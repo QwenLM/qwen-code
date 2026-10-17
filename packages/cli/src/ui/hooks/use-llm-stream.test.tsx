@@ -423,6 +423,7 @@ describe('useLlmStream', () => {
       ) => Promise<SlashCommandProcessorResult | false>,
       shellModeActive: false,
       loadedSettings: mockLoadedSettings,
+      renderMode: 'render' as 'render' | 'raw',
       toolCalls: initialToolCalls as TrackedToolCall[] | undefined,
     };
 
@@ -438,6 +439,7 @@ describe('useLlmStream', () => {
         ) => Promise<SlashCommandProcessorResult | false>;
         shellModeActive: boolean;
         loadedSettings: LoadedSettings;
+        renderMode: 'render' | 'raw';
         toolCalls?: TrackedToolCall[]; // Allow passing updated toolCalls
       }) => {
         // Update the mock's return value if new toolCalls are passed in props
@@ -470,6 +472,7 @@ describe('useLlmStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          props.renderMode,
         );
       },
       {
@@ -496,6 +499,10 @@ describe('useLlmStream', () => {
       },
       rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
         rerender({ ...baseProps, toolCalls }),
+      rerenderWithRenderMode: (renderMode: 'render' | 'raw') =>
+        rerender({ ...baseProps, renderMode }),
+      rerenderWithSettings: (loadedSettings: LoadedSettings) =>
+        rerender({ ...baseProps, loadedSettings }),
     };
   };
 
@@ -8895,7 +8902,7 @@ describe('useLlmStream', () => {
     expect(mockScheduleToolCalls).not.toHaveBeenCalled();
   });
 
-  it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+  it.each([false, true])('deduplicates TUI ids (%s)', async (markdown) => {
     const recordToolResult = vi.fn();
     (
       mockConfig as Config & {
@@ -9039,6 +9046,7 @@ describe('useLlmStream', () => {
         name: 'shell',
         displayName: 'Shell',
         description: 'Run a command',
+        isOutputMarkdown: markdown,
         build: vi.fn(),
       } as any,
       invocation: {
@@ -9077,6 +9085,9 @@ describe('useLlmStream', () => {
     expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
       toolResultParts,
     );
+    expect(
+      recordToolResult.mock.calls.map((call) => call[1].renderOutputAsMarkdown),
+    ).toEqual([markdown, false]);
     expect(
       recordToolResult.mock.calls.map((call) => call[1].executionStatus),
     ).toEqual(expect.arrayContaining(['success', 'not_started']));
@@ -9200,7 +9211,10 @@ describe('useLlmStream', () => {
     );
     expect(recordToolResult).toHaveBeenCalledWith(
       toolResultParts,
-      expect.objectContaining({ executionStatus: 'not_started' }),
+      expect.objectContaining({
+        executionStatus: 'not_started',
+        renderOutputAsMarkdown: false,
+      }),
       { goalContext: permit, provenance: 'goal_runtime' },
     );
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
@@ -12115,6 +12129,59 @@ describe('useLlmStream', () => {
       await act(async () => {
         releaseStream();
       });
+    });
+
+    it('reads the current render mode after a toggle during an active stream', async () => {
+      vi.useFakeTimers();
+      const height = await import('../utils/pending-rendered-height.js');
+      const fit = vi.spyOn(height, 'fitPendingSlice');
+      let nextChunk!: () => void;
+      const holdChunk = new Promise<void>((resolve) => {
+        nextChunk = resolve;
+      });
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'first\n' };
+          await holdChunk;
+          yield { type: ServerLlmEventType.Content, value: 'second\n' };
+          await holdStream;
+        })(),
+      );
+      const { result, rerenderWithRenderMode, rerenderWithSettings } =
+        renderTestHook();
+      act(() =>
+        rerenderWithSettings({
+          ...mockLoadedSettings,
+          merged: {
+            ...mockLoadedSettings.merged,
+            ui: { showLineNumbers: false },
+          },
+        }),
+      );
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60);
+      });
+      expect(fit.mock.calls.at(-1)?.[5]?.renderVisualBlocks).toBe(true);
+      expect(fit.mock.calls.at(-1)?.[5]?.showLineNumbers).toBe(false);
+      act(() => rerenderWithRenderMode('raw'));
+      await act(async () => {
+        nextChunk();
+        await vi.advanceTimersByTimeAsync(60);
+      });
+      expect(fit.mock.calls.at(-1)?.[5]?.renderVisualBlocks).toBe(false);
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+      fit.mockRestore();
     });
 
     it('splits oversized streamed content by rendered height so the pending item stays bounded', async () => {

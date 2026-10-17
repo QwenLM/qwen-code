@@ -10,6 +10,7 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
   ConcurrencyBatch,
+  CompletedToolCall,
   Config,
   CronJob,
   CronScheduler,
@@ -1950,13 +1951,9 @@ export async function runNonInteractive(
           ToolCallRequestInfo,
           ToolCallResponseInfo
         >();
-        const statusByResponse = new Map<
+        const completedCallByResponse = new Map<
           ToolCallResponseInfo,
-          'success' | 'error' | 'cancelled'
-        >();
-        const executionRequestByResponse = new Map<
-          ToolCallResponseInfo,
-          ToolCallRequestInfo
+          CompletedToolCall
         >();
         const structuredOutputActive =
           config.getJsonSchema() &&
@@ -2196,8 +2193,7 @@ export async function runNonInteractive(
               outputUpdateHandler,
               onAllToolCallsComplete: async (completedCalls) => {
                 for (const call of completedCalls) {
-                  statusByResponse.set(call.response, call.status);
-                  executionRequestByResponse.set(call.response, call.request);
+                  completedCallByResponse.set(call.response, call);
                 }
               },
               runtimeView,
@@ -2222,7 +2218,7 @@ export async function runNonInteractive(
           toolResponse: ToolCallResponseInfo,
         ): boolean => {
           const executionRequest =
-            executionRequestByResponse.get(toolResponse) ??
+            completedCallByResponse.get(toolResponse)?.request ??
             getHeadlessExecutionRequest(requestInfo, config);
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
@@ -2481,8 +2477,9 @@ export async function runNonInteractive(
           ({ request, response }) => ({
             request,
             response,
+            completedCall: completedCallByResponse.get(response),
             executionRequest:
-              executionRequestByResponse.get(response) ??
+              completedCallByResponse.get(response)?.request ??
               getHeadlessExecutionRequest(request, config),
           }),
         );
@@ -2506,7 +2503,7 @@ export async function runNonInteractive(
         const chatRecordingService = config.getChatRecordingService?.();
         const toolResponseParts: Part[] = [];
         for (let index = 0; index < resolvedResponses.length; index++) {
-          const { request, response, executionRequest } =
+          const { request, response, executionRequest, completedCall } =
             resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
@@ -2519,9 +2516,13 @@ export async function runNonInteractive(
             {
               callId: request.callId,
               status:
-                statusByResponse.get(response) ??
-                (response.error ? 'error' : 'success'),
+                completedCall?.status ?? (response.error ? 'error' : 'success'),
               resultDisplay: response.resultDisplay,
+              renderOutputAsMarkdown:
+                completedCall?.invocation !== undefined &&
+                (completedCall.status !== 'error' ||
+                  completedCall.request.name === ToolNames.ADVISOR) &&
+                (completedCall.tool?.isOutputMarkdown ?? false),
               persistedOutputFiles: finalized[index].persistedOutputFiles,
               artifacts: finalized[index].artifacts,
               error: response.error,

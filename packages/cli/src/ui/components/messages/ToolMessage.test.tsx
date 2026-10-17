@@ -185,6 +185,7 @@ describe('<ToolMessage />', () => {
     name: 'test-tool',
     description: 'A tool for testing',
     resultDisplay: 'Test result',
+    renderOutputAsMarkdown: true,
     status: ToolCallStatus.Success,
     contentWidth: 80,
     confirmationDetails: undefined,
@@ -1794,6 +1795,7 @@ describe('<ToolMessage />', () => {
         {...baseProps}
         name="some-other-tool"
         resultDisplay={longString}
+        renderOutputAsMarkdown={false}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
         forceShowResult
@@ -1821,6 +1823,7 @@ describe('<ToolMessage />', () => {
         name="some-other-tool"
         contentWidth={20}
         resultDisplay={longSingleLine}
+        renderOutputAsMarkdown={false}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
         forceShowResult
@@ -1844,6 +1847,7 @@ describe('<ToolMessage />', () => {
         {...baseProps}
         name="some-other-tool"
         resultDisplay={exactFitString}
+        renderOutputAsMarkdown={false}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
         forceShowResult

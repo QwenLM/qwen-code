@@ -113,6 +113,7 @@ import {
   getEnclosingFenceInfo,
 } from '../utils/markdown-utilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
+import type { RenderMode } from '../contexts/RenderModeContext.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
@@ -599,8 +600,12 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  renderMode: RenderMode = settings.merged.ui?.renderMode ?? 'render',
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
+  // An active stream retains its starting callbacks across render-mode toggles.
+  const renderModeRef = useRef(renderMode);
+  renderModeRef.current = renderMode;
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
   const activeInteractionOwnerRef = useRef<
@@ -1984,6 +1989,11 @@ export const useLlmStream = (
           commitWidth,
           commitRowBudget,
           tableClampRows,
+          true,
+          {
+            renderVisualBlocks: renderModeRef.current === 'render',
+            showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+          },
         );
         if (!clipped) break;
         // Back up to the last blank line at or before the kept prefix — the only
@@ -2076,6 +2086,7 @@ export const useLlmStream = (
       terminalHeight,
       availableTerminalHeightRef,
       terminalWidthRef,
+      settings,
     ],
   );
 
@@ -4212,6 +4223,7 @@ export const useLlmStream = (
                     callId: request.callId,
                     status: response.error ? 'error' : 'success',
                     resultDisplay: response.resultDisplay,
+                    renderOutputAsMarkdown: false,
                     persistedOutputFiles: finalized[index].persistedOutputFiles,
                     artifacts: finalized[index].artifacts,
                     error: response.error,
@@ -5437,6 +5449,7 @@ export const useLlmStream = (
         request: ToolCallRequestInfo;
         response: ToolCallResponseInfo;
         status: 'success' | 'error' | 'cancelled';
+        renderOutputAsMarkdown: boolean;
       };
       const executableQueues = new Map<string, ReadyToolResponse[]>();
       for (const toolCall of llmTools) {
@@ -5445,6 +5458,11 @@ export const useLlmStream = (
           request: toolCall.request,
           response: toolCall.response,
           status: toolCall.status,
+          renderOutputAsMarkdown:
+            toolCall.invocation !== undefined &&
+            (toolCall.status !== 'error' ||
+              toolCall.request.name === ToolNames.ADVISOR) &&
+            (toolCall.tool?.isOutputMarkdown ?? false),
         });
         executableQueues.set(toolCall.request.callId, queue);
       }
@@ -5454,6 +5472,7 @@ export const useLlmStream = (
         queue.push({
           ...duplicate,
           status: duplicate.response.error ? 'error' : 'success',
+          renderOutputAsMarkdown: false,
         });
         duplicateQueues.set(duplicate.request.callId, queue);
       }
@@ -5496,26 +5515,29 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
-      orderedResponses.forEach(({ request, response, status }, index) => {
-        config.getChatRecordingService?.()?.recordToolResult?.(
-          finalizedResponses[index].responseParts,
-          {
-            callId: request.callId,
-            status,
-            resultDisplay: response.resultDisplay,
-            persistedOutputFiles:
-              finalizedResponses[index].persistedOutputFiles,
-            artifacts: finalizedResponses[index].artifacts,
-            error: response.error,
-            errorType: response.errorType,
-            executionStatus: response.executionStatus,
-          },
-          goalToolResultProvenance(
-            request,
+      orderedResponses.forEach(
+        ({ request, response, status, renderOutputAsMarkdown }, index) => {
+          config.getChatRecordingService?.()?.recordToolResult?.(
             finalizedResponses[index].responseParts,
-          ),
-        );
-      });
+            {
+              callId: request.callId,
+              status,
+              resultDisplay: response.resultDisplay,
+              renderOutputAsMarkdown,
+              persistedOutputFiles:
+                finalizedResponses[index].persistedOutputFiles,
+              artifacts: finalizedResponses[index].artifacts,
+              error: response.error,
+              errorType: response.errorType,
+              executionStatus: response.executionStatus,
+            },
+            goalToolResultProvenance(
+              request,
+              finalizedResponses[index].responseParts,
+            ),
+          );
+        },
+      );
 
       if (continuationWasCancelled()) {
         // This is the branch a cancelled Goal tool batch actually takes: the

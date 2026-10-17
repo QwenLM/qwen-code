@@ -483,7 +483,10 @@ export interface ChatRecord {
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
    */
-  toolCallResult?: Partial<ToolCallResponseInfo> & { status?: Status };
+  toolCallResult?: Partial<ToolCallResponseInfo> & {
+    status?: Status;
+    renderOutputAsMarkdown?: boolean;
+  };
 
   /**
    * Payload for records that need non-API metadata. For chat compression, this
@@ -2945,7 +2948,7 @@ export class ChatRecordingService {
    */
   recordToolResult(
     message: PartListUnion,
-    toolCallResult?: Partial<ToolCallResponseInfo> & { status: Status },
+    toolCallResult?: ChatRecord['toolCallResult'] & { status: Status },
     options?: RecordToolResultOptions,
   ): void {
     try {
@@ -2968,9 +2971,7 @@ export class ChatRecordingService {
             ]
           : []),
       ];
-      let recordingToolCallResult:
-        | (Partial<ToolCallResponseInfo> & { status: Status })
-        | undefined;
+      let recordingToolCallResult: typeof toolCallResult;
       if (toolCallResult) {
         const recordableToolCallResult = { ...toolCallResult };
         delete recordableToolCallResult.persistedOutputFiles;

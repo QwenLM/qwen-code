@@ -5304,7 +5304,7 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
-  it('should execute only the first duplicate provider tool-call id in the same batch', async () => {
+  it.each([false, true])('deduplicates ids (%s)', async (markdown) => {
     setupMetricsMock();
     const recordToolResult = vi.fn();
     (
@@ -5354,6 +5354,8 @@ describe('runNonInteractive', () => {
               request: ToolCallRequestInfo;
               response: ToolCallResponseInfo;
               status: 'success';
+              tool: { isOutputMarkdown: boolean };
+              invocation: object;
             }>,
           ) => Promise<void>;
         },
@@ -5367,7 +5369,13 @@ describe('runNonInteractive', () => {
           executionStatus: 'success',
         };
         await options.onAllToolCallsComplete?.([
-          { request, response, status: 'success' },
+          {
+            request,
+            response,
+            status: 'success',
+            tool: { isOutputMarkdown: markdown },
+            invocation: {},
+          },
         ]);
         return response;
       },
@@ -5408,6 +5416,9 @@ describe('runNonInteractive', () => {
       'Duplicate provider tool call id "tool-1"',
     );
     expect(recordToolResult).toHaveBeenCalledTimes(2);
+    expect(
+      recordToolResult.mock.calls.map((call) => call[1].renderOutputAsMarkdown),
+    ).toEqual([markdown, false]);
     expect(recordToolResult.mock.calls.map((call) => call[1].status)).toEqual([
       'success',
       'error',
