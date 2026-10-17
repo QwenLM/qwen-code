@@ -384,8 +384,14 @@
                                  3380 s healthy sum no longer fits
                                  3600 s, so the fork moves to 3990 s and
                                  the Verify step to 80 minutes to keep
-                                 its 600 s wrap plus margin. -->
-                            <forkedProcessTimeoutInSeconds>3990</forkedProcessTimeoutInSeconds>
+                                 its 600 s wrap plus margin. The FG10b
+                                 and FG10f workflow relay letters
+                                 (HostedWorkflowRelayFaultGatesIT,
+                                 81.6–81.7 s healthy locally, ~165 s
+                                 budgeted at 2×) raise the healthy sum to
+                                 3545 s, so the fork moves to 4155 s and
+                                 the Verify step to 85 minutes. -->
+                            <forkedProcessTimeoutInSeconds>4155</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -518,10 +524,12 @@
                 <configuration>
                     <includes><include>**/HostedWorkflow*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's letters are independent fixtures
-                         sharing one fork: each letter's @Timeout ceiling
-                         (600 s) plus the healthy runtime must fit, the
-                         per-ceiling relation the CI profile pins. -->
+                    <!-- Both workflow classes' letters (FG10a's driver
+                         class and the FG10b/FG10f relay class) are
+                         independent fixtures sharing one fork: each
+                         letter's @Timeout ceiling (600 s) plus the
+                         healthy runtime must fit, the per-ceiling
+                         relation the CI profile pins. -->
                     <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>

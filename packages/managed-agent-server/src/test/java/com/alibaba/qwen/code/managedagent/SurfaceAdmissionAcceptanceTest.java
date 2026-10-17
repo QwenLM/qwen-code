@@ -243,6 +243,9 @@ class SurfaceAdmissionAcceptanceTest {
         var claim = sshWorkspaces.claim(tenant, OWNER,
                 registration.operationId(), "fixture");
         assertThat(claim).isNotNull();
+        // D7-2: only a reserved registration may have reached its node, so
+        // only a reserved one parks recovery_blocked.
+        sshWorkspaces.reserve(claim, "fixture", reservedRegistration(claim, tenant));
         sshWorkspaces.fail(claim, "fixture", "ssh_runtime_identity_mismatch", false);
         registrationOperation = registration.operationId();
     }
@@ -1878,5 +1881,18 @@ class SurfaceAdmissionAcceptanceTest {
                             acceptancePublicationData),
                     properties);
         }
+    }
+
+    static java.util.Map<String, Object> reservedRegistration(
+            com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Intent intent, String tenant) {
+        java.util.Map<String, Object> identity = java.util.Map.of("root", "/work/project",
+                "hostId", "host-" + tenant, "device", "1", "inode", "2", "birthTime", "3");
+        var marker = new java.util.LinkedHashMap<String, Object>(identity);
+        marker.put("version", 2);
+        marker.put("tenantId", intent.tenantId());
+        marker.put("storageId", intent.storageId());
+        marker.put("registrationId", intent.registrationId());
+        return java.util.Map.of("nodeId", intent.nodeId(), "identity", identity, "marker", marker,
+                "qwenVersion", "0.25.1");
     }
 }
