@@ -953,6 +953,13 @@
   opacity: 1;
 }
 
+/* The label and value carry no right padding of their own; the remove button
+   supplies that edge when it is present. A chip without one ends on the
+   content box, so it needs the inset itself. */
+.tagContent:last-child {
+  padding-right: 7px;
+}
+
 .tagRemove {
   flex: 0 0 auto;
   width: 22px;

@@ -5,6 +5,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
@@ -15,8 +17,8 @@ public final class AesGcmSecretProtector implements SecretProtector {
     private static final byte FORMAT_VERSION = 1;
     private static final int IV_BYTES = 12;
     private static final int TAG_BITS = 128;
-    private final String keyId;
-    private final SecretKey key;
+    private final String activeKeyId;
+    private final Map<String, SecretKey> keys;
     private final SecureRandom random;
 
     public AesGcmSecretProtector(String keyId, byte[] keyBytes) {
@@ -25,31 +27,64 @@ public final class AesGcmSecretProtector implements SecretProtector {
 
     AesGcmSecretProtector(String keyId, byte[] keyBytes,
             SecureRandom random) {
-        this.keyId = BrokerValues.requireId(keyId, "keyId");
-        if (keyBytes == null || keyBytes.length != 32) {
-            throw new IllegalArgumentException(
-                    "AES-GCM key must contain 32 bytes");
-        }
+        this(keyId, singleKey(keyId, keyBytes), random);
+    }
+
+    private AesGcmSecretProtector(String activeKeyId,
+            Map<String, byte[]> keyBytes, SecureRandom random) {
+        this.activeKeyId = BrokerValues.requireId(activeKeyId, "keyId");
         if (random == null) {
             throw new IllegalArgumentException("random is required");
         }
-        this.key = new SecretKeySpec(keyBytes.clone(), "AES");
+        Map<String, SecretKey> configured = new LinkedHashMap<>();
+        keyBytes.forEach((id, bytes) -> {
+            String configuredId = BrokerValues.requireId(id, "keyId");
+            if (bytes == null || bytes.length != 32) {
+                throw new IllegalArgumentException("AES-GCM key "
+                        + configuredId + " must contain 32 bytes");
+            }
+            configured.put(configuredId,
+                    new SecretKeySpec(bytes.clone(), "AES"));
+        });
+        this.keys = Map.copyOf(configured);
         this.random = random;
     }
 
     public static AesGcmSecretProtector fromBase64(String keyId,
             String encodedKey) {
+        return fromBase64(keyId, encodedKey, Map.of());
+    }
+
+    public static AesGcmSecretProtector fromBase64(String keyId,
+            String encodedKey, Map<String, String> previousKeys) {
+        Map<String, byte[]> decoded = new LinkedHashMap<>();
+        decoded.put(keyId, decodeKey(keyId, encodedKey));
+        if (previousKeys != null) {
+            previousKeys.forEach((previousKeyId, previousKey) -> {
+                String configuredId = BrokerValues.requireId(previousKeyId,
+                        "keyId");
+                if (decoded.containsKey(configuredId)) {
+                    throw new IllegalArgumentException(
+                            "AES-GCM key IDs must be unique");
+                }
+                decoded.put(configuredId, decodeKey(configuredId, previousKey));
+            });
+        }
+        return new AesGcmSecretProtector(keyId, decoded,
+                new SecureRandom());
+    }
+
+    private static byte[] decodeKey(String keyId, String encodedKey) {
         if (encodedKey == null || encodedKey.isBlank()) {
-            throw new IllegalArgumentException("encodedKey is required");
-        }
-        byte[] decoded;
-        try {
-            decoded = Base64.getDecoder().decode(encodedKey);
-        } catch (IllegalArgumentException exception) {
             throw new IllegalArgumentException(
-                    "encodedKey must be valid base64", exception);
+                    "encodedKey for key " + keyId + " is required");
         }
-        return new AesGcmSecretProtector(keyId, decoded);
+        try {
+            return Base64.getDecoder().decode(encodedKey);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("encodedKey for key " + keyId
+                    + " must be valid base64", exception);
+        }
     }
 
     @Override
@@ -59,14 +94,14 @@ public final class AesGcmSecretProtector implements SecretProtector {
         random.nextBytes(iv);
         try {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, key,
+            cipher.init(Cipher.ENCRYPT_MODE, keys.get(activeKeyId),
                     new GCMParameterSpec(TAG_BITS, iv));
             cipher.updateAAD(aad(context));
             byte[] encrypted = cipher.doFinal(input);
             ByteBuffer output = ByteBuffer.allocate(1 + iv.length
                     + encrypted.length);
             output.put(FORMAT_VERSION).put(iv).put(encrypted);
-            return new ProtectedSecret(keyId, Base64.getEncoder()
+            return new ProtectedSecret(activeKeyId, Base64.getEncoder()
                     .encodeToString(output.array()));
         } catch (GeneralSecurityException exception) {
             throw new IllegalStateException(
@@ -79,7 +114,8 @@ public final class AesGcmSecretProtector implements SecretProtector {
         if (protectedSecret == null) {
             throw new IllegalArgumentException("protectedSecret is required");
         }
-        if (!keyId.equals(protectedSecret.getKeyId())) {
+        SecretKey key = keys.get(protectedSecret.getKeyId());
+        if (key == null) {
             throw new IllegalStateException(
                     "Runtime credential key is unavailable");
         }
@@ -118,6 +154,13 @@ public final class AesGcmSecretProtector implements SecretProtector {
             throw new IllegalArgumentException("plaintext is required");
         }
         return plaintext.clone();
+    }
+
+    private static Map<String, byte[]> singleKey(String keyId,
+            byte[] keyBytes) {
+        Map<String, byte[]> key = new LinkedHashMap<>();
+        key.put(keyId, keyBytes);
+        return key;
     }
 
     private static byte[] aad(String context) {

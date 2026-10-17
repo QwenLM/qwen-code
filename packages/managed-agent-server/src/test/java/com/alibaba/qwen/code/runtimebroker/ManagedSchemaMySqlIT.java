@@ -472,6 +472,17 @@ class ManagedSchemaMySqlIT {
                     assertFalse(row.next());
                 }
             }
+            try (var read =
+                    connection.prepareStatement(
+                            "SELECT runtime_session_id FROM ma_runtime_session FORCE"
+                                    + " INDEX(ix_ma_runtime_session_harness) WHERE"
+                                    + " harness_session_id=? AND tenant_id=?")) {
+                read.setBytes(1, session);
+                read.setBytes(2, tenant);
+                try (var row = read.executeQuery()) {
+                    assertFalse(row.next());
+                }
+            }
         } finally {
             try (var remove =
                     connection.prepareStatement(
