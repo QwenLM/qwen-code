@@ -4890,8 +4890,35 @@ describe('qwen-triage verify hardening round 2', () => {
     // The pointer must resolve, and the script refuses a bare invocation,
     // so the module list it names must exist where the skill says.
     expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
-    expect(flat).toContain('the module list `sdk-java.yml` passes it');
-    expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
+    expect(flat).toContain('the module list `ci.yml` passes it');
+    expect(flat).toContain(
+      'FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js',
+    );
+    expect(flat).toContain('checks uniqueness only');
+    expect(flat).toContain('run from the root of that trial-merge tree');
+    expect(flat).toContain('the branch the PR targets');
+    expect(flat).toContain(
+      'gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName',
+    );
+    const fetchCommand = verifySkill.match(/git fetch [^\n`]+/)?.[0];
+    expect(fetchCommand).toContain('"${BASE_REMOTE}" "refs/heads/${BASE_REF}"');
+    expect(fetchCommand).not.toMatch(/--depth(?:=|\s)|--filter(?:=|\s)/);
+    expect(verifySkill).toContain('git remote get-url "${remote}"');
+    for (const remoteUrl of [
+      'https://github.com/${REPO}',
+      'https://github.com/${REPO}.git',
+      'git@github.com:${REPO}',
+      'git@github.com:${REPO}.git',
+    ]) {
+      expect(verifySkill).toContain(`"${remoteUrl}"`);
+    }
+    expect(verifySkill).toContain('inconclusive: no remote matches $REPO');
+    expect(verifySkill).toContain('inconclusive: baseline fetch failed');
+    expect(verifySkill).toContain(
+      "git rev-parse --verify 'FETCH_HEAD^{commit}'",
+    );
+    expect(verifySkill).toContain('inconclusive: cannot read baseline SHA');
+    expect(readFileSync('.github/workflows/ci.yml', 'utf8')).toContain(
       'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode',
     );
 

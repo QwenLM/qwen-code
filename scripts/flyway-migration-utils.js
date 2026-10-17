@@ -41,10 +41,31 @@ const normalize = (version) =>
 export const migrationVersion = (name) =>
   normalize(MIGRATION_NAME.exec(name)[1]);
 
+export function compareMigrationVersions(left, right) {
+  const a = left.split('.').map(BigInt);
+  const b = right.split('.').map(BigInt);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const x = a[i] ?? 0n;
+    const y = b[i] ?? 0n;
+    if (x < y) return -1;
+    if (x > y) return 1;
+  }
+  return 0;
+}
+
 // Flyway matches the suffix case-insensitively — V1__b.SQL claims version 1
 // exactly like V1__a.sql does.
 export const isMigrationFile = (name, suffix) =>
   name.toLowerCase().endsWith(suffix) && MIGRATION_NAME.test(name);
+
+export const isMigrationPath = (modules, file) =>
+  modules.some((module) =>
+    LOCATIONS.some(
+      (location) =>
+        file.startsWith(`${path.posix.join(module, ...location.dir)}/`) &&
+        isMigrationFile(path.posix.basename(file), location.suffix),
+    ),
+  );
 
 // Not readdirSync's `recursive`: a Node older than 18.17 ignores it (see
 // check-failsafe-reports.js). Flyway scans a location's subdirectories too.

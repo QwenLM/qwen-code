@@ -1043,9 +1043,43 @@ workspace roles and dropped `can_read` / `can_create`; the PR's new SQL
 still named the old columns, so on a real stack built from the merge every
 child creation failed on `bad SQL grammar`. If the PR adds a database
 migration, also run `scripts/check-flyway-migrations.js` on the trial-merge
-tree, with the module list `sdk-java.yml` passes it: the PR's own green
-check is only as fresh as the `main` it ran against. One such check
-finished at 13:20 UTC; another PR merged its own `V36` at 13:57.
+tree, using the branch the PR targets as the baseline, including `release/**`.
+For the baseline preparation and check, run from the root of that trial-merge tree.
+Read the target branch from the explicit repository and select a remote whose
+URL matches that repository exactly; a fork's `origin` is not a valid substitute.
+If no remote matches, or fetching or reading the baseline fails, stop with an
+inconclusive result rather than reuse an old `FETCH_HEAD`:
+
+```bash
+BASE_REF=$(gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName) ||
+  { echo "inconclusive: cannot read PR base branch"; exit 1; }
+BASE_REMOTE=$(
+  for remote in $(git remote); do
+    case "$(git remote get-url "${remote}")" in
+      "https://github.com/${REPO}"|"https://github.com/${REPO}.git"|"git@github.com:${REPO}"|"git@github.com:${REPO}.git")
+        printf '%s\n' "${remote}"
+        break
+        ;;
+    esac
+  done
+)
+[ -n "${BASE_REMOTE}" ] ||
+  { echo "inconclusive: no remote matches $REPO"; exit 1; }
+git fetch "${BASE_REMOTE}" "refs/heads/${BASE_REF}" ||
+  { echo "inconclusive: baseline fetch failed"; exit 1; }
+BASE_SHA=$(git rev-parse --verify 'FETCH_HEAD^{commit}') ||
+  { echo "inconclusive: cannot read baseline SHA"; exit 1; }
+```
+
+Then run
+`FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js <modules>`,
+using the module list `ci.yml` passes it.
+Those module paths are repo-root-relative. Keep the fetch full and unfiltered:
+shallow history and partial-clone configuration affect all linked worktrees.
+Omitting `FLYWAY_BASE_REF`
+checks uniqueness only; the script reports that ordering was not checked.
+The PR's own green check is only as fresh as the `main` it ran against.
+One such check finished at 13:20 UTC; another PR merged its own `V36` at 13:57.
 Trial-merge in-flight PRs that touch the same files, migration directory
 or contract version too.
 
