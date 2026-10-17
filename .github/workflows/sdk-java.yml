@@ -863,6 +863,7 @@ jobs:
             packages/managed-agent-server/target/fg7-cases/
             packages/managed-agent-server/target/fg8-cases/
             packages/managed-agent-server/target/fg9-cases/
+            packages/managed-agent-server/target/fg10-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
       # A separate artifact keeps the reports' layout: a .qwen/ path in the
