@@ -548,8 +548,9 @@ export async function settleParkedTurnCancelled(input: {
  * knew (definitive not-found) is already stopped. A terminally abandoned
  * record is accepted without proof of a stop: the Broker fenced it
  * permanently on loss evidence, so neither cancel nor the terminal poll
- * could ever observe more — a still-reconcilable unknown fails closed
- * instead.
+ * could ever observe more. A still-reconcilable unknown may cancel its original
+ * execution; only a post-cancel settled observation witnesses its stop, and a
+ * persistent unknown still fails closed.
  */
 export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;

@@ -13,6 +13,7 @@ import {
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   authorizeManagedRuntime,
   managedRuntimeJsonBody,
@@ -41,6 +42,7 @@ export const MANAGED_SHELL_PUBLISHER_ROUTE = Object.freeze({
 const PREFIX = { protocolVersion: 3, toolResult: MANAGED_TOOL_RESULT_PROTOCOL };
 export const SHELL_PUBLISHER_BODY_LIMIT = 256 * 1024;
 const CHUNK_BYTES = 64 * 1024;
+const debugLogger = createDebugLogger('ManagedShellPublisher');
 
 export interface ShellPublisherDescriptor {
   readonly url: string;
@@ -127,6 +129,15 @@ async function rpc(
     reader.releaseLock();
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+}
+
+function publisherUnreachable(cause: unknown): boolean {
+  return (
+    cause instanceof Error &&
+    cause.cause instanceof Error &&
+    'code' in cause.cause &&
+    cause.cause.code === 'ECONNREFUSED'
+  );
 }
 
 const PREVIEW_BYTES = 8 * 1024;
@@ -302,6 +313,15 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
     await Promise.all(Object.values(this.queues));
     const physical = this.processResult;
     const preview = shellPreview(responseParts);
+    const boundedError = error
+      ? {
+          message: new TextDecoder().decode(
+            Buffer.from(error.message).subarray(0, 1024),
+            { stream: true },
+          ),
+          ...(error.type ? { type: error.type.slice(0, 128) } : {}),
+        }
+      : undefined;
     try {
       return (this.finalizedResult = parseToolResultEnvelope(
         await rpc(this.descriptor, {
@@ -323,25 +343,28 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
           executionStatus: this.started ? executionStatus : 'not_started',
           responseParts: preview.parts,
           previewTruncated: preview.truncated,
-          error: error
-            ? {
-                message: Buffer.from(error.message)
-                  .subarray(0, 1024)
-                  .toString('utf8'),
-                ...(error.type ? { type: error.type.slice(0, 128) } : {}),
-              }
-            : null,
+          error: boundedError ?? null,
         }),
       ));
     } catch (cause) {
       // Capture loss cannot erase a witnessed cancellation, but a leader's
       // exit alone cannot certify that its original process group stopped.
-      if (!this.isStoppedCancellation(executionStatus)) throw cause;
+      if (
+        !publisherUnreachable(cause) ||
+        !this.isStoppedCancellation(executionStatus)
+      )
+        throw cause;
+      debugLogger.debug(
+        `Managed Shell publisher connection refused while finalizing ${this.identity.executionCallId}.`,
+        cause,
+      );
       return (this.lostCaptureResult = parseToolResultEnvelope({
         executionStatus: 'cancelled',
         responseParts: preview.parts,
-        error: error ?? {
+        error: {
+          ...boundedError,
           message:
+            boundedError?.message ||
             'The command was cancelled, but its captured output is unavailable.',
         },
         capture: {
@@ -475,7 +498,15 @@ export class ManagedShellPublisherRegistry
         envelope,
       });
     } catch (cause) {
-      if (!execution.sink.recordPublisherLoss(envelope)) throw cause;
+      if (
+        !publisherUnreachable(cause) ||
+        !execution.sink.recordPublisherLoss(envelope)
+      )
+        throw cause;
+      debugLogger.debug(
+        `Managed Shell publisher connection refused while accepting ${identity.executionCallId}.`,
+        cause,
+      );
       return blocked();
     }
     const receipt = publisherObject(

@@ -59,12 +59,23 @@ afterEach(async () => {
   pgid = undefined;
 });
 
-async function registryFixture(finalized?: ToolResultEnvelope) {
+async function registryFixture(
+  finalized?: ToolResultEnvelope,
+  refusal?: { operation: 'finalize' | 'accept'; status: number },
+) {
   const publisherApp = express();
   publisherApp.use(express.json());
   let prepares = 0;
+  let refusals = 0;
   publisherApp.post(HOSTED_SHELL_PUBLISHER_PATH, (request, response) => {
     response.set('Cache-Control', 'no-store');
+    if (refusal && request.body.operation === refusal.operation) {
+      refusals++;
+      response.status(refusal.status).json({
+        code: 'hosted_shell_publication_failed',
+      });
+      return;
+    }
     if (request.body.operation === 'prepare') {
       prepares++;
       const { reference, capture } = request.body.request;
@@ -123,7 +134,7 @@ async function registryFixture(finalized?: ToolResultEnvelope) {
   );
   expect(installed.status).toBe(200);
   await installed.body?.cancel();
-  return { registry, prepares: () => prepares };
+  return { registry, prepares: () => prepares, refusals: () => refusals };
 }
 it.skipIf(process.platform === 'win32')(
   'settles a physically stopped foreground Shell when its original publisher is lost',
@@ -351,6 +362,38 @@ it.skipIf(process.platform === 'win32')(
   },
 );
 
+it.skipIf(process.platform === 'win32').each([
+  { message: 'x'.repeat(4096), expectedMessage: 'x'.repeat(1024) },
+  { message: 'x'.repeat(1023) + '😀', expectedMessage: 'x'.repeat(1023) },
+])(
+  'bounds cancellation error details when its original publisher is lost (%#)',
+  async ({ message, expectedMessage }) => {
+    const { registry } = await registryFixture();
+    const { sink, identity } = await registry.prepare(captureRequest);
+    sink.setStarted(recordedPid);
+    sink.setProcessResult(physicalResult());
+    await close(publisher);
+    groupProbe('gone');
+    const result = await sink.finalize('cancelled', [], {
+      message,
+      type: 'y'.repeat(512),
+    });
+    expect(result.error?.message).toBeTruthy();
+    expect
+      .soft(Buffer.byteLength(result.error!.message))
+      .toBeLessThanOrEqual(1024);
+    expect.soft(result.error?.type?.length).toBeLessThanOrEqual(128);
+    expect(result.error).toEqual({
+      message: expectedMessage,
+      type: 'y'.repeat(128),
+    });
+    await expect(registry.accept(identity, result)).resolves.toMatchObject({
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+  },
+);
+
 const finalizedFixture: ToolResultEnvelope = {
   executionStatus: 'cancelled',
   responseParts: [{ text: 'fixture preview' }],
@@ -368,6 +411,58 @@ const finalizedFixture: ToolResultEnvelope = {
     },
   },
 };
+
+it.skipIf(process.platform === 'win32').each([409, 503, 401])(
+  'rejects finalize when a live publisher refuses with HTTP %i',
+  async (status) => {
+    const { registry, refusals } = await registryFixture(undefined, {
+      operation: 'finalize',
+      status,
+    });
+    const { sink } = await registry.prepare(captureRequest);
+    sink.setStarted(recordedPid);
+    sink.setProcessResult(physicalResult());
+    groupProbe('gone');
+    const outcome = await sink.finalize('cancelled', []).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    expect(publisher?.listening).toBe(true);
+    expect(refusals()).toBe(1);
+    expect(outcome).toEqual({
+      error: expect.objectContaining({
+        message: 'Shell publisher refused the request.',
+      }),
+    });
+  },
+);
+
+it.skipIf(process.platform === 'win32').each([409, 503, 401])(
+  'rejects accept when a live publisher refuses with HTTP %i',
+  async (status) => {
+    const { registry, refusals } = await registryFixture(finalizedFixture, {
+      operation: 'accept',
+      status,
+    });
+    const { sink, identity } = await registry.prepare(captureRequest);
+    sink.setStarted(recordedPid);
+    sink.setProcessResult(physicalResult());
+    groupProbe('gone');
+    const finalized = await sink.finalize('cancelled', []);
+    const outcome = await registry.accept(identity, finalized).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    expect(publisher?.listening).toBe(true);
+    expect(refusals()).toBe(1);
+    expect(outcome).toEqual({
+      error: expect.objectContaining({
+        message: 'Shell publisher refused the request.',
+      }),
+    });
+  },
+);
+
 it.skipIf(process.platform === 'win32')(
   'keeps a finalized manifest when the publisher disappears before its cancellation receipt',
   async () => {

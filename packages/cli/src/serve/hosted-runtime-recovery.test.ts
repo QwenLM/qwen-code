@@ -2669,7 +2669,7 @@ describe('recoverHostedRuntimeTurn', () => {
   );
 
   it.each([false, true])(
-    'refuses cancellation when an execution outcome is unknown (afterCancel=%s)',
+    'attempts cancellation but refuses a persistently unknown outcome (afterCancel=%s)',
     async (afterCancel) => {
       await parkAtAwaitRuntime();
       const status = vi
