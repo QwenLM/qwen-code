@@ -211,8 +211,12 @@ class SessionRowLockOrderTest {
                             Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("SessionResourceCollectionCollector.java",
                             Set.of("SessionResourceCollectionCollector.runOnce/0")),
+                    // D7-2's parked registration asks its record whether it
+                    // reserved, through a record accessor the parse cannot
+                    // resolve.
                     Map.entry("SshWorkspaceStore.java",
-                            Set.of("SshWorkspaceStore.physicalKey/1")),
+                            Set.of("Parked.reserved/0",
+                                    "SshWorkspaceStore.physicalKey/1")),
                     Map.entry("ToolPublicationAdmissionStore.java",
                             Set.of("AcknowledgementBundle.captureIdentity/0",
                                     "AcknowledgementBundle.finished/0",

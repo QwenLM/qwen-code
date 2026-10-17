@@ -1516,6 +1516,8 @@ class ManagedAgentApiContractTest {
         String tenant = "contract-registration-" + UUID.randomUUID();
         var operation = sshWorkspaces.begin(tenant, "actor-a", "original", "mac", "/work/project", "Project");
         var intent = sshWorkspaces.claim(tenant, "actor-a", operation.operationId(), "fixture");
+        // D7-2: only a reserved registration parks recovery_blocked.
+        sshWorkspaces.reserve(intent, "fixture", SurfaceAdmissionAcceptanceTest.reservedRegistration(intent, tenant));
         sshWorkspaces.fail(intent, "fixture", "ssh_runtime_identity_conflict", false);
         String body = objectMapper.writeValueAsString(Map.of("operationId", operation.operationId()));
         Map<String, String> drift = new TreeMap<>();
