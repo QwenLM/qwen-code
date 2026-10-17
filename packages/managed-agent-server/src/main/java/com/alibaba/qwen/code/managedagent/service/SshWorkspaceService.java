@@ -3,9 +3,13 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Intent;
 import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Operation;
+import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Parked;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.SshConnectionManager;
@@ -18,9 +22,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.net.URI;
+import java.time.Clock;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -29,10 +35,16 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * SSH Workspace registration. It is also the D7-2 evidence source for a
+ * registration parked recovery_blocked: only the registration's node can say
+ * whether its marker landed, and it is read, never written again.
+ */
 @Service
-public class SshWorkspaceService implements AutoCloseable {
+public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence {
     private final ManagedAgentProperties properties;
     private final SshWorkspaceStore store;
+    private final Clock clock;
     private final Map<String, SshRuntimeSettings.Node> nodes;
     private final SshConnectionManager connections;
     private final Set<String> running = ConcurrentHashMap.newKeySet();
@@ -40,16 +52,22 @@ public class SshWorkspaceService implements AutoCloseable {
             new ArrayBlockingQueue<>(32), Thread.ofPlatform().daemon().name("ssh-workspace-", 0).factory());
 
     @org.springframework.beans.factory.annotation.Autowired
-    public SshWorkspaceService(ManagedAgentProperties properties, SshWorkspaceStore store) {
+    public SshWorkspaceService(ManagedAgentProperties properties, SshWorkspaceStore store, Clock clock) {
         this(properties, store, properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null
-                : new SshConnectionManager(URI.create(properties.getToolPublication().getServiceBaseUrl())));
+                : new SshConnectionManager(URI.create(properties.getToolPublication().getServiceBaseUrl())), clock);
     }
 
     SshWorkspaceService(ManagedAgentProperties properties, SshWorkspaceStore store,
             SshConnectionManager connections) {
+        this(properties, store, connections, Clock.systemUTC());
+    }
+
+    SshWorkspaceService(ManagedAgentProperties properties, SshWorkspaceStore store,
+            SshConnectionManager connections, Clock clock) {
         this.properties = properties;
         this.store = store;
         this.connections = connections;
+        this.clock = clock;
         Map<String, SshRuntimeSettings.Node> catalog = new LinkedHashMap<>();
         for (var node : properties.getRuntimeBroker().getSsh().getNodes()) {
             if (catalog.putIfAbsent(node.nodeId(), node) != null) {
@@ -236,6 +254,61 @@ public class SshWorkspaceService implements AutoCloseable {
         } catch (RuntimeException error) {
             store.fail(intent, owner, "workspace_registration_failed", false);
         }
+    }
+
+    @Override
+    public String kind() {
+        return SshWorkspaceStore.OPERATION;
+    }
+
+    @Override
+    public List<ParkedOperation> parked(int limit) {
+        return store.findParked(limit);
+    }
+
+    @Override
+    public Optional<AcceptanceVerdict> read(ParkedOperation parked) {
+        return store.parked(parked.tenantId(), parked.operationId()).map(this::acceptance);
+    }
+
+    /**
+     * Committed when the reserved directory still stands at its root and
+     * holds this registration's marker. Not committed when it was never
+     * reserved (so never sent), when the root now holds another directory,
+     * or when it holds no marker: the registration parked one delay after
+     * its last attempt, so a register-storage still running then has ended.
+     * A node that cannot be read, that no longer admits the actor, or whose
+     * directory holds another registration's marker proves nothing.
+     */
+    private AcceptanceVerdict acceptance(Parked parked) {
+        if (!parked.reserved()) {
+            return AcceptanceVerdict.notCommitted(parked.failureCode());
+        }
+        Intent intent = parked.intent();
+        SshRuntimeSettings.Node node = nodes.get(intent.nodeId());
+        if (node == null || !node.admits(intent.tenantId(), intent.actorId())) {
+            return AcceptanceVerdict.unknown();
+        }
+        Map<String, Object> identity = SshWorkspaceStore.object(intent.registration(), "identity");
+        Map<String, Object> marker = SshWorkspaceStore.object(intent.registration(), "marker");
+        Map<String, Object> probed = probe(node, SshWorkspaceStore.string(identity, "root"), ".");
+        if (!identity.equals(probed.get("identity"))) {
+            return AcceptanceVerdict.notCommitted("ssh_runtime_identity_mismatch");
+        }
+        if (marker.equals(probed.get("marker"))) {
+            return AcceptanceVerdict.committed();
+        }
+        return probed.get("marker") == null ? AcceptanceVerdict.notCommitted(parked.failureCode())
+                : AcceptanceVerdict.unknown();
+    }
+
+    @Override
+    public boolean settle(AgentStateStore ignored, ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
+        return switch (verdict.acceptance()) {
+            case COMMITTED -> store.completeParked(parked.tenantId(), parked.operationId());
+            case NOT_COMMITTED -> store.releaseParked(parked.tenantId(), parked.operationId(), verdict.failureCode());
+            case UNKNOWN -> store.reparkParked(parked.tenantId(), parked.operationId(), retryAt - clock.millis());
+        };
     }
 
     private static Map<String, Object> request(SshRuntimeSettings.Node node, String operation) {
