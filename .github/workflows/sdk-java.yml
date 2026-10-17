@@ -780,41 +780,60 @@ jobs:
         run: >-
           mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml
           -Pfault-gates -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" test
+      # The arms below need only the bundled CLI, the server jar and these
+      # MySQL binaries. The Verify step's package phase leaves the jar behind
+      # even when one of its integration tests fails, so an unrelated IT
+      # failure, or an earlier arm's, no longer skips them; a failing arm
+      # still fails the job.
       - name: 'Install MySQL binaries for the failover E2E'
+        id: 'failover_prerequisites'
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
         run: |-
+          if ! ls packages/managed-agent-server/target/qwen-managed-agent-server-*.jar >/dev/null 2>&1; then
+            echo '::error::The Verify step packaged no server jar, so the failover arms cannot run.'
+            exit 1
+          fi
           if ! command -v mysqld >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
           fi
       - name: 'Run session owner failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-session-failover
       - name: 'Run in-flight owner failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-inflight-failover
       - name: 'Run continuation owner failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
       - name: 'Run long-answer persistence E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-big-output
       - name: 'Run Harness-restart session failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-failover
       - name: 'Run Harness-restart in-flight failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-inflight-failover
       - name: 'Run Harness-restart continuation failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-continuation-failover
       - name: 'Run frozen former-owner fencing E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-frozen-owner-failover
@@ -823,22 +842,27 @@ jobs:
       # its original identities, then the original cleanup, a next Turn and
       # close complete. Evidence lands under .qwen/investigations.
       - name: 'Run Harness-restart approval Allow recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-allow
       - name: 'Run Harness-restart approval Deny recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-deny
       - name: 'Run Harness-restart approval Cancel recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-cancel
       - name: 'Run Harness-restart approval expiry recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-expiry
       - name: 'Run Harness-restart continuation closeout E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-continuation-closeout
@@ -846,10 +870,12 @@ jobs:
       # replacements; the frozen arm wakes a still-alive former control
       # plane after its Turn moved on (#12952 Q2, binding half).
       - name: 'Run Harness-restart model-round failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-model-round-failover
       - name: 'Run frozen former control-plane fencing E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-frozen-control-plane-failover

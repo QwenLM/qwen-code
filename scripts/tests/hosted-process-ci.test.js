@@ -428,7 +428,19 @@ describe('Hosted real-process gates', () => {
       ).toBeGreaterThan(job.steps.indexOf(install));
       expect(step.run).toContain(`npm run ${script}`);
       expect(step['timeout-minutes'], stepName).toBe(10);
-      expect(step.if, stepName).toBeUndefined();
+      // An unrelated integration-test failure in the Verify step, or an
+      // earlier arm's failure, must not skip this arm: it needs only the
+      // packaged jar and the MySQL binaries, which the install step checks.
+      expect(install.id).toBe('failover_prerequisites');
+      expect(install.if).toBe(
+        "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
+      );
+      expect(install.run).toContain(
+        'ls packages/managed-agent-server/target/qwen-managed-agent-server-*.jar',
+      );
+      expect(step.if, stepName).toBe(
+        "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}",
+      );
       expect(step['continue-on-error'], stepName).toBeUndefined();
       // A renamed or deleted npm script would leave the step failing for
       // the wrong reason; pin that it drives the failover runner — with

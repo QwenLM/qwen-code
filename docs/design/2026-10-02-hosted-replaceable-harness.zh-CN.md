@@ -543,9 +543,16 @@ Turn。所以它的过期工作只有 lease 续约和一次重试，两者都到
 
 自 #14205 起，该任务只按每日计划或手动触发运行，不在 pull request 上运行。
 新增步骤排在 `Verify Hosted Java, Spring and MySQL processes` 和此前的 failover
-步骤之后，且都不带 `if:`，因此只有前面每个步骤都通过才会执行。加入这些门禁时，
-Verify 步骤在 `main` 上是失败的，因此还没有任何一次 CI 运行执行过它们；当时的
-证据来自在 CI 之外运行同样的 `package.json` 脚本。
+步骤之后。加入这些门禁时，所有 failover 步骤都不带 `if:`，因此只有前面每个步骤
+都通过才会执行。当时 Verify 步骤在 `main` 上是失败的，之后的四次运行又各自败在
+不同的测试上，因此没有任何一次 CI 运行执行过这些门禁；它们的证据来自在 CI
+之外运行同样的 `package.json` 脚本。
+
+现在 failover 步骤只依赖它们实际用到的东西。`Install MySQL binaries for the
+failover E2E` 在 Managed Agent 依赖装好且运行未被取消时运行，并先检查 server jar
+已经打包；即使 Verify 步骤里有集成测试失败，它的 package 阶段也已经留下了这个
+jar。每个 failover 步骤在该安装步骤成功且运行未被取消时运行，因此无论是集成测试
+失败还是前面的支路失败，都不会让它被跳过。支路自己失败时，任务仍然失败。
 
 ## 改动与属主
 

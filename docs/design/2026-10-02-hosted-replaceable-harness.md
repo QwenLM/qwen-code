@@ -659,10 +659,21 @@ minutes.
 
 Since #14205 the job runs daily or on demand, never on a pull request. The
 new steps come after `Verify Hosted Java, Spring and MySQL processes` and the
-earlier failover steps, and none of them has an `if:`, so they run only when
-every earlier step passes. When these gates were added the Verify step was
-failing on `main`, so no CI run had executed them; their evidence at that
-point came from running the same `package.json` scripts outside CI.
+earlier failover steps. When these gates were added none of the failover
+steps had an `if:`, so they ran only when every earlier step passed. The
+Verify step was failing on `main` then, and it kept failing on a different
+test in each of the next four runs, so no CI run executed the
+gates; their evidence came from running the same `package.json` scripts
+outside CI.
+
+The failover steps now depend only on what they use. `Install MySQL binaries
+for the failover E2E` runs once the Managed Agent dependencies are installed
+and the run was not cancelled, and it first checks that the server jar was
+packaged; the Verify step's package phase leaves that jar behind even when
+one of its integration tests fails. Each failover step runs when that
+install step succeeded and the run was not cancelled, so neither a failing
+integration test nor a failing earlier arm skips it. A failing arm still
+fails the job.
 
 ## Changes and ownership
 
