@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import jakarta.annotation.PreDestroy;
@@ -26,6 +27,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -194,21 +196,28 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
     }
 
     @Override
-    public OperationKind kind() {
-        return OperationKind.TASK_CANCEL;
+    public String kind() {
+        return OperationKind.TASK_CANCEL.name();
     }
 
     /** A parked cancel resolves only from the record; it is never re-sent. */
     @Override
-    public AcceptanceVerdict read(OperationRecord operation) {
+    public Optional<AcceptanceVerdict> read(ParkedOperation parked) {
+        OperationRecord operation = store.findOperation(parked.tenantId(),
+                parked.sessionId(), parked.operationId()).orElse(null);
+        // A guard, not an input: the verdict comes from the task's record.
+        if (operation == null
+                || !"RECOVERY_BLOCKED".equals(operation.state())) {
+            return Optional.empty();
+        }
         Verdict verdict = verdict(operation);
         if (verdict.live()) {
-            return AcceptanceVerdict.unknown();
+            return Optional.of(AcceptanceVerdict.unknown());
         }
-        return "completed".equals(verdict.outcome().status())
+        return Optional.of("completed".equals(verdict.outcome().status())
                 ? AcceptanceVerdict.committed()
                 : AcceptanceVerdict.notCommitted(
-                        verdict.outcome().failureCode());
+                        verdict.outcome().failureCode()));
     }
 
     /** What the task's committed record proves about a cancellation. */
