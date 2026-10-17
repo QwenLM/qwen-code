@@ -242,16 +242,20 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         }
     }
 
-    /** The relay verb (`kind`) and journal commit (`operation`) a body
-     * names, so the log tells one commit from another. */
+    /** The relay verb (`kind`), journal commit (`operation`) and its
+     * command id a body names, so the log tells one commit from another
+     * and a replay from a new step. */
     private String tagOf(String text) {
         try {
             JsonNode parsed = json.readTree(text);
             JsonNode kind = parsed.path("kind");
             JsonNode operation = parsed.path("operation");
+            JsonNode command = parsed.path("commandId");
             return (kind.isTextual() ? " kind=" + kind.asText() : "")
                     + (operation.isTextual() ? " op=" + operation.asText()
-                            : "");
+                            : "")
+                    + (operation.isTextual() && command.isTextual()
+                            ? " cmd=" + command.asText() : "");
         } catch (IOException ignored) {
             return "";
         }

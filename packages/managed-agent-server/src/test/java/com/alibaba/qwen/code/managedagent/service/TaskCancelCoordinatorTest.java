@@ -686,14 +686,14 @@ class TaskCancelCoordinatorTest {
 
         // Parked, only the reconciler (D7-2) reads it, from the record.
         ParkedOperation parked = new ParkedOperation(TENANT, SESSION,
-                OPERATION, OperationKind.TASK_CANCEL);
+                OPERATION, "TASK_CANCEL");
         when(store.findParkedOperations(
                 org.mockito.ArgumentMatchers.anyInt()))
                 .thenReturn(List.of(parked));
         when(store.findOperation(TENANT, SESSION, OPERATION))
                 .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
         OperationReconciler reconciler = new OperationReconciler(store,
-                List.of(coordinator),
+                List.of(coordinator), new DirectExecutor(),
                 Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC));
         reconciler.reconcile();
         verify(store).settleParkedOperation(eq(parked),

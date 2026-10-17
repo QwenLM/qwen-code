@@ -254,6 +254,97 @@ class SshWorkspaceStoreTest {
                         ready.getBindingId(), ready.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, now));
     }
 
+    // D7-2: register-storage runs after reserve, so an unreserved
+    // registration never reached its node and its refusal is final.
+    @Test
+    void anUnreservedRegistrationFailsOutrightAndIsNeverParked() {
+        var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
+        var intent = store.claim("tenant", "actor", operation.operationId(), "owner");
+        store.fail(intent, "owner", "ssh_runtime_version_mismatch", false);
+        var failed = store.get("tenant", "actor", operation.operationId());
+        assertThat(failed.status()).isEqualTo("failed");
+        assertThat(failed.failureCode()).isEqualTo("ssh_runtime_version_mismatch");
+        jdbc.update("UPDATE ma_operation SET available_at = 0");
+        assertThat(store.findParked(10)).isEmpty();
+        assertThat(store.claim("tenant", "actor", operation.operationId(), "new")).isNull();
+    }
+
+    // A reserved one may have reached its node: it parks for one delay, so
+    // a register-storage still running when its caller gave up ends first.
+    @Test
+    void aReservedRegistrationParksForTheDelayThenReadsAsReserved() {
+        var intent = parkedReservation();
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_operation", String.class)).isEqualTo("BLOCKED");
+        assertThat(jdbc.queryForObject("SELECT available_at - " + com.alibaba.qwen.code.runtimebroker.managedschema
+                .ManagedSchemaTime.SQL_NOW + " > 60000 FROM ma_operation", Boolean.class)).isTrue();
+        assertThat(store.findParked(10)).isEmpty();
+        jdbc.update("UPDATE ma_operation SET available_at = 0");
+        assertThat(store.findParked(10)).containsExactly(new StoreModels.ParkedOperation("tenant", null,
+                intent.operationId(), SshWorkspaceStore.OPERATION));
+        var parked = store.parked("tenant", intent.operationId()).orElseThrow();
+        assertThat(parked.reserved()).isTrue();
+        assertThat(parked.failureCode()).isEqualTo("ssh_runtime_identity_mismatch");
+        assertThat(parked.intent().registration()).isEqualTo(registration(intent));
+        assertThat(store.reparkParked("tenant", intent.operationId(), 60_000)).isTrue();
+        assertThat(store.findParked(10)).isEmpty();
+    }
+
+    // Committed evidence finishes the registration as the original attempt
+    // would have, exactly once.
+    @Test
+    void aParkedRegistrationWhoseMarkerLandedCompletesOnce() {
+        var intent = parkedReservation();
+        assertThat(store.completeParked("tenant", intent.operationId())).isTrue();
+        var completed = store.get("tenant", "actor", intent.operationId());
+        assertThat(completed.status()).isEqualTo("completed");
+        assertThat(completed.workspaceId()).isEqualTo(intent.workspaceId());
+        assertThat(store.verify(binding(intent))).isTrue();
+        assertThat(jdbc.queryForObject("SELECT role FROM ma_workspace_access", String.class)).isEqualTo("OWNER");
+        assertThat(store.completeParked("tenant", intent.operationId())).isFalse();
+        assertThat(store.releaseParked("tenant", intent.operationId(), "x")).isFalse();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
+    }
+
+    // Evidence that the registration cannot land fails it and releases the
+    // physical directory, so another registration can take it.
+    @Test
+    void aParkedRegistrationThatCannotLandFailsAndReleasesItsDirectory() {
+        var intent = parkedReservation();
+        assertThat(store.releaseParked("tenant", intent.operationId(), "ssh_runtime_identity_mismatch")).isTrue();
+        var failed = store.get("tenant", "actor", intent.operationId());
+        assertThat(failed.status()).isEqualTo("failed");
+        assertThat(failed.failureCode()).isEqualTo("ssh_runtime_identity_mismatch");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isZero();
+        assertThat(store.completeParked("tenant", intent.operationId())).isFalse();
+        var next = store.begin("tenant", "actor", "key-2", "mac", "/work/project", "Project");
+        var retry = store.claim("tenant", "actor", next.operationId(), "next");
+        store.reserve(retry, "next", registration(retry));
+        store.complete(retry, "next");
+        assertThat(store.get("tenant", "actor", next.operationId()).status()).isEqualTo("completed");
+    }
+
+    // A release never takes what another registration finished: it deletes
+    // only this registration's unfinished reservation.
+    @Test
+    void aReleaseLeavesAFinishedOwnerAlone() {
+        var intent = parkedReservation();
+        jdbc.update("UPDATE ma_storage SET registration_state = 'REGISTERED'");
+        jdbc.update("UPDATE ma_storage_owner SET mount_state = 'READY'");
+        assertThat(store.releaseParked("tenant", intent.operationId(), "x")).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
+    }
+
+    private SshWorkspaceStore.Intent parkedReservation() {
+        var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
+        var intent = store.claim("tenant", "actor", operation.operationId(), "owner");
+        store.reserve(intent, "owner", registration(intent));
+        store.fail(intent, "owner", "ssh_runtime_identity_mismatch", false);
+        assertThat(store.get("tenant", "actor", operation.operationId()).status()).isEqualTo("recovery_blocked");
+        return intent;
+    }
+
     @Test
     void expiredOwnersCannotWriteFailureOrCompleteRegistration() {
         var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");

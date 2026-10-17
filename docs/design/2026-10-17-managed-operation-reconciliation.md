@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-operation-reconciliation.md) | [简体中文](2026-10-17-managed-operation-reconciliation.zh-CN.md)
 
-Status: phase 1 implemented in this change, in contract `1.59.0`. No schema change.
+Status: phase 1 landed in #14443 (contract `1.59.0`), and phase 2, the SSH Workspace registration, in #14456 (contract `1.60.0`). Phase 3, the Session title, is implemented in this change, with no contract change. No phase changes the schema.
 
 This is slice **D7-2** of [#14122](https://github.com/QwenLM/qwen-code/issues/14122) (the D7 umbrella of [#12380](https://github.com/QwenLM/qwen-code/issues/12380), Stage D), tracked by [#14166](https://github.com/QwenLM/qwen-code/issues/14166). #12380 lets Stage D expose `java_durable` only with durable command delivery (D7-1, [#14168](https://github.com/QwenLM/qwen-code/issues/14168)) and original-command reconciliation (this slice). D7-3 ([#14167](https://github.com/QwenLM/qwen-code/issues/14167)), the opt-in profile, waits for both. The design note on #14166 classifies every site this slice touches.
 
@@ -30,8 +30,8 @@ Two defects follow:
 
 ## Non-goals (later phases)
 
-- `WORKSPACE_CREATE`: splitting deterministic refusals into `failed`, an evidence reader for the node marker, and releasing the reservation when evidence proves non-commit.
-- `RENAME`'s `UNKNOWN` state and its reader (the Harness title revision).
+- ~~`WORKSPACE_CREATE`~~: phase 2, below.
+- ~~`RENAME`'s `UNKNOWN` state and its reader (the Harness title revision)~~: phase 3, below.
 - The Turn-level unknown tool outcome (`managed_runtime_recovery_blocked`), which needs the Runtime Broker's `reconcileExecution` wired to the Turn, together with #13847.
 - A `CANCEL` pending on a `CANCELLING` Turn that the dispatcher fails with `managed_runtime_recovery_blocked`.
 - Renaming the public `recovery_blocked` token for lifecycle waits. That is a contract change better made in D7-3, which exposes delivery state anyway.
@@ -43,7 +43,7 @@ Two defects follow:
 
 `ManagedAgentStore` names the two sets:
 
-- `ACCEPTANCE_UNKNOWN_KINDS` = `TASK_CANCEL`, `SUBMIT_INPUT`. Here `RECOVERY_BLOCKED` means the command's acceptance is unknown.
+- `ACCEPTANCE_UNKNOWN_KINDS` = `TASK_CANCEL`, `SUBMIT_INPUT` and, since phase 3, `RENAME`. Here `RECOVERY_BLOCKED` means the command's acceptance is unknown.
 - `LIFECYCLE_WAIT_KINDS` = `CLOSE`, `ARCHIVE`, `DELETE`, `CWD_CHANGE`. Here it is a published wait on an operation whose acceptance is known, re-driven by the lifecycle coordinator.
 
 The public status stays `recovery_blocked` for both. The contract now says which meaning applies to which kind.
@@ -91,6 +91,29 @@ An input on a Session without a managed journal, or whose journal was compacted 
 
 `hasOpenOperation` excludes a parked task cancel, so it holds no lifecycle hostage (H4f). `WorkspaceMigrationStore.requireIdle` and the `WorkspaceRecoveryStore` source check still count it. The difference is deliberate: a migration moves the storage that the cancel's task may still be using.
 
+### 7. Phase 2: an SSH Workspace registration reconciles from its node
+
+`SshWorkspaceService.register` runs claim, probe, `reserve`, `register-storage` on the node, a final probe, and `complete`. Only `reserve` and `register-storage` have effects. `reserve` writes the storage alias and the physical directory's owner (`FENCE_ONLY`, `UNVERIFIED`) and records the registration in `result_json`. `register-storage` writes the marker on the node.
+
+- **Unreserved means never sent.** `register-storage` runs only after `reserve` committed, so a registration without `result_json` never reached its node. Its non-retryable refusal is now final, `failed` (`ssh_runtime_version_mismatch`, `storage_already_registered`, `runtime_node_forbidden`, …), and nothing is left to release.
+- **Reserved means acceptance unknown.** A reserved one parks `recovery_blocked` (`java_durable`, `blocked`) with its failure code. It is due one delay (`PARK_DELAY_MILLIS`, 5 minutes) after its last attempt, so a `register-storage` that was still running on the node when its caller gave up has ended before the node is read.
+- **The node is the evidence.** `SshWorkspaceService` is the `WORKSPACE_CREATE` evidence source. It probes the reserved root, read-only. The reserved identity holding this registration's marker is **committed**, and `completeParked` finishes the registration as the original attempt would have: the storage is registered, the owner ready, and the Workspace and its owner access created. The reserved identity without a marker, or a different directory at the root, is **not committed**, and `releaseParked` fails it and deletes the alias and the owner, only while both are still this registration's unfinished reservation. Anything else proves nothing and parks it again: an unreadable node, a node that no longer admits the actor, or another registration's marker.
+- **Outside any Session.** The registration is tenant-scoped, so the Session-scoped scan never reads it. The source lists its own parked rows, and its settlement has effects of its own. The reconciler therefore takes stored kind names, and an evidence source may override `settle` and `parked`.
+- **Rows parked before this change** reconcile the same way. An unreserved one fails at once, without a probe.
+
+A marker that a zombie `register-storage` writes after a release is left on a directory nobody owns. Any later registration of that directory sees a foreign marker and is refused, so the failure stays safe: two registrations never own one directory.
+
+### 8. Phase 3: a Session title reconciles from the Session journal
+
+A title delivery (kind `RENAME`, see [rename delivery](2026-10-08-managed-session-rename-delivery.md)) claims its row, marks it `SUBMITTED` and sends the title with its revision. A failure before `SUBMITTED` proves the title never left, and the row retries as before. A failure after it, or a claim that expired while `SUBMITTED`, leaves acceptance unknown. Since #14069 such a row parked `UNKNOWN`: never sent again, its key answering `409 operation_outcome_unknown`, and nothing ever settling it.
+
+- **One parked state.** It now parks `RECOVERY_BLOCKED` (`java_durable`, `blocked`, `session_title_unconfirmed`), due at once, and `RENAME` joins `ACCEPTANCE_UNKNOWN_KINDS`. The per-second delivery sweep converts a legacy `UNKNOWN` row the same way. The conversion runs at runtime, not as a migration: `ManagedSchema` infers a catalog's version from its DDL, so a data-only version could never be detected, and a catalog initialized without Flyway would skip it. The key still answers `409 operation_outcome_unknown` while its row is parked.
+- **The claim stays.** The row keeps its claim owner and generation, so the delivery's own reply, arriving after its lease expired, still completes it, as it did for `UNKNOWN`.
+- **The receipt retires.** Parking moves the title's command receipt from `PENDING` to `FAILED`, as an abandoned delivery's already was. A row parked by an expired claim used to keep its receipt `PENDING`, and that receipt answered `409 session_operation_active` to every later title and lifecycle change of the Session, for good. A late reply and the reconciler both complete a retired receipt.
+- **The journal is the evidence.** The Hosted Harness commits a fenced title to the Session journal as `renameSession` under `commandId = hosted-title:<revision>`, with the title's SHA-256 as `contentDigest`. `renameAcceptance` reads that row and the head in the same single statement as a Turn input (`journalEvidence`, decision 5): a matching digest is **committed**; no row under a `DELETING` or `DELETED` head before compaction is **not committed** (`session_title_undelivered`); anything else, a different digest included, is **unknown**.
+- **The title settles itself.** `RenameEvidence` overrides `settle` with `settleParkedRename`, under the tenant and Session locks. Committed completes the receipt and the row (`harness_confirmed`) and shows the title with a `session.updated` event, in whatever status the Session has reached since, except `DELETING` and `DELETED`, where nothing is left to show it on. Not committed fails the row, `available_at` past every scan, and the key may then retry under a new revision, as any failed title key does; a later supersession leaves that outcome alone. Unknown parks it again for the recheck.
+- **Barriers.** A parked title is no longer a pending delivery, so close, archive, delete, cwd and approval changes proceed, as they do beside a parked task cancel or input. The rename-delivery design held them until the delivery finished, because a title the Harness accepted could otherwise stay missing from the public Session. A parked title now reaches the public Session from the journal instead, and the deletion that closes the journal is what lets the reconciler prove a non-commit. A later title still supersedes a parked one. A Workspace migration still waits for a parked title, and no longer counts superseded or failed ones: it counted every row that was not `COMPLETED`, so one superseded title held its storage for good.
+
 ## Validation
 
 - `OperationReconcilerTest`: a parked cancel resolves only from its record (unknown, then committed), a cancel whose task ended without a stop fails `task_already_settled`, unreadable evidence parks for a whole recheck, a parked input settles from the store's journal verdict only, a row no longer parked is left alone, and one kind has one evidence source. No case sends, claims or calls the Harness.
@@ -98,9 +121,11 @@ An input on a Session without a managed journal, or whose journal was compacted 
 - `ManagedTurnCommandOperationTest`: an input whose submission went unanswered parks with `submit_input_unconfirmed`; its verdict stays unknown with no journal, with an `ACTIVE` head and with a `SEALED` head, becomes committed once the journal holds the matching admission, and settles completed with a receipt. A `DELETING` head without the admission proves non-commit with the Turn's code, a mismatched digest proves nothing, and a started compaction proves nothing.
 - `WorkspaceMigrationStoreTest.refusesAStorageWithAParkedTaskCancelUntilItSettles`: a parked task cancel holds a storage migration until it settles.
 - `TaskCancelCoordinatorTest` keeps its delivery cases; its two parked cases moved to `OperationReconcilerTest`.
+- Phase 2: `SshWorkspaceStoreTest` covers an unreserved registration failing outright, a reserved one parking for the delay, `completeParked` finishing it once, `releaseParked` failing it and freeing the directory for another registration, and a release that leaves an owner another registration finished. `SshWorkspaceServiceTest` covers the verdicts: the marker landed, no marker, another directory at the root, another registration's marker, a revoked actor, an unreadable node, and an unreserved legacy row without a probe. Each case only ever probes. `OperationReconcilerTest.aKindOutsideAnySessionScansAndSettlesThroughItsSource` covers the source's own scan and settle.
+- Phase 3: `ManagedRenameReconciliationTest` (H2, and InnoDB in `ManagedRenameReconciliationMySqlIT`) covers a submission that threw parking with its claim and a retired receipt, never claimed or delivered again and holding no close; a crash-parked title that refused a later title until the sweep parked it, then superseded; a legacy `UNKNOWN` row converted; the verdict unknown without a journal, with an `ACTIVE` head and with another title's digest, then committed, completing the receipt, the row and the title with one event, and replaying the key; a committed title on a closed Session shown, on a deleting one not; a `DELETING` head proving non-commit while a started compaction proves nothing, and the failed key retrying under a new revision without being marked superseded; an unknown verdict re-parking with one more attempt; the claim's late reply completing a parked title; an unsubmitted failure still retrying and holding the lifecycle; a row without its title never read as committed yet still failed by a complete journal; and, through the store's `@Transactional` proxy with an injected statement fault, parking with its receipt retirement and a committed settle with its title, event and receipt, each rolling back whole. `OperationReconcilerTest.aParkedTitleSettlesThroughItsOwnSettle` covers the title settling through its own settle, never the generic one. `ManagedSessionLifecycleTest` now closes a Session beside its parked title, without resending it. `WorkspaceMigrationStoreTest` counts parked and legacy titles, and no longer completed, superseded or failed ones.
 
 ## Acceptance (from #14166)
 
 - An operation whose acceptance is unknown never produces a second side effect: no claim takes it (decision 2), and the reconciler never sends (decision 3).
-- Reconciliation reads the original command identity: the task record by the operation's task, and the journal row keyed by the Turn's prompt and checked against its payload digest (decisions 3 and 5).
+- Reconciliation reads the original command identity: the task record by the operation's task, the journal row keyed by the Turn's prompt and checked against its payload digest, and the journal row keyed by the title's revision and checked against its title (decisions 3, 5 and 8).
 - One rule decides what `recovery_blocked` means next for the acceptance-unknown kinds, and the lifecycle wait is named as a different concept (decision 1). The binding, Session-head and extension-run vocabularies were shown to be distinct on #14166.
