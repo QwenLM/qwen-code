@@ -34,7 +34,7 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     throw new Error(
       'Configure Qwen model authentication before confirmed import. Offline preview does not require authentication.',
     );
-  await config.refreshAuth(authType);
+  await config.refreshAuth(authType, true);
   return new MemoryImportService({
     projectRoot: config.getProjectRoot(),
     assertActive: () => {

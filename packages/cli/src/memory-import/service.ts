@@ -257,10 +257,10 @@ export class MemoryImportService {
     if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid import batch ID.');
     return path.join(this.state, 'batches', this.owner, id);
   }
-  private async prepare(): Promise<void> {
-    this.options.assertActive();
-    // Private sources must never be written into a Git checkout, even when a
-    // runtime environment variable points into one.
+  // Private sources must never be written into a Git checkout, even when a
+  // runtime environment variable points into one. Admission (submit/retry via
+  // prepare) and recovery both enforce this before any batch is kicked.
+  private async assertRuntimeOutsideGit(): Promise<void> {
     let current = path.resolve(this.base);
     while (true) {
       if (await exists(path.join(current, '.git')))
@@ -282,6 +282,10 @@ export class MemoryImportService {
       if (parent === current) break;
       current = parent;
     }
+  }
+  private async prepare(): Promise<void> {
+    this.options.assertActive();
+    await this.assertRuntimeOutsideGit();
     await privateDirectory(
       path.join(this.state, 'batches', this.owner),
       this.base,
@@ -428,6 +432,7 @@ export class MemoryImportService {
     this.options.assertActive();
     const root = path.join(this.state, 'batches', this.owner);
     if (!(await exists(root))) return;
+    await this.assertRuntimeOutsideGit();
     await privateDirectory(root, this.base);
     for (const id of (await fs.readdir(root)).filter((id) =>
       /^[a-f0-9]{64}$/.test(id),
@@ -496,7 +501,10 @@ export class MemoryImportService {
       if (task.status === 'completed') return publicTask(task);
       await fs.rm(path.join(dir, 'cancel.json'), { force: true });
       for (const item of task.items)
-        if (item.status === 'failed') item.status = 'pending';
+        if (item.status === 'failed') {
+          item.status = 'pending';
+          delete item.reason;
+        }
       task.status = 'queued';
       task.updatedAt = new Date().toISOString();
       await writeJson(path.join(dir, 'task.json'), task);
@@ -611,7 +619,7 @@ export class MemoryImportService {
           task.items.some(
             (item) => item.id === candidate.id && item.status === 'pending',
           ) &&
-          !ledger[digest(candidate.content)] &&
+          !ledger[candidate.id] &&
           !journals.some((entry) =>
             entry.sections.some((item) => item.id === candidate.id),
           ),
@@ -666,7 +674,7 @@ export class MemoryImportService {
         scope: section.scope,
         sections: batch.map((item) => ({
           id: item.id,
-          key: digest(item.content),
+          key: item.id,
         })),
         baseline: before.existing.map((item) => ({
           ref: item.ref,
@@ -747,7 +755,7 @@ export class MemoryImportService {
         const ledger: Ledger = (await exists(ledgerPath))
           ? await this.readState(ledgerPath)
           : {};
-        const key = digest(section.content);
+        const key = section.id;
         const previous = ledger[key];
         const outcome = (
           status: ImportItemResult['status'],

@@ -10,6 +10,16 @@ import * as fs from 'node:fs/promises';
 import { previewSource, readLocalSource } from '../memory-import/source.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
 
+// The JSON envelopes are the result of this command; exiting on an
+// unflushed async write truncates them on a pipe.
+const writeStdoutLineFlushed = (message: string): Promise<void> =>
+  new Promise((resolve, reject) =>
+    process.stdout.write(
+      message.endsWith('\n') ? message : `${message}\n`,
+      (error) => (error ? reject(error) : resolve()),
+    ),
+  );
+
 export const memoryCommand: CommandModule = {
   command: 'memory',
   describe: 'Preview and import external memories',
@@ -21,6 +31,11 @@ export const memoryCommand: CommandModule = {
           'Preview Codex memory; explicitly confirm selected sections to consolidate',
         builder: (args: Argv) =>
           args
+            .positional('codex', {
+              type: 'string',
+              describe: 'External memory source',
+              choices: ['codex'],
+            })
             .option('source', {
               type: 'string',
               describe: 'Codex memories directory',
@@ -61,6 +76,11 @@ export const memoryCommand: CommandModule = {
             throw new Error(
               'Confirmed memory import is unavailable in bare or safe mode. Offline preview remains available.',
             );
+          if (
+            args['source'] !== undefined &&
+            typeof args['source'] !== 'string'
+          )
+            throw new Error('Provide a single --source directory.');
           const directory =
             typeof args['source'] === 'string'
               ? args['source']
@@ -72,7 +92,8 @@ export const memoryCommand: CommandModule = {
           const source = await readLocalSource(directory);
           const preview = previewSource(source);
           if (!args['apply']) {
-            if (args['json']) writeStdoutLine(JSON.stringify(preview));
+            if (args['json'])
+              await writeStdoutLineFlushed(JSON.stringify(preview));
             else {
               writeStdoutLine(
                 `Preview only: ${preview.sections.length} source sections. No memory was written.`,
@@ -123,7 +144,7 @@ export const memoryCommand: CommandModule = {
           );
           if (args['retry']) task = await service.retry(task.id);
           task = await service.idle(task.id);
-          writeStdoutLine(JSON.stringify(task));
+          await writeStdoutLineFlushed(JSON.stringify(task));
           if (
             task.status !== 'completed' ||
             task.items.some((item) => item.status === 'conflict')

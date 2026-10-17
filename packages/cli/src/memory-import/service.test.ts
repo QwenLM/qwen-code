@@ -710,4 +710,79 @@ describe('bounded project batches', () => {
       expect(propose).toHaveBeenCalledTimes(1);
       expect((await scanAutoMemorySnapshot(project)).docs).toEqual([]);
     }));
+  it('clears the previous failure reason when an explicit retry succeeds', () =>
+    context(async () => {
+      let fail = true;
+      const propose = vi.fn(async (): Promise<MemoryImportProposal> => {
+        if (fail) throw new Error('model unavailable');
+        return { decision: 'new', reason: '', documents: [doc] };
+      });
+      const svc = service(propose);
+      const task = await svc.submit(source, selection(), 'flaky-model');
+      const failed = await svc.idle(task.id);
+      expect(failed.items[0].status).toBe('failed');
+      expect(failed.items[0].reason).toBeTruthy();
+      fail = false;
+      await svc.retry(task.id);
+      const done = await svc.idle(task.id);
+      expect(done.items[0].status).toBe('added');
+      expect(done.items[0]).not.toHaveProperty('reason');
+    }));
+  it('refuses to recover batches once the runtime sits inside a Git checkout', () =>
+    context(async () => {
+      let release!: (value: MemoryImportProposal) => void;
+      const parked = new Promise<MemoryImportProposal>((resolve) => {
+        release = resolve;
+      });
+      const admitted = vi.fn(() => parked);
+      const first = service(admitted);
+      const task = await first.submit(source, selection(), 'git-guard');
+      await vi.waitFor(() => expect(admitted).toHaveBeenCalled());
+      await fs.mkdir(path.join(root, '.git'));
+      const recovered = vi.fn();
+      const restarted = service(recovered);
+      await expect(restarted.recover()).rejects.toThrow('Git checkout');
+      expect(recovered).not.toHaveBeenCalled();
+      release({
+        decision: 'new',
+        reason: 'Durable project knowledge.',
+        documents: [doc],
+      });
+      await first.idle(task.id);
+    }));
+  it('reports an identical section from a second file as duplicate, not added', () =>
+    context(async () => {
+      const duplicated = {
+        version: 1,
+        source: 'codex',
+        files: [
+          {
+            path: 'MEMORY.md',
+            content:
+              '# Shared\ncwd: /synthetic/project\nShared durable fact.\n# Pointer\ncwd: /synthetic/project\nSee rollout_summaries/note.md',
+          },
+          {
+            path: 'rollout_summaries/note.md',
+            content: '# Shared\ncwd: /synthetic/project\nShared durable fact.',
+          },
+        ],
+      };
+      const sections = previewSource(duplicated).sections.filter(
+        (section) => section.title === 'Shared',
+      );
+      expect(sections).toHaveLength(2);
+      expect(sections[0].content).toBe(sections[1].content);
+      const svc = service();
+      const task = await svc.submit(
+        duplicated,
+        sections.map((section) => ({ id: section.id, scope: 'project' })),
+        'identical-text',
+      );
+      const done = await svc.idle(task.id);
+      expect(done.items.map((item) => item.status).sort()).toEqual([
+        'added',
+        'duplicate',
+      ]);
+      expect(done.result?.newDocuments).toBe(1);
+    }));
 });

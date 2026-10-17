@@ -187,6 +187,13 @@ export function previewSource(input: unknown): ImportPreview {
       warnings.push(`Unreferenced supporting resource excluded: ${file.path}`);
       continue;
     }
+    // remark parse cost is super-linear on heading-dense input, so reject an
+    // over-approximate ATX count above a slack multiple of the cap before
+    // parsing; the exact heading cap below still applies afterwards.
+    const atxCandidates =
+      file.content.match(/^ {0,3}#{1,6}(?:[\t ]|$)/gm)?.length ?? 0;
+    if (headingCount + atxCandidates > 4 * IMPORT_LIMITS.headings)
+      throw new Error('Source exceeds the supported heading limit.');
     const tree = parser.parse(file.content);
     const headings = tree.children
       .filter((node) => node.type === 'heading')

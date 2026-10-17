@@ -1324,6 +1324,7 @@ describe('bootstrap import boundaries', () => {
     expect(source).toContain('function isInProcessFastPath()');
     expect(source).toContain("first === 'serve'");
     expect(source).toContain("first === 'mcp'");
+    expect(source).toContain("first === 'memory'");
     expect(source).toContain("hasFlag('--help', '-h')");
     expect(source).toContain("hasFlag('--version', '-v')");
     expect(source).toContain('UPDATE_COMPLETE_EXIT_CODE = 44');

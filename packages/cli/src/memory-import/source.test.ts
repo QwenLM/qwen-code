@@ -94,6 +94,12 @@ describe('Codex source preview', () => {
       previewSource(source('# Topic\nFact.\n'.repeat(4097))),
     ).toThrow('heading limit');
   });
+  it('rejects a heading-dense source without parsing it', () => {
+    const dense = source('# x\n'.repeat(131072));
+    const started = performance.now();
+    expect(() => previewSource(dense)).toThrow('heading limit');
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
   it('keeps stable identities after reordering', () => {
     const a = '# Alpha\ncwd: /synthetic/alpha\nA.';
     const b = '# Beta\ncwd: /synthetic/beta\nB.';
