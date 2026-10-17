@@ -52,7 +52,9 @@ import {
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
@@ -66,10 +68,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import { ModSession } from './services/mod-session.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
-import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import {
+  CommandKind,
+  type ExecutionMode,
+  type SlashCommand,
+} from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from './services/BundledSkillLoader.js';
+import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { McpPromptLoader } from './services/McpPromptLoader.js';
+import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import type { ICommandLoader } from './services/types.js';
 import {
   _resetCleanupFunctionsForTest,
   runExitCleanup,
@@ -263,6 +277,7 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockLlmClient: {
     sendMessageStream: Mock;
+    admitUserPrompt: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
@@ -334,6 +349,7 @@ describe('runNonInteractive', () => {
 
     mockLlmClient = {
       sendMessageStream: vi.fn(),
+      admitUserPrompt: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
@@ -355,6 +371,7 @@ describe('runNonInteractive', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn().mockResolvedValue(undefined),
       }),
@@ -2689,6 +2706,7 @@ describe('runNonInteractive', () => {
     );
     mockLlmClient.getChat = vi.fn(() => ({
       getDebugResponses: mockGetDebugResponses,
+      getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistory: vi.fn().mockReturnValue([
         {
           role: 'model',
@@ -2869,6 +2887,7 @@ describe('runNonInteractive', () => {
       // continuation hands off to that path with Retry semantics.
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([
@@ -2902,6 +2921,7 @@ describe('runNonInteractive', () => {
       mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([
@@ -2936,6 +2956,7 @@ describe('runNonInteractive', () => {
       setupMetricsMock();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -2977,6 +2998,7 @@ describe('runNonInteractive', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -3024,6 +3046,7 @@ describe('runNonInteractive', () => {
       setupMetricsMock();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
@@ -3033,6 +3056,114 @@ describe('runNonInteractive', () => {
         continueInterrupted: true,
       });
 
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('refuses a cancelled model prompt after a completed local command', async () => {
+      setupMetricsMock();
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'do the thing' }],
+      };
+      markApiHistoryPrompt(content, 'client-A');
+      const historyOwner = { history: [content] } as unknown as LlmChat;
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: () => LlmChat.prototype.getHistory.call(historyOwner),
+        getHistoryShallow: () =>
+          LlmChat.prototype.getHistoryShallow.call(historyOwner),
+      }));
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            uuid: 'user-A',
+            type: 'user',
+            promptId: 'client-A',
+            daemonPromptId: 'daemon-A',
+            message: content,
+          },
+          {
+            uuid: 'cancel-A',
+            type: 'system',
+            subtype: 'turn_result',
+            promptId: 'client-A',
+            systemPayload: {
+              promptId: 'daemon-A',
+              state: 'cancelled',
+              cancelledAt: 1,
+              cancelReason: 'user',
+              endedAt: 2,
+            },
+          },
+          {
+            uuid: 'docs-B',
+            type: 'user',
+            promptId: 'client-B',
+            daemonPromptId: 'daemon-B',
+            message: { role: 'user', parts: [{ text: '/docs' }] },
+          },
+          {
+            uuid: 'complete-B',
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'daemon-B',
+              state: 'completed',
+              endedAt: 3,
+            },
+          },
+        ]);
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-continue-A',
+        { continueInterrupted: true },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(processStdoutSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No interrupted turn to continue.'),
+      );
+    });
+
+    it('refuses direct continuation of an unknown legacy cancellation', async () => {
+      setupMetricsMock();
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            type: 'system',
+            subtype: 'turn_result',
+            uuid: 'cancel',
+            systemPayload: {
+              promptId: 'turn-9',
+              state: 'cancelled',
+              cancelledAt: 1,
+              endedAt: 2,
+            },
+          },
+        ]);
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c5',
+        { continueInterrupted: true },
+      );
+      expect(exitCode).toBe(0);
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
   });
@@ -4089,7 +4220,12 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'work the goal', 'p-goal');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'work the goal',
+        'p-goal',
+      );
 
       const optionsByCallId = new Map(
         recordToolResult.mock.calls.map((call) => [call[1]?.callId, call[2]]),
@@ -4162,7 +4298,12 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'plain work', 'p-plain');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'plain work',
+        'p-plain',
+      );
 
       expect(recordToolResult).toHaveBeenCalled();
       for (const call of recordToolResult.mock.calls) {
@@ -6195,6 +6336,66 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits init before startup logs when a Mod fails in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      for (const write of [processStdoutSpy, processStderrSpy]) {
+        write.mockImplementation((...args: unknown[]) => {
+          const callback = args.at(-1);
+          if (typeof callback === 'function') queueMicrotask(() => callback());
+          return true;
+        });
+      }
+      const close = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(ModSession, 'create').mockImplementation(
+        (_config, _settings, adapter) =>
+          ({
+            initialize: vi
+              .fn()
+              .mockRejectedValue(new Error('MOD_START_FAILED')),
+            close,
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn().mockImplementationOnce(() => {
+              adapter.emitSystemMessage('ui_log', {
+                plugin: 'broken',
+                text: 'MOD_START_LOG',
+              });
+            }),
+          }) as unknown as ModSession,
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, '/hello', 'mod-failure'),
+      ).rejects.toThrow();
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages[0]).toMatchObject({ type: 'system', subtype: 'init' });
+      expect(messages[1]).toMatchObject({
+        type: 'system',
+        subtype: 'ui_log',
+        data: { plugin: 'broken', text: 'MOD_START_LOG' },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: expect.stringContaining('MOD_START_FAILED') },
+      });
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalled();
+    },
+  );
+
   it('should handle API errors in text mode and exit with error code', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
     setupMetricsMock();
@@ -6312,6 +6513,7 @@ describe('runNonInteractive', () => {
         error: {
           message: '402 Model gpt-oss-120b is not available for billing.',
           status: 402,
+          requestId: 'a30a1854-1925-4da8-8803-73fee2865116',
         },
       },
     };
@@ -6356,6 +6558,14 @@ describe('runNonInteractive', () => {
         expect(line.match(/\[API Error: /g)?.length ?? 0).toBe(1);
       }
     }
+
+    // End-to-end pin for issue #14115: the StructuredError's requestId must
+    // survive the whole forwarding chain onto the user-facing stderr line
+    // (inside the closing bracket, so the idempotency guard above still
+    // recognizes the line as formatted).
+    expect(stderrOutput).toContain(
+      '(request_id: a30a1854-1925-4da8-8803-73fee2865116)',
+    );
   });
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
@@ -6442,6 +6652,211 @@ describe('runNonInteractive', () => {
     );
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
+  });
+
+  describe('UserPromptSubmit admission before a command expands', () => {
+    const spies: Array<{ mockRestore: () => void }> = [];
+    const admission = Object.freeze({ blocked: false });
+    let deploy: SlashCommand & { action: Mock };
+    const finishedStream = () =>
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'done' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]);
+
+    beforeEach(() => {
+      setupMetricsMock();
+      deploy = {
+        name: 'deploy',
+        description: 'deploy',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'deploy expanded' }],
+        }),
+      };
+      for (const Loader of [
+        McpPromptLoader,
+        BuiltinCommandLoader,
+        BundledSkillLoader,
+        SkillCommandLoader,
+        SavedWorkflowLoader,
+      ]) {
+        spies.push(
+          vi
+            .spyOn(Loader.prototype as ICommandLoader, 'loadCommands')
+            .mockResolvedValue([]),
+        );
+      }
+      spies.push(
+        vi
+          .spyOn(FileCommandLoader.prototype as ICommandLoader, 'loadCommands')
+          .mockImplementation(async () => [deploy]),
+      );
+      mockCommandServiceCreate.mockImplementation(
+        async (loaders: ICommandLoader[], signal: AbortSignal) => {
+          const commands = (
+            await Promise.all(
+              loaders.map((loader) => loader.loadCommands(signal)),
+            )
+          )
+            .flat()
+            .map((command) => ({ ...command }));
+          return {
+            getCommands: () => commands,
+            getCommandsForMode: (mode: ExecutionMode) =>
+              filterCommandsForMode(commands, mode),
+          };
+        },
+      );
+      mockLlmClient.admitUserPrompt.mockResolvedValue(admission);
+      mockLlmClient.sendMessageStream.mockImplementation(finishedStream);
+    });
+
+    afterEach(() => {
+      for (const spy of spies.splice(0)) spy.mockRestore();
+    });
+
+    it('admits a custom command before it expands and passes the admission to the first send', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledExactlyOnceWith(
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+      expect(
+        mockLlmClient.admitUserPrompt.mock.invocationCallOrder[0],
+      ).toBeLessThan(deploy.action.mock.invocationCallOrder[0]!);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: 'deploy expanded' }],
+        expect.any(AbortSignal),
+        'prompt-id-admit',
+        {
+          type: SendMessageType.UserQuery,
+          modelOverride: undefined,
+          submittedPrompt: '/deploy prod',
+          promptAdmission: admission,
+        },
+      );
+    });
+
+    it('sends a refused command unexpanded, with the admission that blocks it', async () => {
+      const refused = Object.freeze({ blocked: true });
+      mockLlmClient.admitUserPrompt.mockResolvedValue(refused);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-refused',
+      );
+
+      expect(deploy.action).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: '/deploy prod' }],
+        expect.any(AbortSignal),
+        'prompt-id-refused',
+        expect.objectContaining({
+          type: SendMessageType.UserQuery,
+          promptAdmission: refused,
+        }),
+      );
+    });
+
+    it('passes the admission to the first send only', async () => {
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'Tool response' }],
+        executionStatus: 'success',
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-1',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-id-tool',
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(finishedStream);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-tool',
+      );
+
+      const sendOptions = mockLlmClient.sendMessageStream.mock.calls.map(
+        (call) => call[3],
+      );
+      expect(sendOptions).toEqual([
+        expect.objectContaining({ promptAdmission: admission }),
+        expect.not.objectContaining({ promptAdmission: expect.anything() }),
+      ]);
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledOnce();
+    });
+
+    it('does not admit a notification batch', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-notification',
+        { sendMessageType: SendMessageType.Notification },
+      );
+
+      expect(mockLlmClient.admitUserPrompt).not.toHaveBeenCalled();
+      expect(deploy.action).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['before admission', true],
+      ['while admission runs', false],
+    ])(
+      'runs no command when the turn is cancelled %s',
+      async (_, abortFirst) => {
+        const turnAbortController = new AbortController();
+        const cancel = () =>
+          turnAbortController.abort(new TurnInterruptedError());
+        if (abortFirst) cancel();
+        mockLlmClient.admitUserPrompt.mockImplementation(async () => {
+          cancel();
+          return admission;
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          '/deploy prod',
+          'prompt-id-cancelled',
+          {
+            abortController: turnAbortController,
+            recoverableCancellation: true,
+          },
+        );
+
+        expect(exitCode).toBe(130);
+        expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledTimes(
+          abortFirst ? 0 : 1,
+        );
+        expect(deploy.action).not.toHaveBeenCalled();
+        expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('should handle command that requires confirmation by returning early', async () => {

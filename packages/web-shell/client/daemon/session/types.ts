@@ -23,6 +23,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -407,6 +408,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   /** Original text declared at the user submission boundary, before host preparation. */
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
@@ -419,6 +421,8 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Revalidates the caller before every HTTP attempt, including client recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
@@ -430,7 +434,8 @@ export interface SendPromptOptions {
   onAdmitted?: (admission: { promptId: string }) => void;
 }
 
-export interface SubmitPromptOptions extends SendPromptOptions {
+export interface SubmitPromptOptions
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source'> {
   sessionId?: string;
   signal?: AbortSignal;
 }
@@ -513,7 +518,7 @@ export interface DaemonSessionActions {
     requestStartedAt?: number,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
-  continueSession(): Promise<void>;
+  continueSession(options?: { confirmCancellation?: string }): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its
@@ -667,6 +672,16 @@ export interface DaemonSessionActions {
     messageId: string,
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
+  /**
+   * Ask the daemon to deliver the queued mid-turn messages now, cutting short
+   * a model response that a foreground turn is streaming, unless it has
+   * started a tool call.
+   * Pre-flight the daemon's `session_mid_turn_send_now` capability: older
+   * daemons lack the route.
+   */
+  sendMidTurnMessagesNow(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonSendMidTurnMessagesNowResult>;
   /**
    * Best-effort reconciliation snapshot (queue + delivery-state rings) from the
    * daemon. Resolves `undefined` (never throws/raises a notice) when there

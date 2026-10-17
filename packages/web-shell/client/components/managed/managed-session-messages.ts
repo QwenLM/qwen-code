@@ -2,15 +2,34 @@ import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import type { ManagedToolResult } from './managed-tool-result-types';
 
+// `current` must already be ascending and deduplicated by id (stream state
+// and transcript pages are); the append path checks only that `incoming`
+// extends it, so a disordered first argument stays disordered.
 export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
   incoming: readonly ManagedAgentSessionEvent[],
 ): ManagedAgentSessionEvent[] {
+  // An empty input cannot ride the ascending check: strictlyAscendingIds
+  // loops from index 1, and the fast path dereferences incoming[0].
+  if (incoming.length === 0) return [...current];
+  if (
+    strictlyAscendingIds(incoming) &&
+    (current.length === 0 || current[current.length - 1]!.id < incoming[0]!.id)
+  )
+    return [...current, ...incoming];
   return [
     ...new Map(
       [...current, ...incoming].map((event) => [event.id, event]),
     ).values(),
   ].sort((a, b) => a.id - b.id);
+}
+
+function strictlyAscendingIds(
+  events: readonly ManagedAgentSessionEvent[],
+): boolean {
+  for (let index = 1; index < events.length; index++)
+    if (events[index - 1]!.id >= events[index]!.id) return false;
+  return true;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -66,7 +85,8 @@ export function managedEventsToMessages(
   for (const event of events) {
     // Approval updates carry no Turn and render outside the transcript, so
     // they must not settle or split the Turn being streamed.
-    if (event.type === 'action_updated') continue;
+    if (event.type === 'action_updated' || event.type === 'context_changed')
+      continue;
     if (
       BOUNDARY_SETTLE_TYPES.has(event.type) &&
       event.type !== 'tool_result_updated' &&
@@ -237,7 +257,7 @@ export function managedEventsToMessages(
       }
       if (event.type === 'tool_started') {
         tool.status = 'in_progress';
-        tool.startTime = event.at;
+        tool.startTime ??= event.at;
         // A resumed tool outgrows the diagnostic's floor: the end is open
         // again, while the booking survives so the Turn's terminal event
         // can still re-stamp it.
@@ -264,6 +284,11 @@ export function managedEventsToMessages(
       // the live one.
       (event.type === 'runtime_failed' && event.turnId === currentTurnId)
     ) {
+      if (event.type === 'completed' && textMessage?.role === 'assistant') {
+        // Snapshot text parts share the Item's creation time; the shared
+        // transcript measures a settled Turn through its final assistant.
+        textMessage.timestamp = event.at;
+      }
       // environment.failed is a non-fatal diagnostic and the Turn keeps
       // streaming: dropping the continuation handle would split one answer
       // into two bubbles, so only stop the spinner (and fail pending tools).

@@ -29,7 +29,7 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 // `kind: "child_agent"` (H4a) and `kind: "workflow"` (H4c), one child
 // Session per record under one shared shape. The shared fixtures in
 // contracts/managed-child-run-record-v1.fixtures.json pin every shape, and
-// ManagedExtensionRecords in packages/sdk-java/managed-agent-server replays
+// ManagedExtensionRecords in packages/managed-agent-server replays
 // the same cases. See docs/design/2026-10-03-managed-shell-monitor-runtime.md,
 // docs/design/2026-10-06-managed-child-agent-runtime.md and
 // docs/design/2026-10-09-managed-workflow-child-kind.md.
@@ -140,6 +140,30 @@ export type ChildSessionRun = ChildAgentRun | WorkflowRun;
  * parse returns it for `kind: "shell"`.
  */
 export type AnyChildRun = ChildRun | ChildSessionRun;
+
+/**
+ * Whether a child Session of its own executes `record`. Every rule that
+ * holds for both child Session kinds asks this rather than "not a Shell":
+ * the switch names each kind, so a kind added to `AnyChildRun` fails to
+ * compile here until it is classified, and none joins the child Session
+ * rules by default.
+ */
+export function isChildSessionRun(
+  record: AnyChildRun,
+): record is ChildSessionRun {
+  switch (record.kind) {
+    case 'child_agent':
+    case 'workflow':
+      return true;
+    case 'shell':
+      return false;
+    default: {
+      const unclassified: never = record;
+      void unclassified;
+      return false;
+    }
+  }
+}
 
 const SHELL_KEYS = [
   'commandRef',
@@ -709,6 +733,7 @@ export function isChildRunStart(value: unknown): boolean {
     if (!isExtensionRunStart(record.run) || record.stopRequested) return false;
     if (record.kind === 'shell') return record.outputRef === null;
     return (
+      isChildSessionRun(record) &&
       record.run.delivery !== null &&
       record.run.delivery.state === 'planned' &&
       record.childSessionId === null &&
@@ -749,7 +774,7 @@ export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
       }
       return true;
     }
-    if (before.kind === 'shell' || after.kind === 'shell') return false;
+    if (!isChildSessionRun(before) || !isChildSessionRun(after)) return false;
     // Once the run is terminal the record changes only its delivery line:
     // the run's own freeze confines movement to the delivery, and nothing
     // outside the run may change at all.

@@ -68,12 +68,20 @@ function copyViaExecCommand(text: string): boolean {
   // dialog or popover: a body-appended textarea sits outside the FocusScope /
   // DismissableLayer, so the scope refocuses the button during select() and
   // execCommand copies nothing, or the focusin dismisses a popover mid-copy.
-  const layerContainer =
-    document.activeElement?.closest(
+  let previousFocus = document.activeElement;
+  while (previousFocus?.shadowRoot?.activeElement)
+    previousFocus = previousFocus.shadowRoot.activeElement;
+  let ancestor = previousFocus;
+  let layer: Element | null = null;
+  while (ancestor && !layer) {
+    layer = ancestor.closest(
       '[role="dialog"], [data-radix-popper-content-wrapper]',
-    ) ?? document.body;
+    );
+    const root = ancestor.getRootNode();
+    ancestor = root instanceof ShadowRoot ? root.host : null;
+  }
+  const layerContainer = layer ?? document.body;
   layerContainer.appendChild(textarea);
-  const previousFocus = document.activeElement;
 
   try {
     textarea.select();

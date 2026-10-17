@@ -19,7 +19,9 @@ import {
 } from './managed-automation-record.js';
 import {
   assertManagedSessionDomainEnabled,
+  assertManagedSessionScheduleSessionModeEnabled,
   MANAGED_SESSION_ENABLED_DOMAINS,
+  MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES,
   ManagedSessionRecordError,
 } from './managed-session-records.js';
 
@@ -105,12 +107,21 @@ describe('managed-automation-record/1 shared contract', () => {
       projectManagedTask(null, parsed.run, 1_000).definitionRevision,
     ).toBeNull();
     expect((parsed.record as AutomationRun).definitionRevision).toBe(3);
+    // H6b enabled both domains for submission; the mode gate beside the
+    // domain list is what still refuses a per_run definition.
     for (const domain of ['schedule', 'automation_run'] as const) {
-      expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(domain);
-      expect(() => assertManagedSessionDomainEnabled(domain)).toThrow(
-        ManagedSessionRecordError,
-      );
+      expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain(domain);
+      expect(() => assertManagedSessionDomainEnabled(domain)).not.toThrow();
     }
+    expect(MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES).toEqual([
+      'persistent',
+    ]);
+    expect(() =>
+      assertManagedSessionScheduleSessionModeEnabled('persistent'),
+    ).not.toThrow();
+    expect(() =>
+      assertManagedSessionScheduleSessionModeEnabled('per_run'),
+    ).toThrow(ManagedSessionRecordError);
   });
 
   it('pins the closed keys, fixed keys and policy vocabularies', () => {
