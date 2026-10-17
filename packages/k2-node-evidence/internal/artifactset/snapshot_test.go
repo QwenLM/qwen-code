@@ -52,13 +52,13 @@ func fixture(t *testing.T) (fstest.MapFS, fstest.MapFS, fstest.MapFS) {
 		a.Catalogues[name] = pin{len(raw), birth.SHA256(raw)}
 	}
 	pre["artifact-manifest.json"] = file(encode(a))
-	target := target{Format: "qwen-k2-profile-target/2", Architecture: "amd64", Hosts: map[string]hostExecutable{}, Paths: map[string]string{"source": "/etc/qwen-k2/source.json", "gateway": "/etc/qwen-k2/gateway.json"}, HugepageSizes: []string{}}
+	target := target{Format: "qwen-k2-profile-target/2", Architecture: "amd64", Hosts: map[string]HostExecutable{}, Paths: map[string]string{"source": "/etc/qwen-k2/source.json", "gateway": "/etc/qwen-k2/gateway.json"}, HugepageSizes: []string{}}
 	for _, name := range []string{"runtime", "kubelet", "registrar", "plugin", "systemd"} {
 		sha := source[name+"Digest"]
 		if name == "systemd" {
 			sha = strings.Repeat("d", 64)
 		}
-		target.Hosts[name] = hostExecutable{Path: "/usr/bin/" + name, SHA: sha, Label: "host-" + name}
+		target.Hosts[name] = HostExecutable{Path: "/usr/bin/" + name, SHA: sha, Label: "host-" + name}
 	}
 	// The map is initialized by decoding inert metadata, without mounting anything.
 	_ = json.Unmarshal([]byte(`{"worker":[],"sandbox":[]}`), &target.RootfsMounts)
@@ -194,7 +194,7 @@ func TestRepinningDoesNotRepairDependencyOrFinalConfigurationChanges(t *testing.
 }
 
 func TestRepinnedTargetAndUnitMustKeepRoleLinkage(t *testing.T) {
-	for _, which := range []string{"architecture", "targetPath", "runtimeDigest", "unitRole", "unitConfig"} {
+	for _, which := range []string{"architecture", "targetPath", "runtimeDigest", "emptyLabel", "unconfinedLabel", "reservedLabel", "invalidLabel", "duplicateLabel", "relativeHostPath", "uncleanHostPath", "nulHostPath", "longHostPath", "unitRole", "unitConfig"} {
 		t.Run(which, func(t *testing.T) {
 			pre, p, c := fixture(t)
 			files := assemble(t, pre, p, c)
@@ -208,6 +208,12 @@ func TestRepinnedTargetAndUnitMustKeepRoleLinkage(t *testing.T) {
 				target["roleConfigPaths"].(map[string]any)["source"] = "/etc/qwen-k2/other.json"
 			case "runtimeDigest":
 				target["hostExecutables"].(map[string]any)["runtime"].(map[string]any)["sha256"] = strings.Repeat("e", 64)
+			case "emptyLabel", "unconfinedLabel", "reservedLabel", "invalidLabel", "duplicateLabel":
+				label := map[string]string{"emptyLabel": "", "unconfinedLabel": "unconfined", "reservedLabel": "qwen-k2-source-v1", "invalidLabel": "host runtime", "duplicateLabel": "host-kubelet"}[which]
+				target["hostExecutables"].(map[string]any)["runtime"].(map[string]any)["label"] = label
+			case "relativeHostPath", "uncleanHostPath", "nulHostPath", "longHostPath":
+				path := map[string]string{"relativeHostPath": "usr/bin/runtime", "uncleanHostPath": "/usr/../bin/runtime", "nulHostPath": "/usr/bin/run\x00time", "longHostPath": "/" + strings.Repeat("a", 2048)}[which]
+				target["hostExecutables"].(map[string]any)["runtime"].(map[string]any)["path"] = path
 			default:
 				name = "qwen-k2-node-source.service"
 				old, replacement := " source ", " gateway "
@@ -233,6 +239,43 @@ func TestRepinnedTargetAndUnitMustKeepRoleLinkage(t *testing.T) {
 				t.Fatal("coherent pins repaired incorrect role linkage")
 			}
 		})
+	}
+}
+
+func TestHostRolesAreExplicitIndependentValuesFromValidatedBytes(t *testing.T) {
+	pre, p, c := fixture(t)
+	files := assemble(t, pre, p, c)
+	snapshot, err := Validate(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"runtime", "kubelet", "registrar", "plugin", "systemd"} {
+		actual, err := snapshot.Host(name)
+		if err != nil || actual.Path != "/usr/bin/"+name || actual.Label != "host-"+name {
+			t.Fatal("host identity did not come from the original target", name, actual, err)
+		}
+		if name == "runtime" && actual.SHA != strings.Repeat("a", 64) || name == "plugin" && actual.SHA != strings.Repeat("1", 64) {
+			t.Fatal("host digest differs from manual fixture expectation", actual)
+		}
+		original := actual
+		actual.Path, actual.Label, actual.SHA = "changed", "changed", "changed"
+		again, err := snapshot.Host(name)
+		if err != nil || again != original {
+			t.Fatal("caller mutation replaced the original role", name)
+		}
+	}
+	files["target.json"][0] ^= 1
+	actual, err := snapshot.Host("runtime")
+	if err != nil || actual.Label != "host-runtime" {
+		t.Fatal("caller byte mutation replaced the retained target value")
+	}
+	for _, s := range []*Snapshot{nil, {}, snapshot} {
+		if _, err := s.Host("unknown"); err == nil {
+			t.Fatal("unknown host role accepted")
+		}
+	}
+	if _, err := new(Snapshot).Host("runtime"); err == nil {
+		t.Fatal("empty snapshot supplied a host role")
 	}
 }
 

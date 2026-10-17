@@ -85,6 +85,12 @@ name the fixed namespace leaves; their actual loaded permissions are unverified.
 This candidate is compile-only for the native path, changes no wire/SQL format
 and grants no release authority.
 
+[Host peer continuity](2026-10-17-k2-host-peer-continuity.md) extends the
+runtime/plugin/frontend checks to protected host labels, original proc
+directories and retained user/mount namespaces, and retains the gateway's
+leader/current-thread namespace baseline. Its native behavior remains
+unqualified and does not authorize release.
+
 ## Retained service inputs
 
 Source and gateway retain the immutable ext4 configuration, CA, certificate and

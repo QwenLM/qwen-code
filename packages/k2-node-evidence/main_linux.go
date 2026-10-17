@@ -152,15 +152,24 @@ func runGateway(ctx context.Context, path string) error {
 		return err
 	}
 	defer shimConfiguration.Close()
-	_, observed, err := loadInstalledArtifacts("gateway", path, files)
+	installed, observed, err := loadInstalledArtifacts("gateway", path, files)
 	if err != nil {
 		return err
 	}
 	self, err := os.Executable()
-	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil || gatewayConfinement() != nil {
+	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil {
 		return errors.New("actual gateway executable or confinement differs from the protected installation")
 	}
-	conn, process, err := connectBackend(cfg.RuntimeSocket, cfg.RuntimeDigest)
+	security, err := openGatewaySecurity()
+	if err != nil {
+		return err
+	}
+	defer security.close()
+	runtimeHost, err := installed.Host("runtime")
+	if err != nil {
+		return err
+	}
+	conn, process, err := connectBackend(cfg.RuntimeSocket, runtimeHost)
 	if err != nil {
 		return err
 	}
@@ -177,7 +186,7 @@ func runGateway(ctx context.Context, path string) error {
 	gateway := &runtimeReadGateway{tasks: tasks.NewTasksClient(conn), containers: containers.NewContainersClient(conn), content: content.NewContentClient(conn), images: images.NewImagesClient(conn), snapshots: snapshots.NewSnapshotsClient(conn), cri: cri.NewRuntimeServiceClient(conn), lifetime: ctx, connection: conn, coordinator: cfg.CoordinatorPrincipal, source: cfg.SourcePrincipal, identity: &gatewayIdentity{Version: "qwen-k2-runtime-identity/2", Incarnation: hex.EncodeToString(incarnation[:]), BootID: boot, Peer: process.identity, Artifacts: observed}}
 	err = serveControl(ctx, cfg.listenerConfig, tlsConfig, roleboundary.Handler(func() error {
 		current, err := bootID()
-		if err != nil || current != boot || process.verify() != nil || files.verify() != nil || shimConfiguration.Verify() != nil || gatewayConfinement() != nil {
+		if err != nil || current != boot || process.verify() != nil || files.verify() != nil || shimConfiguration.Verify() != nil || security.verify() != nil {
 			return errors.New("original gateway installation or runtime incarnation changed")
 		}
 		return nil
@@ -229,7 +238,11 @@ func runSource(ctx context.Context, path string) error {
 	if policy.value.RawBytes != uint64(observed.PackedBytes) {
 		return errors.New("actual loaded policy length differs from installed artifacts")
 	}
-	conn, plugin, err := connectBackend(cfg.PluginSocket, cfg.PluginDigest)
+	pluginHost, err := installed.Host("plugin")
+	if err != nil {
+		return err
+	}
+	conn, plugin, err := connectBackend(cfg.PluginSocket, pluginHost)
 	if err != nil {
 		return err
 	}
@@ -252,7 +265,15 @@ func runSource(ctx context.Context, path string) error {
 	if err != nil || bootErr != nil || runtime.BootID != boot || runtime.Peer.Digest != cfg.RuntimeDigest || installed.MatchObservation("gateway", runtime.Artifacts) != nil {
 		return errors.New("original runtime and source nodes differ")
 	}
-	frontend := &frontendPeers{kubeletDigest: cfg.KubeletDigest, registrarDigest: cfg.RegistrarDigest}
+	kubeletHost, err := installed.Host("kubelet")
+	if err != nil {
+		return err
+	}
+	registrarHost, err := installed.Host("registrar")
+	if err != nil {
+		return err
+	}
+	frontend := &frontendPeers{kubelet: kubeletHost, registrar: registrarHost}
 	defer frontend.close()
 	gateway.identity, gateway.plugin, gateway.frontend, gateway.policy = runtime, plugin, frontend, policy
 	gateway.shimConfig = shimConfiguration

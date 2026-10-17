@@ -8,10 +8,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/artifactset"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -25,6 +25,10 @@ type backendPeer struct {
 	stat       unix.Stat_t
 	attempted  bool
 	failed     bool
+	process    int
+	procID     kernelObject
+	namespaces *hostNamespaces
+	expected   artifactset.HostExecutable
 }
 
 func sameExecutable(a, b unix.Stat_t) bool {
@@ -34,14 +38,27 @@ func sameExecutable(a, b unix.Stat_t) bool {
 func (p *backendPeer) verify() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.failed || p.executable == nil {
+	if p.failed || p.executable == nil || p.process < 0 || p.pidfd < 0 {
 		return errors.New("original backend connection was lost")
 	}
-	poll := []unix.PollFd{{Fd: int32(p.pidfd), Events: unix.POLLIN}}
-	ticks, tickErr := startTicks(uint32(p.identity.PID))
-	var current, retained unix.Stat_t
-	if _, err := unix.Poll(poll, 0); err != nil || poll[0].Revents != 0 || tickErr != nil || ticks != p.identity.StartTicks || unix.Stat("/proc/"+strconv.FormatInt(int64(p.identity.PID), 10)+"/exe", &current) != nil || unix.Fstat(int(p.executable.Fd()), &retained) != nil || !sameExecutable(p.stat, current) || !sameExecutable(p.stat, retained) {
+	if p.verifyProcess() != nil || p.namespaces.verify(p.process) != nil || p.verifyProcess() != nil {
 		p.failed = true
+		return errors.New("original backend process or namespace changed")
+	}
+	return nil
+}
+
+// The peer is unpublished or locked while checking the process around namespace reads.
+func (p *backendPeer) verifyProcess() error {
+	poll := []unix.PollFd{{Fd: int32(p.pidfd), Events: unix.POLLIN}}
+	raw, statErr := procFile(p.process, "stat")
+	ticks, tickErr := parseStartTicks(raw)
+	label, labelErr := procFile(p.process, "attr/apparmor/current")
+	object, objectErr := policyObject(p.process)
+	var current, retained unix.Stat_t
+	var path [2049]byte
+	n, pathErr := unix.Readlinkat(p.process, "exe", path[:])
+	if _, err := unix.Poll(poll, 0); err != nil || poll[0].Revents != 0 || statErr != nil || tickErr != nil || ticks != p.identity.StartTicks || objectErr != nil || object != p.procID || labelErr != nil || string(label) != p.expected.Label+" (enforce)\n" || pathErr != nil || n == len(path) || string(path[:n]) != p.expected.Path || unix.Fstatat(p.process, "exe", &current, 0) != nil || unix.Fstat(int(p.executable.Fd()), &retained) != nil || !sameExecutable(p.stat, current) || !sameExecutable(p.stat, retained) {
 		return errors.New("original backend process changed")
 	}
 	return nil
@@ -79,17 +96,22 @@ func (p *backendPeer) close() {
 		_ = unix.Close(p.pidfd)
 		p.pidfd = -1
 	}
+	_ = p.namespaces.close()
+	if p.process >= 0 {
+		_ = unix.Close(p.process)
+		p.process = -1
+	}
 }
 
-func connectBackend(path, expectedDigest string) (*grpc.ClientConn, *backendPeer, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !hashString(expectedDigest) {
+func connectBackend(path string, expected artifactset.HostExecutable) (*grpc.ClientConn, *backendPeer, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !hashString(expected.SHA) || expected.Label == "" {
 		return nil, nil, errors.New("invalid original backend configuration")
 	}
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 {
 		return nil, nil, errors.New("original backend socket unavailable")
 	}
-	p := &backendPeer{pidfd: -1}
+	p := &backendPeer{pidfd: -1, process: -1}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, "passthrough:///original-backend", grpc.WithBlock(), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
@@ -106,18 +128,19 @@ func connectBackend(path, expectedDigest string) (*grpc.ClientConn, *backendPeer
 			return nil, errors.New("original backend connection unavailable")
 		}
 		identity, err := unixPeer(c)
-		if err != nil || identity.Digest != expectedDigest {
+		if err != nil || identity.Digest != expected.SHA {
 			_ = c.Close()
 			p.failed = true
 			return nil, errors.New("original backend peer differs")
 		}
-		retained, err := retainPeer(identity)
+		retained, err := retainPeer(identity, expected)
 		if err != nil {
 			_ = c.Close()
 			p.failed = true
 			return nil, errors.New("original backend could not be retained")
 		}
 		p.identity, p.pidfd, p.executable, p.stat = retained.identity, retained.pidfd, retained.executable, retained.stat
+		p.process, p.procID, p.namespaces, p.expected = retained.process, retained.procID, retained.namespaces, retained.expected
 		return &guardedBackendConnection{Conn: c, peer: p}, nil
 	}), grpc.WithUnaryInterceptor(func(ctx context.Context, method string, request, response any, cc *grpc.ClientConn, invoke grpc.UnaryInvoker, options ...grpc.CallOption) error {
 		if p.verify() != nil {

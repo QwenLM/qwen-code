@@ -59,6 +59,10 @@ source/shim 创建通道通过既有原 proc 目录，另持原 peer 的 user、
 仍是安装要求。既有 source/shim profiles 包含固定 namespace 叶子路径，但实际加载权限
 未验收。本候选原生路径仅编译，不改 wire/SQL 格式，不授予释放权限。
 
+[宿主 peer 连续性](2026-10-17-k2-host-peer-continuity.zh-CN.md) 将 runtime/plugin/frontend
+检查扩展为受保护宿主 label、原 proc 目录及持续持有的 user/mount namespace，
+并保留 gateway 的 leader/当前线程 namespace 基线。其原生行为仍未资格化，不授予释放权限。
+
 ## 持续持有服务输入
 
 source 与 gateway 从启动起持续持有 immutable ext4 配置、CA、证书和私钥对象。

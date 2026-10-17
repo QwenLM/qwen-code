@@ -54,7 +54,7 @@ func unixPeer(connection net.Conn) (peerIdentity, error) {
 	var peerErr error
 	if err = raw.Control(func(fd uintptr) {
 		credentials, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-	}); err != nil || peerErr != nil || credentials == nil || credentials.Uid != 0 || credentials.Pid <= 0 {
+	}); err != nil || peerErr != nil || credentials == nil || credentials.Uid != 0 || credentials.Gid != 0 || credentials.Pid <= 0 {
 		return peerIdentity{}, errors.New("original backend peer is unavailable")
 	}
 	ticks, err := startTicks(uint32(credentials.Pid))

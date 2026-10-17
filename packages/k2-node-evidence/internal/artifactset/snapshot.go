@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/birth"
@@ -81,7 +82,7 @@ type shim struct {
 	CreationContract []byte            `json:"creationContract"`
 }
 
-type hostExecutable struct {
+type HostExecutable struct {
 	Path  string `json:"path"`
 	SHA   string `json:"sha256"`
 	Label string `json:"label"`
@@ -90,7 +91,7 @@ type hostExecutable struct {
 type target struct {
 	Format         string                    `json:"format"`
 	Architecture   string                    `json:"architecture"`
-	Hosts          map[string]hostExecutable `json:"hostExecutables"`
+	Hosts          map[string]HostExecutable `json:"hostExecutables"`
 	SnapshotRoot   string                    `json:"snapshotRoot"`
 	PodSlicePrefix string                    `json:"podSlicePrefix"`
 	ExportRoot     string                    `json:"apparmorExportRoot"`
@@ -157,11 +158,27 @@ type Snapshot struct {
 	architecture    string
 	paths           map[string]string
 	inputs          map[string][]byte
+	hosts           map[string]HostExecutable
 }
 
 func (s *Snapshot) PackedSHA256() string { return s.packedSHA }
 func (s *Snapshot) PackedBytes() int     { return s.packedBytes }
 func (s *Snapshot) Architecture() string { return s.architecture }
+
+func (s *Snapshot) Host(name string) (HostExecutable, error) {
+	if s != nil {
+		if value, ok := s.hosts[name]; ok {
+			return value, nil
+		}
+	}
+	return HostExecutable{}, errors.New("original installed host role is unavailable")
+}
+
+var hostLabel = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,253}$`)
+
+func validHost(v HostExecutable) bool {
+	return path.IsAbs(v.Path) && path.Clean(v.Path) == v.Path && v.Path != "/" && len(v.Path) <= 2048 && !strings.ContainsAny(v.Path, "\x00\r\n") && birth.Hash(v.SHA) && hostLabel.MatchString(v.Label) && v.Label != "unconfined" && !strings.HasPrefix(v.Label, "qwen-k2-")
+}
 
 func (s *Snapshot) Match(role, configurationPath string, configuration, shim, unit []byte) error {
 	if s == nil || !birth.Hash(s.installationSHA) || !birth.Hash(s.packedSHA) || s.packedBytes < 1 || s.packedBytes > 8<<20 || s.architecture != "amd64" && s.architecture != "arm64" || len(s.inputs) != 5 || len(s.paths) != 2 || role != "source" && role != "gateway" || s.paths[role] != configurationPath {
@@ -250,10 +267,13 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 	if t.Format != "qwen-k2-profile-target/2" || t.Architecture != architecture || !reflect.DeepEqual(t.Paths, p.Paths) || len(t.Hosts) != 5 {
 		return nil, errors.New("original target and artifact identities differ")
 	}
+	labels := make(map[string]bool)
 	for _, name := range []string{"runtime", "kubelet", "registrar", "plugin", "systemd"} {
-		if !birth.Hash(t.Hosts[name].SHA) || name != "systemd" && source[name+"Digest"] != t.Hosts[name].SHA {
+		v := t.Hosts[name]
+		if !validHost(v) || labels[v.Label] || name != "systemd" && source[name+"Digest"] != v.SHA {
 			return nil, errors.New("original target and role executable digests differ")
 		}
+		labels[v.Label] = true
 	}
 	for _, role := range []string{"source", "gateway"} {
 		if !configurationPath(p.Paths[role]) {
@@ -283,7 +303,7 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 			return nil, errors.New("original service argv and configuration paths differ")
 		}
 	}
-	s := &Snapshot{installationSHA: birth.SHA256(files["installation.json"]), packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, paths: p.Paths, inputs: make(map[string][]byte)}
+	s := &Snapshot{installationSHA: birth.SHA256(files["installation.json"]), packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, paths: p.Paths, inputs: make(map[string][]byte), hosts: t.Hosts}
 	for _, name := range []string{"source-config.installed.json", "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service"} {
 		s.inputs[name] = bytes.Clone(files[name])
 	}

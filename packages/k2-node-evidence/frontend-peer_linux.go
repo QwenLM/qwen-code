@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/artifactset"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
@@ -27,18 +28,31 @@ type frontendAuth struct {
 func (frontendAuth) AuthType() string { return "k2-unix-peer" }
 
 type frontendPeers struct {
-	mu              sync.Mutex
-	kubeletDigest   string
-	registrarDigest string
-	peers           map[string]*backendPeer
+	mu        sync.Mutex
+	kubelet   artifactset.HostExecutable
+	registrar artifactset.HostExecutable
+	peers     map[string]*backendPeer
 }
 
-func retainPeer(identity runtimePeer) (*backendPeer, error) {
-	p := &backendPeer{identity: identity, pidfd: -1}
+func retainPeer(identity runtimePeer, expected artifactset.HostExecutable) (*backendPeer, error) {
+	if identity.PID <= 0 || identity.StartTicks == 0 || !hashString(identity.Digest) || identity.Digest != expected.SHA || expected.Label == "" {
+		return nil, errors.New("original installed host identity is required")
+	}
+	p := &backendPeer{identity: identity, expected: expected, pidfd: -1, process: -1}
 	var err error
-	p.pidfd, err = unix.PidfdOpen(int(identity.PID), 0)
+	p.process, err = openHostProcess(strconv.FormatInt(int64(identity.PID), 10))
 	if err == nil {
-		p.executable, err = os.Open("/proc/" + strconv.FormatInt(int64(identity.PID), 10) + "/exe")
+		p.procID, err = policyObject(p.process)
+	}
+	if err == nil {
+		p.pidfd, err = unix.PidfdOpen(int(identity.PID), 0)
+	}
+	if err == nil {
+		var fd int
+		fd, err = unix.Openat(p.process, "exe", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err == nil {
+			p.executable = os.NewFile(uintptr(fd), "original-host-executable")
+		}
 	}
 	if err == nil {
 		err = unix.Fstat(int(p.executable.Fd()), &p.stat)
@@ -50,6 +64,12 @@ func retainPeer(identity runtimePeer) (*backendPeer, error) {
 		if err == nil && (n == 0 || n > 128<<20 || hex.EncodeToString(h.Sum(nil)) != identity.Digest) {
 			err = errors.New("original executable changed")
 		}
+	}
+	if err == nil {
+		err = p.verifyProcess()
+	}
+	if err == nil {
+		p.namespaces, err = openHostNamespaces(p.process)
 	}
 	if err != nil || p.verify() != nil {
 		p.close()
@@ -64,10 +84,13 @@ func (f *frontendPeers) ServerHandshake(conn net.Conn) (net.Conn, credentials.Au
 		return nil, nil, err
 	}
 	role := ""
-	if identity.Digest == f.kubeletDigest {
+	expected := artifactset.HostExecutable{}
+	if identity.Digest == f.kubelet.SHA {
 		role = "kubelet"
-	} else if identity.Digest == f.registrarDigest {
+		expected = f.kubelet
+	} else if identity.Digest == f.registrar.SHA {
 		role = "registrar"
+		expected = f.registrar
 	}
 	if role == "" {
 		return nil, nil, errors.New("CSI frontend peer is unsupported")
@@ -83,7 +106,7 @@ func (f *frontendPeers) ServerHandshake(conn net.Conn) (net.Conn, credentials.Au
 			return nil, nil, errors.New("original CSI frontend peer changed")
 		}
 	} else {
-		previous, err = retainPeer(identity)
+		previous, err = retainPeer(identity, expected)
 		if err != nil {
 			return nil, nil, err
 		}
