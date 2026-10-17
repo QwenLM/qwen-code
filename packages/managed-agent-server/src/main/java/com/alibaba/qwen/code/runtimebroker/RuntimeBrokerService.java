@@ -1397,11 +1397,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                 return current == null ? record : current;
                                             }
                                             // The detached family holds its Runtime
-                                            // through its own ledger row: the Shell
-                                            // process for `is_background`, the watch
-                                            // for `is_monitor`.
+                                            // through its own ledger row: a monitor
+                                            // turn for `monitor`, the Shell process
+                                            // for `is_background`. The family keys on
+                                            // the validated toolName, never on the
+                                            // optional caller marker (#13930 R1-23):
+                                            // a marker-less monitor payload must
+                                            // still admit its hold row.
                                             Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
-                                            ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
+                                            ManagedHoldFamily family = "monitor".equals(toolName)
                                                     ? ManagedHoldFamily.MONITOR
                                                     : Boolean.TRUE.equals(toolInput.get("is_background"))
                                                             ? ManagedHoldFamily.SHELL

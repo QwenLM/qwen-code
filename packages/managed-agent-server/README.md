@@ -1344,8 +1344,8 @@ npm run test:e2e:managed-continuation-failover
 Both modes require Linux: the replacement owner retires the dead worker's
 Runtime binding through the durable local-Worker reclaim (#12380 W0e), which
 runs on Linux only. The runner enables `durable-local-process` for these modes
-and refuses other platforms with an explicit error; the Hosted MySQL CI job
-runs both.
+and refuses other platforms with an explicit error; the Hosted failover E2E
+CI job runs both.
 
 The in-flight mode holds the first Broker `:start` request after the Harness
 has durably committed its `await_runtime` checkpoint, kills the original
@@ -1356,7 +1356,7 @@ original Prompt without replay, and commit one public terminal event. The
 continuation mode kills the Harness after the first published text chunk and
 requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
-Hosted MySQL CI job.
+Hosted failover E2E CI job.
 
 The G3 arms replace owners without an operator choosing the next one. With
 `--harness-only`, the Spring control plane stays alive and only the Hosted
@@ -1411,9 +1411,10 @@ After the wake, the MySQL general log must show the former Spring's claim
 store's refusal of its stale writer grant. None of these attempts may change
 the Session binding, the Turn row, the public events or the journal, as far as
 the snapshot listed in D11 of the replaceable-Harness design can see. All of
-these arms are steps of the Hosted MySQL CI job, which runs daily or on demand.
-They come after `Verify Hosted Java, Spring and MySQL processes` and the
-earlier failover steps, and run only when every earlier step passes.
+these arms are steps of the Hosted failover E2E CI job (`hosted-failover-e2e`),
+which runs daily or on demand. It builds the CLI and packages the server
+itself, so a failing test in the Hosted MySQL job does not skip the arms, and
+each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
 
