@@ -4608,8 +4608,13 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
+        // #14387: a Turn marked recovery-blocked (its workflow's Harness
+        // generation was lost) is parked, never re-dispatched — without
+        // the carve-out the sweep would claim → refuse → release it once
+        // per tick forever. A cancel still scans it: settling the Turn
+        // cancelled is the cancel's own act, not a re-dispatch.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code <> '" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "') AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -4655,6 +4660,28 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
                         + " ('ACCEPTED', 'RUNNING', 'CANCELLING')",
                 tenantId, sessionId, turnId, owner);
+    }
+
+    @Override
+    @Transactional
+    public boolean markTurnRecoveryBlocked(String tenantId,
+            String sessionId, String turnId, String owner,
+            String errorCode, String errorMessage) {
+        requireLegacyMutation(tenantId, sessionId);
+        long now = clock.millis();
+        // The verdict parks the Turn out of the dispatch sweep, so it is
+        // fenced by the live dispatch lease like every terminal decision:
+        // an owner whose lease already expired holds nothing to park with.
+        return jdbc.update("UPDATE ma_turn SET error_code = ?,"
+                        + " error_message = ?, dispatch_owner = NULL,"
+                        + " dispatch_lease_until = NULL, gmt_modified = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND"
+                        + " dispatch_owner = ? AND dispatch_lease_until >= ?"
+                        + " AND status IN ('ACCEPTED', 'RUNNING',"
+                        + " 'CANCELLING')",
+                errorCode, errorMessage, now, tenantId, sessionId, turnId,
+                owner, now) == 1;
     }
 
     @Override
@@ -6176,11 +6203,30 @@ public class ManagedAgentStore implements AgentStateStore {
             }
         }
         if ("ACTIVE".equals(status)
-                && (hasActiveTurn(session.tenantId(), session.sessionId())
+                && (hasLiveTurn(session.tenantId(), session.sessionId())
                         || session.workspace() != null && hasDecidableAction(session))) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active",
                     "The Session has an active Turn.");
         }
+    }
+
+    /**
+     * #14387: the lifecycle gate's active-Turn count. A Turn marked
+     * recovery-blocked is parked out of the dispatch sweep and never
+     * drives again — it is evidence of an unwitnessed execution, not live
+     * work, so it does not hold a lifecycle operation open. A CANCELLING
+     * Turn still blocks: its cancel is in flight.
+     */
+    private boolean hasLiveTurn(String tenantId, String sessionId) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " ma_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? AND status IN"
+                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING')"
+                        + " AND (status = 'CANCELLING' OR error_code IS NULL"
+                        + " OR error_code <> '"
+                        + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "')",
+                Integer.class, tenantId, sessionId);
+        return count != null && count > 0;
     }
 
     private boolean hasDecidableAction(SessionRecord session) {
