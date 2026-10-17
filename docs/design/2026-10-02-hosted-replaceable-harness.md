@@ -678,7 +678,7 @@ the MySQL binaries install succeeded and the run was not cancelled, so an
 earlier arm's failure does not skip the later ones either, and a failing arm
 still fails the job. The runner-only `QWEN_E2E_REGISTER_STORAGE=1` and the Step 3
 evidence upload moved with them. The Hosted MySQL job's step ceilings now
-sum to 165 (85 + 10 + 20 + 50) under a 180-minute job ceiling; the new job's
+sum to 170 (90 + 10 + 20 + 50) under a 185-minute job ceiling; the new job's
 fifteen arms sum to 150 under 165.
 
 ## Changes and ownership
