@@ -31,6 +31,9 @@ export const ACP_PRIVATE_PARENT_CAPABILITY_META_KEY =
   'qwen-code/private-parent-capability';
 export const ACP_PRIVATE_PARENT_CAPABILITY_ENV =
   'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+// Same ownership note as above: core owns the key, channel-base pins it by
+// value, and the cross-package test keeps the two in step.
+export const ACP_ASK_USER_QUESTION_CAPABILITY_META_KEY = 'qwen.askUserQuestion';
 
 export interface AvailableCommand {
   name: string;
