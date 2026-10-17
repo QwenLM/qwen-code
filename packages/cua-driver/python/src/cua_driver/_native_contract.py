@@ -3494,12 +3494,16 @@ class _UniffiFfiConverterOptionalTypeObservationRevisionInput(_UniffiConverterRu
 
 @dataclass
 class GetWindowStateInput:
-    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_screenshot:typing.Optional[bool], screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], app_context:typing.Optional[bool] = _DEFAULT, observation_revision:typing.Optional[ObservationRevisionInput]):
+    def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_screenshot:typing.Optional[bool], include_child_windows:typing.Optional[bool] = _DEFAULT, screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], app_context:typing.Optional[bool] = _DEFAULT, observation_revision:typing.Optional[ObservationRevisionInput]):
         self.pid = pid
         self.window_id = window_id
         self.session = session
         self.query = query
         self.include_screenshot = include_screenshot
+        if include_child_windows is _DEFAULT:
+            self.include_child_windows = None
+        else:
+            self.include_child_windows = include_child_windows
         self.screenshot_out_file = screenshot_out_file
         self.max_elements = max_elements
         self.max_depth = max_depth
@@ -3513,7 +3517,7 @@ class GetWindowStateInput:
 
 
     def __str__(self):
-        return "GetWindowStateInput(pid={}, window_id={}, session={}, query={}, include_screenshot={}, screenshot_out_file={}, max_elements={}, max_depth={}, app_context={}, observation_revision={})".format(self.pid, self.window_id, self.session, self.query, self.include_screenshot, self.screenshot_out_file, self.max_elements, self.max_depth, self.app_context, self.observation_revision)
+        return "GetWindowStateInput(pid={}, window_id={}, session={}, query={}, include_screenshot={}, include_child_windows={}, screenshot_out_file={}, max_elements={}, max_depth={}, app_context={}, observation_revision={})".format(self.pid, self.window_id, self.session, self.query, self.include_screenshot, self.include_child_windows, self.screenshot_out_file, self.max_elements, self.max_depth, self.app_context, self.observation_revision)
     def __eq__(self, other):
         if self.pid != other.pid:
             return False
@@ -3524,6 +3528,8 @@ class GetWindowStateInput:
         if self.query != other.query:
             return False
         if self.include_screenshot != other.include_screenshot:
+            return False
+        if self.include_child_windows != other.include_child_windows:
             return False
         if self.screenshot_out_file != other.screenshot_out_file:
             return False
@@ -3546,6 +3552,7 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
             session=_UniffiFfiConverterOptionalString.read(buf),
             query=_UniffiFfiConverterOptionalString.read(buf),
             include_screenshot=_UniffiFfiConverterOptionalBoolean.read(buf),
+            include_child_windows=_UniffiFfiConverterOptionalBoolean.read(buf),
             screenshot_out_file=_UniffiFfiConverterOptionalString.read(buf),
             max_elements=_UniffiFfiConverterOptionalUInt32.read(buf),
             max_depth=_UniffiFfiConverterOptionalUInt32.read(buf),
@@ -3560,6 +3567,7 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.check_lower(value.session)
         _UniffiFfiConverterOptionalString.check_lower(value.query)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.include_screenshot)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.include_child_windows)
         _UniffiFfiConverterOptionalString.check_lower(value.screenshot_out_file)
         _UniffiFfiConverterOptionalUInt32.check_lower(value.max_elements)
         _UniffiFfiConverterOptionalUInt32.check_lower(value.max_depth)
@@ -3573,6 +3581,7 @@ class _UniffiFfiConverterTypeGetWindowStateInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.write(value.session, buf)
         _UniffiFfiConverterOptionalString.write(value.query, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.include_screenshot, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.include_child_windows, buf)
         _UniffiFfiConverterOptionalString.write(value.screenshot_out_file, buf)
         _UniffiFfiConverterOptionalUInt32.write(value.max_elements, buf)
         _UniffiFfiConverterOptionalUInt32.write(value.max_depth, buf)

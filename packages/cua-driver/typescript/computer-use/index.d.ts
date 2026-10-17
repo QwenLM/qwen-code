@@ -29,6 +29,8 @@ export interface AppObservationOptions extends CallOptions {
   maxTextChars?: number;
   /** Expose the screenshot captured with this App observation. */
   includeScreenshot?: boolean;
+  /** macOS 14.2+: include child content within this window for one screenshot. Default false. */
+  includeChildWindows?: boolean;
 }
 
 export interface ComputerUseApplication {
@@ -157,6 +159,8 @@ export interface ObserveWindowOptions extends WindowRef, CallOptions {
   /** @deprecated Use disableDiff. */
   forceFull?: boolean;
   includeScreenshot?: boolean;
+  /** macOS 14.2+: include child content within this window for one screenshot. Default false. */
+  includeChildWindows?: boolean;
   screenshotOutFile?: string;
   maxElements?: number;
   maxDepth?: number;

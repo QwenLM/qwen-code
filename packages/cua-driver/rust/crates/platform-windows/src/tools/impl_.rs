@@ -1085,6 +1085,27 @@ fn z_index_from_front_to_back(total: usize, position: usize) -> usize {
 }
 
 #[cfg(test)]
+mod child_window_capture_tests {
+    use super::{GetWindowStateTool, ToolState};
+    use cua_driver_core::tool::Tool;
+
+    #[tokio::test]
+    async fn rejects_children_before_resolving_a_native_target() {
+        let tool = GetWindowStateTool {
+            state: ToolState::new(),
+        };
+        let result = tool
+            .invoke(serde_json::json!({"include_child_windows": true}))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["code"],
+            "unsupported_platform"
+        );
+    }
+}
+
+#[cfg(test)]
 mod list_windows_z_index_tests {
     use super::{exact_window_ownership_result, z_index_from_front_to_back};
 
@@ -1186,6 +1207,7 @@ impl Tool for GetWindowStateTool {
                 "window_id":{"type":"integer","description":"HWND of the target window. Must belong to `pid`. Enumerate via `list_windows` or read from `launch_app`'s `windows` array."},
                 "app_context":{"type":"boolean","description":"Use the compact app observation projection."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_child_windows":{"type":"boolean","description":"Child-window capture is macOS-only; true is unsupported on this platform."},
                 "include_screenshot":{"type":"boolean","description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
                 "screenshot_out_file":{"type":"string","description":"When set, write the PNG to this file path instead of embedding base64 in the response. The structured output will contain `screenshot_file_path` instead."},
                 "query":{"type":"string","description":"Optional case-insensitive substring. Projects both tree_markdown and structured elements to matches plus ancestors while preserving original indices. Compare total_element_count with returned_element_count."},
@@ -1211,6 +1233,10 @@ impl Tool for GetWindowStateTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if args.get("include_child_windows").and_then(Value::as_bool) == Some(true) {
+            return ToolResult::error("include_child_windows is only supported on macOS")
+                .with_structured(json!({ "code": "unsupported_platform" }));
+        }
         if let Some(result) =
             crate::uia_worker::forward_required("get_window_state", args.clone()).await
         {

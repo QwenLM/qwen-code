@@ -98,6 +98,7 @@ type App = {
   getState: (options?: {
     disableDiff?: boolean;
     includeScreenshot?: boolean;
+    includeChildWindows?: boolean; // macOS 14.2+, this observation only
     maxTextChars?: number;
   }) => Promise<State>;
   click: (
@@ -221,6 +222,7 @@ call.
 - When an action opens or closes a dialog, sheet or menu, end the batch and call `app.getState()` to read the new window and IDs before continuing.
 - `No open application window.` means the app is still running without a document window. If closing it completed the task, finish instead of retrying actions; otherwise open the intended file or window first.
 - An action error can occur after the UI already changed. Read state before deciding whether to retry. Partial, unconfirmed or cancelled actions must not be blindly repeated.
+- On macOS, if an open palette is missing from the image, request `app.getState({ includeScreenshot: true, includeChildWindows: true })`. This applies only to that observation; later calls without it use the default capture policy. Child content outside the main window is clipped. Use coordinates only from a returned, current image. If unavailable, follow the observation diagnostic and retain AX actions. Other platforms reject this option when true.
 - Coordinate actions use pixels in this app's current screenshot, with `(0, 0)` at its top-left. Every App observation refreshes that frame internally. Request `includeScreenshot: true` when you need to inspect the image, especially after a window change. Do not infer coordinates from another window or desktop screenshot.
 - `pressKey` sends one key, optionally with modifiers. `hotkey` sends a combination such as `['super', 's']`. Use the connected platform's appropriate shortcut: macOS generally uses `super`; Linux/Windows generally use `ctrl`.
 - App input manages any required activation internally and restores the previous focus, unless the user has moved it elsewhere. If the platform cannot confirm the target or restore focus, the action reports an error. There is no delivery-mode choice and no automatic replay after an uncertain result.

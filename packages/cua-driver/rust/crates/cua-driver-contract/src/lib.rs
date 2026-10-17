@@ -302,6 +302,7 @@ mod tests {
             session: None,
             query: None,
             include_screenshot: None,
+            include_child_windows: None,
             screenshot_out_file: None,
             max_elements: None,
             max_depth: None,
@@ -317,6 +318,7 @@ mod tests {
             session: Some("s1".into()),
             query: None,
             include_screenshot: Some(false),
+            include_child_windows: Some(true),
             screenshot_out_file: None,
             max_elements: None,
             max_depth: None,
@@ -337,6 +339,7 @@ mod tests {
                 "window_id": 7,
                 "session": "s1",
                 "include_screenshot": false,
+                "include_child_windows": true,
                 "observation_revision": {
                     "version": 1,
                     "serializer_version": "accessibility-render-v1",

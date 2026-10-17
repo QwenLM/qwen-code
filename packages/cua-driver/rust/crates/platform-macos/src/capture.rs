@@ -463,8 +463,17 @@ fn lock_window_plan_cache(
 fn build_window_capture_plan(
     window_id: u32,
     expected_identity: WindowCaptureIdentity,
+    include_child_windows: bool,
 ) -> anyhow::Result<std::sync::Arc<WindowCapturePlan>> {
     use screencapturekit::prelude::{SCContentFilter, SCShareableContent, SCStreamConfiguration};
+
+    if include_child_windows && expected_identity.requires_display_crop {
+        anyhow::bail!("child-window capture is unavailable for an attached or unconfirmed window group; use include_child_windows:false for default capture");
+    }
+    if include_child_windows && !has_metal_device() {
+        anyhow::bail!("child-window capture requires a Metal device; use include_child_windows:false for default capture");
+    }
+    let use_display_crop = expected_identity.requires_display_crop || include_child_windows;
 
     let content = SCShareableContent::get()
         .map_err(|e| anyhow::anyhow!("SCShareableContent::get failed: {e}"))?;
@@ -506,9 +515,9 @@ fn build_window_capture_plan(
     // Desktop-independent window filter (captures only the specified window):
     // https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(desktopindependentwindow:)
     // Single-window mode scales the entire AppKit attachment group into the
-    // requested sheet size. sourceRect is ignored in that mode. A display
+    // requested window size. sourceRect is ignored in that mode. A display
     // filter restricted to this window preserves its actual point coordinates.
-    let filter = if expected_identity.requires_display_crop {
+    let filter = if use_display_crop {
         if !window.is_on_screen() {
             anyhow::bail!("window {window_id} is not on screen for display-relative capture");
         }
@@ -517,7 +526,12 @@ fn build_window_capture_plan(
             .into_iter()
             .find(|display| relative_capture_rect(frame, display.frame()).is_some())
             .ok_or_else(|| {
-                anyhow::anyhow!("attached window {window_id} is not fully contained in one display")
+                let target = if include_child_windows {
+                    "window"
+                } else {
+                    "attached window"
+                };
+                anyhow::anyhow!("{target} {window_id} is not fully contained in one display")
             })?;
         SCContentFilter::create()
             .with_display(&display)
@@ -532,7 +546,7 @@ fn build_window_capture_plan(
     let scale = f64::from(filter.point_pixel_scale());
     let (width_pts, height_pts) = {
         let rect = filter.content_rect();
-        if expected_identity.requires_display_crop {
+        if use_display_crop {
             (frame.size.width, frame.size.height)
         } else if content_rect_usable(rect) {
             (rect.size.width, rect.size.height)
@@ -547,13 +561,18 @@ fn build_window_capture_plan(
     let mut config = SCStreamConfiguration::new()
         .with_width(out_w)
         .with_height(out_h);
-    if expected_identity.requires_display_crop {
+    if use_display_crop {
         let source = relative_capture_rect(frame, filter.content_rect())
             .ok_or_else(|| anyhow::anyhow!("capture filter does not cover window {window_id}"))?;
         config = config.with_source_rect(source).with_shows_cursor(false);
-    } else {
+    }
+    if !expected_identity.requires_display_crop {
         // SCK may otherwise scale a GTK attachment group into this window's frame.
-        config = config.with_includes_child_windows(false);
+        // Preserve the base setting for attached crops; true was refused above.
+        config = config.with_includes_child_windows(include_child_windows);
+        if include_child_windows && !config.includes_child_windows() {
+            anyhow::bail!("child-window capture requires macOS 14.2 or later; use include_child_windows:false for default capture");
+        }
     }
 
     Ok(std::sync::Arc::new(WindowCapturePlan {
@@ -736,7 +755,7 @@ fn retry_after_identity_change(
     if actual_identity.requires_display_crop && !has_metal_device() {
         return capture_window_without_metal(window_id, actual_identity);
     }
-    let rebuilt = build_window_capture_plan(window_id, actual_identity)?;
+    let rebuilt = build_window_capture_plan(window_id, actual_identity, false)?;
     {
         let mut cache = lock_window_plan_cache();
         cache.insert_at(window_id, std::sync::Arc::clone(&rebuilt), Instant::now());
@@ -789,7 +808,7 @@ fn screenshot_window_bytes_sck_inner(window_id: u32) -> anyhow::Result<Vec<u8>> 
                     // Drop only this Arc if it is still the cached value.
                     evict_window_capture_plan(window_id, &plan);
 
-                    let rebuilt = match build_window_capture_plan(window_id, identity) {
+                    let rebuilt = match build_window_capture_plan(window_id, identity, false) {
                         Ok(plan) => plan,
                         Err(build_err) => {
                             return Err(anyhow::anyhow!(
@@ -829,7 +848,7 @@ fn screenshot_window_bytes_sck_inner(window_id: u32) -> anyhow::Result<Vec<u8>> 
     // Cache miss: build outside the lock, then insert, then capture.
     // Failed builds are never inserted. Capture failure returns as-is (no
     // pointless second rebuild) so the shell fallback can run.
-    let plan = build_window_capture_plan(window_id, identity)?;
+    let plan = build_window_capture_plan(window_id, identity, false)?;
     {
         let mut cache = lock_window_plan_cache();
         cache.insert_at(window_id, std::sync::Arc::clone(&plan), Instant::now());
@@ -861,6 +880,25 @@ fn screenshot_window_bytes_sck(window_id: u32) -> anyhow::Result<Vec<u8>> {
              using shell fallback"
         )
     })
+}
+
+/// One-shot child content capture. Keep it out of the default plan cache and
+/// shell fallback so later ordinary observations retain their original policy.
+pub fn screenshot_window_bytes_with_children(window_id: u32) -> anyhow::Result<Vec<u8>> {
+    run_native_capture_worker(
+        native_capture_gate(),
+        WINDOW_CAPTURE_NATIVE_TIMEOUT,
+        move || {
+            let identity = current_window_capture_identity(window_id)?;
+            let plan = build_window_capture_plan(window_id, identity, true)?;
+            match capture_window_from_plan_validated(window_id, &plan)? {
+                CaptureIdentityValidation::Matched(bytes) => Ok(bytes),
+                CaptureIdentityValidation::Changed(_) => {
+                    anyhow::bail!("window {window_id} changed identity during child-window capture")
+                }
+            }
+        },
+    )
 }
 
 /// Capture a window by its `window_id` (CGWindowID).
