@@ -374,7 +374,8 @@ jobs:
         run: |-
           set -uo pipefail
           if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
-            docker rm --force "${MYSQL_CONTAINER}"
+            docker rm --force "${MYSQL_CONTAINER}" ||
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it after 24h"
           fi
 
   publish:

@@ -793,12 +793,18 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     const build = parse(text).jobs.build;
     // A service container cannot take a command, so it always reserves native
     // AIO contexts and can exhaust the pool host's fs.aio-max-nr (#14416).
+    assert.equal(build.services, undefined);
     const start = build.steps.find(
       (s) => s.name === 'Start MySQL without native AIO',
     );
     assert.match(start.run, /--publish '127\.0\.0\.1::3306'/);
     assert.match(start.run, /type=tmpfs,destination=\/var\/lib\/mysql/);
     assert.match(start.run, /--innodb-use-native-aio=0/);
+    assert.match(start.run, /MYSQL_PORT=.*GITHUB_ENV/);
+    const remove = build.steps.find(
+      (s) => s.name === 'Remove the MySQL container',
+    );
+    assert.match(remove.if, /always\(\)/);
     const run = (name) => build.steps.find((s) => s.name === name).run;
     assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
     assert.match(
