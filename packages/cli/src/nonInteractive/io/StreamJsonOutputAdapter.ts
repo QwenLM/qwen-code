@@ -111,8 +111,10 @@ export class StreamJsonOutputAdapter
     ) {
       this.finalizeAssistantMessage();
     }
+    const preservedMessage = this.lastAssistantMessage;
     this.emitDiscardedAttemptToolResults(discardedToolCalls);
     super.restartAttempt(false, discardedToolCalls);
+    if (preserveText) this.lastAssistantMessage = preservedMessage;
   }
 
   finalizeAssistantMessage(): CLIAssistantMessage {
