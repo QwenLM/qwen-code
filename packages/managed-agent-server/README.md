@@ -227,6 +227,16 @@ owns lifecycle state and tenant/idempotency checks, while the Hosted Harness
 remains the private title authority and the Runtime Broker owns execution
 bindings.
 
+Turn input and cancellation are recorded in the same table as `submit_input`
+and `cancel` operations. Each is saved with its command, the same route reads
+it back, and a retry under the key resolves to it. The Turn dispatcher stays
+their only deliverer, and the Turn decides their outcome. An input completes
+once a Harness admits its Turn. A cancel completes once its Turn is cancelled,
+and fails with `turn_already_settled` if the Turn ended another way. Neither
+blocks a lifecycle operation; an active Turn still does. Admission responses do
+not carry the operation id yet. See the
+[Turn command operation design](../../docs/design/2026-10-16-managed-turn-command-operations.md).
+
 ```bash
 curl -sS -X PATCH \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \
@@ -559,6 +569,14 @@ have an ordinary daemon can continue to render the exported
 `ManagedAgentWebShell` directly. Neither browser mode receives the private
 Harness or Runtime Broker credentials.
 
+### Native macOS Workspace development
+
+The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled, register the storage offline using the maintenance command below, and configure the same mount in the Java service. A missing registration still refuses tool execution.
+
+For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id` and grant that actor access to the registered Workspace. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
+
+macOS storage identity combines `IOPlatformUUID` with the original device, inode and nanosecond birth time from native `stat`, cross-checked against the JDK directory identity. Worker identity also checks `kern.bootsessionuuid` and the exact process start instant before re-attestation. Preserve the SQL database, private Runtime state directory and credential key across Broker restarts. macOS handles use explicit `macos` namespace labels; older Java readers refuse them. A different boot is refused even for operator stop attestation. Background Shell, Monitor, command Hooks and Linux CSI retain their existing platform restrictions. The published reference distribution's Linux qualification is unchanged.
+
 ## Embedded Runtime Broker
 
 ### Public foreground Shell admission
@@ -607,7 +625,7 @@ Harness and HTTP Session Store, `default` or `auto-edit` approval for Shell
 (`yolo` is also valid for files), and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
-tenant/storage identity must have a deployment mount. Fresh LOCAL databases additionally require `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on Linux and a successful native storage registration before tool or child Git execution. Every logical alias maps to one physical owner; aliases of the same native mount share that owner while retaining independent logical admission fences. Registration preserves the first marker provenance, and an unmapped alias cannot acquire physical execution authority. The trusted ingress must
+tenant/storage identity must have a deployment mount. Fresh LOCAL databases additionally require `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on Linux or macOS and a successful native storage registration before tool or child Git execution. Every logical alias maps to one physical owner; aliases of the same native mount share that owner while retaining independent logical admission fences. Registration preserves the first marker provenance, and an unmapped alias cannot acquire physical execution authority. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
 header alone does not authenticate an actor. For local runs and the
 packaged-stack E2E, which have no ingress,
@@ -617,11 +635,17 @@ never enable it where untrusted clients can reach the server.
 
 ### Create empty Workspaces from WebShell
 
-Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, server-owned directory to enable **New workspace → Start from scratch** in the Managed composer. The default is disabled. The root must be separate from static Workspace mounts, the default Workspace cwd, and private Runtime state. Enable Workspace files, the Session Store, the durable Session-isolated local-process Broker and verified Linux Workspace recovery first. Enabling this setting authorizes authenticated tenant actors to allocate independent empty roots and receive OWNER access; only enable it for tenants allowed to consume this host's storage.
+Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, server-owned directory to enable **New workspace → Start from scratch** in the Managed composer. The default is disabled. The root must be separate from static Workspace mounts, the default Workspace cwd, and private Runtime state. Enable Workspace files, the Session Store, the durable Session-isolated local-process Broker and verified local Workspace recovery first. Enabling this setting authorizes authenticated tenant actors to allocate independent empty roots and receive OWNER access; only enable it for tenants allowed to consume this host's storage.
 
 `POST /api/agent/web-shell/v1/workspaces/create` accepts `displayName` (trimmed, 1–128 characters without controls) and `idempotencyKey`. It returns the regular Workspace summary without host paths. Creation freezes an actor-scoped `WORKSPACE_CREATE` receipt, derives a tenant-separated directory below the configured root, registers its native identity and marker, and atomically publishes the ACTIVE Workspace with its creator grant. The Workspace query advertises `workspaceCreation` when enabled. Existing static mount configuration continues to work.
 
 An uncertain response must be retried with the same key and name. The page preserves that pending operation across refresh and selects the result without clearing the prompt or model. Completed replay never restores revoked access, recreates missing registry rows, or registers held storage again. Pending registration resumes in place after a process restart; failed attempts retain their owned directory for retry. There is no automatic storage deletion or arbitrary host-path import. Workspace persistence does not imply recovery of a resident Harness Session whose writer lease expired during control-plane downtime; that existing Session recovery boundary is separate from creating or reusing a Workspace. Keep the configured root and SQL database durable together. Schema V4 extends the receipt namespace after the published V3 Session-list migration while retaining all published migration resources and existing data.
+
+### Select an existing local project directory
+
+With verified LOCAL storage enabled, **New workspace → Choose existing directory** browses the Linux or macOS execution host through Java. Select an ACTIVE ROOT Workspace you own, then choose an existing project beneath its authorized root. Administrators can register and grant a projects parent directory once; the root must remain outside all Git worktrees. The selected project stays in place and becomes the new Workspace's persistent default working directory. Other Workspaces on that storage retain the same shared file-access scope and physical-owner lease; selecting a subdirectory does not create filesystem isolation.
+
+`POST /api/agent/web-shell/v1/workspaces/directories/query` accepts `workspaceId` and `cwdRelative`, rechecks OWNER access and native storage, and returns at most 100 real immediate child directories (scanning at most 1024 entries). Only this authorized route discloses its execution-host root path. The existing create route accepts `sourceWorkspaceId` and `cwdRelative` together to bind a new logical Workspace to the verified source storage, configuration, and policy. It does not create directories or re-register storage. The creation receipt pins source generation and directory; pending retries refuse source changes or revoked ownership. Completed replay checks the new Workspace's current access. WebShell summaries expose `defaultCwdRelative` and `canSelectDirectory`; missing values mean `.` and unsupported, respectively. The page advertises `workspaceDirectorySelection` separately from empty creation and preserves the selected directory across retries, refresh, and reselect. See the [bilingual design](../../docs/design/2026-10-16-managed-workspace-directory-selection.md).
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
 `auto-edit`, any caller with a read grant on the bound Workspace can list and
@@ -808,6 +832,28 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+After a credential-key rotation, keep each prior key in
+`previous-credential-keys` until no persisted Runtime binding references its
+key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
+`:` and spaces from plain map keys, so an unbracketed ID binds as a key that
+matches no persisted row.
+
+```yaml
+qwen:
+  managed-agent:
+    runtime-broker:
+      credential-key-id: local-dev-v2
+      credential-key: replace-with-base64-encoded-32-byte-v2-key
+      previous-credential-keys:
+        '[local-dev-v1]': replace-with-base64-encoded-32-byte-v1-key
+```
+
+New credentials use only the active key; reads select the active or previous
+key by the ID stored with the ciphertext, and an unavailable ID fails closed.
+The YAML-only ring, the retirement query and the single-key-pair maintenance
+entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
+with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
+
 Two optional knobs change how the Broker listens and how long it waits for a
 dispatched v3 execution's result:
 
@@ -861,9 +907,11 @@ fails before traffic is accepted.
 The Hosted file profile connects through the private Broker endpoint, which
 defaults to `http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
-it does not fall back to in-memory repositories. The credential key must decode
-to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. By default, local worker ownership is durable:
+it does not fall back to in-memory repositories. The active credential key and
+every configured previous key must decode to exactly 32 bytes and protect
+persisted Runtime seeds and static Runtime credentials with AES-256-GCM. New
+writes use only the active key; reads select the exact key ID stored with the
+ciphertext. By default, local worker ownership is durable:
 the Broker registers every launch and a restarted Broker adopts the same live
 worker. This requires Linux and fails startup elsewhere; on such hosts set
 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
@@ -1067,9 +1115,9 @@ for record capacity and rewind semantics.
 
 ### Verified original-mount recovery (W1a)
 
-The current fresh 32-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. The current native identity reader requires Linux, so this baseline does not provide macOS LOCAL tool execution. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
+The current fresh 32-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS requires `trusted-local-reboot-recovery=false` and supports same-boot adoption only. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
 
-Marker v2 stores birth time as a canonical `Instant` string preserving nanoseconds. The guard reads creation time, mtime, device and inode in one `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID, keyed by the trimmed machine-id UTF-8 bytes with `Qwen-Code/verified-workspace/v2` as input, rather than the raw machine ID.
+Marker v2 stores birth time as a canonical `Instant` string. Linux reads creation time, mtime, device and inode in one JDK `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real Linux birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. macOS reads native nanosecond birth time with `stat` and cross-checks its device/inode against the JDK canonical-directory snapshot, because JDK 21 truncates macOS birth time to seconds. A positive native macOS birth time is independent even when it equals mtime; fresh empty roots keep their original birth time. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID with `Qwen-Code/verified-workspace/v2` as input. Its key is the trimmed machine-id UTF-8 bytes on Linux or the original `IOPlatformUUID` UTF-8 bytes on macOS; neither raw identity is stored in the marker.
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
@@ -1078,7 +1126,7 @@ The retired V1–V68 migration chain and marker v1 are historical formats. This 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Initialize
 the new database with the canonical V1 baseline, then run the private maintenance entry from this module on
-the same Linux host. Give a stable canonical lowercase, hyphenated 36-character UUID to each operation and reuse it after a
+the same execution host. Give a stable canonical lowercase, hyphenated 36-character UUID to each operation and reuse it after a
 crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 `W1_JDBC_PASSWORD` environment variables:
 
@@ -1242,9 +1290,14 @@ separate worker bundle exists. The G0 integration test
 
 The real-model run below creates its Session through the public route as a
 Workspace-bound G0 Session, and proves the physical tool execution through
-the durable `qwen_tool_execution` record (exactly one `SETTLED` row) rather
-than a public `item.tool_call.*` event — Broker-worker tool calls are not
-published without O2 tool publication. The run needs live model credentials,
+the durable `ma_tool_execution` record (exactly one `SETTLED` row). Hosted
+tool intent and receipt events also expose tool names and lifecycle status
+through public `item.tool_call.updated` events without O2 publication. Raw
+arguments and output remain behind the existing publication policy. The
+Hosted model loop follows `model.maxSessionTurns` (default `-1`); it no
+longer imposes a separate 16-round limit. See the
+[progress design](../../docs/design/2026-10-16-managed-webshell-progress.md).
+The run needs live model credentials,
 so no CI job executes it; it has been run locally as evidence (macOS,
 qwen3.8-max), and a green CI run therefore says nothing about this mode. The
 script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
