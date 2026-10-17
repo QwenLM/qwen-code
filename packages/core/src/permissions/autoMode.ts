@@ -52,10 +52,7 @@ import {
   type AutoModeDenialState,
   type DenialFallbackReason,
 } from './denialTracking.js';
-import {
-  isDestructiveCommand,
-  extractLastUserPrompt,
-} from './destructive-commands.js';
+import { isDestructiveCommand } from './destructive-commands.js';
 import type { PermissionCheckContext } from './types.js';
 
 const autoModeDebugLogger = createDebugLogger('AUTO_MODE');
@@ -511,7 +508,12 @@ export type AutoModeDecision =
       stage: 'fast' | 'thinking';
       durationMs: number;
     }
-  | { via: 'fallback'; reason: FallbackToAskReason };
+  | {
+      via: 'fallback';
+      reason: FallbackToAskReason;
+      /** An ask rule matched a call the destructive guard flagged. */
+      requiresHumanDecision?: true;
+    };
 
 /**
  * Reasons AUTO mode itself is unavailable before a per-call decision can run.
@@ -549,8 +551,9 @@ export type AutoModeOutcome =
       reason: FallbackToAskReason;
       message?: string;
       /**
-       * Set when a deterministic security floor escalated rather than the
-       * classifier. The confirmation must be given by a human, so a
+       * Set when the deterministic destructive guard is behind the fallback —
+       * it escalated, or an ask rule matched a call it flagged — rather than
+       * the classifier. The confirmation must be given by a human, so a
        * `PermissionRequest` hook `allow` must not waive it — `hideAlwaysAllow`
        * is not enough, since that suppresses persisted allow rules rather than
        * programmatic approval.
@@ -702,6 +705,9 @@ export function applyAutoModeDecision(
         ...(isDenialFallbackReason(decision.reason)
           ? { message: formatDenialFallbackMessage(decision.reason) }
           : {}),
+        ...(decision.requiresHumanDecision
+          ? { requiresHumanDecision: true }
+          : {}),
       };
     default: {
       const _exhaustive: never = decision;
@@ -748,7 +754,7 @@ export const AUTO_MODE_DENIAL_GUIDANCE =
   'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. To request manual approval for this exact action, retry the same tool call without changing its arguments. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
 const AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE =
-  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If this action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
+  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. A reply in chat does not lift this block. If this action is required, stop and tell the user it needs their manual approval: they can run it themselves, approve it outside AUTO mode, or add a matching permissions.ask rule so AUTO mode asks them to confirm it. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
 function formatDenialFallbackMessage(
   reason: DenialFallbackReason,
@@ -869,43 +875,44 @@ export async function evaluateAutoMode(
   }
 
   // L5.2.5: deterministic destructive command guard.
-  // Regex-based hard blocks that run BEFORE the LLM classifier, so API
-  // failures or classifier misjudgment cannot allow destructive git/IaC
-  // commands through on the denying call. The `blocked:destructive-command`
-  // arm of `applyAutoModeDecision` keeps the denial hard until denial tracking
+  // Hard blocks that run BEFORE the LLM classifier, so API failures or
+  // classifier misjudgment cannot allow destructive git/IaC commands through
+  // on the denying call. The `blocked:destructive-command` arm of
+  // `applyAutoModeDecision` keeps the denial hard until denial tracking
   // reaches the consecutive-block or session-total cap, where it escalates to a
   // confirmation only a human can give: unlike the classifier arm, it sets
   // `requiresHumanDecision`, so a `PermissionRequest` hook returning `allow`
   // cannot waive it. Only applies to shell-like tools.
-  if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
-    const command =
-      input.ctx.toolName === ToolNames.MONITOR
-        ? normalizeMonitorCommand(input.ctx.command).safetyCommand
-        : input.ctx.command;
-    const userPrompt = extractLastUserPrompt(input.messages) ?? '';
-    // `ctx.cwd` is only set when the call passes `directory`; otherwise the
-    // shell runs in the session's target dir, which is also where
-    // `ShellToolInvocation` registers session commits. Passing `undefined`
-    // through lands on `process.cwd()` inside `isAmendOfSessionCommit`'s
-    // `git rev-parse` — in a process hosting several sessions (ACP, daemon)
-    // or several worktrees that is a different repo, so one repo's registry
-    // could exempt an amend happening in another.
-    const destructiveResult = isDestructiveCommand(
-      command,
-      userPrompt,
-      input.ctx.cwd ?? input.config.getTargetDir?.(),
-    );
-    if (destructiveResult?.blocked) {
-      return {
-        via: 'blocked:destructive-command',
-        reason: destructiveResult.reason,
-      };
-    }
+  //
+  // `ctx.cwd` is only set when the call passes `directory`; otherwise the
+  // shell runs in the session's target dir, which is also where
+  // `ShellToolInvocation` registers session commits. The host process cwd is
+  // never a stand-in: in a process hosting several sessions (ACP, daemon) or
+  // several worktrees it is a different repo, so one repo's registry could
+  // exempt an amend happening in another.
+  const destructiveResult =
+    SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command
+      ? await isDestructiveCommand(
+          input.ctx.toolName === ToolNames.MONITOR
+            ? normalizeMonitorCommand(input.ctx.command).safetyCommand
+            : input.ctx.command,
+          input.ctx.cwd ?? input.config.getTargetDir?.(),
+        )
+      : null;
+
+  // User `ask` rules require manual confirmation, including for a call the
+  // guard flagged; that confirmation must then come from a human.
+  if (input.pmForcedAsk) {
+    return destructiveResult?.blocked
+      ? { via: 'fallback', reason: 'ask_rule', requiresHumanDecision: true }
+      : { via: 'fallback', reason: 'ask_rule' };
   }
 
-  // User `ask` rules require manual confirmation.
-  if (input.pmForcedAsk) {
-    return { via: 'fallback', reason: 'ask_rule' };
+  if (destructiveResult?.blocked) {
+    return {
+      via: 'blocked:destructive-command',
+      reason: destructiveResult.reason,
+    };
   }
 
   // L5.2.6: External writes must never be auto-approved by the classifier.

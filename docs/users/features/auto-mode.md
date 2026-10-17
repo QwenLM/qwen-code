@@ -66,7 +66,9 @@ runs:
   the classifier so an allow rule on `Bash(*)` cannot silently turn
   into permission to rewrite Qwen Code settings, commands, hooks,
   skills, or MCP servers.
-- `permissions.ask` rules force manual confirmation even in Auto Mode.
+- `permissions.ask` rules force manual confirmation even in Auto Mode,
+  including for commands the
+  [destructive-command guard](#destructive-command-blocks) would block.
 
 ## Over-broad allow rules are stripped while in Auto Mode
 
@@ -203,6 +205,39 @@ denied intent through a different surface are blocked.
 
 If the denied action is genuinely required, the agent should stop and
 ask you for explicit approval rather than route around the denial.
+
+### Destructive-command blocks
+
+Before the classifier runs, a deterministic guard blocks shell commands
+that would discard local work or tear down infrastructure:
+`git reset --hard`, `git checkout -- .`, `git clean -f`, `git stash drop`,
+`terraform destroy`, `pulumi destroy`, `cdk destroy`, and
+`git commit --amend` of a commit the agent did not make in this session.
+It reads the command the way the shell runs it, so printed text, comments
+and quoted data never trigger it, while git global options (`-C`, `-c`),
+option order and wrappers such as `bash -c`, `env` or `sudo` do not hide
+the operation. A command it cannot verify is blocked too when its text
+mentions a protected command: one it cannot parse, or one that runs
+code the guard cannot read — a program or arguments built at run time
+(including arguments `xargs` reads), a script file, a program a shell
+reads from a pipe or file, or code handed to `python`, `node`, `perl`,
+`ruby`, `php` or `awk`. Comments and the git or infrastructure
+operations the guard has already checked do not count as such a
+mention, but their arguments do, since a command such as `git log` can
+print them.
+
+These blocks fail with `Blocked destructive git command: …`,
+`Blocked infrastructure destroy command: …`,
+`Blocked "git commit --amend": …` or
+`Blocked shell command: AUTO mode could not verify …`. Wording in your
+prompt does not lift them; the classifier still reads your request, but
+the guard does not. To run such a command, approve it yourself: run it
+directly, switch out of Auto Mode, or add a `permissions.ask` rule that
+matches it (for example `Bash(git reset *)`) so Auto Mode asks you to
+confirm that call. The confirmation must come from you — a
+`PermissionRequest` hook cannot approve it, and where no prompt can be
+shown (non-interactive runs, SDK hosts, background agents) the call is
+denied.
 
 ### Classifier reason language
 

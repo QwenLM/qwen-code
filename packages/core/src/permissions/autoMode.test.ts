@@ -1304,17 +1304,81 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     expect(decision.via).toBe('blocked:destructive-command');
   });
 
-  it('allows destructive commands when user explicitly mentions discard', async () => {
-    // With "discard" in the prompt, the guard should NOT block. The call falls
-    // through to the classifier (mocked away here — we only verify it is not
-    // blocked:destructive-command).
+  it.each([
+    ['git reset --hard', 'Discard all local changes and reset.'],
+    ['git reset --hard', 'Do not discard my changes; just fix the bug.'],
+    ['git reset --hard', '禁止丢弃我的修改，只修复这个 bug。'],
+    ['git clean -fd', 'Clean up the UI labels only.'],
+    ['terraform destroy', 'Do not destroy terraform infrastructure.'],
+  ])(
+    'keeps blocking %s whatever the prompt says: %s',
+    async (command, prompt) => {
+      // Wording is not authorization: the classifier still reads the request,
+      // but the deterministic guard ignores it.
+      const decision = await evaluateShell(command, prompt);
+      expect(decision.via).toBe('blocked:destructive-command');
+    },
+  );
+
+  it('lets printed text reach the classifier', async () => {
+    const decision = await evaluateShell(
+      `printf '%s\\n' 'git reset --hard'`,
+      'print the example',
+    );
+    expect(decision.via).toBe('classifier');
+  });
+
+  it('blocks a protected command behind git global options', async () => {
+    const decision = await evaluateShell(
+      'git -C /repo -c advice.detachedHead=false reset --hard',
+      'fix the bug',
+    );
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  it('checks the command a Monitor wrapper runs', async () => {
+    const decision = await evaluate(
+      {
+        toolName: ToolNames.MONITOR,
+        command: `bash -lc 'git -C /repo reset --hard'`,
+      },
+      { messages: [userText('watch the build')] },
+    );
+    expect(decision.via).toBe('blocked:destructive-command');
+  });
+
+  it('sends a flagged call matching an ask rule to a human-only confirmation', async () => {
+    // The ask rule must reach manual approval instead of the hard block, and
+    // that approval must not come from a PermissionRequest hook.
     const decision = await evaluate(shell('git reset --hard'), {
-      messages: [userText('discard all local changes and reset')],
-      skipClassifierReason: 'total_denial',
+      pmForcedAsk: true,
     });
-    // Should NOT be blocked:destructive-command; instead falls through
-    // to fallback because we set skipClassifierReason.
-    expect(decision.via).not.toBe('blocked:destructive-command');
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'ask_rule',
+      requiresHumanDecision: true,
+    });
+
+    const { result, setAutoModeDenialState } = apply(
+      decision,
+      counters(0, 0, 0, 0),
+    );
+    expect(result).toEqual({
+      kind: 'fallback',
+      reason: 'ask_rule',
+      requiresHumanDecision: true,
+    });
+    // Asking is not a denial.
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
+  it('keeps an ordinary ask rule on the existing confirmation path', async () => {
+    const decision = await evaluate(shell('git status'), { pmForcedAsk: true });
+    expect(decision).toEqual({ via: 'fallback', reason: 'ask_rule' });
+    expect(apply(decision, counters(0, 0, 0, 0)).result).toEqual({
+      kind: 'fallback',
+      reason: 'ask_rule',
+    });
   });
 
   it('preserves an armed retry when the destructive guard preempts it', async () => {
@@ -1369,31 +1433,34 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     }
   });
 
-  it('keeps the recovery instruction when a long guard match is clamped', async () => {
-    // `git clean -[a-zA-Z]*f` matches an unbounded run, so an over-long echoed
-    // fragment once pushed the template's own recovery instruction past the
-    // 200-char boundary clamp — deleting the one instruction that lets the
-    // agent self-correct. Both sinks must keep it.
+  it('points recovery at manual approval, not at prompt wording', async () => {
+    // A long model-authored command must not push the reason past the
+    // 200-char clamp at either sink; the reason names the operation rather
+    // than echoing the command.
     const decision = await evaluateShell(
       `git clean -${'a'.repeat(120)}f src`,
       'fix the bug',
     );
-    expect(decision.via).toBe('blocked:destructive-command');
+    expect(decision).toEqual({
+      via: 'blocked:destructive-command',
+      reason: 'Blocked destructive git command: "git clean -f".',
+    });
 
     const blocked = apply(decision, counters(0, 0, 0, 0));
     expect(blocked.result.kind).toBe('blocked');
     if (blocked.result.kind === 'blocked') {
       expect(blocked.result.errorMessage).toContain(
-        'explicitly mention discarding local work in your prompt',
+        'A reply in chat does not lift this block.',
       );
+      expect(blocked.result.errorMessage).toContain('permissions.ask rule');
+      expect(blocked.result.errorMessage).not.toMatch(/mention|prompt/i);
     }
 
     const escalated = apply(decision, counters(2, 0, 2, 0));
     expect(escalated.result.kind).toBe('fallback');
     if (escalated.result.kind === 'fallback') {
-      expect(escalated.result.message).toContain(
-        'explicitly mention discarding local work in your prompt',
-      );
+      expect(escalated.result.message).toContain('"git clean -f"');
+      expect(escalated.result.message).not.toMatch(/mention|prompt/i);
     }
   });
 
@@ -1427,7 +1494,7 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
       expect(result.errorMessage).toContain('Do not try to complete');
       expect(result.errorMessage).not.toContain('retry the same tool call');
       expect(result.errorMessage).toContain(
-        'ask the user for explicit approval',
+        'tell the user it needs their manual approval',
       );
     }
     expect(setAutoModeDenialState).toHaveBeenCalled();
@@ -1452,8 +1519,8 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
       expect(result.errorMessage).not.toContain('<system>');
       // Only our own separator newline survives.
       expect(result.errorMessage.split('\n')).toHaveLength(2);
-      // Sanitized reason (<=200) + newline + the fixed denial guidance (398).
-      expect(result.errorMessage.length).toBeLessThan(620);
+      // Sanitized reason (<=200) + newline + the fixed denial guidance (585).
+      expect(result.errorMessage.length).toBeLessThanOrEqual(786);
     }
   });
 });

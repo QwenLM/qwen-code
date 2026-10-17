@@ -39289,6 +39289,60 @@ describe('Session', () => {
       },
     );
 
+    it.each([
+      { answer: core.ToolConfirmationOutcome.ProceedOnce, runs: 1 },
+      { answer: core.ToolConfirmationOutcome.Cancel, runs: 0 },
+    ])(
+      'asks the ACP client rather than a PermissionRequest hook for an ask-ruled destructive call ($answer)',
+      async ({ answer, runs }) => {
+        const { execute, generateJson } = configureAutoModeShellFallback({
+          callId: 'ask-ruled-destructive',
+          command: 'git reset --hard',
+          denialState: {
+            consecutiveBlock: 0,
+            consecutiveUnavailable: 0,
+            totalBlock: 0,
+            totalUnavailable: 0,
+          },
+        });
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(true),
+          hasRelevantRules: () => true,
+          evaluate: vi.fn().mockResolvedValue('ask'),
+          hasMatchingAskRule: () => true,
+          findMatchingDenyRule: () => undefined,
+        });
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({
+          request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+        });
+        const permissionHook = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({ hasDecision: true, shouldAllow: true });
+        vi.mocked(mockClient.requestPermission)
+          .mockReset()
+          .mockImplementation(async (request) => {
+            expect(execute).not.toHaveBeenCalled();
+            expect(
+              request.options.map(
+                (option: { optionId: string }) => option.optionId,
+              ),
+            ).not.toContain(core.ToolConfirmationOutcome.ProceedAlways);
+            return { outcome: { outcome: 'selected', optionId: answer } };
+          });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run tool' }],
+        });
+
+        expect(permissionHook).toHaveBeenCalledOnce();
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(generateJson).not.toHaveBeenCalled();
+        expect(execute).toHaveBeenCalledTimes(runs);
+      },
+    );
+
     it('routes an exact ACP retry to manual approval without reclassifying it', async () => {
       const command = 'python -c "print(1)"';
       const { execute, generateJson, getDenialState, onConfirm } =
