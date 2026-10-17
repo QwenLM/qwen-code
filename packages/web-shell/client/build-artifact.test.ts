@@ -524,11 +524,17 @@ describe('build artifact — transcript entry (#11031)', () => {
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
     // Re-measure and lower it if the entry gets leaner.
+    // Merging main 52ae53b0 with this PR's compact diff notices and visible
+    // control-character decorations measures 1,341,051 UTF-16 units. After
+    // main 2c700670f and the CRLF/escape corrections (the merge-side
+    // transform no longer escapes CR, and the uniformity predicate inspects
+    // the final terminator) the merged tree measures 1,342,365 here; the
+    // 1,344,000 ceiling below retains 1,635 units of margin.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_338_000);
+    expect(js.length).toBeLessThan(1_344_000);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
