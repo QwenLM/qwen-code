@@ -162,12 +162,17 @@ jobs:
 
       # setup-java updates Maven files non-atomically. Keep them job-local
       # because runner instances on one ECS host share HOME.
+      #
+      # The Maven cache is hosted-only. An ECS host keeps ~/.m2 between jobs,
+      # and the post-job save tars that whole shared repository — 14 to 37
+      # minutes per job on 2026-10-16 — only to lose the reservation race to
+      # a parallel job and discard the archive.
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
           java-version: '${{ matrix.java }}'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/managed-agent-server/pom.xml
@@ -546,7 +551,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/managed-agent-server/pom.xml
@@ -602,8 +607,8 @@ jobs:
             echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
-          # Seed from the cache-restored shared repo so cache: 'maven' and
-          # the egress proxy keep paying off for the job-local copy.
+          # Seed from the host-shared repo (cache-restored on hosted runners)
+          # so it and the egress proxy keep paying off for the job-local copy.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
 
@@ -632,6 +637,11 @@ jobs:
           # seed: the warning arm keeps a copy failure from reddening the
           # gate after mvn has already passed, and pipefail keeps a
           # failing left-hand tar from being masked by the extractor.
+          # On a fresh ECS host nothing creates ~/.m2/repository anymore
+          # (the hosted-only cache no longer restores it), so create it
+          # before the write-back or every job re-resolves through the
+          # egress proxy instead of bootstrapping the shared repository.
+          mkdir -p "${HOME}/.m2/repository"
           tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
             | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
             || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
@@ -676,7 +686,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
@@ -937,7 +947,7 @@ jobs:
           java-version: |-
             17
             21
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
@@ -1030,7 +1040,7 @@ jobs:
           java-version: |-
             17
             21
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
@@ -1263,7 +1273,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '11'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
           settings-path: '${{ runner.temp }}/setup-java-m2'
 

@@ -799,6 +799,10 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       run('Build Java components'),
       /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
     );
+    assert.match(
+      run('Assemble reference distribution'),
+      /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
+    );
     const boot = run('Verify and boot the exact archive');
     assert.match(boot, /SERVER_PORT="\$\{server_port\}"/);
     assert.doesNotMatch(boot, /:8080|:3306\//);
