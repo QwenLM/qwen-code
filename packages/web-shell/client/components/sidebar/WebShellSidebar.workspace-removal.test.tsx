@@ -2713,6 +2713,111 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.querySelector('input')).toBeNull();
   });
 
+  it('opens the standalone rename dialog on F2 without loading the session', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'standalone-active';
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-active',
+          displayName: 'Standalone active chat',
+          workspaceCwd: '/private/standalone/standalone-active',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
+    const onLoadStandaloneSession = vi.fn();
+
+    renderSidebar({
+      onLoadStandaloneSession,
+      onStandaloneNotice: vi.fn(),
+    });
+
+    let row: HTMLDivElement | undefined;
+    await vi.waitFor(() => {
+      row = Array.from(
+        container.querySelectorAll<HTMLDivElement>('[role="button"]'),
+      ).find((entry) => entry.textContent?.includes('Standalone active chat'));
+      expect(row).toBeDefined();
+    });
+
+    await act(async () => {
+      row!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.getAttribute('aria-label')).toBe('Rename');
+    expect(onLoadStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('mounts no rename editor or dialog on F2 when rename is not in the items', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'current-session';
+    active.sessions.push({
+      sessionId: 'current-session',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Current session',
+    });
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-other',
+          displayName: 'Standalone other chat',
+          workspaceCwd: '/private/standalone/standalone-other',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
+
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['details'] },
+    });
+    await expandWorkspace('project');
+
+    let workspaceRow: HTMLDivElement | undefined;
+    await vi.waitFor(() => {
+      workspaceRow = Array.from(
+        container.querySelectorAll<HTMLDivElement>('[role="button"]'),
+      ).find((entry) => entry.textContent?.includes('Current session'));
+      expect(workspaceRow).toBeDefined();
+    });
+    let standaloneRow: HTMLDivElement | undefined;
+    await vi.waitFor(() => {
+      standaloneRow = Array.from(
+        container.querySelectorAll<HTMLDivElement>('[role="button"]'),
+      ).find((entry) => entry.textContent?.includes('Standalone other chat'));
+      expect(standaloneRow).toBeDefined();
+    });
+
+    await act(async () => {
+      workspaceRow!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      standaloneRow!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it('keeps the next rename editor when an earlier rename settles late', async () => {
     connection.sessionId = 'current-session';
     active.sessions.push(
@@ -6960,6 +7065,71 @@ describe('WebShellSidebar standalone grouping', () => {
     const details = document.body.querySelector('[role="dialog"]');
     expect(details?.textContent).toContain('No workspace');
     expect(details?.textContent).not.toContain('/private/standalone');
+  });
+
+  it('ignores F2 on a busy standalone row, matching the inline rename button', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'standalone-active';
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-active',
+          displayName: 'Standalone active chat',
+          workspaceCwd: '/private/standalone/standalone-active',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
+    // Hold an export open so the row stays busy for the whole test.
+    (
+      workspace.client as { exportStandaloneSession?: unknown }
+    ).exportStandaloneSession = vi.fn(() => new Promise(() => {}));
+
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: {
+        items: ['rename', 'export'],
+        inlineItems: ['rename', 'export'],
+      },
+    });
+
+    let row: HTMLDivElement | undefined;
+    await vi.waitFor(() => {
+      row = Array.from(
+        container.querySelectorAll<HTMLDivElement>('[role="button"]'),
+      ).find((entry) => entry.textContent?.includes('Standalone active chat'));
+      expect(row).toBeDefined();
+    });
+
+    const exportButton = row!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Export conversation record"]',
+    );
+    expect(exportButton).not.toBeNull();
+    await act(async () => {
+      click(exportButton!);
+      await Promise.resolve();
+    });
+
+    // While the export is in flight the pencil is disabled (busy)…
+    const renameButton = row!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Rename"]',
+    );
+    expect(renameButton!.disabled).toBe(true);
+
+    // …so F2 must not open the standalone rename dialog either.
+    await act(async () => {
+      row!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('keeps delete disabled on the current no-workspace row', async () => {

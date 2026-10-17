@@ -4912,7 +4912,8 @@ export function WebShellSidebar({
             } else if (
               event.key === 'F2' &&
               event.target === event.currentTarget &&
-              showRename
+              showRename &&
+              !busy
             ) {
               event.preventDefault();
               if (standalone) standalone.onRename();

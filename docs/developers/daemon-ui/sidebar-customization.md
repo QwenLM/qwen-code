@@ -232,7 +232,7 @@ the header row with its action buttons and the session search bar are removed.
 ```ts
 type WebShellSidebarSessionActionItem =
   | 'details' // 📝 Details (dropdown sub-menu)
-  | 'rename' // ✏️ Rename (dropdown menu)
+  | 'rename' // ✏️ Rename (inline button by default; dropdown when excluded from inlineItems)
   | 'group' // 📁 Group/Move to folder (dropdown menu)
   | 'export' // 📤 Export chat history (dropdown menu)
   | 'delete' // 🗑 Delete session (dropdown menu)
@@ -257,7 +257,7 @@ Controls which action buttons appear on session rows:
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
 - **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin', 'rename']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, and `'archive'` are dropdown-only.
 
-When `rename` is available for a session and its row can take keyboard focus (active sessions; archived rows are not focusable), pressing **F2** on the focused row also starts the inline rename, regardless of `inlineItems`.
+When `rename` is available for a session and its row can take keyboard focus (active sessions; archived rows are not focusable), pressing **F2** on the focused row also starts a rename, regardless of `inlineItems`. Workspace rows open the inline rename editor; standalone (No workspace) rows open their rename dialog instead.
 
 **Visibility priority**: Both `items` AND the item's built-in condition AND `inlineItems` must all pass for the inline button to show. For example, `delete` as inline requires `items` to include `'delete'` AND `inlineItems` to include `'delete'`.
 
