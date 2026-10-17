@@ -194,7 +194,10 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
     ) {
       return false;
     }
-    return !hasUnsafeQuantifiedGroup(jsPattern);
+    return !(
+      hasUnsafeQuantifiedGroup(jsPattern) ||
+      hasLiveAnchorInAlternation(jsPattern)
+    );
   } catch {
     return false;
   }
@@ -273,8 +276,61 @@ function countCapturingGroups(pattern: string): number {
   return count;
 }
 
+// JavaScript takes the leftmost alternative; POSIX takes the longest. A live
+// ^ or $ on a branch, or nested inside one, makes the simulator rewrite bytes
+// GNU sed would not (`^a|ab` on "ab"). An anchor outside the alternation
+// (`^foo(a|b)`) is still safe to simulate. Declining runs real sed.
+function hasLiveAnchorInAlternation(pattern: string): boolean {
+  const levels: Array<{ hasAnchor: boolean; hasAlternation: boolean }> = [
+    { hasAnchor: false, hasAlternation: false },
+  ];
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      i = skipCharacterClass(pattern, i);
+      continue;
+    }
+    const level = levels[levels.length - 1]!;
+    if (char === '(') {
+      levels.push({ hasAnchor: false, hasAlternation: false });
+      continue;
+    }
+    if (char === ')') {
+      if (levels.length === 1) {
+        continue;
+      }
+      const group = levels.pop()!;
+      if (group.hasAnchor && group.hasAlternation) {
+        return true;
+      }
+      // A nested group is part of its parent's branch, so an anchor inside it
+      // counts at the parent too (`((^a)|ab)`).
+      levels[levels.length - 1]!.hasAnchor ||= group.hasAnchor;
+      continue;
+    }
+    if (char === '|') {
+      level.hasAlternation = true;
+      continue;
+    }
+    if (char === '^' || char === '$') {
+      level.hasAnchor = true;
+    }
+  }
+
+  return levels.some((level) => level.hasAnchor && level.hasAlternation);
+}
+
 function hasUnsafeQuantifiedGroup(pattern: string): boolean {
-  const groups: Array<{ hasAlternation: boolean; hasQuantifier: boolean }> = [];
+  const groups: Array<{
+    hasAlternation: boolean;
+    hasQuantifier: boolean;
+    hasAnchor: boolean;
+  }> = [];
 
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i]!;
@@ -287,12 +343,19 @@ function hasUnsafeQuantifiedGroup(pattern: string): boolean {
       continue;
     }
     if (char === '(') {
-      groups.push({ hasAlternation: false, hasQuantifier: false });
+      groups.push({
+        hasAlternation: false,
+        hasQuantifier: false,
+        hasAnchor: false,
+      });
       continue;
     }
     if (char === '|' && groups.length > 0) {
       groups[groups.length - 1]!.hasAlternation = true;
       continue;
+    }
+    if ((char === '^' || char === '$') && groups.length > 0) {
+      groups[groups.length - 1]!.hasAnchor = true;
     }
     if (char === ')') {
       const group = groups.pop();
@@ -301,7 +364,11 @@ function hasUnsafeQuantifiedGroup(pattern: string): boolean {
       }
       const quantifierEnd = getRegexQuantifierEnd(pattern, i + 1);
       if (quantifierEnd !== null) {
-        if (group.hasAlternation || group.hasQuantifier) {
+        if (
+          group.hasAlternation ||
+          group.hasQuantifier ||
+          (group.hasAnchor && isUnsafeAnchoredGroupQuantifier(pattern, i + 1))
+        ) {
           return true;
         }
         if (groups.length > 0) {
@@ -313,6 +380,7 @@ function hasUnsafeQuantifiedGroup(pattern: string): boolean {
         const parent = groups[groups.length - 1]!;
         parent.hasAlternation ||= group.hasAlternation;
         parent.hasQuantifier ||= group.hasQuantifier;
+        parent.hasAnchor ||= group.hasAnchor;
       }
       continue;
     }
@@ -342,34 +410,66 @@ function skipCharacterClass(pattern: string, start: number): number {
   return pattern.length - 1;
 }
 
-function getRegexQuantifierEnd(pattern: string, start: number): number | null {
-  const char = pattern[start];
-  if (char === undefined) {
-    return null;
+// `+` (\+ in BRE) and a brace repeat with lower bound <= 1 and upper bound
+// >= 2 or omitted (`{1,2}`, `{0,}`, `{1,}`) do not backtrack like GNU sed
+// when the group holds a live anchor: sed drops the match, JavaScript keeps
+// a shorter count. `*` is the same shape as `{0,}` but matches sed there, so
+// it stays simulated. Intervals with no anchor are not touched.
+function isUnsafeAnchoredGroupQuantifier(
+  pattern: string,
+  start: number,
+): boolean {
+  if (pattern[start] === '+') {
+    return true;
   }
-  if (SIMPLE_REGEX_QUANTIFIERS.has(char)) {
-    return start + 1;
+  const bounds = readBraceQuantifierBounds(pattern, start);
+  if (bounds === null) {
+    return false;
   }
-  if (char !== '{') {
-    return null;
-  }
+  const variable = bounds.max === null || bounds.max !== bounds.min;
+  return (
+    variable && bounds.min <= 1 && (bounds.max === null || bounds.max >= 2)
+  );
+}
 
+function readBraceQuantifierBounds(
+  pattern: string,
+  start: number,
+): { min: number; max: number | null; end: number } | null {
+  if (pattern[start] !== '{') {
+    return null;
+  }
   let i = start + 1;
-  let hasDigit = false;
+  const minStart = i;
   while (isAsciiDigit(pattern[i])) {
-    hasDigit = true;
     i++;
   }
-  if (!hasDigit) {
+  if (i === minStart) {
     return null;
   }
+  const min = Number(pattern.slice(minStart, i));
+  let max: number | null = min;
   if (pattern[i] === ',') {
     i++;
+    const maxStart = i;
     while (isAsciiDigit(pattern[i])) {
       i++;
     }
+    max = i === maxStart ? null : Number(pattern.slice(maxStart, i));
   }
-  return pattern[i] === '}' ? i + 1 : null;
+  if (pattern[i] !== '}') {
+    return null;
+  }
+  return { min, max, end: i + 1 };
+}
+
+function getRegexQuantifierEnd(pattern: string, start: number): number | null {
+  const char = pattern[start];
+  if (char !== undefined && SIMPLE_REGEX_QUANTIFIERS.has(char)) {
+    return start + 1;
+  }
+  const bounds = readBraceQuantifierBounds(pattern, start);
+  return bounds === null ? null : bounds.end;
 }
 
 function isAsciiDigit(char: string | undefined): boolean {
@@ -569,8 +669,9 @@ function hasOddBackslashRun(pattern: string, index: number): boolean {
 }
 
 // BRE anchors ^ at the start of the expression and immediately after \( or \|,
-// and $ at the end and immediately before \) or \|. An even run of backslashes
-// is a literal \, so \\(^ is not a group.
+// and $ at the end and immediately before ) or | (escaped or raw). An even
+// run of backslashes is a literal \, so \\(^ is not a group and $\\b keeps
+// $ literal.
 function isBreCaretAnchor(pattern: string, index: number): boolean {
   if (index === 0) {
     return true;
@@ -586,8 +687,9 @@ function isBreDollarAnchor(pattern: string, index: number): boolean {
   if (index === pattern.length - 1) {
     return true;
   }
-  const marker = pattern[index + 2];
-  return pattern[index + 1] === '\\' && (marker === ')' || marker === '|');
+  const next = pattern[index + 1];
+  const marker = next === '\\' ? pattern[index + 2] : next;
+  return marker === ')' || marker === '|';
 }
 
 function unescapeSedDelimiter(pattern: string): string {
