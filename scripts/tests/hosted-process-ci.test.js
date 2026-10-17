@@ -407,9 +407,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (90 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (95 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 170, 185],
+    ['hosted-harness-mysql', 175, 190],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -583,12 +583,13 @@ describe('Hosted real-process gates', () => {
       // workflow relay letters add ~82 s, so the fork moves to 4155 and
       // the Verify step to 85 minutes; their slice 2 (FG10c/FG10e) brings
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
-      // to 90 minutes):
+      // to 90 minutes; the event-stream liveness gates add ~440 s, so the
+      // fork moves to 4793 and the Verify step to 95 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4353);
+        expect(forkSeconds).toBe(4793);
       }
     },
   );
@@ -615,10 +616,14 @@ describe('Hosted real-process gates', () => {
   // 181.2–181.6s for the class locally on JDK 21 + MySQL 8.4.6 across
   // three acceptance runs (~363s budgeted at 2x, as FG10a, up from slice
   // 1's ~165s); with the fork itself ~14s, 3743s (3545s after slice 1,
-  // plus slice 2's ~198s) covers them.
+  // plus slice 2's ~198s) covered them. The event-stream liveness gates
+  // (HostedEventStreamLivenessIT, four cases on the shipped 15s keepalive
+  // and 45s bound) measure 214.4–215.0s for the class locally on JDK 21
+  // and 25 + MySQL 8.4.6 across four acceptance runs (~440s budgeted at
+  // 2x), so 4183s covers them all.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 3743;
+  const hostedForkHealthySeconds = 4183;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -691,6 +696,21 @@ describe('Hosted real-process gates', () => {
     // The FG10 letters are independent fixtures sharing the fork, the same
     // per-ceiling shape the FG8 letters are held to.
     const ceilings = ceilingsOf(hostedTestSource('HostedWorkflowFaultGatesIT'));
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedEventStreamLivenessIT ceilings inside the shared fork budget', () => {
+    // Each liveness case boots its own Spring, Harness, relay and
+    // database, so a stall in one leaves the others running: the
+    // per-ceiling shape the FG8 letters are held to.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedEventStreamLivenessIT'),
+    );
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {
       expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
