@@ -522,14 +522,26 @@ describe('build artifact — transcript entry (#11031)', () => {
     // also enter the shared table. With main 17d5f774 that branch measures
     // 1,334,173 UTF-16 units; the unchanged 1,336,000 ceiling retains 1,827
     // units of margin. Managed interactive code remains excluded here.
+    // Approval-policy copy (#14323) measures 1,336,282 at ebf1607d8f,
+    // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
+    // increase is shared i18n copy; substituting main's table restores the
+    // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
     // Merging 87dcc4a7 and updating deletion error copy measures 1,344,854.
-    // The 1,347,000 ceiling leaves 2,146 units of margin.
+    // The merge base is itself only bracketed, 1,333,969 to 1,334,735, so
+    // grouped deletion contributes 10,119 to 10,885 units of shared action
+    // rendering and bilingual copy. The two sides add rather than overlap:
+    // their i18n keys are disjoint (messageDelete.* and message.moreActions
+    // versus managed.*, sideTask.* and shell.result.*) and the merged table
+    // is their exact union. Main's own 1,338,000 ceiling then bounds the
+    // merged entry under 1,348,900, and 1,351,000 keeps over 2,100 units of
+    // margin against that bound. Both figures come from recorded
+    // measurements, not from building this merge.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_347_000);
+    expect(js.length).toBeLessThan(1_351_000);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
@@ -624,6 +636,11 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js.includes('managed.tasks.')).toBe(false);
+  });
+
+  it('keeps remote Workspace registration copy in the interactive entry', () => {
+    expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
+    expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
   });
 
   it('carries no settings strings and looks none up', () => {

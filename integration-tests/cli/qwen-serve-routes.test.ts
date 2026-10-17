@@ -438,6 +438,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_status',
       'session_close',
       'session_archive',
+      'session_archive_idle_guard',
       'session_storage_conflict_repair',
       'session_metadata',
       'session_organization',

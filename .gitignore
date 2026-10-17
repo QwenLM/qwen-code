@@ -17,6 +17,9 @@
 # Dependency directory
 node_modules
 bower_components
+# pnpm falls back to a project-local store when the global store dir is not
+# writable (e.g. sandboxed CI runners); it is a regenerable cache.
+/.pnpm-store/
 
 # Editors
 .idea

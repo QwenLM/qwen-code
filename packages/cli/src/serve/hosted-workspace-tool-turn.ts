@@ -9,7 +9,7 @@ import {
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
-import { rejectionDetail } from './hosted-never-started-reconcile.js';
+import { probeNeverStarted } from './hosted-never-started-reconcile.js';
 
 import {
   readHostedFileHistory,
@@ -89,7 +89,6 @@ import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
 } from './managed-workspace-binding.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
   hostedRuntimeSessionId,
@@ -216,6 +215,28 @@ export {
 };
 
 const ACQUIRE_BUSY_POLL_MS = 250;
+// The owed handback's cadence: a quick backoff for the common late settle,
+// then a steady one-minute tail — the chain stays owed until the handback
+// lands, every timer unref'd so a blocked Session never holds the daemon's
+// event loop open, and every attempt re-reads the Broker's gate, never
+// bypasses it.
+const BLOCK_MOUNT_RETRY_GAPS_MS = [1000, 3000, 5000, 10000, 30000, 60000];
+// The block verdict never waits out a slow Broker round-trip: it proceeds
+// once the first handback attempt settles or this bound passes, whichever
+// is first — the attempt itself keeps running inside the retry chain.
+const RELEASE_MOUNT_VERDICT_BOUND_MS = 2000;
+// A reply that decided nothing earns a re-send — the holder-conditioned
+// clear is idempotent — and so do the busy refusal, whose executions settle
+// on their own clock, and the Broker's internal error. Every other refusal
+// is final: a superseded claim, a lifecycle drain, a writer that never
+// proved it stopped, a Session the Broker no longer holds.
+function retryableMountHandback(cause: unknown): boolean {
+  if (!(cause instanceof HostedWorkspaceBrokerRejection)) return true;
+  return (
+    (cause.status === 409 && cause.code === 'runtime_session_busy') ||
+    (cause.status === 500 && cause.code === 'runtime_broker_internal_error')
+  );
+}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -1542,6 +1563,7 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private cleanupOwed = false;
+  private cleanedUp = false;
   private retiredOwnerResults = false;
   private uncertain = false;
   // Agent calls never write a `tool.intent` (the Broker pipeline they
@@ -1565,6 +1587,7 @@ export class HostedWorkspaceToolTurn {
   private readonly hooks?: HostedHookSession;
   private readonly profile?: string;
   private readonly context?: HostedWorkspaceContextSlot;
+  private readonly foregroundOnly: boolean;
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
   private readonly backgroundLane?: HostedShellTurnOptions;
@@ -1622,6 +1645,7 @@ export class HostedWorkspaceToolTurn {
       hooks?: HostedHookSession;
       profile?: string;
       context?: HostedWorkspaceContextSlot;
+      foregroundOnly?: boolean;
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
       backgroundLane?: HostedShellTurnOptions;
@@ -1645,23 +1669,28 @@ export class HostedWorkspaceToolTurn {
       memberPlanMode?: boolean;
     },
   ) {
-    this.mcp = extras?.mcp;
-    this.hooks = extras?.hooks;
+    this.foregroundOnly = extras?.foregroundOnly === true;
+    this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
+    this.hooks = this.foregroundOnly ? undefined : extras?.hooks;
     this.profile = extras?.profile;
     this.context = extras?.context;
-    this.childRuns = extras?.childRuns;
-    this.monitors = extras?.monitors;
-    this.backgroundLane = extras?.backgroundLane;
-    this.childAgents = extras?.childAgents?.funnel;
+    this.childRuns = this.foregroundOnly ? undefined : extras?.childRuns;
+    this.monitors = this.foregroundOnly ? undefined : extras?.monitors;
+    this.backgroundLane = this.foregroundOnly
+      ? undefined
+      : extras?.backgroundLane;
+    this.childAgents = this.foregroundOnly
+      ? undefined
+      : extras?.childAgents?.funnel;
     this.childDepth = extras?.childAgents?.depth ?? 0;
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childSnapshots =
       this.childWorkspaces && extras?.childAgents?.childSnapshots === true;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
-    this.messages = extras?.messages;
-    this.teams = extras?.teams;
-    this.commands = extras?.commands;
+    this.messages = this.foregroundOnly ? undefined : extras?.messages;
+    this.teams = this.foregroundOnly ? undefined : extras?.teams;
+    this.commands = this.foregroundOnly ? undefined : extras?.commands;
     this.skills = extras?.skills;
     this.memberPlanMode = extras?.memberPlanMode === true;
     this.publication =
@@ -1736,18 +1765,32 @@ export class HostedWorkspaceToolTurn {
         : search
           ? HOSTED_WORKSPACE_FILE_TOOLS_V2
           : HOSTED_WORKSPACE_FILE_TOOLS
-      ).map((tool) =>
-        ['write_file', 'edit'].includes(tool.name ?? '')
-          ? {
+      )
+        .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
+        .map((tool) => {
+          if (this.foregroundOnly && tool.name === 'run_shell_command') {
+            const schema = structuredClone(tool.parametersJsonSchema) as {
+              properties?: Record<string, unknown>;
+            };
+            delete schema.properties?.['is_background'];
+            return {
               ...tool,
               description:
-                tool.description +
-                (this.mcp
-                  ? ' This MCP profile provides no file backups or undo for Write/Edit.'
-                  : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
-            }
-          : tool,
-      ),
+                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms.',
+              parametersJsonSchema: schema,
+            };
+          }
+          return ['write_file', 'edit'].includes(tool.name ?? '')
+            ? {
+                ...tool,
+                description:
+                  tool.description +
+                  (this.mcp
+                    ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+                    : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+              }
+            : tool;
+        }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
@@ -2081,6 +2124,11 @@ export class HostedWorkspaceToolTurn {
           await oweHostedTurnCleanup(this.session, this.promptId, original);
           this.cleanupOwed = original.runtime !== undefined;
         }
+        // The claim commits under the ORIGINAL turn's identity: remember
+        // the broker that actually acquires before the attempt, so the
+        // recovery-block handback can target it — this.broker's identity
+        // never held that mount.
+        this.mountOwner = original;
         await original.acquire();
         const state = await original.fileHistory({
           kind: 'raw-file-history',
@@ -4124,7 +4172,7 @@ export class HostedWorkspaceToolTurn {
           invocationBindingId: request.isShell
             ? request.runtimeCallId
             : executionCallId,
-          capabilityVersion: WORKSPACE_CAPABILITY_DIGEST,
+          capabilityVersion: this.broker.capabilityDigest,
           policyVersion: 'preapproved-workspace-tools/1',
           mediaVersion: null,
           modelMessageId: messageId,
@@ -4633,13 +4681,53 @@ export class HostedWorkspaceToolTurn {
         if (result.status === 'fulfilled')
           cancellationBarriers.add(reservedIds[index]!);
       });
+      const probeBindings: Array<{
+        readonly executionCallId: string;
+        readonly request: (typeof requests)[number] | undefined;
+      }> = [];
+      const settleNeverStarted = async (
+        executionCallId: string,
+        request: (typeof requests)[number] | undefined,
+        processProven: boolean,
+      ) => {
+        if (request?.background) {
+          try {
+            if (this.childRuns !== undefined) {
+              await this.childRuns.settleFailed(executionCallId, {
+                stopReason: 'start_failed',
+                started: false,
+              });
+              if (processProven)
+                writeStderrLineSafe(
+                  `qwen serve: Settled never-started background child run ${executionCallId} from durable process-ledger absence.`,
+                );
+            }
+          } catch (settleCause) {
+            writeStderrLineSafe(
+              'qwen serve: Unstarted child run record was not settled: ' +
+                String(settleCause),
+            );
+          }
+        }
+        if (request?.monitoring)
+          await this.monitors
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted monitor run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
+      };
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
         const request = requests.find(
           (_, index) => reserved.get(index) === executionCallId,
         );
-        let proven = false;
         let grantOwnerState: unknown;
         try {
           const owner = this.publication!.owner;
@@ -4658,57 +4746,39 @@ export class HostedWorkspaceToolTurn {
             grantOwnerState = (closed as Record<string, unknown>)['state'];
           if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
-          proven = true;
         } catch (closeCause) {
           writeStderrLineSafe(
             'qwen serve: Tool publication close was not confirmed: ' +
               String(closeCause),
           );
         }
-        if (
-          !proven &&
-          grantOwnerState === undefined &&
-          request?.background &&
-          cancellationBarriers.has(executionCallId)
-        ) {
-          try {
-            proven =
-              (await this.broker.backgroundProcessStatus(executionCallId)) ===
-              undefined;
-          } catch (cause) {
-            writeStderrLineSafe(
-              `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${rejectionDetail(cause)}).`,
-            );
-          }
+        if (grantOwnerState === 'NOT_STARTED') {
+          await settleNeverStarted(executionCallId, request, false);
+          continue;
         }
-        if (!proven) continue;
-        // The grant owner proved a Shell or Monitor start never happened,
-        // or the original process ledger proved it for a background Shell.
-        // Publication absence alone proves nothing.
-        if (request?.background)
-          await this.childRuns
-            ?.settleFailed(executionCallId, {
-              stopReason: 'start_failed',
-              started: false,
-            })
-            .catch((settleCause: unknown) =>
-              writeStderrLineSafe(
-                'qwen serve: Unstarted child run record was not settled: ' +
-                  String(settleCause),
-              ),
-            );
-        if (request?.monitoring)
-          await this.monitors
-            ?.settleFailed(executionCallId, {
-              stopReason: 'start_failed',
-              started: false,
-            })
-            .catch((settleCause: unknown) =>
-              writeStderrLineSafe(
-                'qwen serve: Unstarted monitor run record was not settled: ' +
-                  String(settleCause),
-              ),
-            );
+        if (
+          grantOwnerState === undefined &&
+          request?.background === true &&
+          cancellationBarriers.has(executionCallId)
+        )
+          probeBindings.push({ executionCallId, request });
+      }
+      const probeOutcomes = await Promise.all(
+        probeBindings.map(async (binding) => ({
+          ...binding,
+          probe: await probeNeverStarted(this.broker, binding.executionCallId),
+        })),
+      );
+      for (const { executionCallId, request, probe } of probeOutcomes) {
+        if (!probe.proven) {
+          writeStderrLineSafe(
+            `qwen serve: Background process absence could not be confirmed for ${executionCallId} (${probe.cause}).`,
+          );
+          continue;
+        }
+        // The original process ledger proved the background Shell never
+        // started. Publication absence alone proves nothing.
+        await settleNeverStarted(executionCallId, request, true);
       }
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {
@@ -7130,6 +7200,97 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
+  // The recovery-blocked exit ends the turn's Workspace exclusion the way
+  // finish() does on the settled path (#13800: one leaked mount wedged
+  // every unrelated tool turn on the same storage). Only the mount goes
+  // back — releaseMount(), never the RELEASED-forever release() — so the
+  // Runtime Session keeps its READY identity for the recovery fleet, and
+  // the handback names the claim of the acquire that owes it: a re-drive
+  // that acquires again supersedes that claim, so the old handback can
+  // never free the live mount. The plain lane hands back its own broker's
+  // claim (or the takeover branch's original identity); the Hook and MCP
+  // lanes own a Session-scoped mount and answer through their own
+  // discipline. A failed attempt is logged, never thrown — the block
+  // verdict must still reach the Session, and it waits for the first
+  // attempt only up to RELEASE_MOUNT_VERDICT_BOUND_MS. The chain retries
+  // on the BLOCK_MOUNT_RETRY_GAPS_MS cadence until the handback lands or a
+  // final refusal ends it, and the daemon stops it at shutdown.
+  blockMountRetry?: Promise<void>;
+  private mountOwner?: HostedWorkspaceBroker;
+
+  async releaseForRecoveryBlock(): Promise<void> {
+    if (this.blockMountRetry) return;
+    const attempt = this.mountHandbackAttempt();
+    if (!attempt) return;
+    let stopped = false;
+    let wake: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      stopped = true;
+      clearTimeout(timer);
+      wake?.();
+    };
+    let reported: string | undefined;
+    const once = async (): Promise<boolean> => {
+      try {
+        await attempt();
+        return false;
+      } catch (cause) {
+        const retry = retryableMountHandback(cause);
+        const line = String(cause);
+        // One line per distinct failure, not one per retry.
+        if (line !== reported) {
+          reported = line;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness turn ${this.promptId} could not release the Workspace mount after its recovery block${retry ? ' (retrying)' : ''}: ${line}`,
+          );
+        }
+        return retry;
+      }
+    };
+    const first = once();
+    const handbacks = this.options.mountHandbacks;
+    handbacks?.add(stop);
+    this.blockMountRetry = (async () => {
+      let again = await first;
+      for (let attempts = 0; again && !stopped; attempts++) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          timer = setTimeout(
+            resolve,
+            BLOCK_MOUNT_RETRY_GAPS_MS[
+              Math.min(attempts, BLOCK_MOUNT_RETRY_GAPS_MS.length - 1)
+            ],
+          );
+          timer.unref();
+        });
+        if (!stopped) again = await once();
+      }
+    })().finally(() => handbacks?.delete(stop));
+    await Promise.race([
+      first,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, RELEASE_MOUNT_VERDICT_BOUND_MS).unref();
+      }),
+    ]);
+  }
+
+  private mountHandbackAttempt(): (() => Promise<void>) | undefined {
+    if (this.mcp)
+      return this.mcp.mountHandback(
+        () => this.hooks?.mountWorkUnproven() ?? false,
+      );
+    if (this.hooks) return this.hooks.mountHandback();
+    const owner = this.mountOwner ?? this.broker;
+    const claim = owner.mountClaim();
+    // A turn that never sent an acquire holds nothing to hand back.
+    if (claim === undefined) return undefined;
+    return async () => {
+      await owner.releaseMount(claim);
+      this.acquired = false;
+    };
+  }
+
   // The publisher lives on the Session across turns, so a turn's close
   // deliberately does not touch it: the Session's ordered close (H3's
   // fifth slice) drains the stores, and background traffic keeps its
@@ -7144,6 +7305,16 @@ export class HostedWorkspaceToolTurn {
       );
     else if (this.acquired) await this.broker.release();
     this.acquired = false;
+    this.cleanedUp = true;
+  }
+
+  /**
+   * finish() leaves a turn owing the cleanup debt holding its mount for
+   * cleanup(), which runs only after the terminal record lands; a turn that
+   * exits before then still holds it (#13800).
+   */
+  get cleanupPending(): boolean {
+    return this.cleanupOwed && !this.cleanedUp;
   }
 
   async close(): Promise<void> {}

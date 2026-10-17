@@ -22,15 +22,26 @@ import java.util.Objects;
 final class WorkspaceRuntimeResolver {
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore authority;
+    private final SshWorkspaceService ssh;
+    private final com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
 
     WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentProperties properties) {
+        this(sessions, authority, properties, null);
+    }
+
+    WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+            ManagedAgentProperties properties, SshWorkspaceService ssh) {
+        this.ssh = ssh;
         this.sessions = sessions;
         this.authority = authority;
         var broker = properties.getRuntimeBroker();
+        this.residents = new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(broker.getResidentWorkspaces());
         if (WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
-                properties.getHarness().getCapabilityDigest())) {
+                properties.getHarness().getCapabilityDigest())
+                || com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())) {
             throw new IllegalStateException("Workspace execution profile is reserved");
         }
         if (!broker.getWorkspaceMounts().isEmpty()
@@ -85,6 +96,20 @@ final class WorkspaceRuntimeResolver {
             authority.authorizeLifecycle(session, lifecycle);
         }
         ContextBinding binding = session.workspace();
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            if (hook) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ssh.verifyBinding(binding);
+            return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
+                    Long.toString(binding.getWorkspaceGeneration()), ssh.runtimeStorage(binding).mountRoot(),
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+        }
+        var resident = residents.find(binding);
+        if (resident != null) {
+            return new Resolved(binding, com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces.scope(resident)
+                    .withLifecycleAuthority(lifecycle));
+        }
         Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
@@ -107,6 +132,12 @@ final class WorkspaceRuntimeResolver {
      * feature exists for.
      */
     void verifyInstallable(ContextBinding binding, String targetCwdRelative) {
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            ssh.verify(new ContextBinding(binding.getTenantId(), binding.getWorkspaceId(),
+                    binding.getWorkspaceGeneration(), binding.getStorageId(), WorkspaceRelativePath.normalize(targetCwdRelative),
+                    binding.getContextConfigRef(), binding.getContextRevision()));
+            return;
+        }
         Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();

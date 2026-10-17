@@ -67,6 +67,11 @@ public final class JdbcRepositoryContract {
                 new JdbcRuntimeSessionRepository(dataSource),
                 new JdbcToolExecutionRepository(dataSource),
                 prefix + "-release");
+        RuntimeRecoveryContract.verifyUnprovenCapture(
+                new JdbcRuntimeBindingRepository(dataSource, protector(prefix)),
+                new JdbcRuntimeSessionRepository(dataSource),
+                new JdbcToolExecutionRepository(dataSource),
+                prefix + "-capture");
     }
 
     /** Writes the pre-recovery schema directly, without using new repositories. */
