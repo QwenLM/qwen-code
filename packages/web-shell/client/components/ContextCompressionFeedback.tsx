@@ -1,5 +1,6 @@
 import type { ContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
+import { compressionMessageKey } from './ContextCompressionAnnouncer';
 
 export function ContextCompressionFeedback({
   controls,
@@ -14,24 +15,15 @@ export function ContextCompressionFeedback({
   return (
     <div
       className={className}
-      role={
+      data-tone={
         result?.kind === 'failed' || result?.kind === 'refreshFailed'
-          ? 'alert'
+          ? 'error'
           : 'status'
       }
+      data-web-shell-compression-feedback
     >
       {t(
-        controls?.compressing
-          ? 'contextUsage.compressing'
-          : result?.kind === 'completed'
-            ? 'contextUsage.compressed'
-            : result?.kind === 'cancelled'
-              ? 'contextUsage.compressCancelled'
-              : result?.kind === 'interrupted'
-                ? 'contextUsage.compressInterrupted'
-                : result?.kind === 'refreshFailed'
-                  ? 'contextUsage.compressRefreshFailed'
-                  : 'contextUsage.compressFailed',
+        compressionMessageKey(controls?.compressing ? 'pending' : result!.kind),
       )}
     </div>
   );
