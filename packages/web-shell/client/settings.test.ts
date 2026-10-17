@@ -43,6 +43,14 @@ describe('settings presentation aliases', () => {
     ).toBe(false);
     expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:workflow-name-only');
   });
+  it('keeps the stable code-mode alias for the tool mode row', () => {
+    expect(
+      isSettingVisible('tools.mode', {
+        excludeItems: ['setting:code-mode-only'],
+      }),
+    ).toBe(false);
+    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:code-mode-only');
+  });
   it('matches published builtin ids by direct membership', () => {
     expect(
       isItemVisible('builtin:model-management', {
@@ -241,7 +249,7 @@ describe('settings presentation aliases', () => {
       'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
       'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
       'setting:fuzzy-file-search': 'context.fileFiltering.enableFuzzySearch',
-      'setting:code-mode-only': 'tools.codeModeOnly',
+      'setting:code-mode-only': 'tools.mode',
       'setting:web-search': 'tools.webSearch.enabled',
       'setting:web-search-model': 'tools.webSearch.model',
       'setting:web-extractor': 'tools.webSearch.webExtractor',

@@ -38,7 +38,7 @@ describe('review workflow cache continuity', () => {
       targetDir: directory,
       model: 'test-model',
       debugMode: false,
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
     });
     const permissions = new PermissionManager(config);
     permissions.initialize();

@@ -44,6 +44,7 @@ import {
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -9436,6 +9437,27 @@ describe('Server Config (config.ts)', () => {
       await config.shutdownExecutionEnvironments();
       await config.shutdownExecutionEnvironments();
       expect(dispose).toHaveBeenCalledOnce();
+    });
+    it('reports the direct fallback as the effective tool mode under container execution', () => {
+      // Container execution cannot host exec, so a hybrid session falls back
+      // to direct tools and getToolMode() must say so — otherwise every
+      // isCodeModeEnabled gate takes the code-mode branch in a session where
+      // exec is never registered. CodeModeOnly stays a registry-creation
+      // rejection, not a silent downgrade.
+      const config = makeConfig({
+        executionEnvironment: sshEnvironment(),
+        toolMode: 'code_mode',
+      });
+      expect(config.getToolMode()).toBe(ToolMode.Direct);
+      expect(makeConfig({ toolMode: 'code_mode' }).getToolMode()).toBe(
+        ToolMode.CodeMode,
+      );
+      expect(
+        makeConfig({
+          executionEnvironment: sshEnvironment(),
+          toolMode: 'code_mode_only',
+        }).getToolMode(),
+      ).toBe(ToolMode.CodeModeOnly);
     });
     it('skips host project hooks, skills, extensions and memory during SSH initialization', async () => {
       const config = makeConfig({

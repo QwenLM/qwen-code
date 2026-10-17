@@ -33,7 +33,7 @@ const SETTING_KEYS = {
   'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
   'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
   'setting:fuzzy-file-search': 'context.fileFiltering.enableFuzzySearch',
-  'setting:code-mode-only': 'tools.codeModeOnly',
+  'setting:code-mode-only': 'tools.mode',
   'setting:web-search': 'tools.webSearch.enabled',
   'setting:web-search-model': 'tools.webSearch.model',
   'setting:web-extractor': 'tools.webSearch.webExtractor',

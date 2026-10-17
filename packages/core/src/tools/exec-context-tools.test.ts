@@ -34,7 +34,7 @@ function setup(
     userMemory: '',
     memoryFileCount: 0,
     approvalMode: ApprovalMode.DEFAULT,
-    codeModeOnly: true,
+    toolMode: 'code_mode_only',
   });
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);

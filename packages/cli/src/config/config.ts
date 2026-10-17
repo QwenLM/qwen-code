@@ -60,6 +60,11 @@ import {
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import {
+  isToolMode,
+  ToolMode,
+  type ToolMode as ToolModeValue,
+} from '@qwen-code/qwen-code-core/tools/code-mode.js';
+import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   AGENT_SESSION_SOURCE_TYPE,
 } from '../runtime/agent-session-source.js';
@@ -159,6 +164,32 @@ const SKILL_LEVELS: readonly SkillLevel[] = [
 
 function isSkillLevel(value: unknown): value is SkillLevel {
   return SKILL_LEVELS.includes(value as SkillLevel);
+}
+
+function resolveToolModeSetting(tools: Settings['tools']): {
+  mode: ToolModeValue;
+  warning?: string;
+} {
+  const mode: unknown = tools?.mode;
+  if (mode !== undefined) {
+    return isToolMode(mode)
+      ? { mode }
+      : {
+          mode: ToolMode.Direct,
+          warning: `Unrecognized tools.mode ${JSON.stringify(mode)}; falling back to direct.`,
+        };
+  }
+
+  const legacyCodeModeOnly = (tools as { codeModeOnly?: unknown } | undefined)
+    ?.codeModeOnly;
+  if (legacyCodeModeOnly === true) {
+    return {
+      mode: ToolMode.CodeModeOnly,
+      warning:
+        'tools.codeModeOnly is deprecated; use tools.mode = "code_mode_only".',
+    };
+  }
+  return { mode: ToolMode.Direct };
 }
 
 export interface CliArgs {
@@ -2257,6 +2288,10 @@ export async function loadCliConfig(
     selectedAuthType,
     env: process.env as Record<string, string | undefined>,
   });
+  const resolvedToolMode =
+    bareMode || safeMode
+      ? { mode: ToolMode.Direct }
+      : resolveToolModeSetting(settings.tools);
 
   const { model: resolvedModel } = resolvedCliConfig;
 
@@ -2591,8 +2626,7 @@ export async function loadCliConfig(
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,
-    codeModeOnly:
-      !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
+    toolMode: resolvedToolMode.mode,
     freeform: settings.tools?.freeform === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
@@ -2764,7 +2798,10 @@ export async function loadCliConfig(
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
-    warnings: resolvedCliConfig.warnings,
+    warnings: [
+      ...resolvedCliConfig.warnings,
+      ...(resolvedToolMode.warning ? [resolvedToolMode.warning] : []),
+    ],
     bareMode,
     safeMode,
     allowedHttpHookUrls:
@@ -2941,7 +2978,12 @@ export async function loadCliConfig(
         customIgnoreFiles: configParams.fileFiltering?.customIgnoreFiles,
       },
     );
-    configParams.codeModeOnly = false;
+    if (resolvedToolMode.mode !== ToolMode.Direct) {
+      configParams.warnings?.push(
+        `SSH workspaces do not support tools.mode = "${resolvedToolMode.mode}"; using direct tools for this session.`,
+      );
+    }
+    configParams.toolMode = ToolMode.Direct;
     configParams.disableAllHooks = true;
     configParams.mcpServers = {};
     configParams.overrideExtensions = [];

@@ -75,10 +75,14 @@ import {
   buildInheritedForkExecutionToolNames,
   extractParentToolNames,
 } from './runtime/agent-core.js';
-import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
-import { ToolMode } from '../tools/code-mode.js';
+import {
+  hasAgentSkillExecBinding,
+  isAgentSkillEagerHidden,
+  toolConfigAllowsSkill,
+} from './runtime/subagent-plan-tool-policy.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { isDirectToolBridgeAvailable } from '../tools/tool-search.js';
 import type {
   AgentExternalInput,
@@ -139,7 +143,10 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
+  execBindingsAvailable = false,
+  skillEagerHidden = false,
   codeModeOnly = false,
+  skillRegistered = true,
 ): boolean {
   // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
   // and `resolveToolNames`' `for...of` walks a bare string per character,
@@ -167,7 +174,10 @@ function subagentWillHaveSkillTool(
         ? disallowedTools
         : undefined,
     },
+    execBindingsAvailable,
+    skillEagerHidden,
     codeModeOnly,
+    skillRegistered,
   );
 }
 
@@ -1026,7 +1036,13 @@ export class BackgroundAgentResumeService {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
+                  hasAgentSkillExecBinding(activeAgentConfig),
+                  isAgentSkillEagerHidden(activeAgentConfig),
                   activeAgentConfig.getToolMode?.() === ToolMode.CodeModeOnly,
+                  activeAgentConfig
+                    .getToolRegistry()
+                    .getAllToolNames()
+                    .includes(ToolNames.SKILL),
                 ),
               })
             )[0],
@@ -1085,6 +1101,7 @@ export class BackgroundAgentResumeService {
           meta.disallowedTools,
           meta.agentId,
           meta.description,
+          meta.nestedExecutionAllowedTools,
         );
       } else {
         const resumeSubagentConfig =
@@ -1883,6 +1900,7 @@ export class BackgroundAgentResumeService {
     disallowedTools?: string[],
     subagentId?: string,
     taskName?: string,
+    nestedExecutionAllowedTools?: string[],
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1902,6 +1920,9 @@ export class BackgroundAgentResumeService {
           runtime.toolNames,
         ),
       ),
+      ...(nestedExecutionAllowedTools !== undefined
+        ? { nestedExecutionAllowedTools: [...nestedExecutionAllowedTools] }
+        : {}),
       // Restore the persisted blocklist beside the allowlist: the
       // invocation-level re-check is the only enforcement a wildcard
       // allowlist entry (e.g. mcp__*) cannot provide on its own.

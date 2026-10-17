@@ -1355,9 +1355,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await vi.waitFor(
+        () => {
+          expect(startupNoticeSpy).toHaveBeenCalled();
+        },
+        { timeout: 10_000 },
+      );
       expect(readCronTasksMock).not.toHaveBeenCalled();
       expect(addItem).not.toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1401,9 +1404,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await vi.waitFor(
+        () => {
+          expect(startupNoticeSpy).toHaveBeenCalled();
+        },
+        { timeout: 10_000 },
+      );
       expect(addItem).not.toHaveBeenCalledWith(
         expect.objectContaining({
           text: expect.stringContaining('active scheduled'),
@@ -3484,9 +3490,12 @@ describe('AppContainer State Management', () => {
       );
       // The startup effect arms pendingWorktreeNoticeRef from the consumed
       // one-shot Config notice; wait for it before submitting.
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await vi.waitFor(
+        () => {
+          expect(startupNoticeSpy).toHaveBeenCalled();
+        },
+        { timeout: 10_000 },
+      );
 
       act(() => {
         capturedUIActions.setShellModeActive(true);

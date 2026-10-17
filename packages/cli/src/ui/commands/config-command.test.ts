@@ -43,6 +43,32 @@ describe('configCommand', () => {
     expect(configCommand.description).toBeTruthy();
   });
 
+  it.each([
+    { tools: { codeModeOnly: true }, expected: 'code_mode_only' },
+    { tools: { codeModeOnly: false }, expected: 'direct' },
+    { tools: { codeModeOnly: 'true' }, expected: 'direct' },
+    { tools: { codeModeOnly: true, mode: 'direct' }, expected: 'direct' },
+    { tools: { codeModeOnly: true, mode: 'code_mode' }, expected: 'code_mode' },
+  ])(
+    'reads effective tool mode without persisting legacy settings: $tools',
+    async ({ tools, expected }) => {
+      const { ctx, setValuesMock } = createMockContext({ tools });
+      const before = structuredClone(ctx.services.settings.merged);
+      const listing = await configCommand.action!(ctx, '--help');
+      const value = await configCommand.action!(ctx, 'tools.mode');
+
+      expect(listing).toMatchObject({
+        type: 'message',
+        content: expect.stringMatching(
+          new RegExp(`^tools\\.mode\\s+enum\\s+${expected}`, 'm'),
+        ),
+      });
+      expect(value).toMatchObject({ content: `tools.mode = ${expected}` });
+      expect(setValuesMock).not.toHaveBeenCalled();
+      expect(ctx.services.settings.merged).toEqual(before);
+    },
+  );
+
   describe('set boolean value', () => {
     it('sets a boolean setting to true', async () => {
       const { ctx, setValuesMock } = createMockContext({

@@ -32,6 +32,24 @@ import {
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
+    it('distinguishes hybrid eager exclusions from allowlist narrowing in both code modes', () => {
+      const tools = getSettingsSchema().tools.properties;
+      const descriptions = [
+        tools.mode.description,
+        tools.eager.description,
+        tools.toolSearch.properties.threshold.description,
+      ];
+
+      for (const description of descriptions) {
+        expect(description).toContain(
+          'In Hybrid mode, AgentCore excludes tools still hidden by tools.eager from nested bindings.',
+        );
+        expect(description).toContain(
+          'In both code modes, agent allowlists that do not grant exec narrow nested bindings.',
+        );
+      }
+    });
+
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =
         getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
@@ -230,6 +248,23 @@ describe('SettingsSchema', () => {
         showInDialog: true,
         category: 'Tools',
       });
+    });
+
+    it('should expose the tool mode enum', () => {
+      expect(getSettingsSchema().tools.properties.mode).toMatchObject({
+        type: 'enum',
+        default: 'direct',
+        requiresRestart: true,
+        showInDialog: true,
+        options: [
+          { value: 'direct', label: 'Default' },
+          { value: 'code_mode', label: 'Code Mode' },
+          { value: 'code_mode_only', label: 'Code Mode Only' },
+        ],
+      });
+      expect(getSettingsSchema().tools.properties).not.toHaveProperty(
+        'codeModeOnly',
+      );
     });
 
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
