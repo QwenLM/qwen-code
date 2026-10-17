@@ -188,7 +188,7 @@ test('a Flyway guard red files one issue, not one per stacked merge', () => {
   // Two SQL files claiming one version in one module: the #12940 shape.
   const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-'));
   const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-  const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+  const migrationDir = join(moduleDir, 'src/main/resources/db/managed-schema');
   mkdirSync(migrationDir, { recursive: true });
   writeFileSync(join(migrationDir, 'V16__a.sql'), '');
   writeFileSync(join(migrationDir, 'V16__b.sql'), '');
@@ -215,15 +215,15 @@ test('a Flyway guard blind-spot red also files one issue, not one per stacked me
   // fresh issue.
   const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-moved-'));
   const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-  // A db/migration* sibling marks the module as owning migrations while the
+  // A db/managed-schema* sibling marks the module as owning migrations while the
   // configured SQL location stays empty — the guard's "location moved" mode.
-  mkdirSync(join(moduleDir, 'src/main/resources/db/migrations'), {
+  mkdirSync(join(moduleDir, 'src/main/resources/db/managed-schema-renamed'), {
     recursive: true,
   });
 
   const moved = captureGuardLog(moduleDir);
   assert.deepEqual(extractFailingTests(moved.tagged), [
-    `flyway found no migration under src/main/resources/db/migration in ${moduleDir}`,
+    `flyway found no migration under src/main/resources/db/managed-schema in ${moduleDir}`,
   ]);
   assert.deepEqual(
     planSearchMarkers(moved.tagged, '1111111111111'),
@@ -247,7 +247,7 @@ test('a stray migration file outside a populated location gets a stable identity
   // one issue rather than one per commit.
   const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-stray-'));
   const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-  const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+  const migrationDir = join(moduleDir, 'src/main/resources/db/managed-schema');
   mkdirSync(migrationDir, { recursive: true });
   writeFileSync(join(migrationDir, 'V1__a.sql'), '');
   const scratch = join(moduleDir, 'src/main/resources/scratch');
@@ -255,7 +255,7 @@ test('a stray migration file outside a populated location gets a stable identity
   writeFileSync(join(scratch, 'V2__b.sql'), '');
 
   const log = captureGuardLog(moduleDir);
-  const id = `flyway found migration files outside src/main/resources/db/migration in ${moduleDir}`;
+  const id = `flyway found migration files outside src/main/resources/db/managed-schema in ${moduleDir}`;
   assert.deepEqual(extractFailingTests(log.tagged), [id]);
   assert.deepEqual(extractFailingTests(log.raw), [id]);
   assert.deepEqual(
@@ -288,7 +288,10 @@ test(
     // finds no control byte to restore, and no continuation line can form.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-forge-'));
     const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    const migrationDir = join(
+      moduleDir,
+      'src/main/resources/db/managed-schema',
+    );
     mkdirSync(migrationDir, { recursive: true });
     writeFileSync(join(migrationDir, 'V16__a.sql'), '');
     writeFileSync(
@@ -329,7 +332,10 @@ test(
     // view carries neither the shape nor a continuation.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-drive-'));
     const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    const migrationDir = join(
+      moduleDir,
+      'src/main/resources/db/managed-schema',
+    );
     mkdirSync(migrationDir, { recursive: true });
     writeFileSync(join(migrationDir, 'V16__a.sql'), '');
     writeFileSync(
@@ -395,7 +401,10 @@ test(
     // every pattern byte after it, so the decoded view forms no line.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-dirforge-'));
     const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    const migrationDir = join(
+      moduleDir,
+      'src/main/resources/db/managed-schema',
+    );
     const payloadDir = join(
       migrationDir,
       'sub\n::error::packages/evil: 2 migrations claim version 99: y.sql',
@@ -428,7 +437,10 @@ test(
     // suppressed same-line capture; both arms must close.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-strayforge-'));
     const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    const migrationDir = join(
+      moduleDir,
+      'src/main/resources/db/managed-schema',
+    );
     mkdirSync(migrationDir, { recursive: true });
     writeFileSync(join(migrationDir, 'V1__a.sql'), '');
     const payloadDir = join(
@@ -442,7 +454,7 @@ test(
       '',
     );
     const log = captureGuardLog(moduleDir);
-    const id = `flyway found migration files outside src/main/resources/db/migration in ${moduleDir}`;
+    const id = `flyway found migration files outside src/main/resources/db/managed-schema in ${moduleDir}`;
     const decoded = log.raw
       .replace('::error::', '')
       .replace(/%0D/g, '\r')
@@ -476,7 +488,7 @@ test('a guard diagnosis titles the issue and is searched even when its log sorts
   // past the search cap; the run-level diagnosis must come first instead.
   const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-prio-'));
   const moduleDir = slashPath(join(dir, 'managed-agent-server'));
-  const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+  const migrationDir = join(moduleDir, 'src/main/resources/db/managed-schema');
   mkdirSync(migrationDir, { recursive: true });
   writeFileSync(join(migrationDir, 'V16__a.sql'), '');
   writeFileSync(join(migrationDir, 'V16__b.sql'), '');
