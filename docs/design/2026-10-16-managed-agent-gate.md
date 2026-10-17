@@ -169,10 +169,11 @@ of `SDK Java`, which has had no `pull_request` trigger since #14205.
 - A touched push: about 55 machine minutes — Java 21 leg 25 plus the ~16 the
   full module suite adds above, daemon E2E 13, flyway under 1.
 - A touched head that gets a maintainer approval: one full run, about 330
-  machine minutes. Dropping the self-hosted post-job Maven cache save,
-  measured at 14 to 37 minutes per job, is planned work with no implementation
-  in the tree, so 330 is what runs today rather than a figure that a landed
-  fix would lower.
+  machine minutes. That figure was measured while `setup-java` still ran its
+  post-job Maven cache save on the ECS pool, at 14 to 37 minutes per job;
+  #14396 has since suppressed the save on self-hosted runners and is merged
+  into this branch, so a full run should come in below 330. Not re-measured
+  here.
 - An untouched PR: two runner allocations, for the `scope` and `gate` jobs.
   Trusted runs take the ECS pool, where `scope` deletes `.git` and checks out
   again at `fetch-depth: 2`, so an event costs a cold clone plus seconds of

@@ -1154,11 +1154,16 @@ jobs:
     # setup alone needs ~44 min, so 30 cancelled the job before a single
     # assertion ran. Matches the release.yml quality_build tier
     # (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES, default 45).
-    # The fast tier adds the post-job Maven cache save to that budget: on the
-    # saturated pool it measured 14-37 minutes AFTER the assertions passed,
-    # and a job killed there concludes cancelled and reddens the gate of a
-    # green suite (run 38936748280, and 4 of the 8 sdk-java.yml runs before
-    # it). 90 covers ~44 of stretched setup plus the save's measured ceiling.
+    # The fast tier keeps 90 rather than 45. This budget was originally sized
+    # for the post-job Maven cache save, which added 14-37 minutes on the
+    # saturated pool AFTER the assertions passed; a job killed there concludes
+    # cancelled and reddens the gate of a green suite (run 38936748280, and 4
+    # of the 8 sdk-java.yml runs before it). #14396 has since suppressed that
+    # save on self-hosted runners, so the save is no longer the reason. What
+    # still justifies the headroom is frequency: the fast tier runs this leg on
+    # every touched PR push instead of nightly only, so it meets the ~44 min
+    # stretched-setup tail above far more often than a 45 ceiling leaves room
+    # for.
     timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"
     steps:
       - name: 'Restore workspace ownership'

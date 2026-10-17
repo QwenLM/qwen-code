@@ -77,11 +77,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
   });
 
-  it('sizes the daemon-e2e budget for the pool cache save on the fast tier', () => {
-    // The fast tier runs this leg on every touched PR push, on the pool
-    // whose post-job Maven cache save measured 14-37 minutes AFTER the
-    // assertions passed: at 45 the killed job concludes cancelled and
-    // reddens the gate of a green suite. The full tier keeps the budget the
+  it('sizes the daemon-e2e budget for the stretched setup on the fast tier', () => {
+    // The fast tier runs this leg on every touched PR push instead of nightly
+    // only, so it meets the ~44 min stretched-setup tail far more often than a
+    // 45 ceiling leaves room for. This budget was originally sized for the
+    // post-job Maven cache save, which #14396 has since suppressed on
+    // self-hosted runners; a killed job concludes cancelled and reddens the
+    // gate of a green suite either way. The full tier keeps the budget the
     // stretched-setup sizing below justifies.
     expect(parse(workflow).jobs['daemon-e2e']['timeout-minutes']).toBe(
       "${{ inputs.tier == 'fast' && 90 || 45 }}",
