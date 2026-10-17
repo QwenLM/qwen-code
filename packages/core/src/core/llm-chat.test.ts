@@ -4279,6 +4279,52 @@ describe('LlmChat', async () => {
       ]);
     });
 
+    it('arms the compression boundary on the live history, reset by replacement', async () => {
+      const { target, recordChatCompression } = recordingChat();
+      const compressSpy = mockCompressOnce(
+        compressResult(
+          CompressionStatus.COMPRESSED,
+          summaryAck(),
+          176_000,
+          40_000,
+          true,
+        ),
+      );
+      mockStream(textStream('after compression'));
+      target.setLastPromptTokenCount(176_999);
+      await sendDrain('next message', 'prompt-boundary-arm', target);
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+
+      // The recorded snapshot carries the pending user message; the boundary
+      // must be measured on the LIVE history without it (#14325). The live
+      // history keeps the payload PLUS the re-sent prompt and its streamed
+      // response, while the boundary stays at the payload length.
+      const recordPayload = recordChatCompression.mock.calls[0][0] as {
+        compressedHistory: Content[];
+      };
+      expect(recordPayload.compressedHistory).toHaveLength(summaryAck().length + 1);
+      expect(target.getHistory()).toHaveLength(summaryAck().length + 2);
+      expect(target.getCompressedTailLength()).toBe(summaryAck().length);
+
+      // A post-compression interrupted prompt: the strip stops at the
+      // boundary, leaving the settled payload tail in place.
+      target.setHistory([...summaryAck(), userText('orphaned prompt')]);
+      target.setCompressedTailLength(summaryAck().length);
+      expect(target.stripOrphanedUserEntriesFromHistory()).toEqual([
+        userText('orphaned prompt'),
+      ]);
+      expect(target.getHistory()).toEqual(summaryAck());
+
+      // A head-preserving slice clamps the boundary to the surviving prefix.
+      target.truncateHistory(1);
+      expect(target.getCompressedTailLength()).toBe(1);
+
+      // A wholesale replacement invalidates it: the new array no longer ends
+      // at the compression point.
+      target.setHistory([userText('fresh')]);
+      expect(target.getCompressedTailLength()).toBeUndefined();
+    });
+
     it('rejects before request serialization when oversized resumed history cannot be compressed', async () => {
       chat.setHistory(oversizedHistory());
       expect(chat.getLastPromptTokenCount()).toBe(0);
