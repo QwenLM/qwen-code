@@ -671,13 +671,14 @@ All fifteen failover steps therefore moved into their own job,
 the bundled CLI, the server jar and a runner-private `mysqld`, not the Hosted
 MySQL job's MySQL service or cgroup root, so the new job builds the CLI,
 installs the SDK, packages the server with `-DskipTests` and installs the
-MySQL binaries itself, with no `needs:` on the Hosted MySQL job. A failing
-integration test there no longer skips an arm. Each arm runs when the MySQL
-binaries install succeeded and the run was not cancelled, so an earlier
-arm's failure does not skip the later ones either, and a failing arm still
-fails the job. The runner-only `QWEN_E2E_REGISTER_STORAGE=1` and the Step 3
+MySQL binaries itself, with no `needs:` on the Hosted MySQL job; like that
+job, it is skipped only on the `fast` tier of `managed-agent-gate.yml`. A
+failing integration test there no longer skips an arm. Each arm runs when
+the MySQL binaries install succeeded and the run was not cancelled, so an
+earlier arm's failure does not skip the later ones either, and a failing arm
+still fails the job. The runner-only `QWEN_E2E_REGISTER_STORAGE=1` and the Step 3
 evidence upload moved with them. The Hosted MySQL job's step ceilings now
-sum to 160 (80 + 10 + 20 + 50) under a 175-minute job ceiling; the new job's
+sum to 165 (85 + 10 + 20 + 50) under a 180-minute job ceiling; the new job's
 fifteen arms sum to 150 under 165.
 
 ## Changes and ownership

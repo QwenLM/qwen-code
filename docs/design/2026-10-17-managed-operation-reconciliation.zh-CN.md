@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-operation-reconciliation.md) | [简体中文](2026-10-17-managed-operation-reconciliation.zh-CN.md)
 
-状态：第一阶段已在本次改动中实现，契约 `1.59.0`，schema 不变。
+状态：第一阶段已在 #14443 合入（契约 `1.59.0`）。第二阶段（SSH Workspace 注册）在本次改动中实现（契约 `1.60.0`）。两个阶段都不改 schema。
 
 这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 总 issue）的 **D7-2** 切片，由 [#14166](https://github.com/QwenLM/qwen-code/issues/14166) 跟踪。#12380 规定，Stage D 只有同时具备持久命令投递（D7-1，[#14168](https://github.com/QwenLM/qwen-code/issues/14168)）和原命令对账（本切片），才能暴露 `java_durable`。D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选开启的 profile）要等这两者都完成。本切片涉及的每一处代码，都在 #14166 的设计说明里做了分类。
 
@@ -30,7 +30,7 @@
 
 ## 非目标（后续阶段）
 
-- `WORKSPACE_CREATE`：把确定性的拒绝拆成 `failed`，为节点 marker 加证据读取器，并在证据证明未提交时释放预留。
+- ~~`WORKSPACE_CREATE`~~：见下文第二阶段。
 - `RENAME` 的 `UNKNOWN` 状态及其读取器（Harness 的标题 revision）。
 - Turn 层的未知工具结果（`managed_runtime_recovery_blocked`）：需要把 Runtime Broker 的 `reconcileExecution` 接到 Turn 上，与 #13847 一起做。
 - 处于 `CANCELLING` 的 Turn 被调度器以 `managed_runtime_recovery_blocked` 判为失败时，挂在它上面的 `CANCEL`。
@@ -91,6 +91,21 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 
 `hasOpenOperation` 不把挂起的 task cancel 算作打开状态，所以它不会挡住任何生命周期操作（H4f）。`WorkspaceMigrationStore.requireIdle` 和 `WorkspaceRecoveryStore` 的源检查仍然把它算进去。这个差异是有意的：迁移要搬走的存储，可能还在被这个 cancel 的任务使用。
 
+### 7. 第二阶段：SSH Workspace 注册按节点对账
+
+`SshWorkspaceService.register` 的步骤依次是：认领、探测、`reserve`、在节点上执行 `register-storage`、最终探测、`complete`。其中只有 `reserve` 和 `register-storage` 有副作用。`reserve` 写入存储别名和物理目录的所有权（`FENCE_ONLY`、`UNVERIFIED`），并把这次注册记进 `result_json`。`register-storage` 在节点上写 marker。
+
+- **没有预留就意味着从未发出。** `register-storage` 只在 `reserve` 提交之后才执行，所以没有 `result_json` 的注册从未到达节点。它不可重试的拒绝现在是终态 `failed`（`ssh_runtime_version_mismatch`、`storage_already_registered`、`runtime_node_forbidden` 等），也没有需要释放的东西。
+- **已预留就意味着准入未知。** 已预留的注册以 `recovery_blocked`（`java_durable`、`blocked`）挂起，并保留失败码。它在上一次尝试结束一个延迟（`PARK_DELAY_MILLIS`，5 分钟）之后才到期。这样，调用方放弃时节点上仍在执行的 `register-storage`，在读节点之前已经结束。
+- **证据就是节点本身。** `SshWorkspaceService` 是 `WORKSPACE_CREATE` 的证据源，它对预留的根目录做一次只读探测：
+  - **已提交：** 预留的身份带有本次注册的 marker。`completeParked` 按原注册流程补完：存储登记、所有权就绪，并创建 Workspace 及其所有者权限。
+  - **未提交：** 预留的身份没有 marker，或者该路径已换成另一个目录。`releaseParked` 把它记为失败，并删除别名和所有权，前提是这两行仍是本次注册未完成的预留。
+  - **证明不了什么：** 节点读不到、节点不再允许该 actor，或者目录里是另一次注册的 marker。这些情况都重新挂起。
+- **不属于任何 Session。** 注册是租户级的，Session 范围的扫描读不到它。证据源自己列出挂起行，结算也带有自己的副作用。为此，对账器改为按存储中的种类名工作，证据源可以覆盖 `settle` 和 `parked`。
+- **本次改动之前挂起的记录**同样这样对账，没有预留的会立即失败，不做探测。
+
+如果释放之后，一个残留的 `register-storage` 才写下 marker，这个 marker 会留在一个没有所有者的目录上。之后任何对该目录的注册都会看到一个外来 marker 而被拒绝。所以失败方向是安全的：一个目录永远不会有两个注册所有者。
+
 ## 验证
 
 - `OperationReconcilerTest`：挂起的 cancel 只按任务记录结算（先未知，后已提交）；任务未收到停止就结束的 cancel 以 `task_already_settled` 失败；证据读不出来时挂起一整个复查周期；挂起的输入只按 store 返回的 journal 结论结算；已不在挂起状态的行不被处理；一种 kind 只能有一个证据源。所有用例都不发送、不认领，也不调用 Harness。
@@ -98,6 +113,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - `ManagedTurnCommandOperationTest`：提交未获应答的输入以 `submit_input_unconfirmed` 挂起。没有 journal、head 为 `ACTIVE`、head 为 `SEALED` 时，结论都是未知；journal 出现匹配的准入后变为已提交，结算为完成并带回执。head 为 `DELETING` 且没有准入时，证明未提交，失败码取 Turn 的错误码；digest 不一致不能证明任何事；压缩开始后也不能证明任何事。
 - `WorkspaceMigrationStoreTest.refusesAStorageWithAParkedTaskCancelUntilItSettles`：挂起的 task cancel 会挡住存储迁移，结算之后放行。
 - `TaskCancelCoordinatorTest` 保留了投递相关的用例；原来两个挂起用例移到了 `OperationReconcilerTest`。
+- 第二阶段：`SshWorkspaceStoreTest` 覆盖未预留的注册直接失败、已预留的注册挂起一个延迟、`completeParked` 只补完一次、`releaseParked` 记为失败并把目录让给其他注册，以及释放不会动另一次注册已完成的所有权。`SshWorkspaceServiceTest` 覆盖各个结论：marker 已落地、没有 marker、路径换成了另一个目录、另一次注册的 marker、actor 已无权限、节点读不到，以及未预留的旧记录不经探测即失败。所有用例都只做探测。`OperationReconcilerTest.aKindOutsideAnySessionScansAndSettlesThroughItsSource` 覆盖证据源自己的扫描与结算。
 
 ## 验收（来自 #14166）
 

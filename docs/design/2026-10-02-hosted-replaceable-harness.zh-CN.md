@@ -553,11 +553,12 @@ Turn。所以它的过期工作只有 lease 续约和一次重试，两者都到
 （`Hosted failover E2E / Java 21`）。这些支路只需要打包好的 CLI、server jar 和
 runner 私有的 `mysqld`，不需要 Hosted MySQL 任务的 MySQL service 或 cgroup 根，
 所以新任务自己构建 CLI、安装 SDK、以 `-DskipTests` 打包 server 并安装 MySQL
-二进制，不对 Hosted MySQL 任务设 `needs:`。那里的集成测试失败不再让任何支路被
+二进制，不对 Hosted MySQL 任务设 `needs:`；和该任务一样，它只在
+`managed-agent-gate.yml` 的 `fast` 档跳过。那里的集成测试失败不再让任何支路被
 跳过。每条支路在 MySQL 二进制安装成功且运行未被取消时执行，所以前面支路的失败
 也不会让后面的支路被跳过；支路自己失败时，任务仍然失败。仅供 runner 使用的
 `QWEN_E2E_REGISTER_STORAGE=1` 与 Step 3 证据上传也一并迁移。Hosted MySQL 任务的
-步骤上限之和现为 160（80 + 10 + 20 + 50），任务上限 175 分钟；新任务十五条支路
+步骤上限之和现为 165（85 + 10 + 20 + 50），任务上限 180 分钟；新任务十五条支路
 之和为 150，任务上限 165 分钟。
 
 ## 改动与属主
