@@ -1001,7 +1001,9 @@ public final class JdbcRuntimeBindingRepository
         if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
             BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         } else if (!"session".equals(scope.getIsolationClass())
-                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)) {
+                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)
+                && !(WorkspaceExecutionProfile.isBoundWorkspaceScope(scope) && harnessSessionId != null
+                        && authority != null)) {
             if (authority != null) {
                 throw admissionClosed();
             }

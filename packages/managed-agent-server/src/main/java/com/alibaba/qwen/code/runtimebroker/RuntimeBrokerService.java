@@ -5344,7 +5344,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         try {
             return provisioner.createRequest(scope,
                     "session".equals(scope.getIsolationClass())
-                            ? harnessSessionId : null);
+                            ? harnessSessionId : null,
+                    harnessSessionId);
         } catch (IllegalArgumentException exception) {
             // A managed-context provisioner refuses a scope it cannot place,
             // such as one without a storage ID, rather than fall back.

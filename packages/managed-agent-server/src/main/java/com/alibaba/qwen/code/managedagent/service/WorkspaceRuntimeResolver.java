@@ -177,6 +177,30 @@ final class WorkspaceRuntimeResolver {
         return mount.root();
     }
 
+    /**
+     * The verified-recovery check for a shared (Workspace-isolated) request:
+     * the mount for the storage must still resolve to the request's root and
+     * stay intact. A shared binding has no owning Session to resolve by.
+     */
+    void requireMountCurrent(RuntimeScope scope, String storageId) {
+        Mount mount = mounts.get(new Storage(scope.getTenantId(), storageId));
+        if (mount == null) {
+            Path root = authority.createdStorageRoot(scope.getTenantId(), storageId);
+            if (root == null) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            try {
+                mount = new Mount(root, Files.readAttributes(root, BasicFileAttributes.class).fileKey());
+            } catch (IOException error) {
+                throw WorkspaceExecutionStore.unavailable(error);
+            }
+        }
+        if (!mount.root().toString().equals(scope.getCanonicalCwd())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        verifyMountIntact(mount);
+    }
+
     private Mount mount(ContextBinding binding) {
         Mount configured = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
         if (configured != null) {
