@@ -3175,6 +3175,49 @@ describe('MessageList — turn collapse (DOM)', () => {
     ).toHaveLength(1);
   });
 
+  it('attaches the turn footer to the main reply, not the shell-completion ack', () => {
+    const shellMarker: SystemMessage = {
+      id: 'marker',
+      role: 'system',
+      content: 'shell',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    };
+    const ack: AssistantMessage = {
+      ...asstMsg('ack'),
+      source: 'background_notification_response',
+    };
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount(
+      [userMsg('u1'), asstMsg('report'), shellMarker, ack],
+      undefined,
+      { customization: { renderAssistantTurnFooter } },
+    );
+
+    expect(renderAssistantTurnFooter.mock.calls.map(([info]) => info)).toEqual([
+      {
+        turnId: 'u1',
+        message: {
+          id: 'report',
+          content: 'answer',
+          isStreaming: undefined,
+          timestamp: undefined,
+        },
+      },
+    ]);
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
+  });
+
   it('releases the latest turn after matched delayed agent notifications', () => {
     vi.useFakeTimers();
     const firstAgent = agentMsg('agent-1');

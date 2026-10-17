@@ -1,5 +1,9 @@
 import type { Message } from '../adapters/types';
 import { writeClipboardText } from './clipboard';
+import {
+  isShellCompletionAckRow,
+  shellAckRowFromMessage,
+} from './shellCompletionAck';
 
 interface FencedCodeBlock {
   lang: string | null;
@@ -350,11 +354,26 @@ function selectLatexBlock(
 }
 
 function getLastAssistantOutput(messages: readonly Message[]): string | null {
+  const rows = messages.map(shellAckRowFromMessage);
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (message.role === 'assistant' && message.content) {
-      return message.content;
+    if (message.role !== 'assistant' || !message.content) continue;
+    let turnStart = -1;
+    for (let j = i - 1; j >= 0; j--) {
+      const prior = messages[j];
+      if (prior.role === 'user' || prior.role === 'user_shell') {
+        turnStart = j;
+        break;
+      }
     }
+    // The collapse path shows the turn's main answer, not a bookkeeping
+    // reply to a background shell completion; /copy must agree with it.
+    if (
+      isShellCompletionAckRow(rows, i, turnStart, messages.length - 1, false)
+    ) {
+      continue;
+    }
+    return message.content;
   }
   return null;
 }

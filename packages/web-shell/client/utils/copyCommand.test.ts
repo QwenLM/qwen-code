@@ -51,6 +51,44 @@ describe('copyFromLastAssistantMessage', () => {
     });
   });
 
+  it('copies the main reply, not the bookkeeping ack after a background shell marker', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    const result = await copyFromLastAssistantMessage(
+      [
+        user('hello'),
+        assistant('The deliverable report.'),
+        {
+          id: 'marker',
+          role: 'system',
+          variant: 'info',
+          source: 'background_notification_turn_started',
+          content: 'shell',
+          backgroundTurn: {
+            turnId: 'auto-task',
+            taskId: 'task',
+            kind: 'shell',
+            startedAt: 100,
+          },
+        },
+        {
+          id: 'ack',
+          role: 'assistant',
+          content: 'Done.',
+          source: 'background_notification_response',
+        },
+      ],
+      '',
+      writeText,
+    );
+
+    expect(writeText).toHaveBeenCalledWith('The deliverable report.');
+    expect(result).toEqual({
+      status: 'info',
+      message: 'Last output copied to the clipboard',
+    });
+  });
+
   it('copies the last fenced code block with /copy code', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const content = [
