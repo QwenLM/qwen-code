@@ -559,7 +559,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. recovery_blocked is terminal and preserves the original physical owner; querying never unlocks it or starts a Runtime worker. */
+        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. A registration refused before it reserved its directory fails. One that may have reached its node is recovery_blocked and keeps the directory reserved while Java reads the node again, never registering anything: the registration's marker completes it, and a root without the marker, or holding another directory, fails it and releases the directory. Querying never unlocks it or starts a Runtime worker. */
         post: operations["webShellGetWorkspaceOperation"];
         delete?: never;
         options?: never;
@@ -684,6 +684,12 @@ export interface components {
             /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
+            /**
+             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
+             * @default harness_confirmed
+             * @enum {string}
+             */
+            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         WebShellCancelRequest: {
             /** @description Trace correlation only. */
@@ -692,18 +698,29 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
             turnId: string;
+            /**
+             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
+             * @default harness_confirmed
+             * @enum {string}
+             */
+            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         /** @description Arbitrary caller metadata, as a JSON object (or null). Accepted and ignored in Phase 1: nothing from it is persisted. On WebShellCreateRequest the Session title travels in that request's own `title` field; WebShellSubmitRequest has no title surface. Any keys are valid. */
         WebShellMetadata: {
             [key: string]: unknown;
         } | null;
-        /** @description With durable_operations enabled, all three target fields are returned. accepted means Java durable delivery responsibility, not model execution. Missing fields retain the deployed legacy response semantics. */
+        /** @description accepted means Java durable delivery responsibility, not model execution. The three operation fields come together, and only on a Turn input or cancel admission that asked for admissionProfile java_durable on a deployment advertising durableOperations (D7-3): operationId names the command's original submit_input or cancel operation, readable through the operation query, and admissionStage and deliveryState are that operation's latest durable values. A fresh input reads java_durable and pending; a cancel of a Turn that already ended reads its settled values. A retry under the same key answers the same operation with replayed true. Missing fields keep the legacy harness_confirmed response semantics, also for Session creation and for a replayed command recorded before v1.58. */
         WebShellAdmission: {
             /** Format: uuid */
             sessionId: string;
             turnId?: string | null;
             status: string;
             replayed: boolean;
+            operationId?: string;
+            /** @enum {string} */
+            admissionStage?: "java_durable" | "harness_confirmed";
+            /** @enum {string} */
+            deliveryState?: "pending" | "leased" | "confirmed" | "blocked";
         };
         WebShellTurn: {
             turnId: string;
@@ -755,6 +772,11 @@ export interface components {
              * @default false
              */
             cwdChange?: boolean;
+            /**
+             * @description D7-3. Present only on a deployment that enables the java_durable admission profile, where it is true while the Session is readable: a Turn input or cancel may then ask for admissionProfile java_durable. Omitted elsewhere, where asking for it answers 400 unsupported_feature.
+             * @default false
+             */
+            durableOperations?: boolean;
             /** @default false */
             actions: boolean;
             /**
@@ -1434,7 +1456,7 @@ export interface components {
         WebShellWorkspaceOperationRequest: {
             operationId: string;
         };
-        /** @description workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query. */
+        /** @description workspaceId is returned only after completed registration. recovery_blocked means the registration may have reached its node: it keeps the original ownership until Java reads the node and completes it, or fails it and releases the directory. A node that cannot be read, no longer admits the actor or holds another registration's marker leaves it for administrator review, and a new browser draft does not release it. failed releases the directory if the registration reserved it. replayed=true identifies an existing operation returned by a repeated key or a query. */
         WebShellWorkspaceCreateOperation: {
             operationId: string;
             /** @constant */

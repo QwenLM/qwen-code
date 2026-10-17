@@ -368,7 +368,7 @@ class ManagedTaskCancelOperationTest {
         assertThat(store.findParkedOperations(10)).isEmpty();
         jdbc.update("UPDATE ma_operation SET available_at = 0");
         ParkedOperation due = new ParkedOperation(TENANT, sessionId,
-                admitted.operationId(), OperationKind.TASK_CANCEL);
+                admitted.operationId(), "TASK_CANCEL");
         assertThat(store.findParkedOperations(10)).containsExactly(due);
         // Due for reconciliation is still not claimable (D7-2): its
         // acceptance is unknown, so no claim may send it again, however
@@ -446,7 +446,7 @@ class ManagedTaskCancelOperationTest {
                 admitted.operationId(), "owner-2", Duration.ofSeconds(30)))
                 .isEmpty();
         assertThat(store.settleParkedOperation(new ParkedOperation(TENANT,
-                sessionId, admitted.operationId(), OperationKind.TASK_CANCEL),
+                sessionId, admitted.operationId(), "TASK_CANCEL"),
                 AcceptanceVerdict.committed(), 0)).isFalse();
     }
 
