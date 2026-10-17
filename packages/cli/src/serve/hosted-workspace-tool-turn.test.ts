@@ -1459,6 +1459,100 @@ it.each([
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
+// #13905 (item 41): the approval wiring keys on the Session's own profile,
+// not the call's name — a read-profile glob asks nothing under `default`,
+// while an MCP-declared glob on files/1 still asks.
+it('pre-approves glob only where the profile declares it', async () => {
+  const globCall = {
+    ...calls[0],
+    callId: 'call-glob',
+    name: 'glob',
+    args: { pattern: '**/*.ts' },
+  };
+  const globParts: Part[] = [
+    {
+      functionCall: {
+        id: globCall.callId,
+        name: globCall.name,
+        args: globCall.args,
+      },
+    },
+  ];
+  const read = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+    { profile: 'hosted-workspace-read/1' },
+  );
+  const responses = await read.execute(
+    [globCall],
+    globParts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+  expect(actionIds()).toEqual([]);
+  expect(
+    broker.execute.mock.calls.map(
+      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+    ),
+  ).toEqual(['glob']);
+  await read.consumeResults();
+  await read.finish();
+
+  const mcp = {
+    broker,
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
+    toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
+  };
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
+  const running = turn.execute(
+    [mcpGlobCall],
+    [
+      {
+        functionCall: {
+          id: mcpGlobCall.callId,
+          name: mcpGlobCall.name,
+          args: mcpGlobCall.args,
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  // The files/1 Session must ask before dispatching even this name.
+  const requestId = await requested();
+  expect(actionIds()).toEqual([requestId]);
+  expect(broker.execute).toHaveBeenCalledOnce();
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  await running;
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
 function createSearchTurn() {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },

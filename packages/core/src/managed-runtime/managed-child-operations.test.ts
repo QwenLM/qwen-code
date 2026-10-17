@@ -30,6 +30,7 @@ import {
   childDispatchBody,
   childFailBody,
   childLaunchBody,
+  childRecoveryBlockedBody,
   childSettleCompletedBody,
   childStopRequestedBody,
   decodeChildLaunchEnvelope,
@@ -378,6 +379,49 @@ describe('managed child operations (H4b)', () => {
             }),
         ),
       );
+    });
+
+    it('builds the recovery-blocked settlement over a lost generation', () => {
+      const bodies = chain(
+        (p) =>
+          childDispatchBody(p, {
+            dispatchId: 'dispatch-1',
+            runtime: BINDING,
+          }),
+        (p) => childAttachBody(p, { childSessionId: 'session-child' }),
+        (p) =>
+          childRecoveryBlockedBody(p, {
+            reason: 'runtime_lost',
+            childSessionId: 'session-child',
+          }),
+      );
+      expectValidChain(bodies);
+      const blocked = parseChildRun(bodies[3]!);
+      if (blocked.kind !== 'child_agent') throw new Error('kind');
+      expect(blocked.run.state).toBe('recovery_blocked');
+      expect(blocked.run.reason).toBe('runtime_lost');
+      expect(blocked.run.execution).toBe('outcome_unknown');
+      // Blocked, never ended: no stop reason, and the delivery stays open
+      // — the run can still settle if evidence of it ever arrives.
+      expect(blocked.stopReason).toBeNull();
+      expect(blocked.run.delivery).toEqual({
+        target: 'session',
+        state: 'planned',
+      });
+      // A replay restating the same Session is the same revision; a
+      // different one conflicts instead of renaming it.
+      expect(
+        childRecoveryBlockedBody(bodies[2]!, {
+          reason: 'runtime_lost',
+          childSessionId: 'session-child',
+        }),
+      ).toEqual(bodies[3]);
+      expect(() =>
+        childRecoveryBlockedBody(bodies[2]!, {
+          reason: 'runtime_lost',
+          childSessionId: 'session-other',
+        }),
+      ).toThrow(ManagedSessionRecordError);
     });
 
     it('names the minted Session on never-started settlements', () => {
