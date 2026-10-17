@@ -506,6 +506,7 @@ export default tseslint.config(
       'packages/*/scripts/**/*.js',
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
+      'packages/managed-agent-server/src/test/resources/*.mjs',
       // web-templates' export-html template build scripts also run with `node`.
       'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.

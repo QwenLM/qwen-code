@@ -78,6 +78,7 @@ import {
 import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
 import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -2448,9 +2449,7 @@ describe('Settings Loading and Merging', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it
-      .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
-      .each([0o400, 0o444])(
+    it.skipIf(!arePermissionBitsEnforced()).each([0o400, 0o444])(
       'recovers repeatedly from a read-only Workspace file (%o)',
       async (mode) => {
         const actualFs = await vi.importActual<typeof fs>('node:fs');
