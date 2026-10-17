@@ -904,8 +904,11 @@ public class ChildResultRelay {
         // the Harness generation running it was lost and the in-process
         // run's outcome stays unwitnessed. Settle the record blocked and
         // classify unknown: never re-executed, never failed as if its
-        // outcome were observed.
+        // outcome were observed. A CANCELLING Turn keeps its mark but is
+        // the coordinator's in-flight cancel — its real end is the user's
+        // cancel settlement, so the blocked branch waits it out.
         if (!TERMINAL_TURNS.contains(status)
+                && !"CANCELLING".equals(status)
                 && AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(
                         turn.errorCode())) {
             settleRecoveryBlocked(row, now);

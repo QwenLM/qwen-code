@@ -1425,12 +1425,21 @@ public class HarnessCoordinator {
         if (leaseLost.get()) {
             return true;
         }
-        store.markTurnRecoveryBlocked(claimed.tenantId(), claimed.sessionId(),
-                claimed.turnId(), owner,
+        if (!store.markTurnRecoveryBlocked(claimed.tenantId(),
+                claimed.sessionId(), claimed.turnId(), owner,
                 AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
                 "The Harness generation running this workflow was lost;"
                         + " the in-process run's outcome was never"
-                        + " observed.");
+                        + " observed.")) {
+            // The fenced CAS missed — the lease lapsed between the attach
+            // and this write, so the Turn is neither marked nor parked.
+            // The next claim re-walks the refusal; the lost durable guard
+            // must never be silent.
+            LOG.warn("Managed workflow Turn recovery-blocked mark lost to"
+                            + " a lease CAS tenant={} session={} turn={}",
+                    claimed.tenantId(), claimed.sessionId(),
+                    claimed.turnId());
+        }
         return true;
     }
 

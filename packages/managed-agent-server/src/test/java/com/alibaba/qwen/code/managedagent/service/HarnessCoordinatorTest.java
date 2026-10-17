@@ -1144,6 +1144,69 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong(), anyBoolean());
     }
 
+    // A mark lost to its lease CAS still ends the drive, but never
+    // silently: the lost durable guard leaves a searchable warning (review
+    // finding on #14461).
+    @Test
+    void warnsWhenTheRecoveryBlockedMarkIsLostToALeaseCas() {
+        ch.qos.logback.classic.Logger coordinatorLog =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(
+                        HarnessCoordinator.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        coordinatorLog.addAppender(logged);
+        try {
+            AgentStateStore store = mock(AgentStateStore.class);
+            HarnessConnector harness = mock(HarnessConnector.class);
+            RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+            when(runtimeWarmer.isEnabled()).thenReturn(false);
+            TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                    "prompt",
+                    List.of(Map.of("type", "workflow_launch", "script",
+                            "return 1;")),
+                    "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old",
+                    1L, "previous-owner", Long.MAX_VALUE, 0, 0, 0, null,
+                    null, null, 1, 1, null, 1);
+            when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), any(Duration.class)))
+                    .thenReturn(Optional.of(claimed));
+            when(store.requireSession("tenant", "session")).thenReturn(
+                    new SessionRecord("tenant", "session", "qwen-code", null,
+                            "ACTIVE", "boot-old", null, 0, 0, 1, 1, null,
+                            1));
+            HarnessRuntimeRecovery recovery =
+                    mock(HarnessRuntimeRecovery.class);
+            when(harness.recoverManagedRuntime("tenant", "session", false))
+                    .thenReturn(new Attachment("boot-new", recovery, 1L,
+                            "epoch-new"));
+            // The lease lapsed between the attach and the mark: the fenced
+            // CAS misses.
+            when(store.markTurnRecoveryBlocked(anyString(), anyString(),
+                    anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(false);
+            HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                    harness, new HarnessEventProjector(), runtimeWarmer,
+                    directExecutor(), Clock.systemUTC(),
+                    new ManagedAgentProperties());
+            try {
+                coordinator.dispatch("tenant", "session", "turn");
+            } finally {
+                coordinator.close();
+            }
+            verify(store).markTurnRecoveryBlocked(eq("tenant"),
+                    eq("session"), eq("turn"), anyString(),
+                    eq(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED),
+                    anyString());
+            assertThat(logged.list).anySatisfy(event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage())
+                        .contains("recovery-blocked mark lost");
+            });
+        } finally {
+            coordinatorLog.detachAppender(logged);
+        }
+    }
+
     // Once refused, the durable mark ends every later re-claim before any
     // attach: the scan stays a cheap claim-skip-release until the child
     // Session's close settles the Turn.

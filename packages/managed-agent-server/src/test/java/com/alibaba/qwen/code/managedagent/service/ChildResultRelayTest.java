@@ -511,6 +511,27 @@ class ChildResultRelayTest {
                 anyString(), anyLong(), anyLong(), anyLong());
     }
 
+    // A Turn parked while RUNNING and then cancelled keeps the mark
+    // (insertCancelCommand never clears error_code), so the blocked branch
+    // must not fire for it: the coordinator is driving that cancel to its
+    // own CANCELLED settlement, and the run's real end is the user's
+    // cancel — never an outcome-unknown verdict (review finding on
+    // #14461). The watch keeps looking while the cancel drives.
+    @Test
+    void aMarkedTurnInCancellingKeepsWaitingForTheCancel() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "CANCELLING", null,
+                        AgentStateStore.WORKFLOW_RECOVERY_BLOCKED, true,
+                        "epoch-old"));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        verify(store, never()).classify(any(RelayRow.class), anyString(),
+                anyString(), any(), anyLong());
+    }
+
     @Test
     void aTurnFailureSettlesTheRunFailedWithoutAnAcceptance() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,

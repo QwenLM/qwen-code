@@ -6553,7 +6553,14 @@ export class HostedWorkspaceToolTurn {
       }
       const record = children.record(childRunId);
       if (record !== undefined) {
-        if (record.run.state === 'failed' || record.run.state === 'cancelled') {
+        // #14387: a recovery-blocked child is an ending too — its outcome
+        // is unwitnessed, but the wait must not poll forever: the parent
+        // gets the blocked line as its tool result and the await resolves.
+        if (
+          record.run.state === 'failed' ||
+          record.run.state === 'cancelled' ||
+          record.run.state === 'recovery_blocked'
+        ) {
           const ended = convertToFunctionErrorResponse(
             request.call.name,
             request.call.callId,
