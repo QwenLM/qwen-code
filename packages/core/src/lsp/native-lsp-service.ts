@@ -153,10 +153,10 @@ const JSON_RPC_METHOD_NOT_FOUND = -32601;
 
 /**
  * Whether a diagnostics pull failed because the server does not implement
- * pull diagnostics at all. The reply code is the only signal that works:
+ * the requested pull. The reply code remains necessary for undeclared support:
  * real servers that serve `textDocument/diagnostic` (pyright, gopls) do not
  * advertise `diagnosticProvider` for it, while servers that do not serve it
- * (typescript-language-server, clangd) answer `-32601` every time. Such a
+ * (typescript-language-server, clangd) can answer `-32601`. Such a
  * server says nothing about the queried file, so it neither vetoes another
  * server's answer nor backs a clean one — and it is still named when nothing
  * else answered, with wording that says what it actually did. Every other
@@ -792,7 +792,9 @@ export class NativeLspService {
     serverName?: string,
     uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName).filter(
+      ([, handle]) => this.diagnosticPullSupport(handle, uri) !== false,
+    );
     if (handles.length > 0) {
       return handles;
     }
@@ -800,9 +802,20 @@ export class NativeLspService {
       ([name]) => !serverName || name === serverName,
     );
     const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
-    const skipped = configured
-      .filter(([, handle]) => !this.serverDeclaredIrrelevant(handle, extension))
-      .map(([name, handle]) => describeLspServerState(name, handle));
+    const candidates = configured.filter(
+      ([, handle]) => !this.serverDeclaredIrrelevant(handle, extension),
+    );
+    const eligible = candidates.filter(
+      ([, handle]) => this.diagnosticPullSupport(handle, uri) !== false,
+    );
+    if (candidates.length > 0 && eligible.length === 0) {
+      throw new Error(
+        `No configured LSP server supports ${uri ? 'document' : 'workspace'} pull diagnostics`,
+      );
+    }
+    const skipped = eligible.map(([name, handle]) =>
+      describeLspServerState(name, handle),
+    );
     if (skipped.length > 0) {
       throw new Error(
         `No LSP server is ready to provide diagnostics (${boundedRejectionDetail(skipped)})`,
@@ -836,8 +849,18 @@ export class NativeLspService {
     return this.getReadyHandles(serverName).filter(
       ([name, handle]) =>
         !asked.some(([askedName]) => askedName === name) &&
+        this.diagnosticPullSupport(handle, uri) !== false &&
         !this.serverDeclaredIrrelevant(handle, extension),
     );
+  }
+
+  private diagnosticPullSupport(
+    handle: LspServerHandle,
+    uri: string | undefined,
+  ): boolean | undefined {
+    return uri
+      ? handle.diagnosticPull?.document
+      : handle.diagnosticPull?.workspace;
   }
 
   /**
@@ -1000,6 +1023,7 @@ export class NativeLspService {
         ([name, handle]) =>
           (!serverName || name === serverName) &&
           !queried.some(([queriedName]) => queriedName === name) &&
+          this.diagnosticPullSupport(handle, uri) !== false &&
           !this.serverDeclaredIrrelevant(handle, extension),
       )
       .map(([name, handle]) =>
