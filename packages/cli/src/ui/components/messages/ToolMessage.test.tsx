@@ -185,6 +185,7 @@ describe('<ToolMessage />', () => {
     name: 'test-tool',
     description: 'A tool for testing',
     resultDisplay: 'Test result',
+    renderOutputAsMarkdown: true,
     status: ToolCallStatus.Success,
     contentWidth: 80,
     confirmationDetails: undefined,

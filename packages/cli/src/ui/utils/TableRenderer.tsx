@@ -448,7 +448,9 @@ const TableText: React.FC<{
   const lines: string[] = [];
   if (maxHeight !== undefined) {
     for (const line of text.split('\n')) {
-      lines.push(...wrapText(line, contentWidth, { hard: true }));
+      for (const wrapped of wrapText(line, contentWidth, { hard: true })) {
+        lines.push(wrapped);
+      }
       if (lines.length > maxHeight) break;
     }
   }
@@ -503,13 +505,10 @@ export function renderTableText({
     return {
       rendered,
       renderedWidth: getCachedStringWidth(visible),
-      minWordWidth:
-        words.length > 0
-          ? Math.max(
-              ...words.map((w) => getCachedStringWidth(w)),
-              MIN_COLUMN_WIDTH,
-            )
-          : MIN_COLUMN_WIDTH,
+      minWordWidth: words.reduce(
+        (width, word) => Math.max(width, getCachedStringWidth(word)),
+        MIN_COLUMN_WIDTH,
+      ),
     };
   };
 
@@ -580,7 +579,7 @@ export function renderTableText({
     // Shave wider columns until the total fits.
     let excess = columnWidths.reduce((s, w) => s + w, 0) - availableWidth;
     while (excess > 0) {
-      const maxW = Math.max(...columnWidths);
+      const maxW = columnWidths.reduce((max, width) => Math.max(max, width), 0);
       if (maxW <= MIN_COLUMN_WIDTH) break;
       const idx = columnWidths.indexOf(maxW);
       const reduction = Math.min(excess, maxW - MIN_COLUMN_WIDTH);
@@ -680,7 +679,10 @@ export function renderTableText({
       wrapText(cell, columnWidths[colIndex]!, { hard: needsHardWrap }),
     );
 
-    const maxLines = Math.max(...cellLines.map((l) => l.length), 1);
+    const maxLines = cellLines.reduce(
+      (max, lines) => Math.max(max, lines.length),
+      1,
+    );
     // Vertical centering offset per cell
     const offsets = cellLines.map((l) => Math.floor((maxLines - l.length) / 2));
 
@@ -779,19 +781,21 @@ export function renderTableText({
   const headerRendered = headerMetrics.map((m) => m.rendered);
   const tableLines: string[] = [];
   tableLines.push(renderBorderLine('top'));
-  tableLines.push(...renderRowLines(headerRendered, true));
+  for (const line of renderRowLines(headerRendered, true)) {
+    tableLines.push(line);
+  }
   // With no data rows yet (a live table whose first row is still streaming),
   // skip the header/body divider so the box reads as a clean header — otherwise
   // the divider stacked directly on the bottom border looks like an empty row.
   if (rowMetrics.length > 0) {
     tableLines.push(renderBorderLine('middle'));
     rowMetrics.forEach((row, rowIndex) => {
-      tableLines.push(
-        ...renderRowLines(
-          row.map((m) => m.rendered),
-          false,
-        ),
-      );
+      for (const line of renderRowLines(
+        row.map((m) => m.rendered),
+        false,
+      )) {
+        tableLines.push(line);
+      }
       if (rowIndex < rows.length - 1) {
         tableLines.push(renderBorderLine('middle'));
       }
@@ -800,8 +804,9 @@ export function renderTableText({
   tableLines.push(renderBorderLine('bottom'));
 
   // ── Safety check: verify no line exceeds content width ──
-  const maxLineWidth = Math.max(
-    ...tableLines.map((line) => getCachedStringWidth(stripAnsi(line))),
+  const maxLineWidth = tableLines.reduce(
+    (max, line) => Math.max(max, getCachedStringWidth(stripAnsi(line))),
+    0,
   );
   if (rowMetrics.length > 0 && maxLineWidth > contentWidth - SAFETY_MARGIN) {
     // Fallback to vertical format to prevent terminal resize flicker. Skipped

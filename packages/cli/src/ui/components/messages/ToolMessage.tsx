@@ -917,8 +917,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
-  // Resumed shell output has no Markdown flag; stdout is still plain text.
-  renderOutputAsMarkdown ??= !isShellTool;
+  renderOutputAsMarkdown ??= false;
   if (isCappingShell) {
     renderOutputAsMarkdown = false;
   }

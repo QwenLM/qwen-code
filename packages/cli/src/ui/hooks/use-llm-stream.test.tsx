@@ -8902,7 +8902,7 @@ describe('useLlmStream', () => {
     expect(mockScheduleToolCalls).not.toHaveBeenCalled();
   });
 
-  it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+  it.each([false, true])('deduplicates TUI ids (%s)', async (markdown) => {
     const recordToolResult = vi.fn();
     (
       mockConfig as Config & {
@@ -9046,6 +9046,7 @@ describe('useLlmStream', () => {
         name: 'shell',
         displayName: 'Shell',
         description: 'Run a command',
+        isOutputMarkdown: markdown,
         build: vi.fn(),
       } as any,
       invocation: {
@@ -9084,6 +9085,9 @@ describe('useLlmStream', () => {
     expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
       toolResultParts,
     );
+    expect(
+      recordToolResult.mock.calls.map((call) => call[1].renderOutputAsMarkdown),
+    ).toEqual([markdown, false]);
     expect(
       recordToolResult.mock.calls.map((call) => call[1].executionStatus),
     ).toEqual(expect.arrayContaining(['success', 'not_started']));
@@ -9207,7 +9211,10 @@ describe('useLlmStream', () => {
     );
     expect(recordToolResult).toHaveBeenCalledWith(
       toolResultParts,
-      expect.objectContaining({ executionStatus: 'not_started' }),
+      expect.objectContaining({
+        executionStatus: 'not_started',
+        renderOutputAsMarkdown: false,
+      }),
       { goalContext: permit, provenance: 'goal_runtime' },
     );
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();

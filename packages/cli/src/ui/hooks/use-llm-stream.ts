@@ -4223,6 +4223,7 @@ export const useLlmStream = (
                     callId: request.callId,
                     status: response.error ? 'error' : 'success',
                     resultDisplay: response.resultDisplay,
+                    renderOutputAsMarkdown: false,
                     persistedOutputFiles: finalized[index].persistedOutputFiles,
                     artifacts: finalized[index].artifacts,
                     error: response.error,
@@ -5448,6 +5449,7 @@ export const useLlmStream = (
         request: ToolCallRequestInfo;
         response: ToolCallResponseInfo;
         status: 'success' | 'error' | 'cancelled';
+        renderOutputAsMarkdown: boolean;
       };
       const executableQueues = new Map<string, ReadyToolResponse[]>();
       for (const toolCall of llmTools) {
@@ -5456,6 +5458,11 @@ export const useLlmStream = (
           request: toolCall.request,
           response: toolCall.response,
           status: toolCall.status,
+          renderOutputAsMarkdown:
+            toolCall.invocation !== undefined &&
+            (toolCall.status !== 'error' ||
+              toolCall.request.name === ToolNames.ADVISOR) &&
+            (toolCall.tool?.isOutputMarkdown ?? false),
         });
         executableQueues.set(toolCall.request.callId, queue);
       }
@@ -5465,6 +5472,7 @@ export const useLlmStream = (
         queue.push({
           ...duplicate,
           status: duplicate.response.error ? 'error' : 'success',
+          renderOutputAsMarkdown: false,
         });
         duplicateQueues.set(duplicate.request.callId, queue);
       }
@@ -5507,26 +5515,29 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
-      orderedResponses.forEach(({ request, response, status }, index) => {
-        config.getChatRecordingService?.()?.recordToolResult?.(
-          finalizedResponses[index].responseParts,
-          {
-            callId: request.callId,
-            status,
-            resultDisplay: response.resultDisplay,
-            persistedOutputFiles:
-              finalizedResponses[index].persistedOutputFiles,
-            artifacts: finalizedResponses[index].artifacts,
-            error: response.error,
-            errorType: response.errorType,
-            executionStatus: response.executionStatus,
-          },
-          goalToolResultProvenance(
-            request,
+      orderedResponses.forEach(
+        ({ request, response, status, renderOutputAsMarkdown }, index) => {
+          config.getChatRecordingService?.()?.recordToolResult?.(
             finalizedResponses[index].responseParts,
-          ),
-        );
-      });
+            {
+              callId: request.callId,
+              status,
+              resultDisplay: response.resultDisplay,
+              renderOutputAsMarkdown,
+              persistedOutputFiles:
+                finalizedResponses[index].persistedOutputFiles,
+              artifacts: finalizedResponses[index].artifacts,
+              error: response.error,
+              errorType: response.errorType,
+              executionStatus: response.executionStatus,
+            },
+            goalToolResultProvenance(
+              request,
+              finalizedResponses[index].responseParts,
+            ),
+          );
+        },
+      );
 
       if (continuationWasCancelled()) {
         // This is the branch a cancelled Goal tool batch actually takes: the

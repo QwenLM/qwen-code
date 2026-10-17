@@ -184,6 +184,7 @@ export function fitPendingSlice(
   let codeContentWidth = contentWidth;
   let pendingMermaid = false;
   let lastLineEmpty = true;
+  let afterTable = false;
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
@@ -292,6 +293,15 @@ export function fitPendingSlice(
         continue;
       }
     }
+    if (
+      afterTable &&
+      !inMathBlock &&
+      (TABLE_ROW_RE.test(line) || TABLE_SEPARATOR_RE.test(line))
+    ) {
+      // The renderer resumes the table across code/math blocks; its cost changed.
+      kept = i;
+      break;
+    }
     if (renderVisualBlocks && isTableStart(allLines, i)) {
       let j = i + 2;
       while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
@@ -301,6 +311,12 @@ export function fitPendingSlice(
       const rows = allLines
         .slice(i + 2, j)
         .map((row) => splitMarkdownTableRow(TABLE_ROW_RE.exec(row)![1]!));
+      if (rows.length === 0) {
+        // MarkdownDisplay holds a table until its first data row arrives.
+        afterTable = true;
+        i = j;
+        continue;
+      }
       const layoutRows = (isStreaming: boolean) => {
         const renderedRows = renderTableText({
           headers,
@@ -347,6 +363,7 @@ export function fitPendingSlice(
         cost = Math.max(cost, completedCost);
       }
       rendered += cost;
+      afterTable = true;
       i = j;
       if (rendered >= budget) {
         kept = j;
@@ -354,7 +371,12 @@ export function fitPendingSlice(
       }
     } else {
       const listItem = /^([ \t]*)(?:([-*+])|(\d+)\.) +(.*)/.exec(line);
-      if (isBlank) {
+      if (afterTable && !inMathBlock) {
+        // The renderer consumes a table's closing text line as inline text.
+        rendered += isBlank ? 0 : estimateWrappedRows(line, contentWidth);
+        afterTable = false;
+        lastLineEmpty = false;
+      } else if (isBlank) {
         rendered++;
       } else if (listItem) {
         const taskItem = renderVisualBlocks

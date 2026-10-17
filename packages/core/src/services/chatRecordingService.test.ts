@@ -2099,6 +2099,27 @@ describe('ChatRecordingService', () => {
       expect(record.toolCallResult?.callId).toBe('call-1');
     });
 
+    it.each([false, true])(
+      'persists the Markdown display flag %s',
+      async (renderOutputAsMarkdown) => {
+        const record = await recordTool(
+          [fnResponse('test_tool', { output: '# result' }, 'call-1')],
+          {
+            callId: 'call-1',
+            status: 'success',
+            resultDisplay: '# result',
+            renderOutputAsMarkdown,
+          },
+        );
+        expect(record.toolCallResult?.renderOutputAsMarkdown).toBe(
+          renderOutputAsMarkdown,
+        );
+        expect(record.message?.parts).toEqual([
+          fnResponse('test_tool', { output: '# result' }, 'call-1'),
+        ]);
+      },
+    );
+
     it('preserves replayable artifacts without diagnostic metadata', async () => {
       const artifacts = [
         {

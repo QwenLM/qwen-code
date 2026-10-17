@@ -7,10 +7,19 @@
 ToolMessage previously disabled Markdown whenever a terminal-height budget was
 present. Even short question answers consequently displayed literal bold markers.
 Restore formatting without removing height constraints or changing tool execution.
-This is a CLI-only bugfix; no core, configuration, dependency, or protocol changes.
+The fix also preserves the tool's display mode in session records; it does not
+change configuration, dependencies, model messages, or tool execution.
 
 ## Design
 
+- Persist the actual tool-result Markdown flag at each recording boundary
+  (scheduler, TUI and headless batch recording, non-interactive Mod calls, and
+  ACP). Restore the recorded boolean
+  before considering the current tool declaration. Older records use the
+  registered tool's declaration; missing tools and standalone previews without
+  a recorded declaration default to plain text. Ordinary errors and synthetic
+  results remain plain text, preserving the live renderer's Advisor exception.
+  Do not infer a display mode from the tool name.
 - Shell output defaults to plain text, even when force-shown, focused, or
   uncapped. Explicit Markdown is honored only when the shell cap is inactive.
   Explicit plain text and sanitized raw-file details remain plain text.
@@ -95,5 +104,12 @@ Markdown tail slicer or layout cache is introduced.
 - Preserve shell caps, explicit plain text, and raw-file detail through regression
   tests. Run related tool, Markdown, table, estimator, MaxSizedBox, and streaming
   tests, plus build, bundle, typecheck, lint, and formatting checks.
+- Verify recorded true/false declarations survive resumption even when the tool
+  is missing or its current declaration differs. Cover legacy registered tools,
+  unknown tools, standalone previews, ordinary errors, synthetic Mod output,
+  and duplicate-call responses.
+  The resumed LSP heading/list/table fixture must stay literal, while a declared
+  Markdown result still formats. Reverting the renderer fallback must fail the
+  unknown-mode regression.
 - Distinguish component coverage from interactive E2E evidence; short-result
   Ctrl+S checks do not prove expansion of a long result.

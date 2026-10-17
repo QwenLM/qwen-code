@@ -89,7 +89,6 @@ describe('tool result Markdown with a real renderer', () => {
     const { lastFrame } = renderWithProviders(
       resultWithOverflow({
         ...baseProps,
-        renderOutputAsMarkdown: undefined,
         resultDisplay: Array.from(
           { length: 60 },
           (_, i) => `**row ${i}**`,
@@ -126,6 +125,96 @@ describe('tool result Markdown with a real renderer', () => {
   );
 
   it.each([
+    ['cell', '| A |\n| --- |\n| ' + 'x '.repeat(150000) + 'TAIL |'],
+    [
+      'header',
+      '|' + 'x|'.repeat(150000) + '\n|' + '-|'.repeat(150000) + '\nTAIL |',
+    ],
+  ])(
+    'keeps the tail of a large MCP progress table %s in an agent view',
+    async (kind, message) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          name: 'mcp__table',
+          isPending: true,
+          status: ToolCallStatus.Executing,
+          availableTerminalHeight: 12,
+          resultDisplay: {
+            type: 'mcp_tool_progress',
+            progress: 1,
+            message: '\n' + message,
+          },
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(lastFrame()).toContain(`overflow:${kind === 'cell' ? 1 : 0}`),
+      );
+      expect(lastFrame()).toContain('TAIL |');
+      if (kind === 'cell') expect(lastFrame()).toContain('lines hidden');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(8);
+    },
+  );
+
+  it.each([false, true])(
+    'bounds task items immediately after tables with pending=%s',
+    async (isPending) => {
+      const block = [
+        '| A | B |',
+        '| --- | --- |',
+        '| x | y |',
+        '- [ ] ' + 'x'.repeat(74),
+      ].join('\n');
+      const availableTerminalHeight = isPending ? 104 : 102;
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          isPending,
+          status: isPending ? ToolCallStatus.Executing : ToolCallStatus.Success,
+          availableTerminalHeight,
+          resultDisplay: Array<string>(12).fill(block).join('\n'),
+        }),
+      );
+      await vi.waitFor(() => expect(lastFrame()).toContain('overflow:0'));
+      expect(lastFrame()).toContain('| A | B |');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'bounds table rows resumed after a code block with pending=%s',
+    async (isPending) => {
+      const availableTerminalHeight = isPending ? 32 : 30;
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          isPending,
+          status: isPending ? ToolCallStatus.Executing : ToolCallStatus.Success,
+          availableTerminalHeight,
+          resultDisplay: [
+            '| A | B |',
+            '| --- | --- |',
+            '| x | y |',
+            '```text',
+            'x',
+            '```',
+            ...Array<string>(12).fill('| x | y |'),
+            'TAIL',
+          ].join('\n'),
+        }),
+      );
+      await vi.waitFor(() => expect(lastFrame()).toContain('overflow:0'));
+      expect(lastFrame()).toContain('TAIL');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(lastFrame()).toContain('| A | B |');
+    },
+  );
+
+  it.each([
     ['wide line', 'x'.repeat(3000), 'xxxx'],
     ['JSON', JSON.stringify({ value: 'x'.repeat(3000) }), 'xxxx'],
     ['Chinese', '中文'.repeat(1500), '中文'],
@@ -135,7 +224,6 @@ describe('tool result Markdown with a real renderer', () => {
       const { lastFrame } = renderWithProviders(
         resultWithOverflow({
           ...baseProps,
-          renderOutputAsMarkdown: undefined,
           resultDisplay,
           availableTerminalHeight: 9,
         }),
@@ -522,7 +610,7 @@ describe('tool result Markdown with a real renderer', () => {
   });
 
   it.each(['Shell', 'MCP'])(
-    'defaults uncapped %s output to the appropriate rendering mode',
+    'keeps uncapped %s output literal without a rendering declaration',
     (name) => {
       const { lastFrame } = renderWithProviders(
         resultWithOverflow({
@@ -536,7 +624,7 @@ describe('tool result Markdown with a real renderer', () => {
       );
       expect(lastFrame()).toContain('row 0');
       expect(lastFrame()).toContain('row 59');
-      expect((lastFrame() ?? '').includes('**row 59**')).toBe(name === 'Shell');
+      expect(lastFrame()).toContain('**row 59**');
     },
   );
 

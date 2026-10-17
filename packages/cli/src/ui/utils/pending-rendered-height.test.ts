@@ -360,18 +360,20 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(1);
   });
 
-  it('keeps a zero-data-row table horizontal on a narrow terminal (no vertical stub)', () => {
-    // Header + separator only (first data row still streaming). TableRenderer
-    // keeps the horizontal header box; renderVerticalFormat iterates data rows
-    // and would draw nothing. Even though the terminal is narrow (20 < 29), the
-    // estimator must charge horizontal chrome (5), not the 2-row vertical stub.
-    // intro(1)+5 = 6 > budget 4 → cut before it. Without the dataRows>0 guard it
-    // would charge 2, keep the table, and under-count the transient header box.
-    const lines = ['intro', '| A | B | C | D |', '| - | - | - | - |'];
-    const { keptLines, clipped } = fitPendingSlice(lines, 20, 4, CLAMP);
-    expect(clipped).toBe(true);
-    expect(keptLines).toBe(1);
-  });
+  it.each([false, true])(
+    'does not charge a hidden zero-data-row table with pending=%s',
+    (isPending) => {
+      const lines = ['intro', '| A | B | C | D |', '| - | - | - | - |', 'TAIL'];
+      expect(fitPendingSlice(lines, 20, 2, CLAMP, isPending)).toEqual({
+        keptLines: lines.length,
+        clipped: false,
+      });
+      expect(fitPendingSlice(lines, 20, 1, CLAMP, isPending)).toEqual({
+        keptLines: 3,
+        clipped: true,
+      });
+    },
+  );
 
   it('charges wrapped HORIZONTAL rows when cells wrap within MAX_ROW_LINES', () => {
     // 2 cols at width 40 → minHorizontalWidth 24, so horizontal. perColWidth =
