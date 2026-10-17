@@ -527,6 +527,205 @@ describe('runNonInteractive', () => {
     }
   }
 
+  it.each([
+    { reason: 'SIGINT', stderr: 'once' },
+    { reason: 'budget', stderr: 'once' },
+    { reason: 'SIGINT', stderr: 'always' },
+    { reason: 'budget', stderr: 'always' },
+    { reason: 'SIGINT', stderr: 'healthy' },
+    { reason: 'budget', stderr: 'healthy' },
+  ] as const)(
+    'preserves terminal output after $reason with stderr=$stderr',
+    async ({ reason, stderr }) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      if (reason === 'budget') {
+        vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(1);
+      }
+      const controller = new AbortController();
+      const beforeSigint = process.listeners('SIGINT');
+      const beforeSigterm = process.listeners('SIGTERM');
+      const beforeStdout = process.stdout.listeners('error');
+      const beforeAbort = getEventListeners(controller.signal, 'abort');
+      const stderrError = new Error('stderr write failed');
+      const exitSentinel = new Error('committed process.exit');
+      vi.mocked(process.exit).mockImplementation(() => {
+        throw exitSentinel;
+      });
+      let failedWrites = 0;
+      processStderrSpy.mockImplementation(() => {
+        if (
+          controller.signal.aborted &&
+          (stderr === 'always' || (stderr === 'once' && failedWrites === 0))
+        ) {
+          failedWrites++;
+          throw stderrError;
+        }
+        return true;
+      });
+      let notifyBackground: Parameters<
+        ReturnType<
+          Config['getBackgroundTaskRegistry']
+        >['setNotificationCallback']
+      >[0];
+      let notifyMonitor: Parameters<
+        ReturnType<Config['getMonitorRegistry']>['setNotificationCallback']
+      >[0];
+      mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          notifyBackground = callback;
+        },
+      );
+      mockMonitorRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          notifyMonitor = callback;
+        },
+      );
+      mockMonitorRegistry.abortAll.mockImplementation(
+        (options?: { notify?: boolean }) => {
+          if (options?.notify !== false) {
+            notifyMonitor?.('Monitor cancelled', 'Monitor cancelled', {
+              monitorId: 'abort-monitor',
+              toolUseId: 'monitor-tool',
+              status: 'cancelled',
+              eventCount: 1,
+            });
+          }
+        },
+      );
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'Partial answer' };
+        notifyBackground?.('Task completed', 'Task completed', {
+          agentId: 'abort-task',
+          toolUseId: 'task-tool',
+          status: 'completed',
+        });
+        notifyMonitor?.('Monitor running', 'Monitor running', {
+          monitorId: 'abort-monitor',
+          toolUseId: 'monitor-tool',
+          status: 'running',
+          eventCount: 1,
+        });
+        if (reason === 'SIGINT') {
+          process.emit('SIGINT');
+        } else {
+          await new Promise<void>((resolve) =>
+            controller.signal.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          );
+        }
+        // Resume the actual loop's abort guard after a real partial message.
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        };
+      });
+      let settled = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Abort during streaming',
+        'abort-stderr',
+        { abortController: controller },
+      )
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await vi.waitFor(() =>
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce(),
+        );
+        if (reason === 'budget') await vi.advanceTimersByTimeAsync(1_000);
+        // A re-entered exit latch must fail this assertion, not Vitest's timeout.
+        await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+        const frames = processStdoutSpy.mock.calls.flatMap(
+          ([chunk]) => JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+        );
+        expect(frames.filter((frame) => frame.type === 'result')).toEqual([
+          expect.objectContaining({ is_error: true }),
+        ]);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'system' && frame.subtype === 'task_notification',
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            data: expect.objectContaining({
+              task_id: 'abort-task',
+              status: 'completed',
+            }),
+          }),
+          expect.objectContaining({
+            data: expect.objectContaining({
+              task_id: 'abort-monitor',
+              status: 'running',
+            }),
+          }),
+          expect.objectContaining({
+            data: expect.objectContaining({
+              task_id: 'abort-monitor',
+              status: 'cancelled',
+            }),
+          }),
+        ]);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'stream_event' &&
+              frame.event.type === 'message_start',
+          ),
+        ).toHaveLength(1);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'stream_event' &&
+              frame.event.type === 'message_stop',
+          ),
+        ).toHaveLength(1);
+        expect(mockMonitorRegistry.abortAll).toHaveBeenCalledExactlyOnceWith();
+        expect(notifyBackground).toBeUndefined();
+        expect(notifyMonitor).toBeUndefined();
+        if (stderr === 'always') {
+          await expect(run).resolves.toBe(stderrError);
+          expect(failedWrites).toBe(2);
+          expect(process.exit).not.toHaveBeenCalled();
+        } else {
+          const code = reason === 'budget' ? 55 : 130;
+          await expect(run).resolves.toBe(exitSentinel);
+          expect(process.exit).toHaveBeenCalledExactlyOnceWith(code);
+          expect(failedWrites).toBe(stderr === 'once' ? 1 : 0);
+        }
+        expect(process.listeners('SIGINT')).toEqual(beforeSigint);
+        expect(process.listeners('SIGTERM')).toEqual(beforeSigterm);
+        expect(process.stdout.listeners('error')).toEqual(beforeStdout);
+        expect(getEventListeners(controller.signal, 'abort')).toEqual(
+          beforeAbort,
+        );
+      } finally {
+        vi.useRealTimers();
+        // Keep a failed no-reentry assertion from leaking this run's listeners.
+        for (const listener of process.listeners('SIGINT')) {
+          if (!beforeSigint.includes(listener)) process.off('SIGINT', listener);
+        }
+        for (const listener of process.listeners('SIGTERM')) {
+          if (!beforeSigterm.includes(listener))
+            process.off('SIGTERM', listener);
+        }
+        for (const listener of process.stdout.listeners('error')) {
+          if (!beforeStdout.includes(listener))
+            process.stdout.off('error', listener);
+        }
+      }
+    },
+  );
+
   it.each([false, true])(
     'scopes review lease cleanup to the ordinary runtime (sandbox=%s)',
     async (sandbox) => {
@@ -3811,6 +4010,94 @@ describe('runNonInteractive', () => {
         memoryTask,
       ]);
     });
+
+    it.each(['SIGINT', 'budget'] as const)(
+      'does not duplicate a delivered result when %s stderr fails during memory drain',
+      async (reason) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        if (reason === 'budget') {
+          vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(1);
+        }
+        mockLlmClient.sendMessageStream.mockReturnValue(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Completed answer' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+        const controller = new AbortController();
+        const beforeSigint = process.listeners('SIGINT');
+        const beforeAbort = getEventListeners(controller.signal, 'abort');
+        const stderrError = new Error('stderr write failed after result');
+        let failedWrites = 0;
+        processStderrSpy.mockImplementation(() => {
+          if (controller.signal.aborted && failedWrites === 0) {
+            failedWrites++;
+            throw stderrError;
+          }
+          return true;
+        });
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Complete then cancel',
+          'abort-after-result',
+          { abortController: controller, onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          expect(settled).toBe(false);
+          if (reason === 'budget') await vi.advanceTimersByTimeAsync(1_000);
+          else process.emit('SIGINT');
+          await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+          // This handler is already inside the outer catch. A stderr failure
+          // propagates; it must not recursively retry or duplicate the result.
+          await expect(run).resolves.toBe(stderrError);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(failedWrites).toBe(1);
+          const frames = processStdoutSpy.mock.calls.flatMap(
+            ([chunk]) => JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+          );
+          expect(frames.filter((frame) => frame.type === 'result')).toEqual([
+            expect.objectContaining({ is_error: false }),
+          ]);
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          // The unresolved task remains available for a later invocation.
+          expect(
+            mockLlmClient.consumePendingMemoryTaskPromises,
+          ).not.toHaveBeenCalled();
+          expect(
+            mockLlmClient.removePendingMemoryTaskPromises,
+          ).toHaveBeenCalledExactlyOnceWith([]);
+          expect(process.listeners('SIGINT')).toEqual(beforeSigint);
+          expect(getEventListeners(controller.signal, 'abort')).toEqual(
+            beforeAbort,
+          );
+        } finally {
+          vi.useRealTimers();
+          finishMemory(0);
+        }
+      },
+    );
 
     it.each([
       { interruption: 'during memory drain', mixed: false },

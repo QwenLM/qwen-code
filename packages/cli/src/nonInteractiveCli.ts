@@ -910,7 +910,10 @@ export async function runNonInteractive(
      * preserved. Both branches call into `process.exit(...)` so the
      * `unreachable` throw is only present to keep the type-checker honest.
      */
-    let abortExitStarted = false;
+    let abortExitCommitted = false;
+    const markAbortExitCommitted = (): void => {
+      abortExitCommitted = true;
+    };
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
       endActiveInteraction(exceeded ? 'error' : 'cancelled', {
@@ -929,8 +932,11 @@ export async function runNonInteractive(
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {
-        abortExitStarted = true;
-        await handleBudgetExceededError(config, exceeded);
+        await handleBudgetExceededError(
+          config,
+          exceeded,
+          markAbortExitCommitted,
+        );
         // Explicit unreachable — `handleBudgetExceededError` is `never`
         // in production (it calls `process.exit`). If a test stubs
         // `process.exit` or a future refactor makes the handler
@@ -945,8 +951,7 @@ export async function runNonInteractive(
       ) {
         throw abortController.signal.reason;
       }
-      abortExitStarted = true;
-      await handleCancellationError(config);
+      await handleCancellationError(config, markAbortExitCommitted);
       throw new Error('Operation cancelled.');
     };
 
@@ -3364,8 +3369,6 @@ export async function runNonInteractive(
         }
       }
     } catch (error) {
-      // A terminating abort handler must not enter exit cleanup a second time.
-      if (abortExitStarted) throw error;
       const budgetExceeded = budgetEnforcer.getExceeded();
       const failureMessage =
         error instanceof Error ? error.message : String(error);
@@ -3479,6 +3482,8 @@ export async function runNonInteractive(
           );
         }
       }
+      // Preserve terminal output without entering exit cleanup a second time.
+      if (abortExitCommitted) throw error;
       // Abort or budget expiry can arrive during the memory wait, after the
       // result was written. Re-read the reason without emitting another result.
       if (abortController.signal.aborted) {
