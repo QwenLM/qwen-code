@@ -1326,13 +1326,8 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
     }
     if (key === 'agent') {
       // Identity stamp SubAgentTracker pairs with the same two keys. Merging
-      // never reads it — the completed-turn path still merges by
-      // parentToolCallId alone — so an unenrolled key here would split every
-      // streamed subagent delta into its own live segment while the
-      // completed turn merged them, which is the divergence the
-      // `subagentType` case above exists to forbid. Only the container shape
-      // is checked: field-level validation belongs to the consumer that reads
-      // identity (`extractAgentIdentity`), not to a merge gate.
+      // never reads it, so an unenrolled key would split every streamed
+      // subagent delta in the live view only.
       if (typeof value !== 'object' || value === null) return true;
       continue;
     }

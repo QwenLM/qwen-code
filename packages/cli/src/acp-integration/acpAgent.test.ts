@@ -30675,15 +30675,44 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     await agent.beginManagedShutdown().writerShutdown;
 
-    // A queued report is already marked read in the on-disk mailbox, and
-    // `appendRecord` drops silently once the writer has closed — so landing it
-    // only counts ahead of the writer loop.
+    // Already marked read on disk: it only counts ahead of the writer loop.
     expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
     expect(
       liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
     ).toBeLessThan(
       vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still closes the writers when a peer flush throws during managed shutdown', async () => {
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      flushPendingPeerNotifications: vi.fn(() => {
+        throw new Error('mailbox write failed');
+      }),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    // An unguarded throw would abort the session loop before this session's
+    // Config reached the writer-close loop, leaving its writer open.
+    await agent.beginManagedShutdown().writerShutdown;
+
+    expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
+      handoff: true,
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

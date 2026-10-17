@@ -524,6 +524,87 @@ describe('teammate_activity status events', () => {
       'status',
       'status',
     ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['first', 'second']);
+  });
+
+  it('starts a new row after a turn boundary instead of rewriting the old one', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        activity('turn one work', '/root/qa'),
+        { type: 'user.text.delta', text: 'next question' },
+        activity('turn two work', '/root/qa'),
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'user',
+      'status',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['turn one work', 'next question', 'turn two work']);
+  });
+
+  it('finalises the streaming block on a coalesced row that did not opt out', () => {
+    // Clients may dispatch these events themselves, so the reducer must key
+    // off the event rather than off whether a row already existed.
+    const plain = (text: string): DaemonUiEvent => ({
+      type: 'status',
+      source: 'teammate_activity',
+      text,
+      agent: { agentName: '/root/qa', depth: 1, kind: 'teammate' },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answering' },
+        plain('first'),
+        { type: 'assistant.text.delta', text: ' more' },
+        plain('second'),
+        { type: 'assistant.text.delta', text: ' tail' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'assistant',
+      'status',
+      'assistant',
+      'assistant',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['answering', 'second', ' more', ' tail']);
+  });
+
+  it('starts a new row after a branch marker instead of rewriting the old one', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        activity('before the branch', '/root/qa'),
+        {
+          type: 'session.branched',
+          sourceSessionId: 'session-a',
+          newSessionId: 'session-b',
+          displayName: 'retry',
+        },
+        activity('after the branch', '/root/qa'),
+      ],
+      { now: 1 },
+    );
+
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual([
+      'before the branch',
+      'Branched conversation "retry". You are now in the branch.',
+      'after the branch',
+    ]);
   });
 });
 

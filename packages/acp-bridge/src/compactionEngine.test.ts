@@ -208,6 +208,7 @@ type ChunkIdentity = {
   parentToolCallId?: string;
   subagentType?: string;
   sourceRecordIds?: string[];
+  agent?: unknown;
   promptId?: string;
   originatorClientId?: string;
   sessionId?: string;
@@ -221,7 +222,8 @@ function withIdentity(
   if (
     identity.parentToolCallId !== undefined ||
     identity.subagentType !== undefined ||
-    identity.sourceRecordIds !== undefined
+    identity.sourceRecordIds !== undefined ||
+    identity.agent !== undefined
   ) {
     update['_meta'] = {
       ...(identity.parentToolCallId === undefined
@@ -230,6 +232,7 @@ function withIdentity(
       ...(identity.subagentType === undefined
         ? {}
         : { subagentType: identity.subagentType }),
+      ...(identity.agent === undefined ? {} : { agent: identity.agent }),
       ...(identity.sourceRecordIds === undefined
         ? {}
         : {
@@ -247,23 +250,6 @@ function withIdentity(
       ...(event.data as Record<string, unknown>),
     };
   }
-  return event;
-}
-
-/**
- * The meta SubAgentTracker stamps on every streamed subagent delta: the two
- * merge keys plus the identity the projection adds.
- */
-function withAgentStamp(
-  event: BridgeEvent,
-  agent: unknown = { agentName: '/root/explore', depth: 1, kind: 'subagent' },
-): BridgeEvent {
-  const update = (event.data as { update: Record<string, unknown> }).update;
-  update['_meta'] = {
-    parentToolCallId: 'tool-a',
-    subagentType: 'explore',
-    agent,
-  };
   return event;
 }
 
@@ -965,9 +951,14 @@ describe('TurnBoundaryCompactionEngine', () => {
     });
 
     it('merges consecutive subagent chunks carrying the agent identity stamp', () => {
+      const identity = {
+        parentToolCallId: 'tool-a',
+        subagentType: 'explore',
+        agent: { agentName: '/root/explore', depth: 1, kind: 'subagent' },
+      };
       const engine = new TurnBoundaryCompactionEngine();
-      engine.ingest(withAgentStamp(makeTextChunk(1, 'first')));
-      engine.ingest(withAgentStamp(makeTextChunk(2, 'second')));
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), identity));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), identity));
 
       const snap = engine.snapshot();
       expect(snap.liveJournal).toHaveLength(1);
@@ -976,9 +967,14 @@ describe('TurnBoundaryCompactionEngine', () => {
     });
 
     it('keeps chunks discrete when the agent stamp is not a record', () => {
+      const identity = {
+        parentToolCallId: 'tool-a',
+        subagentType: 'explore',
+        agent: 'explore',
+      };
       const engine = new TurnBoundaryCompactionEngine();
-      engine.ingest(withAgentStamp(makeTextChunk(1, 'first'), 'explore'));
-      engine.ingest(withAgentStamp(makeTextChunk(2, 'second'), 'explore'));
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), identity));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), identity));
 
       const snap = engine.snapshot();
       expect(snap.liveJournal).toHaveLength(2);

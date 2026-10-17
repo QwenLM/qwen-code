@@ -1703,10 +1703,7 @@ function appendUnrecognizedDiagnostic(
  * `teammate_activity` arrives once per teammate tool call *and* per tool
  * result and is never persisted, so one block per event spends the `maxBlocks`
  * budget on rows a reload will not contain and `trimTranscriptState` then
- * evicts real conversation from the front to make room — the second symptom
- * the sidechannel doc above names. Keep one row per teammate and refresh it,
- * so N events cost O(teammates) blocks. Returns false when the event is not
- * coalescable and the caller must append normally.
+ * evicts real conversation from the front.
  */
 function coalesceTeammateActivity(
   state: DaemonTranscriptState,
@@ -1719,8 +1716,12 @@ function coalesceTeammateActivity(
   if (!agentName) return false;
   for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
     const candidate = state.blocks[i]!;
+    // Stop at a segment boundary: a row above it keeps the text the reader saw
+    // there instead of being rewritten with content from the new segment.
+    if (candidate.kind === 'user') return false;
+    if (candidate.kind !== 'status') continue;
+    if (candidate.source === 'session_branched') return false;
     if (
-      candidate.kind !== 'status' ||
       candidate.source !== 'teammate_activity' ||
       candidate.agent?.agentName !== agentName
     ) {
@@ -1731,12 +1732,13 @@ function coalesceTeammateActivity(
     const bytesBefore = estimateBlockBytes(block);
     block.text = truncateText(state, block.id, undefined, event.text);
     if (event.data !== undefined) block.data = event.data;
-    if (event.eventId !== undefined) block.eventId = event.eventId;
     block.updatedAt = state.now;
     state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
-    // Same pointer discipline as `appendStatusBlock`'s opt-out branch: the
-    // streaming assistant block stays active, the user pointer resets.
-    state.activeUserBlockId = undefined;
+    // Origin envelope (`createdAt`, `eventId`, `serverTimestamp`) stays pinned
+    // to the first event: `buildEventOrderKeys` derives a second ordering from
+    // `eventId`, so refreshing it would make the two orderings disagree.
+    if (event.clearActiveText !== false) clearActiveText(state);
+    else state.activeUserBlockId = undefined;
     return true;
   }
   return false;

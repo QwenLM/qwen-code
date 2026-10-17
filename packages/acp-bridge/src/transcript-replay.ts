@@ -2709,14 +2709,11 @@ function agentIdentityFromTaskExecution(
   if (typeof subagentName !== 'string' || subagentName.length === 0) {
     return undefined;
   }
-  // A blocked spawn persists the *raw* model-supplied `subagent_type`
-  // (`AgentTool.buildSpawnBlockedResult`), which never reached
-  // `SubagentValidator`. It is also the only frame with no `executionMode`:
-  // every display set after admission carries one next to the validated name,
-  // including the `'failed'` frame a real run produces when it throws. So
-  // `executionMode` — not the status — separates "never ran" from "ran and
-  // failed"; rejecting the whole `'failed'` class would strip identity from a
-  // subagent the live wire did attribute.
+  // `executionMode` is set only on the display built once `SubagentValidator`
+  // has resolved `subagentConfig.name`, and every frame that spreads an
+  // admitted display inherits it. `buildSpawnBlockedResult` — the only
+  // producer of the raw model-supplied `subagent_type` — sets none. So this
+  // field, not `status`, separates a validated name from a raw one.
   const started =
     display['executionMode'] === 'foreground' ||
     display['executionMode'] === 'background';

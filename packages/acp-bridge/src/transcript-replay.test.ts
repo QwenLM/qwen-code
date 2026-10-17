@@ -2253,11 +2253,8 @@ describe('createTranscriptReplayMachine', () => {
 
   it('attributes a subagent that ran and then failed', () => {
     // A run that throws returns `{ ...currentDisplay, status: 'failed' }`, so
-    // the frame keeps the validated name *and* the `executionMode` that only
-    // post-admission displays carry. `buildSpawnBlockedResult` carries
-    // neither. Rejecting the whole `'failed'` class would unattribute a
-    // subagent the live wire did attribute. Single valid segment: only the
-    // started/status guard can reject this fixture.
+    // the frame keeps the validated name *and* its `executionMode`. Single
+    // valid segment: only the started/status guard can reject this fixture.
     for (const executionMode of ['foreground', 'background'] as const) {
       const machine = createTranscriptReplayMachine();
       const result = updates(
