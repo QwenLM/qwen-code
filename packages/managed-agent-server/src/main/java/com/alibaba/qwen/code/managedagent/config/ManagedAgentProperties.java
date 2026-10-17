@@ -981,6 +981,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
+        private Map<String, String> previousCredentialKeys =
+                new LinkedHashMap<>();
         private String nodeExecutable = "";
         private String workerEntry = "";
         private String staticEndpoint = "";
@@ -1260,6 +1262,15 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCredentialKey(String credentialKey) {
             this.credentialKey = credentialKey;
+        }
+
+        public Map<String, String> getPreviousCredentialKeys() {
+            return previousCredentialKeys;
+        }
+
+        public void setPreviousCredentialKeys(
+                Map<String, String> previousCredentialKeys) {
+            this.previousCredentialKeys = previousCredentialKeys;
         }
 
         public String getNodeExecutable() {
