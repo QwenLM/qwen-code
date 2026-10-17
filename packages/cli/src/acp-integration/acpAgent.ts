@@ -10657,17 +10657,11 @@ class QwenAgent implements Agent {
           }
           switch (kind) {
             case 'permissions': {
-              // A settings reload alone does not touch the live permission
-              // managers, so diff each scope's own rule set and sync it the
-              // way the permission-rule route does. The merged view carries
-              // workspace rules too, which the User pass would then apply to
-              // every session.
-              const userBefore = readPermissionRuleSet(
-                this.settings.user.settings,
-              );
-              const workspaceBefore = readPermissionRuleSet(
-                this.settings.workspace.settings,
-              );
+              // The live manager holds the scopes' rules merged, without
+              // provenance, so diff the effective set: a rule another scope
+              // still provides must never be removed. The workspace filter
+              // stays on the apply.
+              const before = readPermissionRuleSet(this.settings.merged);
               if (
                 !this.settings.reloadScopesFromDiskAtomically([
                   SettingScope.User,
@@ -10679,15 +10673,8 @@ class QwenAgent implements Agent {
                 );
               }
               this.syncLivePermissionManagers(
-                userBefore,
-                readPermissionRuleSet(this.settings.user.settings),
-                SettingScope.User,
-                changeCwd,
-                true,
-              );
-              this.syncLivePermissionManagers(
-                workspaceBefore,
-                readPermissionRuleSet(this.settings.workspace.settings),
+                before,
+                readPermissionRuleSet(this.settings.merged),
                 SettingScope.Workspace,
                 changeCwd,
                 true,
