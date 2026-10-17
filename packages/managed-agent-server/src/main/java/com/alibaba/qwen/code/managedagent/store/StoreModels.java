@@ -162,7 +162,9 @@ public final class StoreModels {
         DELETE,
         ACTION_RESPONSE,
         CWD_CHANGE,
-        TASK_CANCEL
+        TASK_CANCEL,
+        SUBMIT_INPUT,
+        CANCEL
     }
 
     /**
@@ -238,8 +240,17 @@ public final class StoreModels {
             String operationId) {
     }
 
+    /**
+     * {@code operationId} names the durable operation of a Turn input or
+     * cancel command (D7-1); it is null for every other command and for a
+     * command recorded before the operation existed.
+     */
     public record Admission(String sessionId, String turnId,
-            boolean replayed, boolean commandEffect) {
+            boolean replayed, boolean commandEffect, String operationId) {
+        public Admission(String sessionId, String turnId, boolean replayed,
+                boolean commandEffect) {
+            this(sessionId, turnId, replayed, commandEffect, null);
+        }
     }
 
     public record SessionPage(List<SessionRecord> sessions,

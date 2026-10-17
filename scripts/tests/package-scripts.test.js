@@ -1157,6 +1157,81 @@ describe('package scripts', () => {
     expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
   });
 
+  it('drops DAC capabilities for root unit tests on both CI commands', () => {
+    // The permission-bit probes in the workspaces and scripts/tests ask the
+    // kernel, so on a root lane that keeps these capabilities every case
+    // they gate skips, without failing.
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    // The step's code, one command per entry: indentation, blank lines and
+    // comments do not change what runs, a commented-out line does.
+    const code = step
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    const setpriv =
+      "test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')";
+    const branch = code.indexOf('if [ "$(id -u)" -eq 0 ]; then');
+    expect(branch).toBeGreaterThan(0);
+    expect(code.slice(branch - 1, branch + 5)).toEqual([
+      'test_runner=()',
+      'if [ "$(id -u)" -eq 0 ]; then',
+      'chown -R 0 "$GITHUB_WORKSPACE" "$HOME"',
+      "echo 'Dropping DAC override capabilities for root unit tests'",
+      setpriv,
+      'fi',
+    ]);
+    // Nothing else touches it (no unset, read or reset), and both test
+    // commands run under it, with no unwrapped copy beside them.
+    expect(code.filter((line) => /\btest_runner\b/.test(line))).toEqual([
+      'test_runner=()',
+      setpriv,
+      '"${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"',
+      '"${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"',
+    ]);
+    expect(
+      code.filter((line) =>
+        /\bnpm run test:(?:ci:workspaces|scripts)\b/.test(line),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('keeps every copy of the permission-bit probe identical', () => {
+    // The probe is copied, not shared: each package that uses it keeps its
+    // own copy, and cli, core and browser-use also keep its tests (wecom
+    // inlines a smaller probe for its one case). A fix to one copy has to
+    // reach the others, or the packages measure differently.
+    const copies = {
+      'permission-bits.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+        'packages/sdk-typescript/test/test-utils',
+        'integrations/test-failure-explorer/src/test-utils',
+      ],
+      'permission-bits.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+      'permission-bits.mocked-fs.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+    };
+    for (const [file, dirs] of Object.entries(copies)) {
+      const [reference, ...others] = dirs.map((dir) =>
+        readFileSync(path.join(root, dir, file), 'utf8'),
+      );
+      others.forEach((text, i) => {
+        expect(text, `${file}: ${dirs[i + 1]} vs ${dirs[0]}`).toBe(reference);
+      });
+    }
+  });
+
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
     // #10490's run 3 was cancelled at ~60 minutes, leaving behind
     // orphaned test processes; a stall reads as a timeout, not a failure.
