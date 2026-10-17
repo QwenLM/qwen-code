@@ -365,9 +365,9 @@ jobs:
           if-no-files-found: 'error'
           retention-days: 14
 
-      # The host's docker cleanup service only reaps exited/dead containers and
-      # leftovers older than a day, so a cancelled job would strand a running
-      # mysqld on the shared pool.
+      # The host's docker cleanup service reaps qwen-code-* containers only
+      # after a 24h age gate, so a cancelled job would strand a running mysqld
+      # on the shared pool for up to a day.
       - name: 'Remove the MySQL container'
         if: '${{ always() }}'
         shell: 'bash'
