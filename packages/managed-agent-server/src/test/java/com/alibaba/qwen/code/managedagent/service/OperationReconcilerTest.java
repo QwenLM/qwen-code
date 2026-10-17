@@ -52,6 +52,8 @@ class OperationReconcilerTest {
             TENANT, SESSION, CANCEL, "TASK_CANCEL");
     private static final ParkedOperation PARKED_INPUT = new ParkedOperation(
             TENANT, SESSION, INPUT, "SUBMIT_INPUT");
+    private static final ParkedOperation PARKED_TITLE = new ParkedOperation(
+            TENANT, SESSION, "rename:3", "RENAME");
 
     private AgentStateStore store;
     private ManagedExtensionRecordStore records;
@@ -81,7 +83,8 @@ class OperationReconcilerTest {
                 Executors.newVirtualThreadPerTaskExecutor(), clock,
                 new ManagedAgentProperties());
         reconciler = new OperationReconciler(store,
-                List.of(cancels, new TurnInputEvidence(store)), DIRECT,
+                List.of(cancels, new TurnInputEvidence(store),
+                        new RenameEvidence(store)), DIRECT,
                 clock);
     }
 
@@ -144,6 +147,30 @@ class OperationReconcilerTest {
         reconciler.reconcile();
         verify(store).settleParkedOperation(PARKED_INPUT,
                 AcceptanceVerdict.committed(), RECHECK_AT);
+        assertNothingSent();
+    }
+
+    // A parked title keeps its claim for its own late reply, so the generic
+    // settle, which only takes unclaimed rows, would never match it: the
+    // title settles through its own store call, from the journal only.
+    @Test
+    void aParkedTitleSettlesThroughItsOwnSettle() {
+        when(store.findParkedOperations(anyInt()))
+                .thenReturn(List.of(PARKED_TITLE));
+        when(store.renameAcceptance(PARKED_TITLE)).thenReturn(
+                Optional.of(AcceptanceVerdict.unknown()),
+                Optional.of(AcceptanceVerdict.committed()), Optional.empty());
+        reconciler.reconcile();
+        verify(store).settleParkedRename(PARKED_TITLE,
+                AcceptanceVerdict.unknown(), RECHECK_AT);
+        reconciler.reconcile();
+        verify(store).settleParkedRename(PARKED_TITLE,
+                AcceptanceVerdict.committed(), RECHECK_AT);
+        // Settled since the scan: nothing is recorded.
+        reconciler.reconcile();
+        verify(store, never()).settleParkedOperation(any(), any(), anyLong());
+        verify(store, never()).deliverableRenames(anyLong());
+        verify(store, never()).claimRename(any(), any(), any());
         assertNothingSent();
     }
 
