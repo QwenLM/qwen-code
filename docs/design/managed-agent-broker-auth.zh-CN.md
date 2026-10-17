@@ -8,7 +8,7 @@
 
 ## 1. 问题陈述
 
-Managed Agent Runtime Broker（`packages/sdk-java/managed-agent-server`）
+Managed Agent Runtime Broker（`packages/managed-agent-server`）
 目前信任客户端自证的身份和客户端自铸的凭证。当 broker 在没有网关的
 情况下可达时，五个缺口组合成对任意 hosted 会话持久 transcript 的
 跨租户读写：
@@ -158,11 +158,10 @@ harness。
   载荷携带下发的 writer 凭证）。
 - `tool-publication.enabled` 且 `service-base-url` 为非回环明文
   http（runtime 携带 writer 凭证访问发布面）。
-- `session-store.enabled` 且 `session-store.base-url` 的主机落在客户端
-  的纯字面量回环集（`localhost`、`*.localhost`、`127.0.0.0/8`、
-  `[::1]`）之外、又未设 `session-store.allow-insecure-http` 的明文
-  http——所有 harness 都会在 attach 时拒绝该 URL，因此 broker 在
-  启动时直接拒绝。
+- `session-store.enabled` 且 `session-store.base-url` 的主机落在纯
+  字面量回环集（§4.5）之外、又未设 `session-store.allow-insecure-http`
+  的明文 http——所有 harness 都会在 attach 时拒绝该 URL，因此 broker
+  在启动时直接拒绝。
 
 `allow-insecure-bind` 会同时停用其中四项守卫（公网绑定、内部面
 binding key、harness 传输、发布面传输）；启动 posture 行以
@@ -267,11 +266,42 @@ VARBINARY(2048) NULL;`（与
   这使 hosted 审批应答能通过 HTTP 走通，并把 workspace 审批绑定到
   已认证 actor（G1）而非自证头身份，堵住“可猜测 actor”缺口。
 
-### 4.5 TypeScript 客户端传输守卫（G5）
+### 4.5 Session store 传输守卫（G5）
 
-`ManagedSessionStoreHttpClient` 拒绝协议为 `http:` 且主机名非回环
-（`localhost`、`*.localhost`、`127.0.0.0/8`、`[::1]`）的 base URL，
-除非传入新选项 `allowInsecureHttp: true`。
+协议为 `http:` 且主机名非回环的 session store base URL 一律被拒绝，
+除非显式 opt-in 明文传输。三道关卡执行这一规则：
+
+1. 路由边界。`parseBridgeManagedSessionStore`（acp-bridge）解析
+   hosted `POST /session` 与 `POST /session/:id/load` 路由的
+   `managedSessionStore` 描述符。它先校验 `allowInsecureHttp` 的类型，
+   非布尔值以 `managedSessionStore.allowInsecureHttp is invalid` 拒绝；
+   再拒绝非回环的明文 base URL，除非 `allowInsecureHttp` 为 `true`。
+   路由在打开会话之前应答这两种拒绝：状态码 `400`、错误码
+   `invalid_managed_session_store`，并附带错误信息。
+2. Store 客户端。由 `createHttpManagedSessionStores` 构造的
+   `ManagedSessionStoreHttpClient` 对其 `baseUrl` 与 `allowInsecureHttp`
+   选项执行同一规则，因此守卫对导出工厂的任何直接调用方都成立，
+   而不只是 hosted 路由；在 hosted 路由上，它的拒绝同样以 `400` 和该
+   错误码应答。
+3. Broker 启动。启用的 session store 若对外通告回环集之外的明文 base
+   URL、且未设 `session-store.allow-insecure-http`，`BrokerSecurity`
+   拒绝启动（§4.1），因为所有 harness 都会在 attach 时拒绝该 URL。
+
+两道 TypeScript 关卡都在 WHATWG URL 解析之后对主机名分类；解析会把
+IPv4 简写与十六进制形式（`127.1`、`0x7f.1`）折叠为 `127.0.0.1`：
+回环为 `localhost`、`*.localhost`、`127.0.0.0/8` 内的点分四段 IPv4
+字面量，或 `[::1]`。仅以 `127.` 开头的 DNS 名（`127.example.com`、
+`127.foo.example.test`）不是回环。Broker 按原样匹配主机文本，不做
+规范化，也不查询解析器：`localhost`、`*.localhost`、`[::1]`，或
+`127` 后跟一到三段以点分隔的十进制数字。每道关卡各自维护分类函数
+（core `isLoopbackHostname`、acp-bridge
+`isManagedSessionStoreLoopback`、broker `isLiteralLoopbackHost`），
+因此修改回环集必须同时更新这三处。
+
+决策：IPv4 映射回环（`[::ffff:127.0.0.1]`，WHATWG URL 将其规范化为
+`[::ffff:7f00:1]`）不在三道关卡任何一道的回环集内；此类 URL 必须使用
+HTTPS 或 opt-in。
+
 `BridgeManagedSessionStore` 新增对应可选布尔字段
 `allowInsecureHttp`，由 broker 的
 `qwen.managed-agent.session-store.allow-insecure-http` 配置
@@ -349,8 +379,12 @@ false。报错信息点名该选项，使补救方式可被发现。客户端
    无属主记录的会话（open 模式匿名创建，或 V40 之前创建）允许租户内
    任意调用方应答，与其读 ACL 一致；迁移前的 workspace 会话保持现有
    行为。
-5. `createHttpManagedSessionStores({ baseUrl: 'http://<非回环>' })`
-   抛出异常，除非 `allowInsecureHttp: true`。
+5. `parseBridgeManagedSessionStore({ baseUrl: 'http://<非回环>' })` 与
+   `createHttpManagedSessionStores({ baseUrl: 'http://<非回环>' })`
+   抛出异常，除非 `allowInsecureHttp: true`；hosted `POST /session`
+   路由以状态码 `400`、错误码 `invalid_managed_session_store` 应答解析器
+   的拒绝；解析器以 invalid 拒绝非布尔的 `allowInsecureHttp`；IPv4
+   映射回环按非回环处理。
 
 ## 9. 待决问题
 

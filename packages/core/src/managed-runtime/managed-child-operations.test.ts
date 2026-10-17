@@ -30,6 +30,7 @@ import {
   childDispatchBody,
   childFailBody,
   childLaunchBody,
+  childRecoveryBlockedBody,
   childSettleCompletedBody,
   childStopRequestedBody,
   decodeChildLaunchEnvelope,
@@ -165,6 +166,7 @@ describe('managed child operations (H4b)', () => {
       envelopeBytes: 100,
       workspaceMode: 'shared',
       childWorkspaces: false,
+      childSnapshots: false,
       sameDefinition: true,
     };
 
@@ -184,7 +186,7 @@ describe('managed child operations (H4b)', () => {
         admitted: false,
         reason: 'workspace_mode',
       });
-      // The capability never widens the mode set: snapshot waits for I3.
+      // Child Workspaces alone never admit a snapshot (#13753 I3).
       expect(
         admitChildLaunch({
           ...base,
@@ -192,6 +194,36 @@ describe('managed child operations (H4b)', () => {
           childWorkspaces: true,
         }),
       ).toEqual({ admitted: false, reason: 'workspace_mode' });
+    });
+
+    it('admits a snapshot launch only on a host that serves child Workspaces and snapshots', () => {
+      expect(
+        admitChildLaunch({
+          ...base,
+          workspaceMode: 'snapshot',
+          childWorkspaces: true,
+          childSnapshots: true,
+        }),
+      ).toEqual({ admitted: true });
+      // The snapshot flag counts only beside the child Workspace one.
+      expect(
+        admitChildLaunch({
+          ...base,
+          workspaceMode: 'snapshot',
+          childSnapshots: true,
+        }),
+      ).toEqual({ admitted: false, reason: 'workspace_mode' });
+      // And it changes nothing for the other modes.
+      expect(
+        admitChildLaunch({
+          ...base,
+          workspaceMode: 'worktree',
+          childSnapshots: true,
+        }),
+      ).toEqual({ admitted: false, reason: 'workspace_mode' });
+      expect(admitChildLaunch({ ...base, childSnapshots: true })).toEqual({
+        admitted: true,
+      });
     });
 
     it('refuses each violation with its own reason', () => {
@@ -347,6 +379,49 @@ describe('managed child operations (H4b)', () => {
             }),
         ),
       );
+    });
+
+    it('builds the recovery-blocked settlement over a lost generation', () => {
+      const bodies = chain(
+        (p) =>
+          childDispatchBody(p, {
+            dispatchId: 'dispatch-1',
+            runtime: BINDING,
+          }),
+        (p) => childAttachBody(p, { childSessionId: 'session-child' }),
+        (p) =>
+          childRecoveryBlockedBody(p, {
+            reason: 'runtime_lost',
+            childSessionId: 'session-child',
+          }),
+      );
+      expectValidChain(bodies);
+      const blocked = parseChildRun(bodies[3]!);
+      if (blocked.kind !== 'child_agent') throw new Error('kind');
+      expect(blocked.run.state).toBe('recovery_blocked');
+      expect(blocked.run.reason).toBe('runtime_lost');
+      expect(blocked.run.execution).toBe('outcome_unknown');
+      // Blocked, never ended: no stop reason, and the delivery stays open
+      // — the run can still settle if evidence of it ever arrives.
+      expect(blocked.stopReason).toBeNull();
+      expect(blocked.run.delivery).toEqual({
+        target: 'session',
+        state: 'planned',
+      });
+      // A replay restating the same Session is the same revision; a
+      // different one conflicts instead of renaming it.
+      expect(
+        childRecoveryBlockedBody(bodies[2]!, {
+          reason: 'runtime_lost',
+          childSessionId: 'session-child',
+        }),
+      ).toEqual(bodies[3]);
+      expect(() =>
+        childRecoveryBlockedBody(bodies[2]!, {
+          reason: 'runtime_lost',
+          childSessionId: 'session-other',
+        }),
+      ).toThrow(ManagedSessionRecordError);
     });
 
     it('names the minted Session on never-started settlements', () => {
