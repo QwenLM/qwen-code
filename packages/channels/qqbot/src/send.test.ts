@@ -49,7 +49,7 @@ const {
     mockSendQQMessage: vi.fn(),
     mockFetchAccessToken: vi.fn(),
     mockFetchGatewayUrl: vi.fn(),
-    mockBaseHandleInbound: vi.fn(() => Promise.resolve()),
+    mockBaseHandleInbound: vi.fn((_env: Envelope) => Promise.resolve()),
     MockWebSocket,
     mockWebSockets,
   };
@@ -108,7 +108,7 @@ vi.mock('@qwen-code/channel-base', async () => {
         this.router = (options?.['router'] as Record<string, unknown>) ?? {};
         this.baseOptions = options ?? ({} as Record<string, unknown>);
       }
-      protected handleInbound(env: unknown): Promise<void> {
+      protected handleInbound(env: Envelope): Promise<void> {
         return mockBaseHandleInbound(env) as Promise<void>;
       }
       protected getResponseMessageId(_sessionId: string): string | undefined {
@@ -145,6 +145,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     sanitizePromptText: real.sanitizePromptText,
     sanitizeLogText: real.sanitizeLogText,
     truncateCodePoints: real.truncateCodePoints,
+    truncateUtf16Units: real.truncateUtf16Units,
   };
 });
 
@@ -155,6 +156,10 @@ type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
 afterEach(() => {
   vi.useRealTimers();
+  // Restore every spyOn-created spy even when an assertion fails mid-test —
+  // tests that put spy.mockRestore() at the end leak the mock (e.g. a
+  // mocked QQChannel.prototype.sendMessage) into subsequent tests otherwise.
+  vi.restoreAllMocks();
 });
 
 /** Create a mock Response-like object for sendQQMessage. */
@@ -172,6 +177,33 @@ function deferredPromise() {
     resolve = res;
   });
   return { promise, resolve };
+}
+
+/**
+ * Seed two sessions anchored to the same msgId with one msg_seq counter and
+ * no chat-level replyMsgId entry naming it. Both release tests share this:
+ * while one session still anchors msgId the counter must survive, and the
+ * release of the last anchor is what purges it.
+ */
+function anchorTwoSessionsToOneMsgId(
+  chp: Record<string, unknown>,
+  sessions: [string, string],
+  msgId: string,
+  seq: number,
+): {
+  sessionAnchors: Map<string, { msgId: string; timestamp: number }>;
+  seqMap: Map<string, number>;
+} {
+  const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+    string,
+    { msgId: string; timestamp: number }
+  >;
+  const seqMap = chp['msgSeqMap'] as Map<string, number>;
+  for (const sessionId of sessions) {
+    sessionAnchors.set(sessionId, { msgId, timestamp: Date.now() });
+  }
+  seqMap.set(msgId, seq);
+  return { sessionAnchors, seqMap };
 }
 
 describe('isValidChatId', () => {
@@ -1201,6 +1233,13 @@ describe('sendMessage', () => {
       replyMsgId: 'msg-old',
       replyMsgIdTimestamp: Date.now() - 300_001,
     });
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    // Seed the counter so the cleanup below is observable: with no session
+    // anchored to msg-old, the expired-entry path must purge the orphaned
+    // seq (previously the map never held this key, so `has === false` was a
+    // vacuous pass).
+    seqMap.set('msg-old', 5);
 
     await ch.sendMessage('test-chat-id', 'hello');
 
@@ -1215,11 +1254,50 @@ describe('sendMessage', () => {
     expect(body['msg_id']).toBeUndefined();
     expect(body['msg_seq']).toBeUndefined();
     // Verify expired entries were cleaned from maps
-    const chp = ch as unknown as Record<string, unknown>;
     const replyMap = chp['replyMsgId'] as Map<string, unknown>;
-    const seqMap = chp['msgSeqMap'] as Map<string, unknown>;
     expect(replyMap.has('test-chat-id')).toBe(false);
     expect(seqMap.has('msg-old')).toBe(false);
+  });
+
+  it('keeps msg_seq of an expired chat entry that is still session-anchored (sendMessage)', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyMap = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+
+    // The chat-level entry for msg-OLD has expired past the TTL, but a
+    // session is still streaming under msg-OLD (fresh anchor). The
+    // expired-entry path must evict the chat entry yet keep the msg_seq
+    // counter alive so the tail send does not reset the sequence.
+    sessionAnchors.set('sess-A', { msgId: 'msg-OLD', timestamp: Date.now() });
+    replyMap.set('test-chat-id', {
+      msgId: 'msg-OLD',
+      timestamp: Date.now() - ttl - 1,
+    });
+    seqMap.set('msg-OLD', 3);
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    // Anchored msg_seq survives (isMsgIdAnchoredBySession guard).
+    expect(seqMap.get('msg-OLD')).toBe(3);
+    // The expired chat entry is evicted.
+    expect(replyMap.has('test-chat-id')).toBe(false);
+    // Send went out without a stale msg_id/msg_seq.
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'hello' } },
+    );
   });
 
   it('increments msg_seq on consecutive sendMessage calls', async () => {
@@ -1412,6 +1490,46 @@ describe('sendMessage', () => {
     saveSpy.mockRestore();
   });
 
+  it('does not roll back a seq a concurrent send consumed before a 429', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-429-race' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-429-race', 0);
+
+    mockSendQQMessage.mockImplementationOnce(async () => {
+      // A sibling session anchored to the same msgId consumed a seq while this
+      // markdown attempt was in flight.
+      msgSeqMap.set('msg-429-race', 5);
+      return mockResponse(false, 429);
+    });
+
+    await expect(
+      ch.sendMessage('test-chat-id', '**bold**'),
+    ).rejects.toBeInstanceOf(DeliveryError);
+
+    // The rollback is conditional: an unconditional one would forget the seq
+    // the sibling accepted and later sends would replay a deduped pair.
+    expect(msgSeqMap.get('msg-429-race')).toBe(5);
+  });
+
+  it('does not roll back a seq a concurrent send consumed before a markdown fallback', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-fb-race' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-fb-race', 0);
+
+    mockSendQQMessage.mockImplementationOnce(async () => {
+      msgSeqMap.set('msg-fb-race', 7);
+      return mockResponse(false, 500);
+    });
+    // The active-markdown retry (no msg_id) succeeds.
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(true));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    expect(msgSeqMap.get('msg-fb-race')).toBe(7);
+  });
+
   it('stops silently at 429 when no replyMsgId is set', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
 
@@ -1602,7 +1720,7 @@ describe('lifecycle status hooks', () => {
     vi.clearAllMocks();
   });
 
-  it('keeps prompt lifecycle hooks as explicit no-ops', () => {
+  it('sets the reply anchor at prompt start and releases it at prompt end', () => {
     const ch = makeChannel();
     const chp = ch as unknown as {
       onPromptStart: (
@@ -1616,11 +1734,26 @@ describe('lifecycle status hooks', () => {
         messageId?: string,
       ) => void;
     };
+    const sessionAnchors = (ch as unknown as Record<string, unknown>)[
+      'sessionReplyMsgId'
+    ] as Map<string, { msgId: string; timestamp: number }>;
 
     expect(() => {
+      // Inbound turn: anchor to the triggering message's id.
       chp.onPromptStart('test-chat-id', 'session-1', 'msg-1');
-      chp.onPromptEnd('test-chat-id', 'session-1', 'msg-1');
     }).not.toThrow();
+    expect(sessionAnchors.get('session-1')!.msgId).toBe('msg-1');
+
+    // Proactive turn (loop/webhook/cron): no messageId → clear the anchor.
+    chp.onPromptStart('test-chat-id', 'session-1');
+    expect(sessionAnchors.has('session-1')).toBe(false);
+
+    expect(() => {
+      // onPromptEnd releases the anchor.
+      chp.onPromptStart('test-chat-id', 'session-2', 'msg-2');
+      chp.onPromptEnd('test-chat-id', 'session-2', 'msg-2');
+    }).not.toThrow();
+    expect(sessionAnchors.has('session-2')).toBe(false);
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
@@ -1644,6 +1777,36 @@ describe('lifecycle status hooks', () => {
     }).not.toThrow();
 
     expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('releaseSessionReplyAnchor keeps msg_seq while another session is anchored to the same msgId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const release = (
+      chp['releaseSessionReplyAnchor'] as (
+        sessionId: string,
+        expectedMsgId?: string,
+      ) => void
+    ).bind(ch);
+    const { sessionAnchors, seqMap } = anchorTwoSessionsToOneMsgId(
+      chp,
+      ['sess-A', 'sess-B'],
+      'msg-X',
+      4,
+    );
+
+    // Releasing one must NOT purge the seq — the other session still needs it
+    // (isMsgIdAnchoredBySession guard).
+    release('sess-A', 'msg-X');
+    expect(sessionAnchors.has('sess-A')).toBe(false);
+    expect(sessionAnchors.has('sess-B')).toBe(true);
+    expect(seqMap.get('msg-X')).toBe(4);
+
+    // Releasing the LAST session anchored to msg-X orphans it: the seq is
+    // finally purged.
+    release('sess-B', 'msg-X');
+    expect(sessionAnchors.has('sess-B')).toBe(false);
+    expect(seqMap.has('msg-X')).toBe(false);
   });
 });
 
@@ -2254,6 +2417,245 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
+  it('keeps msg_seq of an expired replyMsgId that is still session-anchored', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+
+    // The chat entry for msg-A expired past the TTL, but a session is still
+    // streaming under msg-A: cleanup must evict the chat entry yet keep the
+    // msg_seq counter alive so the tail send doesn't reset the sequence.
+    sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: Date.now() });
+    replyMsgId.set('test-chat', {
+      msgId: 'msg-A',
+      timestamp: Date.now() - ttl - 1000,
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // The expired chat entry is gone, but the anchored msg_seq survives.
+    expect(replyMsgId.has('test-chat')).toBe(false);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    ch.disconnect();
+  });
+
+  it('reclaims a msg_seq counter orphaned by a vetoed release on the next tick', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const streamState = chp['streamState'] as Map<
+      string,
+      {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        turn: number;
+      }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+    const stale = Date.now() - ttl - 1000;
+
+    // Both naming entries are past the TTL, but the stream entry still holds a
+    // residual, so the sweep's release is vetoed: the session anchor entry
+    // disappears while the counter survives with nothing left to name it.
+    sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: stale });
+    replyMsgId.set('test-chat', { msgId: 'msg-A', timestamp: stale });
+    streamState.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: 'T1-resid',
+      timer: null,
+      retryCount: 0,
+      msgId: 'msg-A',
+      turn: 1,
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Tick 1: the naming entries are gone and the live residual legitimately
+    // keeps the counter.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(replyMsgId.has('test-chat')).toBe(false);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    // The last holder disappears. No naming entry is left that could reach the
+    // counter — the orphan shape this reclaim exists for.
+    streamState.delete('sess-1');
+
+    // Tick 2: the sweep iterates the counter map itself, so the orphan is
+    // visited and reclaimed.
+    vi.advanceTimersByTime(60_000);
+    expect(msgSeqMap.has('msg-A')).toBe(false);
+
+    ch.disconnect();
+  });
+
+  it('keeps a msg_seq counter named only by replyContextByMessageId', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyContexts = chp['replyContextByMessageId'] as Map<
+      string,
+      { chatId: string; msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    const streamState = chp['streamState'] as Map<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    // The chat anchor has moved on to a newer message, and there is no session
+    // anchor, stream entry or in-flight send. But the routing map still names
+    // msg-A (fresh, so the sweep's TTL loop keeps it), and a send resolves its
+    // outgoing msg_id out of that map — so its counter still has a holder.
+    replyMsgId.set('test-chat', { msgId: 'msg-NEW', timestamp: Date.now() });
+    replyContexts.set('msg-A', {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    expect(sessionAnchors.size).toBe(0);
+    expect(streamState.size).toBe(0);
+    expect(flushingSessions.size).toBe(0);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Without the routing-map holder the orphan pass reclaims msg-A on this
+    // tick, and a send resumed under it restarts msg_seq at 1 — colliding with
+    // an already-accepted (msg-A, 1) that QQ dedupes and silently drops.
+    expect(replyContexts.has('msg-A')).toBe(true);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    ch.disconnect();
+  });
+
+  it('reclaims the group reply entry counter immediately when nothing else holds it', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const groupId = 'group-1';
+    replyMsgId.set(groupId, { msgId: 'msg-X', timestamp: Date.now() });
+    msgSeqMap.set('msg-X', 2);
+
+    vi.spyOn(ch, 'onSessionDied').mockImplementation(() => {});
+    (chp['handleGroupDelRobot'] as (e: Record<string, unknown>) => void).call(
+      ch,
+      {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      },
+    );
+
+    expect(replyMsgId.has(groupId)).toBe(false);
+    // The entry was the last holder: the reclaim now runs after it is removed,
+    // so the counter is dropped without waiting for the next sweep tick.
+    expect(msgSeqMap.has('msg-X')).toBe(false);
+  });
+
+  it('reclaims a msg_seq counter orphaned by group removal on the next tick', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const streamState = chp['streamState'] as Map<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const groupId = 'group-1';
+    const state = {
+      chatId: groupId,
+      buffer: '',
+      timer: null as ReturnType<typeof setTimeout> | null,
+      retryCount: 0,
+      msgId: 'msg-X',
+      turn: 1,
+    };
+    streamState.set('sess-1', state);
+    // A genuine in-flight send owns the counter: it is what vetoes the release
+    // the teardown performs before destroying the entry.
+    flushingSessions.set('sess-1', state);
+    sessionAnchors.set('sess-1', { msgId: 'msg-X', timestamp: Date.now() });
+    replyMsgId.set(groupId, { msgId: 'msg-X', timestamp: Date.now() });
+    msgSeqMap.set('msg-X', 2);
+
+    // The mock ChannelBase has no onSessionDied; it is irrelevant here anyway
+    // (the entry is already destroyed), so stub it out to isolate the
+    // group-removal teardown under test.
+    const onSessionDiedSpy = vi
+      .spyOn(ch, 'onSessionDied')
+      .mockImplementation(() => {});
+
+    (chp['handleGroupDelRobot'] as (e: Record<string, unknown>) => void).call(
+      ch,
+      {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      },
+    );
+
+    // Every holder is destroyed, but the release ran first and was vetoed by
+    // the in-flight marker, and the naming entries are gone — so the counter
+    // is orphaned with nothing left that could name it.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(streamState.has('sess-1')).toBe(false);
+    expect(flushingSessions.has('sess-1')).toBe(false);
+    expect(replyMsgId.has(groupId)).toBe(false);
+    expect(msgSeqMap.get('msg-X')).toBe(2);
+
+    // One tick of the safety net reclaims it.
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+    expect(msgSeqMap.has('msg-X')).toBe(false);
+
+    onSessionDiedSpy.mockRestore();
+    ch.disconnect();
+  });
+
   it('calls reconnectWithRetry after 10 consecutive token refresh failures', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
@@ -2306,6 +2708,14 @@ describe('replyMsgId cleanup timer', () => {
   // ---------------------------------------------------------------------------
   // flushAndTrack transient vs permanent error handling
   // ---------------------------------------------------------------------------
+  // PORT NOTE (main + PR #8241 merge): on main, `flushAndTrack` delivers
+  // through the private `sendMessageWithReplyContext(chatId, text,
+  // replyContext, sourceLabel, msgIdOverride)` — the PR was written when
+  // `sendMessage` was still the delivery point, so these spies originally
+  // targeted `sendMessage` and never intercepted the send (main's own copies
+  // of the tests were correspondingly weak and only asserted "state kept").
+  // The spy target below is the only change; every assertion is the PR's.
+  // ---------------------------------------------------------------------------
   describe('flushAndTrack transient errors', () => {
     function makeChannelForFlush(): QQChannelInstance {
       const ch = new QQChannel(
@@ -2334,7 +2744,12 @@ describe('replyMsgId cleanup timer', () => {
 
       const state = {
         chatId: 'test-chat-id',
-        buffer: 'test buffer',
+        // Distinct seed text so the re-buffer ORDER is observable: the
+        // failed send's text must come FIRST, the concurrently accumulated
+        // buffer SECOND (current.buffer = buffer + (current.buffer || '')).
+        // A reversed implementation would produce 'accumulatedflushed-text'
+        // and fail this gate (thread 69).
+        buffer: 'accumulated',
         timer: null as ReturnType<typeof setTimeout> | null,
         retryCount: 0,
       };
@@ -2349,15 +2764,13 @@ describe('replyMsgId cleanup timer', () => {
       >;
       streamState.set('session-1', state);
 
-      // Spy on sendMessage to throw RATE_LIMITED
-      const sendSpy = vi
-        .spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessage: () => Promise<void>;
-          },
-          'sendMessage',
-        )
-        .mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      // Spy on sendMessageWithReplyContext to throw RATE_LIMITED
+      vi.spyOn(
+        QQChannel.prototype as unknown as {
+          sendMessageWithReplyContext: () => Promise<void>;
+        },
+        'sendMessageWithReplyContext',
+      ).mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
 
       // Call flushAndTrack
       (
@@ -2367,144 +2780,587 @@ describe('replyMsgId cleanup timer', () => {
           state: typeof state,
           logLabel: string,
         ) => void
-      )('session-1', 'test buffer', state, 'test');
+      )('session-1', 'flushed-text', state, 'test');
 
-      // Drain microtask queue so the .catch() handler runs
-      // (must NOT advance timers — that would fire the retry setTimeout)
-      await Promise.resolve();
+      // Drain the full microtask chain so the .catch() handler actually runs
+      // before asserting. A single `await Promise.resolve()` is NOT enough —
+      // the rejected sendMessage promise needs several microtask hops
+      // (P → .then → .catch → .finally) to settle, and one await resumes the
+      // test before the catch handler has executed. advanceTimersByTimeAsync
+      // flushes the microtask queue (advancing 0ms does NOT fire the retry
+      // setTimeout).
+      await vi.advanceTimersByTimeAsync(0);
 
-      // RATE_LIMITED is transient — streamState should keep the entry
+      // RATE_LIMITED is transient — the entry stays, the buffer is re-buffered
+      // and a retry timer is armed.
       expect(streamState.has('session-1')).toBe(true);
+      // catch re-buffered: current.buffer = buffer + (current.buffer || '')
+      expect(state.buffer).toBe('flushed-textaccumulated');
+      // retryCount incremented by the re-buffer path
+      expect(state.retryCount).toBe(1);
+      // retry timer armed (IDLE_FLUSH_MS) — 0ms advance must not have fired it
+      expect(state.timer).not.toBeNull();
 
-      sendSpy.mockRestore();
       vi.useRealTimers();
     });
 
+    it('re-buffers a route-blocked flush instead of marking the session flushed (transient)', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForFlush();
+      const chp = ch as unknown as Record<string, unknown>;
+      chp['accessToken'] = 'test-token';
+
+      // An idle flush drains the buffer, so the payload exists only in the
+      // in-flight send. A blocked route resolves without throwing, and the
+      // delivered arm would delete the entry and record the payload as sent.
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: '',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 0,
+        // The live turn's generation (turnCounter is empty → 0), so
+        // onResponseComplete takes the residual-buffer path rather than the
+        // stale-entry path.
+        turn: 0,
+      };
+      const streamState = chp['streamState'] as Map<string, typeof state>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      streamState.set('sess-1', state);
+
+      // A failed token refresh resolves as 'transient' (resolveRoute does not
+      // throw); the completion attempt below then resolves a real route.
+      let routeCalls = 0;
+      chp['resolveRoute'] = async () => {
+        routeCalls++;
+        if (routeCalls === 1) return { block: 'transient' };
+        return {
+          base: 'https://api.sgroup.qq.com',
+          path: '/v2/users/test-chat-id/messages',
+        };
+      };
+      mockSendQQMessage.mockResolvedValue(mockResponse(true));
+
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          state: typeof state,
+          logLabel: string,
+        ) => void
+      )('sess-1', 'FULL-REPLY-TEXT', state, 'test');
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      // (a) The payload never reached the wire, so the session must not be
+      // recorded as flushed — flushedSessions is what makes
+      // onResponseComplete skip its fullText fallback.
+      expect(flushedSessions.has('sess-1')).toBe(false);
+      // (b) The payload is re-buffered for the retry instead of being lost.
+      expect(streamState.get('sess-1')!.buffer).toBe('FULL-REPLY-TEXT');
+      expect(state.retryCount).toBe(1);
+      expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+      // (c) The completion therefore still delivers the payload.
+      await (
+        chp['onResponseComplete'] as (
+          chatId: string,
+          fullText: string,
+          sessionId: string,
+        ) => Promise<void>
+      )('test-chat-id', '', 'sess-1');
+
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendQQMessage).toHaveBeenCalledWith(
+        'https://api.sgroup.qq.com',
+        '/v2/users/test-chat-id/messages',
+        'test-token',
+        { msg_type: 2, markdown: { content: 'FULL-REPLY-TEXT' } },
+      );
+
+      vi.useRealTimers();
+    });
+
+    it('takes the permanent teardown for a route-blocked flush (permanent)', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForFlush();
+      const chp = ch as unknown as Record<string, unknown>;
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: '',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 0,
+        turn: 0,
+        // The only other copy of the sealed head: the boundary cleared the
+        // bridge's collection, so a silent wipe loses it for good.
+        sealedPre: 'HEAD',
+      };
+      const streamState = chp['streamState'] as Map<string, typeof state>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { text: string; pre?: string }
+      >;
+      streamState.set('sess-1', state);
+      // A live turn, so handOffSealedPre re-stashes the head for this turn's
+      // completion instead of taking the deliver-now path.
+      (chp['activePromptSessions'] as Set<string>).add('sess-1');
+
+      chp['resolveRoute'] = async () => ({ block: 'permanent' });
+      const handOffSpy = vi.spyOn(
+        QQChannel.prototype as unknown as {
+          handOffSealedPre: (...args: unknown[]) => void;
+        },
+        'handOffSealedPre',
+      );
+
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          state: typeof state,
+          logLabel: string,
+        ) => void
+      )('sess-1', 'FULL-REPLY-TEXT', state, 'test');
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The permanent class drops the entry with a loss log; no retry is armed
+      // and the session is not recorded as flushed.
+      expect(streamState.has('sess-1')).toBe(false);
+      expect(state.retryCount).toBe(0);
+      expect(state.timer).toBeNull();
+      const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(logged).toContain('test delivery failed (FALLBACK_FAILED)');
+      expect(logged).toContain(
+        'outgoing route permanently blocked for test-chat-id',
+      );
+      // The sealed head is handed off (not silently wiped) before the delete.
+      expect(handOffSpy).toHaveBeenCalledTimes(1);
+      expect(orphanBuffer.get('sess-1')?.pre).toBe('HEAD');
+      expect(flushedSessions.has('sess-1')).toBe(false);
+      expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+      handOffSpy.mockRestore();
+      stderrSpy.mockRestore();
+      vi.useRealTimers();
+    });
+
+    // These rows assert against the private maps `flushAndTrack` owns
+    // (streamState, sessionReplyMsgId, msgSeqMap, inFlightMsgSeqSends) and spy
+    // on its send point, rather than driving a full protocol turn: the
+    // behaviours under test are the tear-down/keep decisions that method makes
+    // on them, and a public-path fixture would assert the same maps through
+    // more indirection without adding coverage. The loss logs and the wire
+    // contents are asserted as text alongside, so each row pins an observable
+    // outcome as well as the internal bookkeeping that produces it.
     describe('flushAndTrack permanent errors', () => {
-      function makeChannelForPerm(): QQChannelInstance {
-        const ch = new QQChannel(
-          'test-bot',
-          {
-            type: 'qq',
-            token: '',
-            senderPolicy: 'open' as const,
-            allowedUsers: [],
-            sessionScope: 'user' as const,
-            cwd: '/tmp',
-            groupPolicy: 'disabled' as const,
-            groups: {},
-            appID: 'test-app-id',
-            appSecret: 'test-secret',
-          },
-          {} as unknown as ChannelAgentBridge,
-        );
-        return ch;
+      type PermFailureState = {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        turn?: number;
+        boundaryClearedInFlight?: 'payload' | 'residual';
+      };
+
+      /**
+       * Seed the streamState entry a terminal flush failure reads, plus the
+       * per-session reply anchor and msg_seq counter that name it — the anchor
+       * onPromptStart sets from the triggering message's id. `buffer` is
+       * pre-filled because chunks can accumulate between the caller's clear
+       * and the send's completion. No chat-level replyMsgId entry points at
+       * the anchor, so releasing the session must cascade: session anchor
+       * dropped + orphaned seq purged (persisted via saveQQState).
+       * `anchorMsgId` may differ from `msgId` to model a successor turn's
+       * anchor that a flush without its own anchor must keep.
+       */
+      function seedPermFailure(
+        chp: Record<string, unknown>,
+        opts: {
+          sessionId: string;
+          msgId?: string;
+          anchorMsgId?: string;
+          seq?: number;
+          turn?: number;
+        },
+      ): {
+        state: PermFailureState;
+        streamState: Map<string, PermFailureState>;
+        sessionAnchors: Map<string, { msgId: string; timestamp: number }>;
+        seqMap: Map<string, number>;
+      } {
+        const state: PermFailureState = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null,
+          retryCount: 0,
+          msgId: opts.msgId,
+        };
+        if (opts.turn !== undefined) state.turn = opts.turn;
+        const streamState = chp['streamState'] as Map<string, PermFailureState>;
+        streamState.set(opts.sessionId, state);
+
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        const anchorMsgId = opts.anchorMsgId ?? opts.msgId;
+        if (anchorMsgId !== undefined) {
+          sessionAnchors.set(opts.sessionId, {
+            msgId: anchorMsgId,
+            timestamp: Date.now(),
+          });
+          seqMap.set(anchorMsgId, opts.seq ?? 4);
+        }
+        return { state, streamState, sessionAnchors, seqMap };
       }
 
-      it('keeps streamState on RETRY_EXHAUSTED when buffer has concurrent chunks', async () => {
-        vi.useFakeTimers();
-        const ch = makeChannelForPerm();
-        const chp = ch as unknown as Record<string, unknown>;
+      /** Arm the flush's delivery to reject with `code` and no retry. */
+      function rejectFlush(code: string, message: string): void {
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessageWithReplyContext: () => Promise<void>;
+          },
+          'sendMessageWithReplyContext',
+        ).mockRejectedValue(new DeliveryError(code, message));
+      }
 
-        const state = {
-          chatId: 'test-chat-id',
-          // Set buffer to simulate concurrent chunks arriving during the in-flight send.
-          // Production code clears state.buffer before calling flushAndTrack, but new chunks
-          // can accumulate in state.buffer between the clear and the send's completion.
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-          }
-        >;
-        streamState.set('session-perm', state);
-
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
-          );
-
+      /**
+       * Run `flushAndTrack` for a seeded session and drain the full microtask
+       * chain so the .catch() handler runs — a single await
+       * Promise.resolve() resumes the test before the catch executes.
+       */
+      async function runFlush(
+        chp: Record<string, unknown>,
+        sessionId: string,
+        state: PermFailureState,
+      ): Promise<void> {
         (
           chp['flushAndTrack'] as (
             sessionId: string,
             buffer: string,
-            state: typeof state,
+            state: PermFailureState,
             logLabel: string,
           ) => void
-        )('session-perm', 'test buffer', state, 'test');
+        )(sessionId, 'test buffer', state, 'test');
+        await vi.advanceTimersByTimeAsync(0);
+      }
 
-        await Promise.resolve();
+      it('deletes streamState and releases anchor on RETRY_EXHAUSTED', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-perm', msgId: 'msg-X' },
+        );
 
-        expect(streamState.has('session-perm')).toBe(true);
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
 
-        sendSpy.mockRestore();
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-perm', state);
+
+        // RETRY_EXHAUSTED is permanent: the entry is dropped and the reply
+        // anchor released, cascading to the orphaned msg_seq counter — whose
+        // removal is persisted (saveQQState must have been called).
+        expect(streamState.has('session-perm')).toBe(false);
+        expect(sessionAnchors.has('session-perm')).toBe(false);
+        expect(seqMap.has('msg-X')).toBe(false);
+        expect(saveSpy).toHaveBeenCalled();
+
         vi.useRealTimers();
       });
 
-      it('keeps streamState on ACTIVE_MSG_DISABLED (permanent error)', async () => {
+      it('reports the residual buffered during a permanent failure, not just the payload', async () => {
         vi.useFakeTimers();
-        const ch = makeChannelForPerm();
+        const ch = makeChannelForFlush();
         const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-residual',
+          msgId: 'msg-R',
+        });
+        // A chunk arrived while the send was in flight: it sits in
+        // state.buffer, is dropped with the entry, and must be counted in the
+        // loss log — the failed payload alone under-reports what is lost.
+        state.buffer = 'stale-tail';
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
 
-        const state = {
-          chatId: 'test-chat-id',
-          buffer: 'test buffer',
-          timer: null as ReturnType<typeof setTimeout> | null,
-          retryCount: 0,
-        };
-        const streamState = chp['streamState'] as Map<
-          string,
-          {
-            chatId: string;
-            buffer: string;
-            timer: ReturnType<typeof setTimeout> | null;
-            retryCount: number;
-          }
-        >;
-        streamState.set('session-ads', state);
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-residual', state);
 
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError(
-              'ACTIVE_MSG_DISABLED',
-              'active messages disabled',
-            ),
-          );
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toContain('dropping 11 chars');
+        expect(logged).toContain('plus 10 chars buffered in flight');
 
+        stderrSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
+      it('reports only the in-flight text beyond the residual a boundary already sealed', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-sealed-residual',
+          msgId: 'msg-SR',
+          turn: 1,
+        });
+        // captureBoundaryClear only seals the residual of the turn that owns
+        // the counter, so the entry and the counter must agree.
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        turnCounter.set('session-sealed-residual', 1);
+        // Keep the handoff on its stash write instead of a live delivery.
+        const activePromptSessions = chp['activePromptSessions'] as Set<string>;
+        activePromptSessions.add('session-sealed-residual');
+
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        state.buffer = 'stale-tail';
         (
           chp['flushAndTrack'] as (
             sessionId: string,
             buffer: string,
-            state: typeof state,
+            state: PermFailureState,
             logLabel: string,
           ) => void
-        )('session-ads', 'test buffer', state, 'test');
+        )('session-sealed-residual', 'test buffer', state, 'test');
+        // A boundary clears the bridge's collection while the send is in
+        // flight: the live turn's residual is copied into sealedPre and the
+        // flight is flagged 'residual'. 'EXTRA' then arrives after the capture.
+        (chp['captureBoundaryClear'] as (sessionId: string) => void)(
+          'session-sealed-residual',
+        );
+        state.buffer += 'EXTRA';
+        await vi.advanceTimersByTimeAsync(0);
 
-        await Promise.resolve();
+        // The captured 10-char head ('stale-tail') is folded into the handoff
+        // seal and delivered separately, so it is not dropped here: only the 5
+        // chars that arrived after the capture are (15 in the buffer - 10
+        // preserved). The same branch folds the 11-char payload itself into
+        // that seal, so the payload is preserved too and must not be reported
+        // as dropped — only the 5 post-capture chars are actually lost.
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).not.toContain('dropping 11 chars');
+        expect(logged).toContain('dropping 5 chars buffered in flight');
+        expect(logged).not.toContain('plus 15 chars buffered in flight');
+        // And the payload really is preserved, not merely uncounted from the
+        // log: it is the handoff stash's sealed head (payload + residual).
+        const stash = (
+          chp['streamOrphanBuffer'] as Map<string, { pre?: string }>
+        ).get('session-sealed-residual');
+        expect(stash?.pre).toBe('test bufferstale-tail');
 
-        expect(streamState.has('session-ads')).toBe(true);
-
-        sendSpy.mockRestore();
+        stderrSpy.mockRestore();
         vi.useRealTimers();
+      });
+
+      it('does not count a payload a boundary re-seal preserves in the handoff', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state } = seedPermFailure(chp, {
+          sessionId: 'session-sealed-payload',
+          msgId: 'msg-SP',
+          turn: 1,
+        });
+        // captureBoundaryClear flags 'payload' (no live residual: the entry's
+        // buffer is empty at the boundary) and ownsLiveTurn holds, so the
+        // permanent-failure arm re-seals the whole payload below and preserves
+        // it. Marking the empty buffer lets the boundary classify as 'payload'
+        // rather than 'residual'.
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        turnCounter.set('session-sealed-payload', 1);
+        const activePromptSessions = chp['activePromptSessions'] as Set<string>;
+        activePromptSessions.add('session-sealed-payload');
+        state.buffer = '';
+
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: PermFailureState,
+            logLabel: string,
+          ) => void
+        )('session-sealed-payload', 'test buffer', state, 'test');
+        // Boundary clears the bridge's collection with no buffer-resident
+        // residual: only the in-flight payload is stripped and re-sealed.
+        (chp['captureBoundaryClear'] as (sessionId: string) => void)(
+          'session-sealed-payload',
+        );
+        // Three chars arrive after the capture: they are the only real loss
+        // (the payload is folded into the handoff seal and delivered).
+        state.buffer = 'xyz';
+        expect(state.boundaryClearedInFlight).toBe('payload');
+        await vi.advanceTimersByTimeAsync(0);
+
+        const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).not.toContain('dropping 11 chars');
+        expect(logged).toContain('dropping 3 chars buffered in flight');
+        const stash = (
+          chp['streamOrphanBuffer'] as Map<string, { pre?: string }>
+        ).get('session-sealed-payload');
+        expect(stash?.pre).toBe('test buffer');
+
+        stderrSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
+      it('clears pending-cleanup flags on RETRY_EXHAUSTED (permanent-catch teardown)', async () => {
+        // A dead-session tail chain (pendingStreamDelete + flushedSessions +
+        // turnCounter parked) that hits a permanent failure must be torn
+        // down entirely by the catch branch — onResponseComplete/onPromptEnd
+        // would otherwise have cleaned these, but the permanent failure
+        // settles the turn without them (thread 53).
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-pc', msgId: 'msg-P', turn: 1 },
+        );
+
+        const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+        const flushedSessions = chp['flushedSessions'] as Set<string>;
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        pendingStreamDelete.add('session-pc');
+        flushedSessions.add('session-pc');
+        turnCounter.set('session-pc', 1);
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-pc', state);
+
+        // The permanent-catch branch deletes the stream entry, clears the
+        // pending-delete flag, and drops the deferred turn's flushedSessions
+        // + turnCounter records.
+        expect(streamState.has('session-pc')).toBe(false);
+        expect(pendingStreamDelete.has('session-pc')).toBe(false);
+        expect(flushedSessions.has('session-pc')).toBe(false);
+        expect(turnCounter.has('session-pc')).toBe(false);
+        // The anchor + orphaned seq are released/cascaded as usual.
+        expect(sessionAnchors.has('session-pc')).toBe(false);
+        expect(seqMap.has('msg-P')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('keeps the successor anchor when the failed flush had no own msgId', async () => {
+        // A flush started without a per-session reply anchor (msgId
+        // undefined, e.g. a proactive turn) that fails permanently must NOT
+        // release — the release path is guarded on state.msgId, and an
+        // unconditional release here would delete the successor turn's
+        // anchor (thread 54).
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-guard', anchorMsgId: 'msg-B', seq: 1, turn: 1 },
+        );
+
+        rejectFlush('RETRY_EXHAUSTED', 'permanent failure');
+        await runFlush(chp, 'session-guard', state);
+
+        // The failed flush's stream entry is dropped...
+        expect(streamState.has('session-guard')).toBe(false);
+        // ...but the successor's anchor and its seq survive untouched.
+        expect(sessionAnchors.get('session-guard')!.msgId).toBe('msg-B');
+        expect(seqMap.get('msg-B')).toBe(1);
+
+        vi.useRealTimers();
+      });
+
+      it('deletes streamState and releases anchor on ACTIVE_MSG_DISABLED', async () => {
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-ads', msgId: 'msg-Y' },
+        );
+
+        rejectFlush('ACTIVE_MSG_DISABLED', 'active messages disabled');
+        await runFlush(chp, 'session-ads', state);
+
+        // ACTIVE_MSG_DISABLED is permanent: the entry is dropped and the
+        // reply anchor released, cascading to the orphaned msg_seq counter.
+        expect(streamState.has('session-ads')).toBe(false);
+        expect(sessionAnchors.has('session-ads')).toBe(false);
+        expect(seqMap.has('msg-Y')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('deletes streamState and releases anchor on FALLBACK_FAILED', async () => {
+        // FALLBACK_FAILED is the passive-markdown → active-message fallback
+        // exhaustion: permanent, same teardown as RETRY_EXHAUSTED (thread
+        // 67 — this code path previously had zero coverage).
+        vi.useFakeTimers();
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { state, streamState, sessionAnchors, seqMap } = seedPermFailure(
+          chp,
+          { sessionId: 'session-fb', msgId: 'msg-Z' },
+        );
+
+        rejectFlush('FALLBACK_FAILED', 'passive fallback failed');
+        await runFlush(chp, 'session-fb', state);
+
+        // FALLBACK_FAILED is permanent: the entry is dropped and the reply
+        // anchor released, cascading to the orphaned msg_seq counter.
+        expect(streamState.has('session-fb')).toBe(false);
+        expect(sessionAnchors.has('session-fb')).toBe(false);
+        expect(seqMap.has('msg-Z')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('does not call saveQQState when another session still anchors the released msgId', () => {
+        // The release cascade is what persists (msgSeqMap.delete → saveQQState);
+        // when a sibling session still anchors the same msgId the counter is
+        // kept and nothing must be written (thread 52 keep-scenario gate).
+        const ch = makeChannelForFlush();
+        const chp = ch as unknown as Record<string, unknown>;
+        const { sessionAnchors, seqMap } = anchorTwoSessionsToOneMsgId(
+          chp,
+          ['s-1', 's-2'],
+          'msg-K',
+          3,
+        );
+
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
+
+        (chp['releaseSessionReplyAnchor'] as (sessionId: string) => void)(
+          's-1',
+        );
+
+        // s-1's own anchor is released, but msg-K is still live (s-2 holds
+        // it), so its seq counter survives — and no state write happens.
+        expect(sessionAnchors.has('s-1')).toBe(false);
+        expect(sessionAnchors.get('s-2')!.msgId).toBe('msg-K');
+        expect(seqMap.get('msg-K')).toBe(3);
+        expect(saveSpy).not.toHaveBeenCalled();
       });
     });
   });
@@ -2680,5 +3536,330 @@ describe('replyMsgId cleanup timer', () => {
       const parsed = JSON.parse(sentPayload!);
       expect(parsed.op).toBe(2); // IDENTIFY (no sessionId to resume)
     });
+  });
+});
+
+// deliverCancelledStash's text has no second copy — onPromptEnd deletes its
+// stash (and handOffSealedPre clears sealedPre) before the call. But
+// sendMessageWithReplyContext returns normally without sending when
+// resolveRoute yields null (token refresh failure, empty token, chat type
+// cleared), so "no exception" cannot mean "delivered": a transient class the
+// loop cannot see would otherwise drop the text with no retry and no drop log.
+describe('a null route is not a delivered stash', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  const drain = async (): Promise<void> => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'refreshed-token',
+      expiresIn: 7200,
+    });
+    mockFetchGatewayUrl.mockResolvedValue('wss://gateway.qq.test/ws');
+    vi.useFakeTimers();
+  });
+
+  it('re-attempts a cancelled stash whose first route resolution fails', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    // Expired token: resolveRoute refreshes it, and the first refresh fails
+    // with the transient class resolveRoute turns into a null route.
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    mockFetchAccessToken.mockRejectedValueOnce(new Error('network blip'));
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    // Nothing reached the wire, so the anchor must NOT have been released.
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+
+    // The retry window re-attempts, resolves a route, and sends.
+    await vi.advanceTimersByTimeAsync(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body['markdown'] as Record<string, string>)['content']).toBe(
+      'STASH',
+    );
+    expect(body['msg_id']).toBe('msg-A');
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('resolves the route once, so no stale probe can drop the stash', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+
+    // Count the resolutions the send path performs: it must consult the route
+    // exactly once, so the route it reports on is the one it sends with. A
+    // pre-probe would resolve twice and could go stale in between.
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('holds the msg seq counter while a send waits on a token refresh', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const inFlight = chp['inFlightMsgSeqSends'] as Map<string, number>;
+
+    // The token refresh hangs: the send is suspended inside resolveRoute, after
+    // the in-flight marker was taken, so the counter cannot be reclaimed while
+    // it is in the air.
+    let releaseToken!: (v: { accessToken: string; expiresIn: number }) => void;
+    mockFetchAccessToken.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseToken = resolve;
+      }),
+    );
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect([...inFlight.entries()]).toEqual([['msg-A', 1]]);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    releaseToken({ accessToken: 'refreshed-token', expiresIn: 7200 });
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(inFlight.size).toBe(0);
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('drops a route that can never resolve instead of retrying it forever', async () => {
+    // The chat type IS known (chatTypes), so the disposed guard is the only
+    // reason resolveRoute classifies the route permanent. Without it the guard
+    // falls through to a usable route and the stash is delivered; the
+    // no-chat-type guard would otherwise give the same permanent class and
+    // hide the branch this test names.
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'c2c' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    chp['disposed'] = true;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    // `maxFlushRetries: 0` is documented as unlimited, but a permanently
+    // unavailable route cannot become sendable: 10 minutes of backoff windows.
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await drain();
+    }
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'no usable route',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('drops a mis-typed chatType once instead of retrying it forever', async () => {
+    // resolveRoute accepts only 'group' | 'c2c'; nothing validates chatTypes at
+    // runtime, so a truthy-but-bogus value must classify as permanent.
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'bogus' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await drain();
+    }
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'no usable route',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('delivers once through a valid chatTypes config value', async () => {
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'c2c' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(anchors.has('s1')).toBe(false);
+  });
+});
+
+describe('disconnect clears routing state', () => {
+  it('clears the chat type map on disconnect', () => {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+    const chp = ch as unknown as Record<string, unknown>;
+    const chatTypeMap = chp['chatTypeMap'] as Map<string, string>;
+    chatTypeMap.set('test-chat', 'c2c');
+    expect(chatTypeMap.size).toBe(1);
+
+    ch.disconnect();
+
+    // resetRoutingState drops the routing maps: keeping a stale chat type
+    // would let a later resolveRoute classify a removed chat as deliverable.
+    expect(chatTypeMap.size).toBe(0);
   });
 });
