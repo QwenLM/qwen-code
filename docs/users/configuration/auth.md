@@ -1,8 +1,9 @@
 # Authentication
 
-Qwen Code's first-run `/auth` menu has three top-level options. Pick the one that matches how you want to run the CLI:
+Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that matches how you want to run the CLI:
 
-- **Alibaba ModelStudio**: official recommended setup. Opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
+- **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
+- **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
@@ -10,7 +11,86 @@ Qwen Code's first-run `/auth` menu has three top-level options. Pick the one tha
 >
 > **Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
 
-## Option 1: Qwen OAuth (Discontinued)
+## ☁️ Option 1: QwenCloud
+
+The official platform entry. Choose it when your API key comes from 千问AI平台 (China) or QwenCloud (International).
+
+- **How it works**: pick an access method, then pick the platform explicitly — the UI language never decides your endpoint. Enter the key issued by that platform and Qwen Code configures the matching endpoint.
+- **Access methods**: **Token Plan** (a subscription with a monthly Credit quota on a dedicated endpoint; Personal and Team editions) or **Standard API Key** (pay-as-you-go). Coding Plan is _not_ offered here — it is an Alibaba ModelStudio product, see Option 3.
+- **Requirements**: a Token Plan key (prefixed `sk-sp-`) generated from the Token Plan console, or a pay-as-you-go key (prefixed `sk-` or `sk-ws-`) from the platform's API key page.
+- **Benefits**: both access methods enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
+
+| Platform                  | Access method    | Endpoint                                                      | API key                                                                                  |
+| ------------------------- | ---------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| China — 千问AI平台        | Standard API Key | `https://maas.qianwenaiapi.com/compatible-mode/v1`            | [API keys](https://platform.qianwenai.com/docs/developer-guides/administration/api-keys) |
+| China — 千问AI平台        | Token Plan       | `https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1` | [Token Plan](https://platform.qianwenai.com/docs/token-plan/overview)                    |
+| International — QwenCloud | Standard API Key | `https://maas.qwencloudapi.com/compatible-mode/v1`            | [API keys](https://docs.qwencloud.com/developer-guides/administration/api-keys)          |
+| International — QwenCloud | Token Plan       | `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` | [Token Plan](https://docs.qwencloud.com/token-plan/overview)                             |
+
+### Interactive setup
+
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **QwenCloud**, and choose **Token Plan** or **Standard API Key** from the sub-menu. Choose the platform (**China — 千问AI平台** or **International — QwenCloud**), then enter your API key.
+
+### Headless or scripted setup
+
+For CI, containers, or scripts, configure the platform with environment variables instead of the interactive `/auth` flow.
+
+```bash
+# Pay-as-you-go (Standard API Key), International
+export QWENCLOUD_API_KEY="sk-your-api-key"
+export OPENAI_BASE_URL="https://maas.qwencloudapi.com/compatible-mode/v1"
+export OPENAI_MODEL="qwen3.8-max"
+```
+
+```bash
+# Token Plan, China
+export QWENCLOUD_TOKEN_PLAN_API_KEY="sk-sp-your-api-key"
+export OPENAI_BASE_URL="https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+export OPENAI_MODEL="qwen3.8-max"
+```
+
+### Alternative: configure via `settings.json`
+
+If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwen/settings.json`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3.8-max",
+        "name": "qwen3.8-max (QwenCloud)",
+        "baseUrl": "https://maas.qwencloudapi.com/compatible-mode/v1",
+        "description": "qwen3.8-max from QwenCloud Standard API Key",
+        "envKey": "QWENCLOUD_API_KEY"
+      }
+    ]
+  },
+  "env": {
+    "QWENCLOUD_API_KEY": "sk-your-api-key"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "qwen3.8-max"
+  }
+}
+```
+
+> [!note]
+>
+> `capabilities` is the one provider stamp that is never inferred from the model name, so a hand-written entry resolves with no reasoning declaration and `/effort` offers the generic tier list rather than QwenCloud's curated `low` / `medium` / `xhigh`. Use `/auth` to install the provider when you want the curated set.
+
+As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOKEN_PLAN_API_KEY` take effect once a `settings.json` provider entry declares them as the `envKey`; to select OpenAI-compatible auth with environment variables alone, export `OPENAI_API_KEY` instead.
+
+> [!note]
+>
+> QwenCloud and Alibaba ModelStudio are separate entries with separate env keys and endpoints. Choosing QwenCloud does not rewrite or delete saved ModelStudio credentials, endpoints, or model selections.
+
+## Option 2: Qwen OAuth (Discontinued)
 
 > [!warning]
 >
@@ -27,14 +107,14 @@ Start the CLI and follow the browser flow:
 qwen
 ```
 
-Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
+Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (QwenCloud, Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
 
 > [!note]
 >
 > In non-interactive or headless environments (e.g., CI, SSH, containers), you typically **cannot** complete the OAuth browser login flow.
 > In these cases, please use the Alibaba Cloud Coding Plan or API Key authentication method.
 
-## 💳 Option 2: Alibaba Cloud Coding Plan
+## 💳 Option 3: Alibaba Cloud Coding Plan
 
 Use this if you want predictable costs with diverse model options and higher usage quotas.
 
@@ -103,7 +183,7 @@ If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwe
 >
 > The Coding Plan uses a dedicated endpoint (`https://coding.dashscope.aliyuncs.com/v1`) that is different from the standard Dashscope endpoint. Make sure to use the correct `baseUrl`.
 
-## 🪙 Option 3: Alibaba Cloud Token Plan
+## 🪙 Option 4: Alibaba Cloud Token Plan
 
 Use this if your team or company prefers usage-based billing on a dedicated ModelStudio endpoint.
 
@@ -121,7 +201,7 @@ Token Plan is available in two regions, each with its own dedicated endpoint:
 
 ### Interactive setup
 
-Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. Token Plan API keys have no prefix requirement (unlike Coding Plan keys, which start with `sk-sp-`).
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **Alibaba ModelStudio**, and choose **Token Plan** from the sub-menu. Choose your region (**China (Beijing)** or **Singapore (International)**), then enter your API key. The wizard then shows its final step (Step 3/3 · Model IDs), where you pick the model IDs to configure: the models served by your endpoint are offered there and are applied only when you explicitly select them. ModelStudio Token Plan API keys have no prefix requirement, unlike Coding Plan keys, which start with `sk-sp-`, and unlike the separate QwenCloud Token Plan keys in Option 1, which also start with `sk-sp-`.
 
 After authentication, use the `/model` command to browse and switch between the models configured for your Token Plan. The model lineup evolves over time, so it is intentionally not listed here; model discovery from the endpoint happens during the `/auth` setup step above (the endpoint's own list is offered there and must be selected explicitly), and `/model` then shows the models configured for your plan.
 
@@ -174,7 +254,7 @@ If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwe
 >
 > The Token Plan uses dedicated, region-specific endpoints (`*.maas.aliyuncs.com`) that are different from the standard DashScope endpoint. Make sure the `baseUrl` matches the region of your subscription.
 
-## 🚀 Option 4: API Key (flexible)
+## 🚀 Option 5: API Key (flexible)
 
 Use this if you want to connect to third-party providers such as OpenAI, Anthropic, Google, Azure OpenAI, OpenRouter, Requesty, ModelScope, or a self-hosted endpoint. Supports multiple protocols and providers.
 
