@@ -18,11 +18,9 @@ import type {
   ChangeEvent as ReactChangeEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import {
-  DAEMON_APPROVAL_MODES,
-  useOptionalWorkspace,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
+import { EXECUTION_APPROVAL_MODES } from '../utils/planMode';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
@@ -1417,7 +1415,7 @@ export const ChatEditor = memo(
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
-      availableModes,
+      availableModes = EXECUTION_APPROVAL_MODES,
       planMode = false,
       modeControlsDisabled = false,
       onTogglePlan,
@@ -1996,8 +1994,28 @@ export const ChatEditor = memo(
     const planDescriptionId = useId();
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     useEffect(() => {
-      if (modeControlsDisabled) setModeDropdownOpen(false);
-    }, [modeControlsDisabled]);
+      if (!modeControlsDisabled && availableModes.length > 0) return;
+      setModeDropdownOpen(false);
+      // The trigger is natively disabled here, so focus held by it or by the
+      // open popover would drop to the body; hand it on, as the plan chip
+      // does when it unmounts. Focus anywhere else is left alone.
+      const toolbar = toolbarLeadingRef.current;
+      const active = getShadowAwareActiveElement(toolbar);
+      if (
+        !(active instanceof HTMLElement) ||
+        (!active.closest('[data-web-shell-mode-button]') &&
+          !active.closest('[data-web-shell-toolbar-popover]'))
+      )
+        return;
+      if (!disabled && !isCoarsePointerDevice()) {
+        focusComposer();
+        return;
+      }
+      // The mode control itself is disabled, so it cannot be the target.
+      toolbar
+        ?.querySelector<HTMLElement>('[data-web-shell-model-button]')
+        ?.focus();
+    }, [availableModes.length, modeControlsDisabled, disabled, focusComposer]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     useEffect(() => {
       if (modelControlsDisabled) setModelDropdownOpen(false);
@@ -2108,16 +2126,15 @@ export const ChatEditor = memo(
 
     const modeItems = useMemo<DropdownItem[]>(
       () =>
-        DAEMON_APPROVAL_MODES.filter(
-          (id) =>
-            id !== 'plan' && (!availableModes || availableModes.includes(id)),
+        EXECUTION_APPROVAL_MODES.filter((id) =>
+          availableModes.includes(id),
         ).map((id) => ({
           id,
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
         })),
-      [t, availableModes],
+      [availableModes, t],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2195,16 +2212,12 @@ export const ChatEditor = memo(
 
     const handleModeSelect = useCallback(
       (modeId: string) => {
-        if (
-          modeControlsDisabled ||
-          (availableModes && !availableModes.includes(modeId))
-        )
-          return;
+        if (modeControlsDisabled || !availableModes.includes(modeId)) return;
         onSelectMode?.(modeId);
         setModeDropdownOpen(false);
         core.focus();
       },
-      [onSelectMode, core, modeControlsDisabled, availableModes],
+      [availableModes, onSelectMode, core, modeControlsDisabled],
     );
 
     // The add menu closes before this runs and leaves focus to the caller. The
@@ -3442,7 +3455,10 @@ export const ChatEditor = memo(
                               showModeLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-mode-button
-                            disabled={modeControlsDisabled}
+                            disabled={
+                              modeControlsDisabled ||
+                              availableModes.length === 0
+                            }
                             data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();

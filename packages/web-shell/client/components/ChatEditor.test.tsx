@@ -428,7 +428,7 @@ interface ChatEditorRenderProps
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   currentMode?: string;
-  availableModes?: readonly string[];
+  availableModes?: ComponentProps<typeof ChatEditor>['availableModes'];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
@@ -2960,6 +2960,64 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
         .querySelector('[data-web-shell-plan-button]')
         ?.getAttribute('aria-checked'),
     ).toBe('true');
+  });
+
+  it('renders only the supplied mode choices and retains the actual current mode', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      currentMode: 'yolo',
+      availableModes: ['auto', 'plan', 'default', 'unsupported', 'auto'],
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    expect(trigger.textContent).toContain('Full Access');
+    act(() => trigger.click());
+    const labels = Array.from(
+      document.querySelectorAll('[data-web-shell-toolbar-popover] button'),
+    ).map((button) => button.textContent);
+    expect(labels).toHaveLength(2);
+    expect(labels[0]).toContain('(default)');
+    expect(labels[1]).toContain('(auto)');
+  });
+
+  it('disables the mode picker for an empty list', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      availableModes: [],
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.disabled,
+    ).toBe(true);
+  });
+
+  it('closes an open mode dropdown when the list becomes empty', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    act(() => modeButton.click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    // The list emptying while the trigger holds focus must hand focus to the
+    // composer; a disabled button cannot keep it and the body must not get it.
+    act(() => modeButton.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.disabled,
+    ).toBe(true);
+    expect(composerCoreState.focus).toHaveBeenCalled();
   });
 
   it('keeps permission and Plan controls operable while approval disables input', () => {
