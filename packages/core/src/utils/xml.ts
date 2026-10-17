@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export const TASK_NOTIFICATION_OPEN = '<task-notification>';
+export const TASK_NOTIFICATION_CLOSE = '</task-notification>';
+
 /**
  * Escape text so it is safe to interpolate into an XML element body OR
  * an attribute value. Covers all five XML metacharacters (`&`, `<`, `>`,

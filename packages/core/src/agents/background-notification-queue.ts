@@ -23,6 +23,11 @@
  * that its normal drain would prune without delivery.
  */
 
+import {
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../utils/xml.js';
+
 /**
  * Hard cap on queued background notifications in the TUI and ACP session.
  *
@@ -312,7 +317,7 @@ export class DroppedNotificationTally {
     const summary = summaryParts.join(' ');
     const status: 'dropped' | 'recorded' =
       droppedTotal === 0 && supersededPulseCount === 0 ? 'recorded' : 'dropped';
-    const modelText = `<task-notification>\n<kind>queue</kind>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`;
+    const modelText = `${TASK_NOTIFICATION_OPEN}\n<kind>queue</kind>\n<status>${status}</status>\n<summary>${summary}</summary>\n${TASK_NOTIFICATION_CLOSE}`;
 
     this.clear();
     return { displayText, modelText, status };
