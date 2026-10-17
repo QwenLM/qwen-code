@@ -4898,9 +4898,24 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName',
     );
-    const fetchCommand = verifySkill.match(/`git fetch [^`]+`/)?.[0];
-    expect(fetchCommand).toContain('origin "refs/heads/${BASE_REF}"');
+    const fetchCommand = verifySkill.match(/git fetch [^\n`]+/)?.[0];
+    expect(fetchCommand).toContain('"${BASE_REMOTE}" "refs/heads/${BASE_REF}"');
     expect(fetchCommand).not.toMatch(/--depth(?:=|\s)|--filter(?:=|\s)/);
+    expect(verifySkill).toContain('git remote get-url "${remote}"');
+    for (const remoteUrl of [
+      'https://github.com/${REPO}',
+      'https://github.com/${REPO}.git',
+      'git@github.com:${REPO}',
+      'git@github.com:${REPO}.git',
+    ]) {
+      expect(verifySkill).toContain(`"${remoteUrl}"`);
+    }
+    expect(verifySkill).toContain('inconclusive: no remote matches $REPO');
+    expect(verifySkill).toContain('inconclusive: baseline fetch failed');
+    expect(verifySkill).toContain(
+      "git rev-parse --verify 'FETCH_HEAD^{commit}'",
+    );
+    expect(verifySkill).toContain('inconclusive: cannot read baseline SHA');
     expect(readFileSync('.github/workflows/ci.yml', 'utf8')).toContain(
       'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode',
     );
