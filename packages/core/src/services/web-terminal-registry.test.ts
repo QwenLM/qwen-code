@@ -8,24 +8,37 @@ import type { MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '@xterm/headless';
 import { Writable } from 'node:stream';
+import { promises as fs } from 'node:fs';
+import { PTY_INPUT_QUEUE_FIELDS } from './pty-input-queue.js';
 
 const { Terminal } = pkg;
 
-const { spawn, loadPty, spawnSync, osPlatform, loadXtermHeadless, warn } =
-  vi.hoisted(() => ({
-    spawn: vi.fn(),
-    loadPty: vi.fn(),
-    spawnSync: vi.fn(),
-    osPlatform: vi.fn(),
-    loadXtermHeadless: vi.fn(),
-    warn: vi.fn(),
-  }));
+const {
+  spawn,
+  loadPty,
+  spawnSync,
+  osPlatform,
+  loadXtermHeadless,
+  warn,
+  logFileEnabled,
+  logSessionEnabled,
+} = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  loadPty: vi.fn(),
+  spawnSync: vi.fn(),
+  osPlatform: vi.fn(),
+  loadXtermHeadless: vi.fn(),
+  warn: vi.fn(),
+  logFileEnabled: vi.fn(),
+  logSessionEnabled: vi.fn(),
+}));
 
 vi.mock('node:child_process', () => ({ spawnSync }));
 vi.mock('../utils/getPty.js', () => ({ loadPty }));
 vi.mock('../utils/load-xterm-headless.js', () => ({ loadXtermHeadless }));
 vi.mock('../utils/debugLogger.js', () => ({
-  createDebugLogger: () => ({ warn }),
+  createDebugLogger: () => ({ warn, isEnabled: logSessionEnabled }),
+  isDebugLogFileEnabled: logFileEnabled,
 }));
 // conpty-host reads os.platform() for its win32 release gate, and the
 // registry for the bundled-vs-inbox ConPTY backend choice; killPtyTree
@@ -174,6 +187,9 @@ describe('WebTerminalRegistry', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    warn.mockReset();
+    logFileEnabled.mockReset().mockReturnValue(true);
+    logSessionEnabled.mockReset().mockReturnValue(true);
     inputSocket = { writableLength: 0 };
     write = vi.fn((data: string | Buffer) => {
       inputSocket.writableLength += Buffer.byteLength(data);
@@ -957,6 +973,9 @@ describe('WebTerminalRegistry', () => {
       expect(warn.mock.calls[0][0]).toContain('_writeStream._writeQueue');
       expect(warn.mock.calls[0][0]).toContain('_agent.inSocket.writableLength');
       expect(warn.mock.calls[0][0]).toContain('_socket.writableLength');
+      for (const field of PTY_INPUT_QUEUE_FIELDS) {
+        expect(warn.mock.calls[0][0]).toContain(field);
+      }
       expect(warn.mock.calls[0][0]).not.toContain('private input');
       expect(registry.write('terminal:unknown', '\x03')).toBe('written');
 
@@ -1007,6 +1026,80 @@ describe('WebTerminalRegistry', () => {
     expect(warn).toHaveBeenCalledOnce();
     registry.dispose();
   });
+
+  it.each(['file', 'session'])(
+    'logs once through the real debug sink (%s enabled first)',
+    async (firstEnabled) => {
+      const actual = await vi.importActual<
+        typeof import('../utils/debugLogger.js')
+      >('../utils/debugLogger.js');
+      const appendFile = vi
+        .spyOn(fs, 'appendFile')
+        .mockResolvedValue(undefined);
+      const mkdir = vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+      const logger = actual.createDebugLogger('WEB_TERMINAL_REGISTRY');
+      logFileEnabled.mockImplementation(actual.isDebugLogFileEnabled);
+      logSessionEnabled.mockImplementation(logger.isEnabled);
+      warn.mockImplementation(logger.warn);
+      actual.resetDebugLoggingState();
+      actual.setDebugLogSession(null);
+      vi.stubEnv('QWEN_DEBUG_LOG_FILE', undefined);
+      spawn.mockImplementation(() => ({
+        ...createSpawnedPty(),
+        _agent: {},
+      }));
+      const registry = await start('terminal:late-debug');
+      try {
+        expect(registry.write('terminal:late-debug', 'private input')).toBe(
+          'unavailable',
+        );
+        expect(warn).not.toHaveBeenCalled();
+        expect(appendFile).not.toHaveBeenCalled();
+
+        if (firstEnabled === 'file') {
+          vi.stubEnv('QWEN_DEBUG_LOG_FILE', '1');
+        } else {
+          actual.setDebugLogSession({
+            getSessionId: () => 'terminal-debug-test',
+          });
+        }
+        expect(registry.write('terminal:late-debug', 'private input')).toBe(
+          'unavailable',
+        );
+        expect(warn).not.toHaveBeenCalled();
+        expect(appendFile).not.toHaveBeenCalled();
+
+        vi.stubEnv('QWEN_DEBUG_LOG_FILE', '1');
+        actual.setDebugLogSession({
+          getSessionId: () => 'terminal-debug-test',
+        });
+        expect(registry.write('terminal:late-debug', 'private input')).toBe(
+          'unavailable',
+        );
+        await vi.waitFor(() => expect(appendFile).toHaveBeenCalledTimes(1));
+        const line = String(appendFile.mock.calls[0][1]);
+        expect(line).toContain('[WARN] [WEB_TERMINAL_REGISTRY]');
+        expect(line).toContain('terminal:late-debug');
+        expect(line).toContain('node-pty');
+        for (const field of PTY_INPUT_QUEUE_FIELDS) {
+          expect(line).toContain(field);
+        }
+        expect(line).not.toContain('private input');
+        expect(registry.write('terminal:late-debug', 'retry')).toBe(
+          'unavailable',
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(appendFile).toHaveBeenCalledTimes(1);
+      } finally {
+        registry.dispose();
+        actual.setDebugLogSession(null);
+        actual.resetDebugLoggingState();
+        appendFile.mockRestore();
+        mkdir.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'kills every process in the PTY session',

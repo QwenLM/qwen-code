@@ -9,10 +9,14 @@ import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  createDebugLogger,
+  isDebugLogFileEnabled,
+} from '../utils/debugLogger.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
 import {
   getPtyInputQueueBytes,
+  PTY_INPUT_QUEUE_FIELDS,
   type PtyInputQueueInternals,
 } from './pty-input-queue.js';
 import {
@@ -77,7 +81,7 @@ interface PtySession {
   workspaceCwd: string;
   buffer: string[];
   bufferBytes: number;
-  bufferedInputBytes(): number | undefined;
+  measureBufferedInputBytes(): number | undefined;
   exited: boolean;
   exitCode?: number;
   outputListeners: Set<(data: string) => void>;
@@ -417,7 +421,7 @@ export class WebTerminalRegistry {
           // `_isReady` is false, so note the close only when kill() really ran.
           // release() then disposes the worker a deferred kill left behind,
           // without double-closing a pseudo-console kill() already closed.
-          if ((spawned as { _isReady?: boolean })._isReady !== false) {
+          if (spawned._isReady !== false) {
             noteConPtyHostReleased(spawned);
           }
         },
@@ -441,7 +445,7 @@ export class WebTerminalRegistry {
           // node-pty never releases on a natural exit, and this branch frees
           // it. Same outcome releaseConPtyHost would have had on that arm,
           // reached for a different reason.
-          if ((spawned as { _isReady?: boolean })._isReady === false) {
+          if (spawned._isReady === false) {
             disposeConoutWorker(spawned);
             return;
           }
@@ -471,14 +475,19 @@ export class WebTerminalRegistry {
       workspaceCwd: options.workspaceCwd,
       buffer: [],
       bufferBytes: 0,
-      bufferedInputBytes: () => {
+      measureBufferedInputBytes: () => {
         if (spawned._isReady === false) return deferredInputBytes;
         deferredInputBytes = 0;
         const bytes = getPtyInputQueueBytes(spawned);
-        if (bytes === undefined && !warnedInputQueue) {
+        if (
+          bytes === undefined &&
+          !warnedInputQueue &&
+          isDebugLogFileEnabled() &&
+          debugLogger.isEnabled()
+        ) {
           warnedInputQueue = true;
           debugLogger.warn(
-            `Web terminal ${terminalId}: cannot inspect ${ptyImpl.name} input queue; expected _writeStream._writeQueue, _agent.inSocket.writableLength, or _socket.writableLength. Input admission is unavailable.`,
+            `Web terminal ${terminalId}: cannot inspect ${ptyImpl.name} input queue; expected ${PTY_INPUT_QUEUE_FIELDS.join(', ')}. Input admission is unavailable.`,
           );
         }
         return bytes;
@@ -548,7 +557,7 @@ export class WebTerminalRegistry {
     const isRecoveryControl =
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
     if (!isRecoveryControl) {
-      const bufferedBytes = session.bufferedInputBytes();
+      const bufferedBytes = session.measureBufferedInputBytes();
       if (bufferedBytes === undefined) return 'unavailable';
       if (
         bufferedBytes !== 0 &&

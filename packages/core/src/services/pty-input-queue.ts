@@ -6,6 +6,12 @@
 
 import type { WindowsPtyAgentInternals } from './conpty-host.js';
 
+export const PTY_INPUT_QUEUE_FIELDS = [
+  '_writeStream._writeQueue',
+  '_agent.inSocket.writableLength',
+  '_socket.writableLength',
+] as const;
+
 export interface PtyInputQueueInternals {
   _socket?: { writableLength?: number };
   _agent?: WindowsPtyAgentInternals;
@@ -19,6 +25,8 @@ export interface PtyInputQueueInternals {
  * POSIX write tasks, Windows input socket, and the legacy POSIX socket.
  * Recheck these shapes and deferred Windows startup writes on upgrades;
  * node-pty's public write() provides no drain signal.
+ * POSIX inspection is O(queued tasks) per call; the byte limit does not bound
+ * the cumulative scan cost of filling the queue with many small writes.
  */
 export function getPtyInputQueueBytes(
   pty: PtyInputQueueInternals,
