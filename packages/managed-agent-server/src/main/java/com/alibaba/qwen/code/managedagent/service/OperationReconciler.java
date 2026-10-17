@@ -13,6 +13,10 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * D7-2 of #14122: the one rule for an operation whose command's acceptance
@@ -25,7 +29,10 @@ import java.util.Map;
  * different thing, a published wait the lifecycle coordinator re-drives, and
  * never reaches this scan. Session kinds come from one Session-scoped scan; a
  * kind outside any Session, such as an SSH Workspace registration, lists its
- * own parked rows.
+ * own parked rows. The scan runs on the shared recovery scheduler, so it only
+ * lists due rows and hands each to the executor: evidence may block (an SSH
+ * probe waits on its node), and it must never hold up another coordinator's
+ * recovery tick. A row still being reconciled is not handed out again.
  */
 @Component
 public class OperationReconciler {
@@ -37,11 +44,15 @@ public class OperationReconciler {
 
     private final AgentStateStore store;
     private final Map<String, AcceptanceEvidence> evidence;
+    private final ExecutorService executor;
     private final Clock clock;
+    private final Set<String> active = ConcurrentHashMap.newKeySet();
 
     public OperationReconciler(AgentStateStore store,
-            List<AcceptanceEvidence> evidence, Clock clock) {
+            List<AcceptanceEvidence> evidence, ExecutorService executor,
+            Clock clock) {
         this.store = store;
+        this.executor = executor;
         this.evidence = new LinkedHashMap<>();
         for (AcceptanceEvidence source : evidence) {
             if (this.evidence.put(source.kind(), source) != null) {
@@ -57,12 +68,31 @@ public class OperationReconciler {
     public void reconcile() {
         for (ParkedOperation parked : store.findParkedOperations(
                 SCAN_LIMIT)) {
-            reconcile(parked);
+            dispatch(parked);
         }
         for (AcceptanceEvidence source : evidence.values()) {
             for (ParkedOperation parked : source.parked(SCAN_LIMIT)) {
-                reconcile(parked);
+                dispatch(parked);
             }
+        }
+    }
+
+    private void dispatch(ParkedOperation parked) {
+        String key = parked.kind() + "\n" + parked.tenantId() + "\n"
+                + parked.sessionId() + "\n" + parked.operationId();
+        if (!active.add(key)) {
+            return;
+        }
+        try {
+            executor.execute(() -> {
+                try {
+                    reconcile(parked);
+                } finally {
+                    active.remove(key);
+                }
+            });
+        } catch (RejectedExecutionException closed) {
+            active.remove(key);
         }
     }
 

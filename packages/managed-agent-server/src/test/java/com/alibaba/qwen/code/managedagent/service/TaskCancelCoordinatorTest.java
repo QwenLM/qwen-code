@@ -693,7 +693,7 @@ class TaskCancelCoordinatorTest {
         when(store.findOperation(TENANT, SESSION, OPERATION))
                 .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
         OperationReconciler reconciler = new OperationReconciler(store,
-                List.of(coordinator),
+                List.of(coordinator), new DirectExecutor(),
                 Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC));
         reconciler.reconcile();
         verify(store).settleParkedOperation(eq(parked),
