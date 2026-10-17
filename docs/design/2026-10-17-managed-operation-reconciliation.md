@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-operation-reconciliation.md) | [简体中文](2026-10-17-managed-operation-reconciliation.zh-CN.md)
 
-Status: phase 1 implemented in this change, in contract `1.59.0`. No schema change.
+Status: phase 1 landed in #14443 (contract `1.59.0`). Phase 2, the SSH Workspace registration, is implemented in this change (contract `1.60.0`). Neither changes the schema.
 
 This is slice **D7-2** of [#14122](https://github.com/QwenLM/qwen-code/issues/14122) (the D7 umbrella of [#12380](https://github.com/QwenLM/qwen-code/issues/12380), Stage D), tracked by [#14166](https://github.com/QwenLM/qwen-code/issues/14166). #12380 lets Stage D expose `java_durable` only with durable command delivery (D7-1, [#14168](https://github.com/QwenLM/qwen-code/issues/14168)) and original-command reconciliation (this slice). D7-3 ([#14167](https://github.com/QwenLM/qwen-code/issues/14167)), the opt-in profile, waits for both. The design note on #14166 classifies every site this slice touches.
 
@@ -30,7 +30,7 @@ Two defects follow:
 
 ## Non-goals (later phases)
 
-- `WORKSPACE_CREATE`: splitting deterministic refusals into `failed`, an evidence reader for the node marker, and releasing the reservation when evidence proves non-commit.
+- ~~`WORKSPACE_CREATE`~~: phase 2, below.
 - `RENAME`'s `UNKNOWN` state and its reader (the Harness title revision).
 - The Turn-level unknown tool outcome (`managed_runtime_recovery_blocked`), which needs the Runtime Broker's `reconcileExecution` wired to the Turn, together with #13847.
 - A `CANCEL` pending on a `CANCELLING` Turn that the dispatcher fails with `managed_runtime_recovery_blocked`.
@@ -91,6 +91,18 @@ An input on a Session without a managed journal, or whose journal was compacted 
 
 `hasOpenOperation` excludes a parked task cancel, so it holds no lifecycle hostage (H4f). `WorkspaceMigrationStore.requireIdle` and the `WorkspaceRecoveryStore` source check still count it. The difference is deliberate: a migration moves the storage that the cancel's task may still be using.
 
+### 7. Phase 2: an SSH Workspace registration reconciles from its node
+
+`SshWorkspaceService.register` runs claim, probe, `reserve`, `register-storage` on the node, a final probe, and `complete`. Only `reserve` and `register-storage` have effects. `reserve` writes the storage alias and the physical directory's owner (`FENCE_ONLY`, `UNVERIFIED`) and records the registration in `result_json`. `register-storage` writes the marker on the node.
+
+- **Unreserved means never sent.** `register-storage` runs only after `reserve` committed, so a registration without `result_json` never reached its node. Its non-retryable refusal is now final, `failed` (`ssh_runtime_version_mismatch`, `storage_already_registered`, `runtime_node_forbidden`, …), and nothing is left to release.
+- **Reserved means acceptance unknown.** A reserved one parks `recovery_blocked` (`java_durable`, `blocked`) with its failure code. It is due one delay (`PARK_DELAY_MILLIS`, 5 minutes) after its last attempt, so a `register-storage` that was still running on the node when its caller gave up has ended before the node is read.
+- **The node is the evidence.** `SshWorkspaceService` is the `WORKSPACE_CREATE` evidence source. It probes the reserved root, read-only. The reserved identity holding this registration's marker is **committed**, and `completeParked` finishes the registration as the original attempt would have: the storage is registered, the owner ready, and the Workspace and its owner access created. The reserved identity without a marker, or a different directory at the root, is **not committed**, and `releaseParked` fails it and deletes the alias and the owner, only while both are still this registration's unfinished reservation. Anything else proves nothing and parks it again: an unreadable node, a node that no longer admits the actor, or another registration's marker.
+- **Outside any Session.** The registration is tenant-scoped, so the Session-scoped scan never reads it. The source lists its own parked rows, and its settlement has effects of its own. The reconciler therefore takes stored kind names, and an evidence source may override `settle` and `parked`.
+- **Rows parked before this change** reconcile the same way. An unreserved one fails at once, without a probe.
+
+A marker that a zombie `register-storage` writes after a release is left on a directory nobody owns. Any later registration of that directory sees a foreign marker and is refused, so the failure stays safe: two registrations never own one directory.
+
 ## Validation
 
 - `OperationReconcilerTest`: a parked cancel resolves only from its record (unknown, then committed), a cancel whose task ended without a stop fails `task_already_settled`, unreadable evidence parks for a whole recheck, a parked input settles from the store's journal verdict only, a row no longer parked is left alone, and one kind has one evidence source. No case sends, claims or calls the Harness.
@@ -98,6 +110,7 @@ An input on a Session without a managed journal, or whose journal was compacted 
 - `ManagedTurnCommandOperationTest`: an input whose submission went unanswered parks with `submit_input_unconfirmed`; its verdict stays unknown with no journal, with an `ACTIVE` head and with a `SEALED` head, becomes committed once the journal holds the matching admission, and settles completed with a receipt. A `DELETING` head without the admission proves non-commit with the Turn's code, a mismatched digest proves nothing, and a started compaction proves nothing.
 - `WorkspaceMigrationStoreTest.refusesAStorageWithAParkedTaskCancelUntilItSettles`: a parked task cancel holds a storage migration until it settles.
 - `TaskCancelCoordinatorTest` keeps its delivery cases; its two parked cases moved to `OperationReconcilerTest`.
+- Phase 2: `SshWorkspaceStoreTest` covers an unreserved registration failing outright, a reserved one parking for the delay, `completeParked` finishing it once, `releaseParked` failing it and freeing the directory for another registration, and a release that leaves an owner another registration finished. `SshWorkspaceServiceTest` covers the verdicts: the marker landed, no marker, another directory at the root, another registration's marker, a revoked actor, an unreadable node, and an unreserved legacy row without a probe. Each case only ever probes. `OperationReconcilerTest.aKindOutsideAnySessionScansAndSettlesThroughItsSource` covers the source's own scan and settle.
 
 ## Acceptance (from #14166)
 

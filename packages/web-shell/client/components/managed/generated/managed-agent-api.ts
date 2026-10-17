@@ -559,7 +559,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. recovery_blocked is terminal and preserves the original physical owner; querying never unlocks it or starts a Runtime worker. */
+        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. A registration refused before it reserved its directory fails. One that may have reached its node is recovery_blocked and keeps the directory reserved while Java reads the node again, never registering anything: the registration's marker completes it, and a root without the marker, or holding another directory, fails it and releases the directory. Querying never unlocks it or starts a Runtime worker. */
         post: operations["webShellGetWorkspaceOperation"];
         delete?: never;
         options?: never;
@@ -1434,7 +1434,7 @@ export interface components {
         WebShellWorkspaceOperationRequest: {
             operationId: string;
         };
-        /** @description workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query. */
+        /** @description workspaceId is returned only after completed registration. recovery_blocked means the registration may have reached its node: it keeps the original ownership until Java reads the node and completes it, or fails it and releases the directory. A node that cannot be read, no longer admits the actor or holds another registration's marker leaves it for administrator review, and a new browser draft does not release it. failed releases the directory if the registration reserved it. replayed=true identifies an existing operation returned by a repeated key or a query. */
         WebShellWorkspaceCreateOperation: {
             operationId: string;
             /** @constant */
