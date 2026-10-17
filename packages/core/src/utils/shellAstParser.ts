@@ -838,8 +838,13 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
       // `git remote show` queries the remote over the network
       // (git-upload-pack) unless `-n` is given, so without that flag it has a
       // network side effect and must not auto-run as read-only — the argument
-      // can be any URL. `get-url` never connects.
-      if (action === 'show' && !beforeTerminator(rest).includes('-n')) {
+      // can be any URL. `get-url` never connects. A quote or backslash left in
+      // an argument means its text is not yet the word bash hands git (`\--`
+      // reaches git as the `--` terminator), so `-n` cannot be placed by it.
+      if (
+        action === 'show' &&
+        (!options.includes('-n') || rest.some((arg) => /["'\\]/.test(arg)))
+      ) {
         return 'unknown';
       }
       return 'read-only';
