@@ -1977,6 +1977,7 @@ const EN: Messages = {
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
   'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactChanged': 'Modified since recorded',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path
       ? `File not found in the workspace · ${v.path}`
@@ -6322,6 +6323,7 @@ const ZH: Messages = {
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactChanged': '登记后已被修改',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',

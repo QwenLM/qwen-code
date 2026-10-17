@@ -68,6 +68,7 @@ describe('NotebookEditTool', () => {
       getMemoryFileCount: () => 0,
       setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as never,
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
     tool = new NotebookEditTool(config);
   });
@@ -184,6 +185,31 @@ describe('NotebookEditTool', () => {
       expect(cacheState.entry.lastReadWasFull).toBe(true);
       expect(cacheState.entry.lastReadCacheable).toBe(false);
     }
+  });
+
+  it('records the edited notebook as a session artifact', async () => {
+    vi.mocked(config.isRecordArtifactEnabled).mockReturnValue(true);
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await replaceLoadData(filePath);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'automatically recorded as a workspace artifact with workspacePath "analysis.ipynb"',
+    );
+    expect(result.artifacts).toEqual([
+      {
+        title: 'analysis.ipynb',
+        kind: 'notebook',
+        storage: 'workspace',
+        workspacePath: 'analysis.ipynb',
+        mimeType: 'application/x-ipynb+json',
+        sizeBytes: fs.statSync(filePath).size,
+      },
+    ]);
   });
 
   it('blocks writing a secret into a team-memory notebook', async () => {

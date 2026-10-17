@@ -58,6 +58,10 @@ import type {
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
+import {
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
 
 const debugLogger = createDebugLogger('NOTEBOOK_EDIT');
 
@@ -647,8 +651,10 @@ class NotebookEditInvocation extends BaseToolInvocation<
         );
       }
 
+      let postWriteSizeBytes: number | undefined;
       try {
         const postWriteStats = fs.statSync(this.params.notebook_path);
+        postWriteSizeBytes = postWriteStats.size;
         const cache = this.config.getFileReadCache();
         if (prepared.requiresReadAfterWrite) {
           cache.invalidate(postWriteStats);
@@ -703,10 +709,19 @@ class NotebookEditInvocation extends BaseToolInvocation<
         diffStat,
       };
 
+      const artifact = buildWorkspaceArtifactCandidate(
+        this.config,
+        this.params.notebook_path,
+        { sizeBytes: postWriteSizeBytes },
+      );
+      const reminder =
+        artifact && !artifact.updateOnly
+          ? ` ${formatRecordArtifactReminder(artifact.workspacePath)}`
+          : '';
       const llmContent =
         this.modifyMetadata?.modifiedNotebookContent !== undefined
-          ? `Notebook ${this.params.notebook_path} has been updated. Notebook content was modified by the user before approval; the final saved notebook may differ from the original ${prepared.mode} cell ${prepared.editedCellId} proposal.`
-          : `Notebook ${this.params.notebook_path} has been updated. ${prepared.mode} cell ${prepared.editedCellId}.${
+          ? `Notebook ${this.params.notebook_path} has been updated.${reminder} Notebook content was modified by the user before approval; the final saved notebook may differ from the original ${prepared.mode} cell ${prepared.editedCellId} proposal.`
+          : `Notebook ${this.params.notebook_path} has been updated.${reminder} ${prepared.mode} cell ${prepared.editedCellId}.${
               prepared.mode === 'delete'
                 ? ''
                 : `\n\nUpdated source:\n\n---\n\n${normalizeSource(this.params.new_source ?? '')}`
@@ -715,6 +730,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
         llmContent,
         returnDisplay: displayResult,
         resultFilePaths: [this.params.notebook_path],
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
