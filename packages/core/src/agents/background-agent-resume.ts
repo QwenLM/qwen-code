@@ -41,6 +41,7 @@ import {
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 import type { PermissionMode, StopHookOutput } from '../hooks/types.js';
 import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
+import { applySubagentStartContext } from '../hooks/subagent-start-context.js';
 import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
@@ -1043,7 +1044,6 @@ export class BackgroundAgentResumeService {
       )
         ? promptInputs
         : undefined;
-      let pendingInitialExternalInputs = initialExternalInputs;
       const writerInitialPrompt = continuationPrompt;
       if (target.isFork && (!resumeHistory || resumeHistory.length === 0)) {
         const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
@@ -1224,12 +1224,18 @@ export class BackgroundAgentResumeService {
           ? `${forkResumeCapabilityReminder}\n\n${continuationPrompt}`
           : continuationPrompt,
       );
+      if (initialExternalInputs) {
+        contextState.set('external_inputs_override', initialExternalInputs);
+      }
       const resolvedMode = approvalModeToPermissionMode(resolvedApprovalMode);
       await this.applySubagentStartHook(contextState, {
         agentId: meta.agentId,
         agentType: meta.agentType,
         resolvedMode,
         signal: bgAbortController.signal,
+        systemPrompt: target.isFork
+          ? undefined
+          : target.subagentConfig?.systemPrompt,
       });
       const bgEmitter = subagent.getCore().getEventEmitter();
       let liveToolCallCount = 0;
@@ -1313,8 +1319,7 @@ export class BackgroundAgentResumeService {
         fireStartHook: boolean,
       ) => {
         let keepResident = false;
-        let finishingInputs = pendingInitialExternalInputs;
-        pendingInitialExternalInputs = undefined;
+        let finishingInputs: AgentExternalInput[] | undefined;
         let shouldFireStartHook = fireStartHook;
         turnRunning = true;
         try {
@@ -1326,13 +1331,6 @@ export class BackgroundAgentResumeService {
                 resolvedMode,
                 signal: turnAbortController.signal,
               });
-              const additionalContext = turnContextState.get('hook_context');
-              if (additionalContext) {
-                turnContextState.set(
-                  'task_prompt',
-                  `${String(turnContextState.get('task_prompt'))}\n\n${String(additionalContext)}`,
-                );
-              }
             }
             shouldFireStartHook = false;
 
@@ -1932,6 +1930,7 @@ export class BackgroundAgentResumeService {
       agentType: string;
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
+      systemPrompt?: string;
     },
   ): Promise<void> {
     const hookSystem = this.config.getHookSystem();
@@ -1949,7 +1948,11 @@ export class BackgroundAgentResumeService {
       );
       const additionalContext = startHookOutput?.getAdditionalContext();
       if (additionalContext) {
-        contextState.set('hook_context', additionalContext);
+        applySubagentStartContext(
+          contextState,
+          additionalContext,
+          opts.systemPrompt,
+        );
       }
     } catch (hookError) {
       debugLogger.warn(
