@@ -585,6 +585,16 @@ export interface UserPromptRecordPayload {
    * this payload when no projection, references, or input annotations exist.
    */
   displayText: string;
+  /**
+   * ACP record sites set this from whether the client supplied a display
+   * projection: false means displayText is the raw request text recorded so
+   * replay can render carried references/resources, and the title tracker
+   * must not treat the turn as a projection (a single raw-text marker would
+   * otherwise flip the whole session into title-projection mode and drop
+   * every payload-less turn from the title input). Absent on older journals
+   * and non-ACP paths, which keep the historical payload-shape heuristic.
+   */
+  displayProjection?: boolean;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
@@ -593,6 +603,10 @@ export interface UserPromptRecordPayload {
   attachmentReferences?: UserPromptAttachmentReference[];
   /** Original ACP resource references, independent of model-input expansion. */
   resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
+  /** Bounded original ACP text resources, independent of model-input expansion. */
+  embeddedResources?: Array<Extract<ContentBlock, { type: 'resource' }>>;
+  /** True when replayable embedded text resources exceeded the retention bounds and were not journaled. */
+  embeddedResourcesTruncated?: boolean;
 }
 
 export interface UserPromptAttachmentReference {
@@ -1224,6 +1238,15 @@ export class ChatRecordingService {
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
+   * Separate from the per-turn texts: one `string | undefined` slot cannot
+   * answer both "is this session in client-projection mode?" and "what text
+   * does this turn contribute?". A raw-text record (displayProjection ===
+   * false) contributes its text below without flipping this flag, so a
+   * session with no projection still titles from the full history, while a
+   * projection session never falls back to the hidden model context.
+   */
+  private displayProjectionForTitle = false;
+  /**
    * How many auto-title attempts have been made this process.
    *
    * We don't commit to "one attempt per session" because the first assistant
@@ -1415,13 +1438,13 @@ export class ChatRecordingService {
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.displayProjectionForTitle = false;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitle(
-          (record.systemPayload as UserPromptRecordPayload | undefined)
-            ?.displayText,
+        this.trackUserDisplayTextForTitlePayload(
+          record.systemPayload as UserPromptRecordPayload | undefined,
         );
       }
       if (record.type !== 'system') continue;
@@ -1465,6 +1488,27 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+  }
+
+  // A record whose displayText is raw request text (displayProjection
+  // === false) hides no model context, unlike a projection record — it
+  // contributes its text without flipping the session into projection mode.
+  // Legacy payloads predate the marker, so a marker-less payload keeps the
+  // historical behavior: any recorded displayText was a projection. A
+  // projection record must keep tracking its displayText even when it is ''
+  // (and even beside embedded resources): tracking undefined would read as
+  // "no projection" and fall back to the raw history the client hid.
+  private trackUserDisplayTextForTitlePayload(
+    payload: UserPromptRecordPayload | undefined,
+  ): void {
+    if (payload !== undefined && payload.displayProjection !== false) {
+      this.displayProjectionForTitle = true;
+    }
+    this.trackUserDisplayTextForTitle(
+      payload?.displayProjection === false && payload.displayText === ''
+        ? undefined
+        : payload?.displayText,
+    );
   }
 
   private trackUserDisplayTextForTitle(displayText: string | undefined): void {
@@ -2352,7 +2396,7 @@ export class ChatRecordingService {
     daemonPromptId?: string,
   ): void {
     try {
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
+      this.trackUserDisplayTextForTitlePayload(promptPayload);
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
@@ -2371,6 +2415,10 @@ export class ChatRecordingService {
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
     return this.userDisplayTextsForTitle;
+  }
+
+  hasDisplayProjectionForTitle(): boolean {
+    return this.displayProjectionForTitle;
   }
 
   recordGoalRuntimeMessage(
@@ -2884,7 +2932,15 @@ export class ChatRecordingService {
         const outcome = await tryGenerateSessionTitle(
           this.config,
           controller.signal,
-          this.userDisplayTextsForTitle,
+          // Outside projection mode the recorded texts must not stand in for
+          // the conversation: a raw-text record's displayText is the request
+          // text, and projecting only payload-carrying turns would drop every
+          // payload-less turn from the title input. The flag itself is passed
+          // through: the ring can shift every recorded entry out of a session
+          // that is still projected, so the consumer must not re-derive the
+          // mode from the surviving texts.
+          this.displayProjectionForTitle ? this.userDisplayTextsForTitle : [],
+          this.displayProjectionForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;

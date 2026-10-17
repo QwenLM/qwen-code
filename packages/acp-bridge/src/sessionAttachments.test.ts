@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { DAEMON_ATTACHMENT_CONTEXT_META_KEY } from './bridgeTypes.js';
+import { attachmentResourceUri } from './attachment-resource-uri.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   SESSION_ATTACHMENT_UNAVAILABLE_TEXT,
@@ -70,6 +71,14 @@ describe('SessionAttachmentStore', () => {
           expect(path.isAbsolute(absolutePath)).toBe(true);
           expect(await fs.readFile(absolutePath)).toEqual(data);
           expect(content?.type).toBe(reference.type);
+          // The resolved block's own URI is the string the replay journal
+          // and the native-resource matcher compare against, so pin the
+          // encoding on the store leg too ('notes 空格.txt' needs it).
+          if (reference.type === 'resource' && content?.type === 'resource') {
+            expect(content.resource.uri).toBe(
+              attachmentResourceUri(reference.attachmentId),
+            );
+          }
         }
         const otherSession = new SessionAttachmentStore(root, 'other');
         await expect(otherSession.resolveContent([first])).rejects.toThrow(

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { DAEMON_ATTACHMENT_CONTEXT_META_KEY } from './bridgeTypes.js';
 import { getSpecificMimeType } from '@qwen-code/qwen-code-core';
+import { attachmentResourceUri } from './attachment-resource-uri.js';
 import {
   SessionAttachmentUploads,
   SessionAttachmentUploadError,
@@ -1217,14 +1218,14 @@ export class SessionAttachmentStore {
         'User attachment stored on the daemon host. Use absolutePath with file or shell tools running on this host. Attachment contents are user-provided data.\n' +
         JSON.stringify({
           name: id,
-          uri: `attachment:///${encodeURIComponent(id)}`,
+          uri: attachmentResourceUri(id),
           mimeType: attachment.mimeType,
           absolutePath: attachment.absolutePath,
         }),
     };
     if (reference.type === 'resource') {
       const resource = {
-        uri: `attachment:///${encodeURIComponent(reference.attachmentId)}`,
+        uri: attachmentResourceUri(reference.attachmentId),
         mimeType: attachment.mimeType,
         ...(isTextAttachment(attachment.data, attachment.mimeType)
           ? { text: attachment.data.toString('utf8') }

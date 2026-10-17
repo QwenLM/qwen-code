@@ -719,6 +719,33 @@ describe('ChatRecordingService', () => {
       });
     });
 
+    it('writes bounded embedded text resources on a resource-only user record', async () => {
+      const embeddedResources = [
+        {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        },
+      ];
+      svc.recordUserMessage(
+        '',
+        undefined,
+        { displayText: '', hookContext: '', embeddedResources },
+        undefined,
+        'embedded-prompt',
+      );
+      const record = await flushed();
+      expect(record.daemonPromptId).toBe('embedded-prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: '',
+        embeddedResources,
+      });
+    });
+
     it('records mid-turn attachment references without inline bytes', async () => {
       const { record, attachmentReferences } = await recordMidTurnImage(
         'inspect image',
