@@ -36,6 +36,7 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import {
   HookCommandCgroup,
   HookCommandIsolationUnavailableError,
@@ -619,6 +620,19 @@ async function terminateSurvivingHookProcessGroup(
   });
 }
 
+/**
+ * A function hook receives its input by reference; a PreToolUse hook gets its
+ * own copy so it can change the tool input only through its returned output.
+ */
+function isolatedHookInput(
+  eventName: HookEventName,
+  input: HookInput,
+): HookInput {
+  return eventName === HookEventName.PreToolUse
+    ? structuredClone(input)
+    : input;
+}
+
 function createSurvivingHookInputFile(input: HookInput): string {
   const path = join(
     tmpdir(),
@@ -1022,10 +1036,12 @@ export class HookRunner {
   ): Promise<HookExecutionResult[]> {
     const promises = hookConfigs.map(async (config, index) => {
       onHookStart?.(config, index);
-      const result = await this.executeHook(config, eventName, input, {
-        ...context,
-        signal,
-      });
+      const result = await this.executeHook(
+        config,
+        eventName,
+        isolatedHookInput(eventName, input),
+        { ...context, signal },
+      );
       onHookEnd?.(config, result, index);
       return result;
     });
@@ -1060,10 +1076,12 @@ export class HookRunner {
       }
       const config = hookConfigs[i];
       onHookStart?.(config, i);
-      const result = await this.executeHook(config, eventName, currentInput, {
-        ...context,
-        signal,
-      });
+      const result = await this.executeHook(
+        config,
+        eventName,
+        isolatedHookInput(eventName, currentInput),
+        { ...context, signal },
+      );
       onHookEnd?.(config, result, i);
       results.push(result);
 
@@ -1237,7 +1255,7 @@ export class HookRunner {
         delete supervisorEnv['NODE_OPTIONS'];
         try {
           child = spawn(
-            process.execPath,
+            getJsInterpreterCommand(import.meta.url).command,
             [
               '--input-type=commonjs',
               '--eval',
@@ -1292,6 +1310,9 @@ export class HookRunner {
             shell: false,
             // Own a process group for legacy cancellation.
             detached: process.platform !== 'win32',
+            // Give the child a windowless console, so a hook command that hides
+            // its own window cannot minimize the terminal hosting the session.
+            windowsHide: process.platform === 'win32',
           },
         );
         if (processUnit) {

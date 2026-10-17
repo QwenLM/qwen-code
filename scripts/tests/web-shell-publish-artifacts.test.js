@@ -64,17 +64,79 @@ function write(fixture, name, contents) {
 // the build emits below `dist/` is on disk yet absent from the tarball.
 const files = ['dist/*.js', 'dist/types'];
 
-function declarePackage(fixture, exports, packageFiles = files) {
+function declarePackage(
+  fixture,
+  exports,
+  packageFiles = files,
+  dependencies = {},
+) {
+  write(fixture, 'NOTICES.txt', 'Bundled dependency licenses');
   write(fixture, 'package.json', {
     name: 'fixture-web-shell',
     version: '0.0.0',
     type: 'module',
-    files: packageFiles,
+    files: ['NOTICES.txt', ...packageFiles],
     exports,
+    dependencies,
   });
 }
 
 describe('web-shell publish artifact verifier', () => {
+  it.each(['shiki-files/core', '@shikijs/types'])(
+    'refuses declarations depending on undeclared %s',
+    (specifier) => {
+      const result = runVerifier((fixture) => {
+        declarePackage(fixture, { '.': './dist/index.js' });
+        write(fixture, 'dist/index.js', 'export {};');
+        write(
+          fixture,
+          'dist/types/private.d.ts',
+          `export type X = typeof import('${specifier}');`,
+        );
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `private.d.ts imports the repo-only ${specifier}`,
+      );
+    },
+  );
+
+  it('accepts self, relative, builtin and declared type dependencies', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, { '.': './dist/index.js' }, files, {
+        shiki: '*',
+        '@types/hast': '*',
+      });
+      write(fixture, 'dist/index.js', 'export {};');
+      write(
+        fixture,
+        'dist/types/index.d.ts',
+        `export type A = typeof import('fixture-web-shell/daemon-react-sdk');
+         export type B = typeof import('./relative');
+         export type C = typeof import('node:fs');
+         export type D = typeof import('shiki/core');
+         export type E = import('hast').Root;`,
+      );
+    });
+    expect(result.status).toBe(0);
+  });
+  it('refuses bundled dependency notices excluded from the npm package', () => {
+    const result = runVerifier((fixture) => {
+      write(fixture, 'NOTICES.txt', 'Bundled dependency licenses');
+      write(fixture, 'dist/index.js', 'export {};');
+      write(fixture, 'package.json', {
+        name: 'fixture-web-shell',
+        version: '0.0.0',
+        type: 'module',
+        files,
+        exports: { '.': './dist/index.js' },
+      });
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'NOTICES.txt is missing from the npm package',
+    );
+  });
   it('refuses an export target that exists on disk but is left out of the tarball', () => {
     const result = runVerifier((fixture) => {
       declarePackage(fixture, {

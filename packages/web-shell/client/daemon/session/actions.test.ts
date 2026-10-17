@@ -181,7 +181,470 @@ describe('context usage counter reconciliation', () => {
   );
 });
 
+describe('sendPrompt admission notices', () => {
+  it.each([
+    {
+      name: 'MCP App response loss',
+      source: 'mcp-app' as const,
+      error: new TypeError('Failed to fetch'),
+      noticeCount: 0,
+    },
+    {
+      name: 'ordinary composer response loss',
+      source: undefined,
+      error: new TypeError('Failed to fetch'),
+      noticeCount: 1,
+    },
+    {
+      name: 'MCP App definite rejection',
+      source: 'mcp-app' as const,
+      error: new DaemonHttpError(
+        413,
+        { code: 'prompt_too_large' },
+        'Prompt too large',
+      ),
+      noticeCount: 0,
+    },
+  ])(
+    'preserves the original error for $name',
+    async ({ source, error, noticeCount }) => {
+      const session = createMockSession('session-a');
+      session.submitPrompt.mockRejectedValueOnce(error);
+      const addNotice = vi.fn();
+      const onAdmitted = vi.fn();
+      const { actions } = createActionsHarness({ session, addNotice });
+
+      await expect(
+        actions.sendPrompt('Analyze failures', {
+          ...(source ? { source } : {}),
+          onAdmitted,
+        }),
+      ).rejects.toBe(error);
+
+      expect(session.submitPrompt).toHaveBeenCalledOnce();
+      expect(onAdmitted).not.toHaveBeenCalled();
+      expect(addNotice).toHaveBeenCalledTimes(noticeCount);
+      if (noticeCount > 0) {
+        expect(addNotice).toHaveBeenCalledWith(
+          expect.objectContaining({
+            operation: 'send_prompt',
+            message: 'Prompt failed: Failed to fetch',
+          }),
+        );
+      }
+    },
+  );
+
+  it('keeps notices for MCP App errors before admission starts', async () => {
+    const session = createMockSession('session-a');
+    const error = new Error('Admission preparation failed');
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ session, addNotice });
+
+    await expect(
+      actions.sendPrompt('Analyze failures', {
+        source: 'mcp-app',
+        onAdmissionStarted: () => {
+          throw error;
+        },
+      }),
+    ).rejects.toBe(error);
+
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+    expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        operation: 'send_prompt',
+        message: 'Prompt failed: Admission preparation failed',
+      }),
+    );
+  });
+
+  it('keeps notices for MCP App errors after a receipt arrives', async () => {
+    const session = createMockSession('session-a');
+    const error = new Error('Turn connection lost');
+    const addNotice = vi.fn();
+    const onAdmitted = vi.fn();
+    const { actions, activePromptsRef } = createActionsHarness({
+      session,
+      addNotice,
+    });
+    const pending = actions
+      .sendPrompt('Analyze failures', {
+        source: 'mcp-app',
+        onAdmitted,
+      })
+      .catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+        promptId: 'prompt-1',
+      }),
+    );
+    const active = activePromptsRef.current.get('session-a');
+    expect(active?.reject).toEqual(expect.any(Function));
+    active?.reject?.(error);
+
+    expect(await pending).toBe(error);
+    expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        operation: 'send_prompt',
+        message: 'Prompt failed: Turn connection lost',
+      }),
+    );
+  });
+});
+
+describe('sendPrompt client registration recovery', () => {
+  it('keeps a cancelled recovery request rejected and admits a fresh guarded request', async () => {
+    const resume = createDeferred<Response>();
+    const promptClientIds: Array<string | null> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/resume')) return resume.promise;
+      if (url.endsWith('/prompt')) {
+        promptClientIds.push(
+          new Headers(init?.headers).get('X-Qwen-Client-Id'),
+        );
+        return new Response(
+          JSON.stringify(
+            promptClientIds.length === 1
+              ? { code: 'invalid_client_id', error: 'unknown client' }
+              : { promptId: 'fresh-prompt', lastEventId: 0 },
+          ),
+          { status: promptClientIds.length === 1 ? 400 : 202 },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        attached: true,
+        workspaceCwd: '/workspace',
+      },
+    });
+    const connection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-a',
+      clientId: 'client-a',
+      workspaceCwd: '/workspace',
+      currentModel: 'model-a',
+    };
+    const h = createActionsHarness({ connection });
+    h.sessionRef.current = session;
+    const rpc = new AbortController();
+    const onAdmitted = vi.fn();
+    const beforeDispatch = vi.fn((clientId: string | undefined) => {
+      if (rpc.signal.aborted || clientId !== connection.clientId) {
+        throw new DOMException('Source expired', 'AbortError');
+      }
+    });
+    const cancelled = h.actions.sendPrompt('Analyze failures', {
+      beforeDispatch,
+      onAdmitted,
+    });
+    await vi.waitFor(() =>
+      expect(
+        fetch.mock.calls.some(([url]) => String(url).endsWith('/resume')),
+      ).toBe(true),
+    );
+    rpc.abort();
+    resume.resolve(
+      new Response(
+        JSON.stringify({
+          sessionId: 'session-a',
+          clientId: 'client-recovered',
+          attached: true,
+          workspaceCwd: '/workspace',
+          state: {},
+        }),
+        { status: 200 },
+      ),
+    );
+
+    expect(await cancelled).toEqual({ stopReason: 'cancelled' });
+    expect(promptClientIds).toEqual(['client-a']);
+    expect(beforeDispatch.mock.calls).toEqual([
+      ['client-a'],
+      ['client-recovered'],
+    ]);
+    expect(onAdmitted).not.toHaveBeenCalled();
+    expect(h.getConnection()).toEqual({
+      ...connection,
+      clientId: 'client-recovered',
+    });
+
+    const reviewedClientId = h.getConnection().clientId;
+    const freshGuard = vi.fn((clientId: string | undefined) => {
+      if (clientId !== reviewedClientId) {
+        throw new DOMException('Source expired', 'AbortError');
+      }
+    });
+    const fresh = h.actions.sendPrompt('Analyze failures again', {
+      beforeDispatch: freshGuard,
+      onAdmitted,
+    });
+    await vi.waitFor(() =>
+      expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+        promptId: 'fresh-prompt',
+      }),
+    );
+    expect(freshGuard).toHaveBeenCalledExactlyOnceWith('client-recovered');
+    expect(promptClientIds).toEqual(['client-a', 'client-recovered']);
+    const active = h.activePromptsRef.current.get('session-a');
+    expect(active?.resolve).toEqual(expect.any(Function));
+    active?.resolve?.({ stopReason: 'end_turn' });
+    expect(await fresh).toEqual({ stopReason: 'end_turn' });
+  });
+
+  it.each(['session-b', 'session-a'])(
+    'does not publish a recovered client to a replacement SDK instance for %s',
+    async (replacementSessionId) => {
+      const resume = createDeferred<Response>();
+      let promptCount = 0;
+      const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/resume')) return resume.promise;
+        if (url.endsWith('/prompt')) {
+          promptCount++;
+          return new Response(
+            JSON.stringify({
+              code: 'invalid_client_id',
+              error: 'unknown client',
+            }),
+            { status: 400 },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const session = new DaemonSessionClient({
+        client,
+        session: {
+          sessionId: 'session-a',
+          clientId: 'client-a',
+          attached: true,
+          workspaceCwd: '/workspace',
+        },
+      });
+      const h = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          clientId: 'client-a',
+        },
+      });
+      h.sessionRef.current = session;
+      const onAdmitted = vi.fn();
+      const pending = h.actions.sendPrompt('Analyze failures', {
+        onAdmitted,
+        beforeDispatch: (clientId) => {
+          if (h.sessionRef.current !== session || clientId !== 'client-a') {
+            throw new DOMException('Source expired', 'AbortError');
+          }
+        },
+      });
+      await vi.waitFor(() =>
+        expect(
+          fetch.mock.calls.some(([url]) => String(url).endsWith('/resume')),
+        ).toBe(true),
+      );
+      const replacement = new DaemonSessionClient({
+        client,
+        session: {
+          sessionId: replacementSessionId,
+          clientId: 'client-replacement',
+          attached: true,
+          workspaceCwd: '/replacement',
+        },
+      });
+      h.sessionRef.current = replacement;
+      const replacementConnection: DaemonConnectionState = {
+        status: 'connected',
+        sessionId: replacementSessionId,
+        clientId: 'client-replacement',
+        workspaceCwd: '/replacement',
+        currentModel: 'model-replacement',
+      };
+      h.replaceConnection(replacementConnection);
+      resume.resolve(
+        new Response(
+          JSON.stringify({
+            sessionId: 'session-a',
+            clientId: 'client-recovered',
+            attached: true,
+            workspaceCwd: '/workspace',
+            state: {},
+          }),
+          { status: 200 },
+        ),
+      );
+
+      expect(await pending).toEqual({ stopReason: 'cancelled' });
+      expect(session.clientId).toBe('client-recovered');
+      expect(promptCount).toBe(1);
+      expect(onAdmitted).not.toHaveBeenCalled();
+      expect(h.getConnection()).toBe(replacementConnection);
+      expect(h.sessionRef.current).toBe(replacement);
+    },
+  );
+
+  it('preserves automatic recovery and admission without a dispatch guard', async () => {
+    const promptClientIds: Array<string | null> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/resume')) {
+        return new Response(
+          JSON.stringify({
+            sessionId: 'session-a',
+            clientId: 'client-recovered',
+            attached: true,
+            workspaceCwd: '/workspace',
+            state: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/prompt')) {
+        promptClientIds.push(
+          new Headers(init?.headers).get('X-Qwen-Client-Id'),
+        );
+        return new Response(
+          JSON.stringify(
+            promptClientIds.length === 1
+              ? { code: 'invalid_client_id', error: 'unknown client' }
+              : { promptId: 'recovered-prompt', lastEventId: 0 },
+          ),
+          { status: promptClientIds.length === 1 ? 400 : 202 },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        attached: true,
+        workspaceCwd: '/workspace',
+      },
+    });
+    const connection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-a',
+      clientId: 'client-a',
+      workspaceCwd: '/workspace',
+      currentModel: 'model-a',
+    };
+    const h = createActionsHarness({ connection });
+    h.sessionRef.current = session;
+    const onAdmitted = vi.fn();
+    const pending = h.actions.sendPrompt('Normal composer prompt', {
+      onAdmitted,
+    });
+    await vi.waitFor(() =>
+      expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+        promptId: 'recovered-prompt',
+      }),
+    );
+    expect(promptClientIds).toEqual(['client-a', 'client-recovered']);
+    const active = h.activePromptsRef.current.get('session-a');
+    expect(active?.resolve).toEqual(expect.any(Function));
+    active?.resolve?.({ stopReason: 'end_turn' });
+    expect(await pending).toEqual({ stopReason: 'end_turn' });
+    expect(h.getConnection()).toEqual({
+      ...connection,
+      clientId: 'client-recovered',
+    });
+  });
+});
+
 describe('getConnectionAfterSessionClear', () => {
+  it('rechecks the MCP App source before an SDK recovery retry', async () => {
+    const resume = createDeferred<Response>();
+    let promptCount = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/resume')) return resume.promise;
+      if (url.endsWith('/prompt')) {
+        promptCount++;
+        return new Response(
+          JSON.stringify(
+            promptCount === 1
+              ? { code: 'invalid_client_id', error: 'unknown client' }
+              : { promptId: 'must-not-be-admitted', lastEventId: 0 },
+          ),
+          { status: promptCount === 1 ? 400 : 202 },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        attached: true,
+        workspaceCwd: '/workspace',
+      },
+    });
+    const addNotice = vi.fn();
+    const h = createActionsHarness({ addNotice });
+    h.sessionRef.current = session;
+    let sourceCurrent = true;
+    const onAdmissionStarted = vi.fn();
+    const onAdmitted = vi.fn(() => {
+      h.activePromptsRef.current
+        .get('session-a')
+        ?.resolve?.({ stopReason: 'end_turn' });
+    });
+    const beforeDispatch = vi.fn((clientId: string | undefined) => {
+      if (!sourceCurrent || clientId !== 'client-a') {
+        throw new DOMException('Source expired', 'AbortError');
+      }
+    });
+    const result = h.actions
+      .sendPrompt('Analyze failures', {
+        source: 'mcp-app',
+        onAdmissionStarted,
+        onAdmitted,
+        beforeDispatch,
+      })
+      .catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(
+        fetch.mock.calls.some(([url]) => String(url).endsWith('/resume')),
+      ).toBe(true),
+    );
+    sourceCurrent = false;
+    resume.resolve(
+      new Response(
+        JSON.stringify({
+          sessionId: 'session-a',
+          clientId: 'client-b',
+          attached: true,
+          workspaceCwd: '/workspace',
+          state: {},
+        }),
+        { status: 200 },
+      ),
+    );
+
+    expect(await result).toMatchObject({ name: 'AbortError' });
+    expect(promptCount).toBe(1);
+    expect(beforeDispatch.mock.calls).toEqual([['client-a'], ['client-b']]);
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
+    expect(onAdmitted).not.toHaveBeenCalled();
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(h.store.dispatch).toHaveBeenCalledWith({
+      type: 'assistant.done',
+      reason: 'cancelled',
+    });
+    expect(h.activePromptsRef.current.has('session-a')).toBe(false);
+    expect(h.setPromptStatus).toHaveBeenLastCalledWith('idle');
+  });
+
   it('uses the current provider mode for mid-turn admission', async () => {
     const session = {
       ...createMockSession('session-a'),
@@ -1051,6 +1514,28 @@ describe('createDaemonSessionActions', () => {
       expect.objectContaining({ operation: 'load_stats' }),
     );
   });
+
+  it.each([
+    ['reports', undefined, 2],
+    ['does not report', true, 0],
+  ] as const)(
+    '%s failed rewind calls when silent is %s',
+    async (_name, silent, notices) => {
+      const addNotice = vi.fn((notice) => notice);
+      const session = createMockSession('session-a');
+      session.getRewindSnapshots.mockRejectedValueOnce(new Error('no list'));
+      session.rewind.mockRejectedValueOnce(new Error('busy'));
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getRewindSnapshots({ silent })).rejects.toThrow(
+        'no list',
+      );
+      await expect(
+        actions.rewindSession('prompt-1', { rewindFiles: false, silent }),
+      ).rejects.toThrow('busy');
+      expect(addNotice).toHaveBeenCalledTimes(notices);
+    },
+  );
 
   it('does not report a context usage error while the session is disconnected', async () => {
     const addNotice = vi.fn();
@@ -3436,7 +3921,9 @@ describe('createDaemonSessionActions', () => {
         restartEventStream,
         onContinuationAdmitted,
       });
-      const pending = actions.continueSession();
+      const pending = actions.continueSession({
+        confirmCancellation: 'legacy-daemon',
+      });
       expect(getConnection().context?.recovery).toEqual({
         kind: 'interrupted_prompt',
         canContinue: false,
@@ -3453,6 +3940,7 @@ describe('createDaemonSessionActions', () => {
       await expect(pending).resolves.toBeUndefined();
       expect(session.continueSession).toHaveBeenCalledWith(
         expect.any(AbortSignal),
+        { confirmCancellation: 'legacy-daemon' },
       );
       expect(restartEventStream).toHaveBeenCalledWith('session-a');
       expect(onContinuationAdmitted).toHaveBeenCalledExactlyOnceWith(
@@ -5329,6 +5817,51 @@ describe('createDaemonSessionActions', () => {
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
   });
 
+  it('does not admit a queued prompt cancelled while its upload response was in flight', async () => {
+    const upload = createDeferred<{
+      type: 'image';
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    const controller = new AbortController();
+    const session = createMockSession('session-a');
+    session.uploadAttachment.mockReturnValueOnce(upload.promise);
+    const { actions, store } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+    const onAdmissionStarted = vi.fn();
+    const result = actions.submitPrompt('', {
+      signal: controller.signal,
+      optimisticUserMessage: false,
+      onAdmissionStarted,
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+    const rejected = result.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(session.uploadAttachment).toHaveBeenCalled());
+    controller.abort();
+    upload.resolve({
+      type: 'image',
+      attachmentId: 'cancelled-upload',
+      mimeType: 'image/png',
+      size: 3,
+    });
+    expect(await rejected).toMatchObject({ name: 'AbortError' });
+    expect(session.removeAttachment).toHaveBeenCalledWith('cancelled-upload');
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+    expect(onAdmissionStarted).not.toHaveBeenCalled();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
   it('keeps uploaded attachments when the admitted prompt already started', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
@@ -5811,6 +6344,61 @@ describe('createDaemonSessionActions', () => {
 
     await expect(actions.getMidTurnMessages()).resolves.toBeUndefined();
     expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('asks the current session to send its queued mid-turn messages now', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      sendMidTurnMessagesNow: vi.fn(async () => ({ requested: true })),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.sendMidTurnMessagesNow({ sessionId: 'session-a' }),
+    ).resolves.toEqual({ requested: true });
+    expect(session.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a restored row now against its own session', async () => {
+    const base = createMockSession('session-a', 'client-a');
+    const sendMidTurnMessagesNow = vi.fn(async () => ({ requested: false }));
+    const session = {
+      ...base,
+      client: { ...base.client, sendMidTurnMessagesNow },
+      sendMidTurnMessagesNow: vi.fn(),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.sendMidTurnMessagesNow({ sessionId: 'session-b' }),
+    ).resolves.toEqual({ requested: false });
+    expect(sendMidTurnMessagesNow).toHaveBeenCalledWith('session-b', {
+      clientId: 'client-a',
+    });
+    expect(session.sendMidTurnMessagesNow).not.toHaveBeenCalled();
+  });
+
+  it('uses the restored session persisted client id to send its row now', async () => {
+    vi.stubGlobal('window', {
+      sessionStorage: { getItem: vi.fn(() => 'client-b') },
+    });
+    try {
+      const base = createMockSession('session-a', 'client-a');
+      const sendMidTurnMessagesNow = vi.fn(async () => ({ requested: true }));
+      const session = {
+        ...base,
+        client: { ...base.client, sendMidTurnMessagesNow },
+      };
+      const { actions } = createActionsHarness({ session });
+
+      await actions.sendMidTurnMessagesNow({ sessionId: 'session-b' });
+
+      expect(sendMidTurnMessagesNow).toHaveBeenCalledWith('session-b', {
+        clientId: 'client-b',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('resolves undefined from getMidTurnMessages when no session exists', async () => {
@@ -6489,6 +7077,8 @@ function createMockSession(
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     stats: vi.fn(),
     contextUsage: vi.fn(),
+    getRewindSnapshots: vi.fn(),
+    rewind: vi.fn(),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
     workflowTasks: vi.fn(async () => ({
       v: 1 as const,

@@ -14,6 +14,15 @@ const EXPIRY_GRACE_MS = 1_000;
 const LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 // The contract's codes for an Action that already ended: it expired, was
 // cancelled, or was answered elsewhere. Retrying the answer cannot succeed.
+// `action_response_delivery_failed` is deliberately absent: the service
+// re-admits a retried click whose Action is still requested, so a retry
+// after a delivery failure can succeed and the card must stay retryable.
+// `action_response_decision_expired` is absent too, although no retry of it
+// succeeds: the service records it while the Action is still requested, so
+// the list keeps returning the Action and a hidden card would come straight
+// back on the next read, only without the reason. The rejection keeps that
+// reason on screen until the Action's end projects (review round 1, R1-2;
+// the missing terminal signal is #14351).
 const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
   'action_expired',
   'action_cancelled',
@@ -41,11 +50,12 @@ export interface ManagedActionsState {
   /** Sending an answer failed; the approval is shown again. */
   answerError?: unknown;
   /**
-   * The service refused an answer as creator-only. That is a fact about the
-   * viewer and the Session, not about one Action, so it outlives the refused
-   * Action, covers every later approval the same Session raises, and survives
-   * leaving that Session and coming back. It is remembered per mount: a reload
-   * or reopening the panel starts clean.
+   * The service refused an answer under the owner-or-Workspace-operator
+   * rule. That refusal is a fact about the viewer's Workspace role row,
+   * which an operator can raise while the page stays open, so the latch
+   * covers every later approval the same Session raises and survives
+   * leaving that Session and coming back — but `retry()` drops it and
+   * re-probes instead of treating one 403 as permanent for the mount.
    */
   respondForbidden: boolean;
   respond(actionId: string, optionId: string): Promise<void>;
@@ -75,8 +85,9 @@ export function useManagedActions(
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [loadError, setLoadError] = useState<unknown>();
   const [answerError, setAnswerError] = useState<unknown>();
-  // The Sessions that refused this viewer as a non-creator, keyed by Session so
-  // that leaving a refused one and coming back does not re-admit the 403.
+  // The Sessions that refused this viewer under the owner-or-operator
+  // rule, keyed by Session so that leaving a refused one and coming back
+  // does not re-admit the 403 without an explicit retry.
   const [forbiddenSessions, setForbiddenSessions] = useState<
     ReadonlySet<string>
   >(new Set());
@@ -116,7 +127,12 @@ export function useManagedActions(
       loadFailures.current = 0;
       return undefined;
     }
-    if (enabled === undefined) return undefined;
+    if (enabled === undefined) {
+      // So is a reload, which is how a user retries from the page: the
+      // reader comes back with the same Session and a fresh retry budget.
+      loadFailures.current = 0;
+      return undefined;
+    }
     const abort = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     reader
@@ -221,12 +237,13 @@ export function useManagedActions(
           'code' in failure &&
           (failure as { code?: unknown }).code === 'action_forbidden'
         ) {
-          // Responding requires the Session creator, which the service decides
-          // from the (tenant, Session, actor) row rather than the Action, and
-          // checks before it checks that the Action still exists. So the
-          // refusal is recorded even when a re-read has already dropped the
-          // refused Action, and it covers every later approval of the Session
-          // the answer was aimed at — not the one now selected.
+          // Responding requires the Session's owner or a Workspace operator,
+          // which the service decides from the viewer's Workspace role row
+          // rather than the Action, and it checks that row before it checks
+          // that the Action still exists. So the refusal is recorded even
+          // when a re-read has already dropped the refused Action, and it
+          // covers every later approval of the Session the answer was aimed
+          // at — not the one now selected.
           setForbiddenSessions((current) =>
             new Set(current).add(target.sessionId),
           );
@@ -258,6 +275,13 @@ export function useManagedActions(
 
   const retry = useCallback(() => {
     loadFailures.current = 0;
+    // One explicit retry re-probes every refusal latched this mount: the
+    // role row each of them was decided from can be raised while the page
+    // stays open, and the refused Session is not necessarily the selected
+    // one.
+    setForbiddenSessions((current) =>
+      current.size === 0 ? current : new Set(),
+    );
     setRevision((value) => value + 1);
   }, []);
 
