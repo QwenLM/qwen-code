@@ -45,6 +45,8 @@ export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
   lifecycleAuthority?: () => ManagedSessionLifecycleAuthority | undefined;
+  /** Stops for the daemon's owed mount handbacks (#13800). */
+  mountHandbacks?: Set<() => void>;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -196,12 +198,23 @@ export class HostedWorkspaceBroker {
       await this.request('/runtimes:authorize-lifecycle', {});
   }
 
+  // The latest acquire's mount claim, recorded before the request leaves
+  // so that a reply lost after the grant still names it: only that claim
+  // may hand the mount back, and any later acquire supersedes it (#13800).
+  private claim?: string;
+
+  mountClaim(): string | undefined {
+    return this.claim;
+  }
+
   async acquire(expected?: {
     runtimeBindingId: string;
     generation: string;
   }): Promise<void> {
+    this.claim = randomUUID();
     const response = await this.request('/tool-sessions:acquire', {
       turnKind: 'bootstrap',
+      mountClaimId: this.claim,
       ...(expected
         ? {
             recoveryBindingId: expected.runtimeBindingId,
@@ -629,11 +642,16 @@ export class HostedWorkspaceBroker {
    * Read-only execution state. Only a definitive not-found resolves to
    * undefined; an unknown outcome is not proof that execution stopped, and a
    * terminally abandoned record reaches the caller as the distinct
-   * `abandoned` state rather than folding into that sentinel.
+   * `abandoned` state rather than folding into that sentinel. A settled
+   * record also names its result's execution status.
    */
-  async status(
-    id: string,
-  ): Promise<{ state: HostedBrokerExecutionState } | undefined> {
+  async status(id: string): Promise<
+    | {
+        state: HostedBrokerExecutionState;
+        executionStatus?: string;
+      }
+    | undefined
+  > {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
@@ -665,7 +683,18 @@ export class HostedWorkspaceBroker {
       !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
     )
       throw new Error('Runtime execution outcome is unknown.');
-    return { state: state as HostedBrokerExecutionState };
+    const result = status['result'];
+    const executionStatus =
+      state === 'settled' &&
+      typeof result === 'object' &&
+      result !== null &&
+      typeof (result as Record<string, unknown>)['executionStatus'] === 'string'
+        ? ((result as Record<string, unknown>)['executionStatus'] as string)
+        : undefined;
+    return {
+      state: state as HostedBrokerExecutionState,
+      ...(executionStatus === undefined ? {} : { executionStatus }),
+    };
   }
 
   /**
@@ -761,6 +790,20 @@ export class HostedWorkspaceBroker {
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');
     this.leaseAcquired = false;
+  }
+
+  // Frees only the Workspace execution mount: unlike release(), the
+  // Runtime Session keeps its READY identity for the recovery fleet — a
+  // recovery-blocked turn hands its mount back through here (#13800),
+  // never through a full release, whose RELEASED-forever verdict would
+  // strand the Session's later runtime recovery outright.
+  async releaseMount(mountClaimId: string): Promise<void> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release-mount`,
+      { mountClaimId },
+    );
+    if (response['mountReleased'] !== true)
+      throw new Error('Runtime Session mount release is unconfirmed.');
   }
 
   /**

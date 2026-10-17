@@ -281,6 +281,7 @@ describe('HTTP Managed Session store', () => {
 
   async function bootStoresAndSession(
     server: FakeManagedSessionStore,
+    requestTimeoutMs?: number,
   ): Promise<{
     stores: ReturnType<typeof createHttpManagedSessionStores>;
     session: Awaited<ReturnType<typeof openManagedSession>>;
@@ -297,6 +298,7 @@ describe('HTTP Managed Session store', () => {
       writerId: 'harness-a',
       writerToken: TOKEN_A,
       fetchFn: server.fetch,
+      ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
     });
     const definitionRef = await stores.resourceStore.publish(
       'managed-session-definition',
@@ -907,6 +909,128 @@ describe('HTTP Managed Session store', () => {
       await session.close();
     }
   });
+
+  it.each([
+    // The first refusal lands ~200 ms before the shared budget ends. A gate
+    // that infers the spend from wall-clock time alone throws here and the
+    // second fetch never happens (#13800 R2-2).
+    ['a contended refusal near the deadline', 'contended'],
+    // A stall that alone burns the whole request budget used to leave the
+    // earned restart with an already-expired timeout (#13800 R2-2).
+    ['a first attempt that stalls until its deadline', 'stall'],
+  ] as const)(
+    'restarts a publication commit after %s',
+    async (_label, firstAttempt) => {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'managed-http-store-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const requests: Array<Record<string, unknown>> = [];
+      let outcomeRef: ManagedSessionDurableRef;
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        requestTimeoutMs: 1_200,
+        fetchFn: async (input, init) => {
+          if (!new URL(requestUrl(input)).pathname.endsWith('/receipts/commit'))
+            return server.fetch(input, init);
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          requests.push(body);
+          if (requests.length === 1) {
+            if (firstAttempt === 'stall') {
+              // Never answers: only the request's own timeout ends it.
+              await abortableDelay(60_000, init?.signal);
+            }
+            await abortableDelay(1_000, init?.signal);
+            return jsonResponse(
+              { error: { code: 'tenant_guard_contended', message: 'held' } },
+              503,
+            );
+          }
+          // The restart honours its signal like a real fetch, so one issued
+          // with the spent shared deadline as its timeout aborts before this
+          // answer arrives.
+          await abortableDelay(100, init?.signal);
+          const committed = await server.fetch(
+            `http://127.0.0.1:8080/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+            init,
+          );
+          return jsonResponse({
+            ...(await committed.json()),
+            historyRevision: body['lastSequence'],
+            toolOutcomeRef: outcomeRef,
+          });
+        },
+      });
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-session-definition',
+        Buffer.from('{}'),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{}'),
+      );
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+      });
+      try {
+        outcomeRef = await session.resources.publish(
+          'managed-tool-outcome',
+          Buffer.from('{}'),
+        );
+        stores.publication.rememberAdmission('publication-a', outcomeRef);
+        await session.authority.appendExecutionEvent(
+          {
+            operation: 'recordToolResult',
+            commandId: 'receipt-a',
+            sessionKey: SESSION_KEY,
+            contentDigest: 'a'.repeat(64),
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: 'receipt:a',
+            sessionKey: SESSION_KEY,
+            kind: 'tool.receipt',
+            occurredAt: 1,
+            payload: {
+              executionCallId: 'execution-a',
+              toolOutcomeRef: outcomeRef,
+              resultRef: null,
+              resources: [],
+              historyRevision: sequence,
+            },
+          }),
+          { class: 'trusted_entry' },
+        );
+        expect(requests).toHaveLength(2);
+        expect(requests[1]).toEqual(requests[0]);
+        expect(
+          server.commits.filter(
+            (commit) => commit['operation'] === 'recordToolResult',
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   it.each([
     'uncommitted-503',
@@ -1916,6 +2040,12 @@ describe('HTTP Managed Session store', () => {
       await expect(first.close()).rejects.toThrow('backend down');
       expect(server.sealCount).toBe(1);
       expect(server.state).toBe('ACTIVE');
+      // `first` is the only writer in this window, so any renewal here is
+      // the failed close's cadence surviving; the later assertions cannot
+      // see it, because both stores share one writer identity (review round
+      // 2, R2-10).
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.renewCount).toBe(1);
 
       // The broker redrives the attach with byte-identical credentials; the
       // backend replays the live lease and hands over the same generation.
@@ -2100,6 +2230,176 @@ describe('HTTP Managed Session store', () => {
           requestUrl(input).includes('/restore?'),
         ),
       ).toHaveLength(9);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('keeps retrying a contended tenant guard past the attempt cap within one request budget', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 5;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?') && contended > 0) {
+        contended--;
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).resolves.toBeDefined();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(6);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('keeps the transient retry allowance after spending guard retries', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 4;
+    let dropped = 2;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?')) {
+        if (contended > 0) {
+          contended--;
+          return jsonResponse(
+            { error: { code: 'tenant_guard_contended', message: 'held' } },
+            503,
+          );
+        }
+        if (dropped > 0) {
+          dropped--;
+          throw new TypeError('fetch failed');
+        }
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      const started = Date.now();
+      await expect(handle.read()).resolves.toBeDefined();
+      const elapsedMs = Date.now() - started;
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(7);
+      // Four 250 ms guard pauses, then the two transient backoffs at
+      // their first and second steps (~200 ms and ~400 ms): about 1.7 s.
+      // Scaling the transient backoff by the total attempt count instead
+      // would sleep ~1.0 s and ~1.2 s there, about 3.3 s in all (#13800
+      // R2-6).
+      expect(elapsedMs).toBeLessThan(2_600);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a contended guard on a non-retryable POST because the store rolled it back', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 4;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/recovery:block') && contended > 0) {
+        contended--;
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await stores.assertWritable();
+      await handle.blockRecovery!({
+        status: 'BLOCKED_RESOURCE',
+        detailCode: 'managed_session_test',
+      });
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/recovery:block'),
+        ),
+      ).toHaveLength(5);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('gives up on a persistently contended guard at the request deadline', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+      requestTimeoutMs: 1_500,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      const started = Date.now();
+      await expect(handle.read()).rejects.toMatchObject({
+        status: 503,
+        remoteCode: 'tenant_guard_contended',
+      });
+      // The guard retries run until less than one 250 ms pause of the
+      // 1 500 ms budget remains, so the give-up lands at about 1 250 ms:
+      // pin it from below too, or a client that quits early stays green.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_200);
+      expect(Date.now() - started).toBeLessThan(1_500 + 1_000);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ).length,
+      ).toBeGreaterThan(3);
     } finally {
       await stores.close();
     }
@@ -3365,6 +3665,150 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it('spends one contention budget across the commit retries', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return jsonResponse(
+            { error: { code: 'tenant_guard_contended', message: 'held' } },
+            503,
+          );
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /POST \/transactions:commit failed after \d+ attempts: held/,
+    );
+    // Each of the commit's three attempts restarting its own 1 200 ms of
+    // guard retries would take ~3.6 s and ~15 fetches.
+    expect(Date.now() - started).toBeLessThan(1_200 + 1_000);
+    expect(attempts).toBeLessThanOrEqual(6);
+    // The failed commit latched the log shut, so closing cannot settle.
+    await session.close().catch(() => undefined);
+  });
+
+  it('lets a deadline abort after a slow guard answer close the shared commit budget', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    // The guard holds its answer for 500 ms, slower than an instant 503:
+    // the second attempt aborts at the shared deadline instead of
+    // returning a contended refusal the outer loop would recognize.
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(
+                jsonResponse(
+                  {
+                    error: { code: 'tenant_guard_contended', message: 'held' },
+                  },
+                  503,
+                ),
+              );
+            }, 500);
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal.reason as Error);
+            });
+          });
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /POST \/transactions:commit failed after \d+ attempts/,
+    );
+    const elapsedMs = Date.now() - started;
+    // The deadline abort arrives as a transport error, so the outer commit
+    // loop used to restart a fresh 1 200 ms attempt behind the spent budget
+    // (a third fetch at ~1 450 ms and the settle at ~1 950 ms). Once the
+    // shared deadline governs restarts, the loop stops at the first abort.
+    expect(elapsedMs).toBeGreaterThanOrEqual(1_000);
+    expect(elapsedMs).toBeLessThan(1_600);
+    expect(attempts).toBe(2);
+    await session.close().catch(() => undefined);
+  });
+
+  it('names a budget-closing slow guard after its earlier contended refusal', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    // The first attempt answers contended inside the window; the second
+    // outlives the shared deadline and is aborted, so the terminal error
+    // used to arrive as a transport failure that renamed the guard
+    // contention an unavailable store (#13800 R1-7).
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(
+                jsonResponse(
+                  {
+                    error: { code: 'tenant_guard_contended', message: 'held' },
+                  },
+                  503,
+                ),
+              );
+            }, 500);
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal.reason as Error);
+            });
+          });
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    const rejection = appendMessage(session, 1, messageRef);
+    await expect(rejection).rejects.toMatchObject({
+      status: 503,
+      remoteCode: 'tenant_guard_contended',
+      contentionExhausted: true,
+    });
+    await expect(rejection).rejects.not.toThrow(
+      ManagedSessionStoreTransportError,
+    );
+    // Named at the deadline abort itself: the commit stops there instead
+    // of the outer loop restarting until a later attempt happens to end
+    // in the store's own refusal (four fetches, ~2.7 s).
+    expect(attempts).toBe(2);
+    expect(Date.now() - started).toBeLessThan(1_600);
+    await session.close().catch(() => undefined);
+  });
+
   it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
@@ -4040,6 +4484,23 @@ function refsDeclaredBy(recordBytesBase64: string): ManagedSessionDurableRef[] {
     }
   }
   return refs;
+}
+
+function abortableDelay(
+  ms: number,
+  signal?: AbortSignal | null,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason as Error);
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason as Error);
+    });
+  });
 }
 
 function requestUrl(input: URL | RequestInfo): string {

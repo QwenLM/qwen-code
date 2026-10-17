@@ -660,6 +660,29 @@ it('preserves a definite acquisition refusal from the HTTP response', async () =
   );
 });
 
+it('hands the mount back only under the claim its acquire recorded before the reply (#13800)', async () => {
+  const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+  let mountReleased: unknown = true;
+  const broker = await fixture((path, body) => {
+    requests.push({ path, body });
+    if (path.endsWith('/tool-sessions:acquire')) return { drop: true };
+    return { body: { ...identity, mountReleased } };
+  });
+  expect(broker.mountClaim()).toBeUndefined();
+  // A reply lost after the grant still names the claim the request carried.
+  await expect(broker.acquire()).rejects.toThrow();
+  const claim = broker.mountClaim();
+  expect(requests[0].body['mountClaimId']).toBe(claim);
+  await broker.releaseMount(claim!);
+  expect(requests[1]).toMatchObject({
+    path: '/internal/runtime-broker/v1/tool-sessions/turn:release-mount',
+    body: { ...identity, mountClaimId: claim },
+  });
+  // An answer that does not confirm the release never passes for one.
+  mountReleased = undefined;
+  await expect(broker.releaseMount(claim!)).rejects.toThrow('unconfirmed');
+});
+
 it('retries a cancellation whose transport reply was lost without restarting', async () => {
   const paths: string[] = [];
   let cancellations = 0;
@@ -880,6 +903,7 @@ it('resolves a durable execution status for recovery reports', async () => {
   }));
   await expect(broker.status('execution')).resolves.toEqual({
     state: 'settled',
+    executionStatus: 'success',
   });
 });
 

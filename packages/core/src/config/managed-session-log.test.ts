@@ -61,6 +61,7 @@ import {
   localManagedSessionKey,
   managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
@@ -639,8 +640,8 @@ describe('Managed Session log recording', () => {
   });
 
   // An unreadable file is made with chmod, which neither Windows nor root
-  // honours.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // with its DAC capabilities honours.
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps a reclaimed lock when it cannot read the log',
     async () => {
       const first = await start(managedConfig());
