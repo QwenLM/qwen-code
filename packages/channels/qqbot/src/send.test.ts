@@ -154,6 +154,10 @@ type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];
 type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
 afterEach(() => {
+  // Restore every spyOn-created spy even when an assertion fails mid-test —
+  // tests that put spy.mockRestore() at the end leak the mock (e.g. a
+  // mocked QQChannel.prototype.sendMessage) into subsequent tests otherwise.
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -2305,6 +2309,14 @@ describe('replyMsgId cleanup timer', () => {
 
   // ---------------------------------------------------------------------------
   // flushAndTrack transient vs permanent error handling
+  // PORT NOTE (main + PR #8241 merge): on main, `flushAndTrack` delivers
+  // through the private `sendMessageWithReplyContext(chatId, text,
+  // replyContext, sourceLabel, msgIdOverride)` — the PR was written when
+  // `sendMessage` was still the delivery point, so these spies originally
+  // targeted `sendMessage` and never intercepted the send (main's own copies
+  // of the tests were correspondingly weak and only asserted "state kept").
+  // The spy target below is the only change; every assertion is the PR's.
+  // ---------------------------------------------------------------------------
   // ---------------------------------------------------------------------------
   describe('flushAndTrack transient errors', () => {
     function makeChannelForFlush(): QQChannelInstance {
@@ -2334,7 +2346,12 @@ describe('replyMsgId cleanup timer', () => {
 
       const state = {
         chatId: 'test-chat-id',
-        buffer: 'test buffer',
+        // Distinct seed text so the re-buffer ORDER is observable: the
+        // failed send's text must come FIRST, the concurrently accumulated
+        // buffer SECOND (current.buffer = buffer + (current.buffer || '')).
+        // A reversed implementation would produce 'accumulatedflushed-text'
+        // and fail this gate (thread 69).
+        buffer: 'accumulated',
         timer: null as ReturnType<typeof setTimeout> | null,
         retryCount: 0,
       };
@@ -2349,15 +2366,13 @@ describe('replyMsgId cleanup timer', () => {
       >;
       streamState.set('session-1', state);
 
-      // Spy on sendMessage to throw RATE_LIMITED
-      const sendSpy = vi
-        .spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessage: () => Promise<void>;
-          },
-          'sendMessage',
-        )
-        .mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      // Spy on sendMessageWithReplyContext to throw RATE_LIMITED
+      vi.spyOn(
+        QQChannel.prototype as unknown as {
+          sendMessageWithReplyContext: () => Promise<void>;
+        },
+        'sendMessageWithReplyContext',
+      ).mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
 
       // Call flushAndTrack
       (
@@ -2367,16 +2382,155 @@ describe('replyMsgId cleanup timer', () => {
           state: typeof state,
           logLabel: string,
         ) => void
-      )('session-1', 'test buffer', state, 'test');
+      )('session-1', 'flushed-text', state, 'test');
 
-      // Drain microtask queue so the .catch() handler runs
-      // (must NOT advance timers — that would fire the retry setTimeout)
-      await Promise.resolve();
+      // Drain the full microtask chain so the .catch() handler actually runs
+      // before asserting. A single `await Promise.resolve()` is NOT enough —
+      // the rejected sendMessage promise needs several microtask hops
+      // (P → .then → .catch → .finally) to settle, and one await resumes the
+      // test before the catch handler has executed. advanceTimersByTimeAsync
+      // flushes the microtask queue (advancing 0ms does NOT fire the retry
+      // setTimeout).
+      await vi.advanceTimersByTimeAsync(0);
 
-      // RATE_LIMITED is transient — streamState should keep the entry
+      // RATE_LIMITED is transient — the entry stays, the buffer is re-buffered
+      // and a retry timer is armed.
       expect(streamState.has('session-1')).toBe(true);
+      // catch re-buffered: current.buffer = buffer + (current.buffer || '')
+      expect(state.buffer).toBe('flushed-textaccumulated');
+      // retryCount incremented by the re-buffer path
+      expect(state.retryCount).toBe(1);
+      // retry timer armed (IDLE_FLUSH_MS) — 0ms advance must not have fired it
+      expect(state.timer).not.toBeNull();
 
-      sendSpy.mockRestore();
+      vi.useRealTimers();
+    });
+
+    it('re-buffers a route-blocked flush instead of marking the session flushed (transient)', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForFlush();
+      const chp = ch as unknown as Record<string, unknown>;
+      chp['accessToken'] = 'test-token';
+
+      // An idle flush drains the buffer, so the payload exists only in the
+      // in-flight send. A blocked route resolves without throwing, and the
+      // delivered arm would delete the entry and record the payload as sent.
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: '',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 0,
+        // The live turn's generation (turnCounter is empty → 0), so
+        // onResponseComplete takes the residual-buffer path rather than the
+        // stale-entry path.
+        turn: 0,
+      };
+      const streamState = chp['streamState'] as Map<string, typeof state>;
+      const flushedSessions = chp['flushedSessions'] as Set<string>;
+      streamState.set('sess-1', state);
+
+      // A failed token refresh resolves as 'transient' (resolveRoute does not
+      // throw); the completion attempt below then resolves a real route.
+      let routeCalls = 0;
+      chp['resolveRoute'] = async () => {
+        routeCalls++;
+        if (routeCalls === 1) return { block: 'transient' };
+        return {
+          base: 'https://api.sgroup.qq.com',
+          path: '/v2/users/test-chat-id/messages',
+        };
+      };
+      mockSendQQMessage.mockResolvedValue(mockResponse(true));
+
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          state: typeof state,
+          logLabel: string,
+        ) => void
+      )('sess-1', 'FULL-REPLY-TEXT', state, 'test');
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      // (a) The payload never reached the wire, so the session must not be
+      // recorded as flushed — flushedSessions is what makes
+      // onResponseComplete skip its fullText fallback.
+      expect(flushedSessions.has('sess-1')).toBe(false);
+      // (b) The payload is re-buffered for the retry instead of being lost.
+      expect(streamState.get('sess-1')!.buffer).toBe('FULL-REPLY-TEXT');
+      expect(state.retryCount).toBe(1);
+      expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+      // (c) The completion therefore still delivers the payload.
+      await (
+        chp['onResponseComplete'] as (
+          chatId: string,
+          fullText: string,
+          sessionId: string,
+        ) => Promise<void>
+      )('test-chat-id', '', 'sess-1');
+
+      expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendQQMessage).toHaveBeenCalledWith(
+        'https://api.sgroup.qq.com',
+        '/v2/users/test-chat-id/messages',
+        'test-token',
+        { msg_type: 2, markdown: { content: 'FULL-REPLY-TEXT' } },
+      );
+
+      vi.useRealTimers();
+    });
+
+    it('takes the permanent teardown for a route-blocked flush (permanent)', async () => {
+      vi.useFakeTimers();
+      const ch = makeChannelForFlush();
+      const chp = ch as unknown as Record<string, unknown>;
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      const state = {
+        chatId: 'test-chat-id',
+        buffer: '',
+        timer: null as ReturnType<typeof setTimeout> | null,
+        retryCount: 0,
+      };
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+        }
+      >;
+      streamState.set('sess-1', state);
+
+      // A permanently blocked route resolves without throwing and never
+      // reaches the wire, so flushAndTrack must take its permanent-failure
+      // teardown instead of recording the payload as delivered.
+      chp['resolveRoute'] = async () => ({ block: 'permanent' });
+
+      (
+        chp['flushAndTrack'] as (
+          sessionId: string,
+          buffer: string,
+          state: typeof state,
+          logLabel: string,
+        ) => void
+      )('sess-1', 'FULL-REPLY-TEXT', state, 'test');
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(streamState.has('sess-1')).toBe(false);
+      expect(state.retryCount).toBe(0);
+      expect(state.timer).toBeNull();
+      expect(logged).toContain('test delivery failed (FALLBACK_FAILED)');
+      expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+      stderrSpy.mockRestore();
       vi.useRealTimers();
     });
 

@@ -1046,6 +1046,55 @@ describe('buffer limit flush (#11)', () => {
   });
 });
 
+// The send path now reports why it did not reach the wire, and the streaming
+// path routes a route-blocked send through the same transient-retry /
+// permanent-teardown arms a thrown DeliveryError uses instead of recording it
+// delivered.
+describe('send path route reporting', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reports an unresolvable route through the permanent-failure arm, not as a delivered send', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    onResponseChunk(ch, 'test-chat', 'text', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(streamState(ch).has('s1')).toBe(false);
+    // The block is permanent, so flushAndTrack takes its permanent-failure
+    // teardown instead of recording the send as delivered. resolveRoute's own
+    // diagnostic stays, so the drop is traceable either way.
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      logged.some((c) =>
+        c.includes(
+          'resolveRoute: no chat type for test-chat, dropping message',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      logged.some((c) =>
+        c.includes('idleFlush delivery failed (FALLBACK_FAILED)'),
+      ),
+    ).toBe(true);
+    stderrSpy.mockRestore();
+  });
+});
+
 describe('idleFlush guard re-schedule (#5)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
