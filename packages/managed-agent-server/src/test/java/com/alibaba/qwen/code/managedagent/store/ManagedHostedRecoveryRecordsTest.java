@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 
@@ -101,6 +103,43 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     @Test
+    void validatesAgentSkillReferencesInsideTheManagedDefinitionClosure() {
+        byte[] bytes = "[{\"name\":\"review\",\"description\":\"Review\",\"body\":\"Read the diff.\"}]"
+                .getBytes(StandardCharsets.UTF_8);
+        var skills = new ManagedSessionStoreModels.StoredResource("skills", "managed-agent-skills", 1,
+                bytes.length, ToolPublicationContract.sha256(bytes), bytes);
+        ObjectNode agent = json.createObjectNode();
+        agent.set("skillsRef", reference(skills));
+        ObjectNode body = json.createObjectNode();
+        body.set("agentDefinition", agent);
+        var definition = stored("definition", "managed-definition", body);
+        var ref = reference(definition);
+        java.util.function.Function<String, ManagedSessionStoreModels.StoredResource> reader = id -> {
+            if (id.equals(definition.resourceId())) {
+                return definition;
+            }
+            if (id.equals(skills.resourceId())) {
+                return skills;
+            }
+            throw new IllegalStateException("Missing nested resource");
+        };
+        assertThatCode(() -> ManagedHostedRecoveryRecords.reference(ref, "managed-definition",
+                "tenant", "workspace", "session", reader)).doesNotThrowAnyException();
+        assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(ref, "managed-definition",
+                "tenant", "workspace", "session", id -> {
+                    if (id.equals(definition.resourceId())) {
+                        return definition;
+                    }
+                    throw new IllegalStateException("Missing skills");
+                })).hasMessageContaining("Missing skills");
+        assertThatThrownBy(() -> ManagedHostedRecoveryRecords.reference(ref, "managed-definition",
+                "tenant", "workspace", "session", id -> id.equals(definition.resourceId()) ? definition
+                        : new ManagedSessionStoreModels.StoredResource("skills", skills.kind(), 1,
+                                skills.byteLength(), "0".repeat(64), bytes)))
+                .hasMessageContaining("Hosted nested resource conflicts");
+    }
+
+    @Test
     void acceptsDigestCleanupIdentityForTheMaximumStablePrompt() {
         String prompt = "a".repeat(512);
         String original = "hosted-cleanup:" + prompt + ":" + prompt;
@@ -127,6 +166,23 @@ class ManagedHostedRecoveryRecordsTest {
             ObjectNode body = modelRequest();
             ((ObjectNode) body.get("prepared")).put("allowPersistentRetry", allow);
             assertThatCode(() -> validateModel(body)).doesNotThrowAnyException();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0, 15, 16, 20, ManagedSessionStoreModels.MAX_SAFE_COUNTER})
+    void acceptsNonnegativeSafeModelRoundCounters(long round) {
+        assertThatCode(() -> validateModel(modelRequest().put("round", round))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsInvalidModelRoundCounters() {
+        for (var value : java.util.List.of(json.getNodeFactory().numberNode(-1),
+                json.getNodeFactory().numberNode(1.5), json.getNodeFactory().textNode("16"),
+                json.getNodeFactory().numberNode(ManagedSessionStoreModels.MAX_SAFE_COUNTER + 1))) {
+            ObjectNode body = modelRequest();
+            body.set("round", value);
+            assertThatThrownBy(() -> validateModel(body)).hasMessageContaining("round");
         }
     }
 

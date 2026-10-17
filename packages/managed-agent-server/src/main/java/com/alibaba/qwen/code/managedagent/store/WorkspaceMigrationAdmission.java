@@ -9,9 +9,15 @@ final class WorkspaceMigrationAdmission {
     }
 
     static void lockTenant(JdbcTemplate jdbc, String tenant) {
+        // A zero statement timeout is unlimited, the historical shape.
+        lockTenant(jdbc, tenant, 0);
+    }
+
+    /** Bounded variant for per-turn admissions: fails instead of out-waiting the caller (#13800). */
+    static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
         // Fence installation and admission share this lock before any Session lock.
         jdbc.execute((ConnectionCallback<Void>) connection -> {
-            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, timeoutSeconds);
             return null;
         });
     }
@@ -56,7 +62,8 @@ final class WorkspaceMigrationAdmission {
         if (alias.get("physical_key") == null || "CSI".equals(alias.get("storage_kind"))) {
             return;
         }
-        String physical = LocalStorageOwners.key(jdbc, tenant, storage);
+        String physical = "SSH_LOCAL".equals(alias.get("storage_kind"))
+                ? SshWorkspaceStore.physicalKey(jdbc, tenant, storage) : LocalStorageOwners.key(jdbc, tenant, storage);
         var states = jdbc.queryForList("SELECT mount_state FROM ma_storage_owner WHERE storage_key = ?"
                 + (lock ? " FOR UPDATE" : ""), String.class, physical);
         if (states.size() != 1 || !"READY".equals(states.getFirst())) {
@@ -64,17 +71,12 @@ final class WorkspaceMigrationAdmission {
         }
     }
 
-    static void sessionAdmission(JdbcTemplate jdbc, String tenant, String session) {
-        sessionAdmission(jdbc, tenant, session, null);
-    }
-
-    static void sessionAdmission(JdbcTemplate jdbc, String tenant, String session, String workspace) {
-        lockTenant(jdbc, tenant);
-        requireOpen(jdbc, tenant, sessionStorage(jdbc, tenant, session, workspace));
-    }
-
     static void requireSessionOpen(JdbcTemplate jdbc, String tenant, String session) {
-        requireOpen(jdbc, tenant, sessionStorage(jdbc, tenant, session, null));
+        requireSessionOpen(jdbc, tenant, session, null);
+    }
+
+    static void requireSessionOpen(JdbcTemplate jdbc, String tenant, String session, String workspace) {
+        requireOpen(jdbc, tenant, sessionStorage(jdbc, tenant, session, workspace));
     }
 
     static String sessionStorage(JdbcTemplate jdbc, String tenant, String session, String workspace) {

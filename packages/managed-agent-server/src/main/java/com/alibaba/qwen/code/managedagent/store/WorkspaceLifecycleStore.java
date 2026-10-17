@@ -34,6 +34,12 @@ public class WorkspaceLifecycleStore {
     private final ManagedExtensionRecordStore records;
     private final ObjectProvider<RuntimeBindingRepository> bindings;
     private WorkspaceProfileLifecycleVerifier profiles;
+    private ResidentWorkspaces residents = new ResidentWorkspaces(java.util.List.of());
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setResidentConfiguration(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
+        residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     void setProfiles(WorkspaceProfileLifecycleVerifier profiles) { this.profiles = profiles; }
@@ -48,6 +54,14 @@ public class WorkspaceLifecycleStore {
     public static void lockPlacement(JdbcTemplate jdbc, String tenant) {
         jdbc.execute((ConnectionCallback<Void>) connection -> {
             JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
+            return null;
+        });
+    }
+
+    /** Bounded variant for hot paths: fails instead of out-waiting the caller (#13800). */
+    public static void lockPlacement(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
+        jdbc.execute((ConnectionCallback<Void>) connection -> {
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, timeoutSeconds);
             return null;
         });
     }
@@ -95,7 +109,8 @@ public class WorkspaceLifecycleStore {
     }
 
     public static void requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2) {
-        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision FROM ma_session_head"
+        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision, journal_revision"
+                + " FROM ma_session_head"
                 + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
         if (heads.isEmpty()) {
@@ -105,12 +120,45 @@ public class WorkspaceLifecycleStore {
                 || ((Number) heads.getFirst().get("compacted_through_revision")).longValue() != 0) {
             throw blocked("workspace_lifecycle_journal_unverified");
         }
+        long headRevision = ((Number) heads.getFirst().get("journal_revision")).longValue();
+        // The head row locked above is the per-Session fence: writers append
+        // revisions only behind it, so the ordered scan first runs without a
+        // lock of its own, and a lifecycle settle does not pin every revision
+        // of the journal while it parses them in Java (#13800). That scan is
+        // a snapshot read, though, and the enclosing lifecycle transaction
+        // may have pinned its snapshot with plain reads before the head lock
+        // was granted. A revision committed in that window is invisible to
+        // it, so when the scan stops short of the locked head's revision it
+        // is repeated as a locking read, which reads the journal as committed
+        // now and decides on that (#13800 R2-3). Only a journal that still
+        // falls short of its own head fails closed.
+        var scan = scanJournal(jdbc, json, tenant, session, v2, false);
+        if (scan.maxRevision() < headRevision) {
+            scan = scanJournal(jdbc, json, tenant, session, v2, true);
+            if (scan.maxRevision() < headRevision) {
+                throw blocked("workspace_lifecycle_journal_unverified");
+            }
+        }
+        var pending = scan.pending();
+        var cleanup = scan.cleanup();
+        if (!pending.isEmpty() || !allowCleanup && cleanup.values().stream().anyMatch(state -> !"confirmed".equals(state))) {
+            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
+        }
+    }
+
+    private record JournalScan(long maxRevision, java.util.Set<String> pending, java.util.Map<String, String> cleanup) {
+    }
+
+    private static JournalScan scanJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session,
+            boolean v2, boolean locking) {
+        final long[] maxScanned = {0};
         var pending = new java.util.HashSet<String>();
         var cleanup = new java.util.HashMap<String, String>();
         var settled = new java.util.HashSet<String>();
-        jdbc.query("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY journal_revision FOR UPDATE", row -> {
-                for (String line : new String(row.getBytes(1), StandardCharsets.UTF_8).split("\n")) {
+        jdbc.query("SELECT journal_revision, record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                + " ORDER BY journal_revision" + (locking ? " FOR UPDATE" : ""), row -> {
+                maxScanned[0] = Math.max(maxScanned[0], row.getLong("journal_revision"));
+                for (String line : new String(row.getBytes("record_bytes"), StandardCharsets.UTF_8).split("\n")) {
                     try {
                         JsonNode event = json.readTree(line).path("managedSession");
                         String turn = event.path("payload").path("turnId").asText();
@@ -137,9 +185,7 @@ public class WorkspaceLifecycleStore {
                     }
                 }
             }, tenant, session);
-        if (!pending.isEmpty() || !allowCleanup && cleanup.values().stream().anyMatch(state -> !"confirmed".equals(state))) {
-            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
-        }
+        return new JournalScan(maxScanned[0], pending, cleanup);
     }
 
     @Transactional
@@ -165,7 +211,12 @@ public class WorkspaceLifecycleStore {
                 return null;
             }
             receipt.put("neverInitialized", true);
+            receipt.put("storeSynthesized", true);
         } else {
+            // A receipt synthesized here is built from the journal and store
+            // alone — the Harness was never asked to settle (review round 14,
+            // R14-2).
+            receipt.put("storeSynthesized", true);
             JsonNode definitionRef = header.path("definitionRef");
             JsonNode definition = records.readRecordResource(operation.tenantId(), operation.sessionId(), definitionRef);
             receipt.set("definitionRef", definitionRef);
@@ -225,6 +276,12 @@ public class WorkspaceLifecycleStore {
         if (!writers.isEmpty() && "ACTIVE".equals(writers.getFirst().get("state"))
                 && ((Number) writers.getFirst().get("live_writer")).intValue() != 0) {
             throw blocked("workspace_lifecycle_writer_active");
+        }
+        if (residents.verifyClosed(jdbc, operation.tenantId(), operation.sessionId())) {
+            if (!writers.isEmpty() && !"SEALED".equals(writers.getFirst().get("state"))) {
+                throw blocked("workspace_lifecycle_writer_active");
+            }
+            return;
         }
         RuntimeBindingRepository repository = bindings.getIfAvailable();
         if (repository == null) {
@@ -290,8 +347,16 @@ public class WorkspaceLifecycleStore {
 
     private void verifyEffects(OperationRecord operation, JsonNode receipt) {
         requireIdleJournal(jdbc, json, operation.tenantId(), operation.sessionId(), false, operation.lifecycleProtocolVersion() == 2);
+        // The receipt's own operation id is the hook-execution namespace:
+        // the Hook executions it certifies were recorded under the operation
+        // that ran them. A resumed operation carries the receipt its failed
+        // predecessor validated — the store moves it at the fence rebind —
+        // so the named operation may be a terminal-failed same-kind
+        // operation on this Session instead of the completing one (review
+        // round 13, R13-1).
+        String receiptOperation = receipt.path("operationId").asText();
         if (receipt.path("protocolVersion").asInt() != operation.lifecycleProtocolVersion() || !receipt.path("sessionKey").equals(sessionKey(operation))
-                || !operation.operationId().equals(receipt.path("operationId").asText())
+                || !receiptOperation.equals(operation.operationId()) && !failedLifecyclePredecessor(operation, receiptOperation)
                 || !operation.kind().name().toLowerCase(java.util.Locale.ROOT).equals(receipt.path("kind").asText())
                 || !receipt.path("effects").isArray()) {
             throw blocked("workspace_lifecycle_receipt_invalid");
@@ -336,14 +401,14 @@ public class WorkspaceLifecycleStore {
         for (int index = 0; index < events.size(); index++) {
             String event = events.get(index);
             JsonNode effect = receipt.path("effects").get(index);
-            String latest = latestHookExecutionResource(operation, occurrence(event, operation.operationId()));
+            String latest = latestHookExecutionResource(operation, occurrence(event, receiptOperation));
             if (latest == null || !latest.equals(effect.path("recordRef").path("resourceId").asText())) {
                 throw blocked("workspace_lifecycle_receipt_invalid");
             }
             JsonNode record = records.readRecordResource(operation.tenantId(), operation.sessionId(), effect.path("recordRef"));
             ManagedHookRecords.requireExecution(record);
             if (!event.equals(effect.path("event").asText()) || !event.equals(record.path("eventName").asText())
-                    || !occurrence(event, operation.operationId()).equals(record.path("hookExecutionId").asText())
+                    || !occurrence(event, receiptOperation).equals(record.path("hookExecutionId").asText())
                     || !"__plan__".equals(record.path("hookId").asText()) || record.path("resultRef").isNull()
                     || "recovery_blocked".equals(record.path("run").path("state").asText())) {
                 throw blocked("workspace_lifecycle_hooks_unsettled");
@@ -412,6 +477,17 @@ public class WorkspaceLifecycleStore {
             }
         }
         throw blocked("workspace_lifecycle_receipt_invalid");
+    }
+
+    private boolean failedLifecyclePredecessor(OperationRecord operation,
+            String receiptOperation) {
+        Integer matches = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " ma_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = ? AND"
+                        + " operation_kind = ? AND state = 'FAILED'",
+                Integer.class, operation.tenantId(), operation.sessionId(),
+                receiptOperation, operation.kind().name());
+        return matches != null && matches > 0;
     }
 
     private com.fasterxml.jackson.databind.node.ObjectNode envelope(OperationRecord operation) {

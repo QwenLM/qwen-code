@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.MacOsHostIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -41,16 +42,18 @@ public class WorkspaceStorageGuard {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final Map<Storage, Path> roots;
+    private final WorkspaceCreationRoots createdRoots;
     private final boolean enabled;
     private final IdentityReader identities;
+    private SshWorkspaceStore ssh;
     private final ObjectMapper json = new ObjectMapper();
 
     @Autowired
     public WorkspaceStorageGuard(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ManagedAgentProperties properties) {
-        this(jdbc, manager, properties, WorkspaceStorageGuard::linuxIdentity);
-        if (enabled && !"Linux".equals(System.getProperty("os.name"))) {
-            throw new IllegalStateException("Verified Workspace recovery requires Linux");
+        this(jdbc, manager, properties, WorkspaceStorageGuard::nativeIdentity);
+        if (enabled && !List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
+            throw new IllegalStateException("Verified Workspace recovery requires Linux or macOS");
         }
     }
 
@@ -60,6 +63,7 @@ public class WorkspaceStorageGuard {
         this.transaction = new TransactionTemplate(manager);
         this.enabled = properties.getRuntimeBroker().isVerifiedWorkspaceRecoveryEnabled();
         this.identities = identities;
+        this.createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         this.roots = enabled ? properties.getRuntimeBroker().getWorkspaceMounts().stream()
                 .collect(Collectors.toMap(mount -> new Storage(mount.tenantId(), mount.storageId()),
                         mount -> Path.of(mount.root()), (left, right) -> {
@@ -71,12 +75,17 @@ public class WorkspaceStorageGuard {
         return enabled;
     }
 
+    @Autowired
+    void configureSsh(SshWorkspaceStore store, ManagedAgentProperties properties) {
+        this.ssh = properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null : store;
+    }
+
     public String inspect(String tenantId, String storageId) {
         if (!enabled) {
             return "disabled";
         }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
-        Path root = roots.get(new Storage(tenantId, storageId));
+        Path root = configuredRoot(tenantId, storageId);
         if (root == null) {
             return "unconfigured";
         }
@@ -177,6 +186,9 @@ public class WorkspaceStorageGuard {
     }
 
     public void verify(ContextBinding binding) {
+        if (ssh != null && ssh.verify(binding)) {
+            return;
+        }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!enabled) {
             return;
@@ -186,6 +198,9 @@ public class WorkspaceStorageGuard {
     }
 
     void verifyLocked(ContextBinding binding) {
+        if (ssh != null && ssh.verify(binding)) {
+            return;
+        }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (enabled) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -201,16 +216,41 @@ public class WorkspaceStorageGuard {
         verify(binding.getTenantId(), binding.getStorageId(), binding.getCwdRelative(), true);
     }
 
+    public Path createdStorageRoot(String tenantId, String storageId) {
+        return createdRoots.resolve(tenantId, storageId, false);
+    }
+
+    Path verifiedRoot(ContextBinding binding) {
+        if (!enabled) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        verify(binding);
+        return root(binding.getTenantId(), binding.getStorageId());
+    }
+
+    void registerCreated(String tenantId, String storageId, String operationId) {
+        Path path = createdRoots.resolve(tenantId, storageId, true);
+        if (path == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        register(tenantId, storageId, operationId, path);
+    }
+
     public void register(String tenantId, String storageId, String operationId) {
+        register(tenantId, storageId, operationId, root(tenantId, storageId));
+    }
+
+    private void register(String tenantId, String storageId, String operationId, Path root) {
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        Path root = root(tenantId, storageId);
         Identity identity = identity(root);
         String key = LocalStorageOwners.physicalKey(identity);
         Registration prepared = transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            requireNonOverlapping(identity);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             jdbc.update("INSERT INTO ma_storage_owner"
@@ -466,6 +506,9 @@ public class WorkspaceStorageGuard {
     // is deliberately untouched: re-classifying inside verify() would flip
     // tool-turn verdicts.
     public void verifyProbe(ContextBinding binding) {
+        if (ssh != null && ssh.verify(binding)) {
+            return;
+        }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!enabled) {
             return;
@@ -682,6 +725,7 @@ public class WorkspaceStorageGuard {
     void promoteMigration(RecoveryRegistration source, Identity target, String registration, String operation) {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, source.tenantId());
+            requireNonOverlapping(target);
             recoveryRegistration(source.tenantId(), source.storageId(), source.mountRevision(), source.fenceOperationId());
             if (!source.hostId().equals(target.hostId()) || !target.equals(identity(Path.of(target.root())))
                     || !new String(migrationMarker(source.tenantId(), source.storageId(), target, registration), StandardCharsets.UTF_8)
@@ -713,8 +757,21 @@ public class WorkspaceStorageGuard {
         }
     }
 
-    private Path root(String tenantId, String storageId) {
+    private void requireNonOverlapping(Identity identity) {
+        try {
+            LocalStorageOwners.requireNonOverlapping(jdbc, identity);
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException conflict) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private Path configuredRoot(String tenantId, String storageId) {
         Path root = roots.get(new Storage(tenantId, storageId));
+        return root == null ? createdStorageRoot(tenantId, storageId) : root;
+    }
+
+    private Path root(String tenantId, String storageId) {
+        Path root = configuredRoot(tenantId, storageId);
         if (root == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -729,8 +786,9 @@ public class WorkspaceStorageGuard {
         }
     }
 
-    private static Identity linuxIdentity(Path root) throws IOException {
-        if (!"Linux".equals(System.getProperty("os.name"))) {
+    private static Identity nativeIdentity(Path root) throws IOException {
+        String os = System.getProperty("os.name");
+        if (!List.of("Linux", "Mac OS X").contains(os)) {
             throw new IOException("Unsupported mount identity provider");
         }
         Map<String, Object> attributes = Files.readAttributes(root,
@@ -739,9 +797,13 @@ public class WorkspaceStorageGuard {
                 || !root.equals(root.toRealPath())) {
             throw new IOException("Workspace root is not canonical");
         }
-        String birthTime = verifiedBirthTime((FileTime) attributes.get("creationTime"),
-                (FileTime) attributes.get("lastModifiedTime"));
-        String machineId = Files.readString(Path.of("/etc/machine-id")).strip();
+        String device = Long.toUnsignedString(((Number) attributes.get("dev")).longValue());
+        String inode = Long.toUnsignedString(((Number) attributes.get("ino")).longValue());
+        String birthTime = "Mac OS X".equals(os) ? MacOsHostIdentity.birthTime(root, device, inode)
+                : verifiedBirthTime((FileTime) attributes.get("creationTime"),
+                        (FileTime) attributes.get("lastModifiedTime"));
+        String machineId = "Mac OS X".equals(os) ? MacOsHostIdentity.machineId()
+                : Files.readString(Path.of("/etc/machine-id")).strip();
         if (machineId.isEmpty() || machineId.length() > 256) {
             throw new IOException("Host identity is unavailable");
         }
@@ -756,8 +818,6 @@ public class WorkspaceStorageGuard {
             }
             throw error;
         }
-        String device = Long.toUnsignedString(((Number) attributes.get("dev")).longValue());
-        String inode = Long.toUnsignedString(((Number) attributes.get("ino")).longValue());
         return new Identity(root.toString(), host, device, inode, birthTime);
     }
 
