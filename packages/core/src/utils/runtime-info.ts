@@ -42,7 +42,10 @@ export type JsRuntime = 'node' | 'bun';
 export interface JsInterpreterCommand {
   /** Absolute path of a binary that can run arbitrary JS files. */
   command: string;
-  /** Which runtime the command will execute the child with. */
+  /**
+   * Runtime metadata; current production callers consume only `command`.
+   * Runtime-specific consumer behavior is not implemented here.
+   */
   runtime: JsRuntime;
 }
 
@@ -144,13 +147,16 @@ let cachedInterpreter: JsInterpreterCommand | undefined;
  *
  * Within that trusted root, every declaration is validated before use:
  * `runtime` must be exactly `'bun'` or `'node'`, and the interpreter — the
- * `interpreter` field resolved against the package root, else the standard
+ * `interpreter` field resolved against the package root (absolute paths are
+ * used as-is, without containment), else the standard
  * `bun/bin/bun` / `node/bin/node` location — must be an existing executable
  * regular file. Any invalid or missing declaration falls back to
  * `process.execPath` rather than guessing at another binary.
  *
- * The result is memoized per process; pass the caller's `import.meta.url`
- * so chunked bundle layouts resolve like sibling assets.
+ * The result is memoized per process: only the first call's `import.meta.url`
+ * is used; later caller URLs are ignored. Current production callers share
+ * one installation root. Pass the caller URL so chunked bundle layouts
+ * resolve like sibling assets on that first call.
  */
 export function getJsInterpreterCommand(
   importMetaUrl: string,

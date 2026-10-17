@@ -96,6 +96,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
      3. 否则把命令作为新命令准入:发送的 run 必须是开启中团队某个成员的链头,正在运行,且未请求停止。否则回复为 `refused`:
         - 对任何开启中团队都未列出的 run,回复 `This Session is not a member of an open team.`,这包括在其命令等待期间团队被删除的成员;
         - 对不是其成员链头、已结算或正在停止的 run,回复 `Your run has ended or is being stopped; it takes no more team commands.`。
+   - **计划取代的部分提交恢复。** 只有键为 `supersede:<commandId>:<oldRequestId>` 的精确 `withdrawTeamPlan` 回执可以绕过新 run 准入。替代计划的修订号为被取消计划的修订号加一，而不是恢复时的最大修订号。如果另一提交已经占用该修订号或更高修订号，恢复回复旧提交已被取代并给出新请求标识，不开启竞争计划，也不取消任何计划；inbound 命令回执保存该结果。否则，即使原 run 已结算，也开启欠下的计划。新提交保留初始及撤回前的链头检查；取消一旦提交，run 结算不得使欠下的后继计划变成拒绝。域回滚不授权新写入：缺失后继计划时，命令保持可重试且不写入 refused 回执，直到重新启用。现有 authority 约束仍要求团队为 active 且成员需要计划模式。
    - **读取不提交任何东西。** `board_read` 自己检查发送方的血缘与 attach,因为没有记录规则做这件事,然后返回任务板当前的状态。它不提交回执:它不改变任何东西,重新运行时可能以更新的任务板作答。只有成员的 journal 保留它的回复。
    - **funnel 之间的顺序。** 团队 funnel 与 child funnel 各有一条写入链,任一方都从不在自己的链内等待另一方(H4e-b2 决策 10)。`execute` 在团队链上读取并校验,离开它,然后才为消息调用 child funnel(决策 8)。任务板写入在团队链上运行,位于 lead 自己的两次调用之间,从不在某次调用的中途。
    - **正在关闭的团队**遵循 H4e-b1:团队关闭期间 `task_create` 被拒绝,`task_update` 被允许。`plan_submit` 被拒绝,因为 `team_plan` 只在 active 的团队中开启。
@@ -116,7 +117,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
    - 声明只是一种便利,而不是授权:lead 依据链头与名册答复每条命令(决策 3)。提示词恰好带有前言形状块的普通 child 会得到这些工具,并被告知它不是成员。
    - **门禁。** 只有 `session_command` 已启用时才声明成员工具;`exit_plan_mode` 还需要 `team_plan`,并且只在处于 plan mode 的 run 中声明(决策 9)。
    - **前言的措辞跟随成员能做什么**,而不是跟随交付它的批次:`session_command` 启用后,它不再说成员不能编辑任务板;构建带有成员消息(b3c)且 `session_command` 已启用后,它不再说成员不能给其他成员发消息。
-   - **plan-mode 属性。** 开始标签接受一个可选的 `plan-mode="required"` 属性,此时正文说明成员在 leader 批准其计划之前处于 plan mode;按格式要求,正文从不包含 `<`。b3a 先于使用交付放宽的格式检查、plan mode 拒绝,以及决策 9 在拼装成员前言的两处(具名 launch 与续跑)所用的拼装规则;它们都不需要命令通道。b3d 之前没有成员能被要求 plan mode,因此没有任何东西写入该属性。从 b3d 回滚到任何带有 b3a 的构建时,要求 plan mode 的成员都保持在 plan mode(fail-closed),在构建再次带上 b3d 之前没有 `exit_plan_mode` 可以离开它;在这样的构建中,plan mode 拒绝说明该 run 只能读取,且不提及 `exit_plan_mode`。不带 b3a 的构建会忽略该属性,因此决策 13 把 b3a 定为下限,低于它就不再保持 plan mode。
+   - **plan-mode 属性。** 开始标签接受一个可选的 `plan-mode="required"` 属性,此时正文说明成员在 leader 批准其计划之前处于 plan mode;按格式要求,正文从不包含 `<`。b3a 先于使用交付放宽的格式检查、plan mode 拒绝,以及决策 9 在拼装成员前言的两处(具名 launch 与续跑)所用的拼装规则;它们都不需要命令通道。b3d 之前没有成员能被要求 plan mode,因此没有任何东西写入该属性。从 b3d 回滚到任何带有 b3a 且仍能加载该会话的构建时(见决策 13 中 plan mode 的下限),要求 plan mode 的成员都保持在 plan mode(fail-closed),在构建再次带上 b3d 之前没有 `exit_plan_mode` 可以离开它;在这样的构建中,plan mode 拒绝说明该 run 只能读取,且不提及 `exit_plan_mode`。不带 b3a 的构建会忽略该属性,因此决策 13 把 b3a 定为下限,低于它就不再保持 plan mode。
 
 6. **成员的任务板工具。** 它们都是命令,它们的答复就是回复。
 
@@ -208,7 +209,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
     | b3c  | 成员之间的消息与仅限运行中的发送(决策 8)                                                                                           | 无新增;在其实机验收之后合入        |
     | b3d  | 要求 plan mode 的 launch、`exit_plan_mode`、`team_plan_approval`、`team_plan` 记录与撤回                                           | `team_plan`,在其实机验收之后       |
     - b3a 不需要通道,最先落地。每个批次在启用任何新东西或合入之前,都要在真实 Hosted 栈上做一次实机验收,与 H4e-b1 和 H4e-b2 一样。
-    - **plan mode 的下限。** 只有当部署的回滚下限及为其服务的每个 Harness 都带有 b3a 时,b3d 才接受 `plan_mode_required`。不带 b3a 的构建在拼装要求 plan mode 的成员的续跑时不带该属性,并准入所有工具,因此只要存在要求 plan mode 的成员,就不支持回滚到该下限以下。
+    - **plan mode 的下限。** 只有当部署的回滚下限及为其服务的每个 Harness 都带有 b3a 时,b3d 才接受 `plan_mode_required`。不带 b3a 的构建在拼装要求 plan mode 的成员的续跑时不带该属性,并准入所有工具,因此只要存在要求 plan mode 的成员,就不支持回滚到该下限以下。后续批次提交的记录会抬高持有它们的会话的下限,即使该批次的 domain 仍关闭:所有可能重开持有 `session_command` 记录的会话的 Harness 以及回滚下限都必须包含 b3b;对提交过 `team_plan` 记录的 lead,它们必须包含 b3d。低于该下限的 Harness 会拒绝加载该会话(见[团队计划设计](2026-10-12-managed-agent-team-plans.zh-CN.md))。
     - 每个批次把它启用的 domain 加入 Hosted 重开白名单。
 
 14. **被中断的回合按已提交的内容作答(扩展 H4e-b2 决策 9)。**
@@ -218,6 +219,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
       - `planned`:取消该条目,并把调用答为未发送;在竞争中胜出的交接则按 `accepting` 条目的情形作答;
       - checkpoint 写明了命令调用但没有 outbound 条目:答为未发送,批次中的其他调用从 journal 补齐(决策 4);
       - `rejected`、`cancelled`、`unknown`:如实说明,`unknown` 绝不呈现为已完成。
+      - 对处于 `accepting` 或 `unknown` 的 `member_message`,答复说明部分收件人可能已经收到消息或稍后收到,并禁止重发。任务板无法证明消息是否送达。实时等待、续跑及被中断回合的答复使用 journal 中已提交的命令类型;任务板命令与 `plan_submit` 保留原有文案。
     - **lead 的调用**(`team_plan_approval`、`request_shutdown`)依据其已提交的记录作答,与 H4e-b1 的团队调用一样;对已记录但未送达的决定,使用决策 9 的两段式答复。
 
 ## 工具
@@ -321,7 +323,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
   - b3a:lead 停止一个运行中的成员,停止结算后删除团队;
   - b3b:两个成员读写任务板,lead 读取它,一个成员的写入与 lead 的某次写入竞争,并在一个成员的命令等待期间重启它的 Harness;
   - b3c:发给运行中成员与 `"*"` 的成员之间消息、被拒绝的已完成收件方,以及收件方对发送方的回复;
-  - b3d:要求 plan mode 的成员被驳回、修改、获批准,然后才编辑文件;批准之前 lead 发给它的消息让它保持在 plan mode;回滚到 b3a 的构建让它保持在 plan mode;
+  - b3d:要求 plan mode 的成员被驳回、修改、获批准,然后才编辑文件;批准之前 lead 发给它的消息让它保持在 plan mode;回滚到关闭 `team_plan` domain 的 b3d 时它仍保持在 plan mode,因为低于 b3d 的构建无法加载持有 `team_plan` 记录的 lead(决策 13);
   - 每次启用之前,用真实模型跑一次,经用户批准。
 
 ## 验收标准

@@ -24,9 +24,11 @@ before S2/S3/S4 build on it.
 
 ## Current state: call-site inventory
 
-Baseline audited: `main` `d8558bba0198c1cdadac1523940c88c04b038f62`
-(diff vs plan baseline `5aae8991bede…` touches none of the files below).
-Classified by which identity the site actually needs.
+The conceptual tables originated at `main`
+`d8558bba0198c1cdadac1523940c88c04b038f62`. They are not exhaustive;
+the fixed-parent literal call-site audit below supplements them with every
+scoped occurrence and its exclusions. Classification does not prove migration
+or compatibility.
 
 ### App launcher identity (how to re-invoke this build)
 
@@ -46,19 +48,19 @@ Classified by which identity the site actually needs.
 
 ### JS interpreter identity (how to run an arbitrary JS child)
 
-| Site                                                                  | Use                                                                                                                                      | Wired to `getJsInterpreterCommand` in this change           |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                                                | yes                                                         |
-| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                                                | yes                                                         |
-| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                                             | yes                                                         |
-| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit                           | not yet (S3) — Linux only (cgroup v2 platform guard)        |
-| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it          | not yet (S3) — Linux only (bubblewrap)                      |
-| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it                                               | not yet (S3) — Linux only (landlock LSM)                    |
-| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY backend selection (under Bun, PTY loads the `qwen-bun-pty` backend — [bun-pty-backend.md](bun-pty-backend.md)) | detection via `isBunRuntime()`                              |
-| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled mem0 MCP child; identity check `server.command !== process.execPath`                                                             | not yet; must migrate with its identity check together (S3) |
-| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                                                    | launcher-shaped, see above                                  |
-| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | helper child spawn                                                                                                                       | not yet (S3 sweep)                                          |
-| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                                                  | intentionally not; host-tool identity                       |
+| Site                                                                  | Use                                                                                                                             | Wired to `getJsInterpreterCommand` in this change           |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                                       | yes                                                         |
+| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                                       | yes                                                         |
+| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                                    | yes                                                         |
+| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit                  | not yet (S3) — Linux only (cgroup v2 platform guard)        |
+| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it | not yet (S3) — Linux only (bubblewrap)                      |
+| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it                                      | not yet (S3) — Linux only (landlock LSM)                    |
+| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY gate (PTY disabled under Bun today — **S2 replaces this branch with a real backend**)                 | detection via `isBunRuntime()`                              |
+| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled mem0 MCP child; identity check `server.command !== process.execPath`                                                    | not yet; must migrate with its identity check together (S3) |
+| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                                           | launcher-shaped, see above                                  |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | helper child spawn                                                                                                              | not yet (S3 sweep)                                          |
+| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                                         | intentionally not; host-tool identity                       |
 
 Rows marked `not yet` are owned by the **S3 migration sweep** (V8/GC/TLS/env
 compatibility stage), which uses this table as its checklist. The
@@ -74,8 +76,66 @@ platform.
 | `packages/cli/src/utils/managed-npm-update.ts`                         | runs npm's `cli.js` via `process.execPath`; npm **must** run under a Node identity, never the private bundled Bun — keep host Node resolution here |
 | `packages/cli/src/ui/handleAutoUpdate.ts`                              | picks the update command; Node-identity path                                                                                                       |
 | `packages/cli/src/serve/daemon-update-restart.ts`                      | already disabled under Bun (`process.versions['bun']`) and execve-feature-detected                                                                 |
-| `packages/cli/src/utils/installationInfo.ts`                           | reports `process.execPath` as the node path (informational)                                                                                        |
+| `packages/cli/src/utils/installationInfo.ts`                           | defaults npm CLI path resolution to `process.execPath` (host Node)                                                                                 |
 | `scripts/build-standalone-release.js` / `create-standalone-package.js` | pin Bun 1.3.14, five targets, `manifest.json` (`runtime`, version); layout `bun/bin/bun`, `node/bin/node`                                          |
+
+### Complete literal call-site audit at the fixed parent
+
+The tables above are a historical conceptual grouping, not an exhaustive list.
+This table accounts for every executable literal `process.execPath` read in
+`packages/**/src/**` at parent
+`8b4a0a25ea2bc570a1a6070e05182f29501a1b7f`: 34 files, 48 occurrences.
+Line numbers refer to that parent; different roles within a file are explicit.
+The sweep excludes comments, `*.test.*`, `*.spec.*`, `__tests__`, `test`
+directories, `*test-helper*`, and `acceptance` directories; exceptions are
+accounted for below. This is source classification, not platform or compiled
+artifact compatibility evidence, nor an audit of every implicit fork, alias,
+external command, or native spawn. Repeat this scoped sweep after changes.
+
+| Fixed source location (all lines)                                      | Identity, current behavior and follow-up scope                                                                                                                              |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/acp-bridge/src/spawnChannel.ts:554`                          | Launcher: ACP CLI child with heap arguments; not migrated (S4).                                                                                                             |
+| `packages/browser-use/src/native-host-installer.ts:378`                | Interpreter: persists the native-host runtime in its shell launcher; not migrated (S3); installation lifetime and host compatibility need validation.                       |
+| `packages/channels/base/src/AcpBridge.ts:141`                          | Launcher: CLI entry with --acp and inherited runtime flags; not migrated (S4).                                                                                              |
+| `packages/cli/src/agent-view/current-cli-argv.ts:27,34`                | Launcher: development tsx entry (27), ordinary entry (34); neither migrated (S4).                                                                                           |
+| `packages/cli/src/commands/review/run.ts:602`                          | Launcher: CLI review agent with --expose-gc; not migrated (S4).                                                                                                             |
+| `packages/cli/src/commands/review/test-efficacy.ts:1849`               | Host tooling: local Vitest entry; intentionally retains its test host, outside app-interpreter migration.                                                                   |
+| `packages/cli/src/commands/sandbox.ts:228`                             | Interpreter: sandbox -e diagnostic, realpath allowlist; not migrated (S3, Linux).                                                                                           |
+| `packages/cli/src/config/mem0-settings.ts:153,208`                     | Interpreter: MCP child (153) and matching identity check (208); migrate together (S3), neither changed here.                                                                |
+| `packages/cli/src/serve/channel-worker-supervisor.ts:1119`             | Launcher: channel daemon-worker entry with IPC; not migrated (S4).                                                                                                          |
+| `packages/cli/src/serve/daemon-update-restart.ts:99,100`               | Launcher: execve executable and argv[0]; Bun-disabled path, not compiled-app support (S4).                                                                                  |
+| `packages/cli/src/serve/local-process-runtime-activator.ts:315`        | Launcher: configured managed-runtime entry arguments; not migrated (S4).                                                                                                    |
+| `packages/cli/src/serve/managed-runtime-session-worker.ts:250`         | Launcher: managed-runtime-worker entry; not migrated (S4).                                                                                                                  |
+| `packages/cli/src/serve/pem-certificate-blocks.ts:83`                  | Interpreter: CommonJS PEM oracle; not migrated (S3); runtime crypto semantics remain to be verified.                                                                        |
+| `packages/cli/src/serve/run-qwen-serve.ts:913`                         | Interpreter: module eval TLS trust probe; not migrated (S3); preserve Node/Bun TLS distinctions.                                                                            |
+| `packages/cli/src/serve/session-agents/orchestrator.ts:631`            | Launcher: agents session-send-mcp entry; not migrated (S4).                                                                                                                 |
+| `packages/cli/src/ui/handleAutoUpdate.ts:124`                          | Host Node: npm update command; retain host identity, not private Bun (S3 validation pending).                                                                               |
+| `packages/cli/src/ui/utils/updateCheck.ts:148`                         | Host Node: npm update-check runner default; retain host identity (S3 validation pending).                                                                                   |
+| `packages/cli/src/utils/installationInfo.ts:27`                        | Host Node: default for npm CLI path resolution, not merely informational; retain with npm consumers.                                                                        |
+| `packages/cli/src/utils/managed-npm-update.ts:118,120,137,188,329,331` | Host Node: npm config/path resolution (118/120/137), staged CLI health launch (188), npm install and path lookup (329/331); retain host identity, validate each stage (S3). |
+| `packages/cli/src/utils/processUtils.ts:68,69`                         | Launcher: execve executable and argv[0]; not migrated for compiled apps (S4).                                                                                               |
+| `packages/cli/src/utils/relaunch.ts:167,168,190`                       | Launcher: execve executable/argv[0] (167/168), supervised IPC spawn fallback (190); not migrated for compiled apps (S4).                                                    |
+| `packages/core/src/agents/arena/ArenaManager.ts:1096`                  | Launcher: argv[1] in agent worktree; not migrated (S4).                                                                                                                     |
+| `packages/core/src/hooks/hook-command-cgroup.ts:166`                   | Interpreter: CommonJS eval cgroup launcher; not migrated (S3, Linux cgroup v2).                                                                                             |
+| `packages/core/src/sandbox/bwrap-execution.ts:41`                      | Interpreter: realpath staging for JS relay; not migrated (S3, Linux bubblewrap).                                                                                            |
+| `packages/core/src/sandbox/landlock-execution.ts:113`                  | Interpreter: realpath staging for JS relay; not migrated (S3, Linux landlock).                                                                                              |
+| `packages/core/src/utils/runtime-info.ts:175`                          | Interpreter resolver fallback: host executable on rejected/missing manifest; implemented S1, compiled flavor unsupported.                                                   |
+| `packages/mobile-mcp/src/server.ts:189`                                | Information: telemetry identity hash input; no child launch, intentionally outside migration.                                                                               |
+| `packages/node-repl/src/desktop-relay/cli.ts:89,174,192`               | Mixed: npm host interpreter (89); persisted launchd relay app entry (174, S4 pending); permission guidance text (192, informational). Do not replace all three blindly.     |
+| `packages/node-repl/src/desktop-relay/runtime.ts:53`                   | Interpreter: node-repl package entry, not Qwen CLI launcher; not migrated (S3), package/runtime boundary must be preserved.                                                 |
+| `packages/node-repl/src/kernel-manager.ts:567`                         | Interpreter: VM kernel with experimental flags and fd3/fd4 protocol; host Node contract, no automatic Bun substitution (S3 compatibility pending).                          |
+| `packages/sdk-typescript/src/utils/cliPath.ts:313,340`                 | Launcher: bundled CLI default (313); interpreter: explicit JS executable (340). SDK-host identity, intentionally no private-Bun override; compiled handling pending S4.     |
+| `packages/vscode-ide-companion/src/extension.ts:409`                   | Launcher: extension-host CLI terminal command; preserve Electron/VSCode environment contract, not private Bun (S4 pending).                                                 |
+| `packages/vscode-ide-companion/src/services/acpConnection.ts:109`      | Launcher: extension-host ACP entry; preserve Electron run-as-Node contract (S4 pending).                                                                                    |
+| `packages/vscode-ide-companion/src/services/qwenDaemonProcess.ts:76`   | Launcher: extension-host serve entry; preserve Electron run-as-Node contract (S4 pending).                                                                                  |
+| `scripts/cli-entry.js:476,488`                                         | Launcher: Bun/Windows `spawnSync(--expose-gc, cliPath)` branch and error text; not migrated for compiled apps (S4), not interpreter-selector wiring.                        |
+| `scripts/dev.js:237`                                                   | Development host interpreter selection; intentionally retains the development tool host, outside standalone production migration.                                           |
+
+Scope exceptions: literal matches in `packages/sdk-typescript/src/transport/ProcessTransport.ts` are comments; its actual `forkOptions.execPath` consumes the selection from `cliPath.ts` and needs joint SDK/Electron contract validation. The `execPath` parameter reads at `channel-worker-supervisor.ts:196,271,280` consume the 1119 call in the table. Other literal matches in `core/src/utils/runtime-info.ts` are comments.
+
+Intentional production-migration exclusions: `packages/cli/src/serve/cdp-tunnel/acceptance/run-real-chrome.mjs:95,112,129` is an acceptance driver; `packages/cli/src/serve/managed-runtime-tool-v3-host.test-helper.ts:44` is a test helper; all tests/fixtures and `packages/sdk-java/**/src/test/**` are host tests. Remaining matches in `packages/**/scripts/**`, package-root `build.mjs`, and `scripts/**` are build, packaging, development, benchmark, sandbox prototype, lint or E2E drivers. They retain their tool host and are not migrated application sites. Script spawns in `scripts/build-standalone-release.js` are build-host behavior, not proof that generated archives run. Runtime strings in packaging scripts are layout configuration requiring separate unmodified-archive acceptance.
+
+The three S1 selector consumers are `core/src/code-mode/host-client.ts`, `core/src/sandbox/file-worker-client.ts` and `core/src/hooks/hookRunner.ts` (each under `packages/`). They no longer read `process.execPath` directly and remain part of the inventory despite no literal match. `getPty.ts` detects the runtime; it does not spawn an interpreter. S3/S4 designate pending work, not submitted or approved migrations; kernel, npm, SDK and extension hosts must not all be replaced with private Bun.
 
 ### SDK consumers
 
@@ -85,7 +145,7 @@ Node host: `getJsInterpreterCommand` only deviates from `process.execPath`
 when a standalone `manifest.json` exists in the package layout, which npm and
 source installs do not have.
 
-## Proposed contract
+## Contract
 
 ### 1. App launcher
 
@@ -98,7 +158,7 @@ source installs do not have.
   `process.execPath + process.argv[1]`, because the entry is a JS file in
   every shipped layout. A compiled flavor must publish its launcher through
   `QWEN_CODE_CLI` before those sites can change — they are pinned by the
-  inventory above.
+  inventory above as source locations, not verified compiled-app behavior.
 
 ### 2. JS interpreter — `packages/core/src/utils/runtime-info.ts`
 
@@ -114,47 +174,64 @@ source installs do not have.
      `process.execPath`.
   2. Within that trusted root every declaration is validated before use:
      `runtime` must be exactly `'bun'` or `'node'`, and the interpreter —
-     the `interpreter` field resolved against the package root, else the
+     the `interpreter` field resolved against the package root (absolute paths
+     are used as-is; no containment is enforced), else the
      standard `bun/bin/bun` / `node/bin/node` location — must be an existing
-     executable regular file (directories and non-executable files reject).
+     regular file. POSIX additionally requires execute permission; Windows
+     checks regular-file existence only, not PE validity or launchability.
+     The Windows default paths are `bun/bun.exe` and `node/node.exe`.
   3. Any invalid or missing declaration — non-object manifest, unknown
      `runtime`, non-string `interpreter`, missing binary, directory,
-     non-executable file, missing entry marker — falls back to
+     non-executable POSIX file, missing entry marker — falls back to
      `process.execPath`, the interpreter running this process (host Node,
      bundled Node, or the private bundled Bun). The resolution never
      guesses at a different binary and never throws.
-- Result memoized per process; `resetJsInterpreterCacheForTests()` clears it.
-- Invariant: **never returns the application binary**. Under a compiled
-  flavor the manifest must carry the interpreter path (packaging change in
-  S4).
+- `runtime` is metadata with no current production read site: the three
+  migrated callers consume only `command`. Runtime-specific consumers,
+  including any future S3 use of this field, are not implemented here.
+- Result memoized per process: the first caller's URL determines resolution;
+  later caller URLs are ignored. Current production callers share one
+  installation root. `resetJsInterpreterCacheForTests()` clears the cache.
+- The sandbox file-worker selects this interpreter, but bwrap/landlock still
+  stage `realpathSync(process.execPath)` in their allowlists. That coupling
+  remains an unimplemented S3 migration; this PR does not establish support
+  for layouts where the resolved interpreter differs from the staged binary.
+- Supported scope: **interpreter-based Node/Bun distributions**. Rejection
+  returns `process.execPath`, which would be the application binary in a
+  compiled build. This PR does not support compiled applications or provide
+  a compiled-artifact producer. That future flavor needs explicit interpreter
+  packaging and separately verified failure behavior before adoption; the
+  present fallback does not guarantee a usable interpreter in that flavor.
 
 Migration rule: any new code that spawns a JS file or `-e` snippet as a child
 goes through `getJsInterpreterCommand`; sites that re-invoke the app go
 through `QWEN_CODE_CLI` / the entry fallback.
 
-## Bun compatibility facts (probed this change)
+## Cross-runtime test coverage
 
-Probed with Bun 1.4.0 local vs Node 24.19.0 (same fixture, see
-`packages/core/src/utils/runtime-boundary.node-bun.test.ts`). The _shipped_
-Bun 1.3.14 pin is verified by the packaging acceptance, not here.
+`packages/core/src/utils/runtime-boundary.node-bun.test.ts` runs the same
+fixture under Node and an available Bun interpreter. It covers identity and
+stdio JSON framing, exit-code propagation, POSIX SIGTERM handling, IPC
+round-trips with explicit shutdown, `--expose-gc`, and
+`--input-type=commonjs --eval`. These are test contracts, not a claim that all
+platforms or packaged artifacts have passed. Windows skips the catchable
+SIGTERM case. An absent Bun binary skips the Bun leg; record the actual
+runtime versions and skips when reporting a run. The shipped Bun 1.3.14 pin
+and standalone artifacts require separate packaging acceptance.
 
-| Behavior                                                                     | Node 24.19.0 | Bun 1.4.0                                                                                                                                 |
-| ---------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `--expose-gc script.js` → `typeof gc === 'function'`                         | yes          | yes (`--expose-gc` accepted)                                                                                                              |
-| `--input-type=commonjs --eval '…'`                                           | yes          | yes                                                                                                                                       |
-| Node IPC channel (`spawn stdio:[…,'ipc']`, `process.send` / `on('message')`) | yes          | yes, round-trip OK                                                                                                                        |
-| SIGTERM handler → graceful `exit(0)`                                         | yes          | yes                                                                                                                                       |
-| exit-code propagation via `process.exit(n)`                                  | yes          | yes                                                                                                                                       |
-| `process.execve`                                                             | yes          | absent — code must feature-detect (`relaunch.ts`, `processUtils.ts`, `daemon-update-restart.ts` already do)                               |
-| PTY                                                                          | yes          | yes via the `qwen-bun-pty` backend (S2, [bun-pty-backend.md](bun-pty-backend.md)); `@lydell/node-pty`'s own wrapper still hangs under Bun |
+This fixture does not probe `process.execve`, native PTY loading, fd-3 status
+pipes or process-group signaling. `process.execve` feature detection at
+relaunch sites and Bun gating in `getPty` are source mechanisms, not results
+from this matrix. Native PTY and process-tree behavior need their own real
+process and artifact evidence.
 
 ## Validation plan
 
 - `packages/core/src/utils/runtime-info.test.ts` — manifest resolution,
   fallbacks, memoization.
 - `packages/core/src/utils/runtime-boundary.node-bun.test.ts` — the
-  same-fixture matrix above; Bun leg skips cleanly when no Bun binary exists
-  (CI stays green; local runs with `bun` on PATH exercise it).
+  same-fixture coverage described above; the Bun leg skips when no Bun
+  binary exists. A skipped leg is not a compatibility pass.
 - S2/S3 consume the inventory tables as their migration checklist; S5 reruns
   the matrix on the real archives per the MYWO-8 acceptance protocol.
 

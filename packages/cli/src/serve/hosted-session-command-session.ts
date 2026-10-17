@@ -33,6 +33,7 @@ import {
 import { MANAGED_CHILD_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
+  assertManagedSessionDomainEnabled,
   ManagedSessionRecordError,
   type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -88,17 +89,22 @@ export const SESSION_COMMAND_LEADER_UNANSWERING_TEXT =
  */
 export function sessionCommandEvidenceText(
   state: 'planned' | 'accepting' | 'rejected' | 'cancelled' | 'unknown',
+  kind: SessionCommandKind = 'board_write',
 ): string {
   switch (state) {
     case 'planned':
       return 'The leader did not take the command before the wait ended; it was not sent and nothing happened. Send it again in a fresh turn.';
     case 'accepting':
+      if (kind === 'member_message')
+        return 'The message reached the leader, but its reply did not arrive in time; some recipients may already have it or get it later. Do not send it again; end your turn and say so in your result.';
       return 'The command reached the leader, but its reply did not arrive in time; a write may have taken effect. End your turn and say so in your result; read the board again before repeating the write.';
     case 'rejected':
       return 'The leader rejected the command; it was not run.';
     case 'cancelled':
       return 'The command was cancelled before it ran; it never left.';
     default:
+      if (kind === 'member_message')
+        return "The message's outcome is unknown; some recipients may already have it or get it later. Do not send it again.";
       return "The command's outcome is unknown; the leader may have run it and a write may have taken effect. Read the board again before repeating the write.";
   }
 }
@@ -264,6 +270,25 @@ export class HostedSessionCommandSession {
         throw new ManagedSessionRecordError(
           'This Session is closing and takes no more commands.',
         );
+      }
+      if (params.kind === 'plan_submit') {
+        for (const prior of this.commands()) {
+          if (
+            prior.direction !== 'outbound' ||
+            prior.kind !== 'plan_submit' ||
+            prior.childRunId !== lineage.parentChildRunId
+          )
+            continue;
+          const state = prior.run.delivery?.state;
+          if (state === 'cancelled' || state === 'rejected') continue;
+          if (state === 'accepted' || state === 'consumed') {
+            const reply = await this.readReply(prior.commandId);
+            if (reply?.outcome === 'refused') continue;
+          }
+          throw new ManagedSessionRecordError(
+            'This run already submitted a plan whose acceptance is confirmed or unresolved; end your turn and wait for the leader.',
+          );
+        }
       }
       const volume = this.commands().filter(
         (command) =>
@@ -578,11 +603,44 @@ export class HostedSessionCommandSession {
       return reply;
     };
     if (params.kind === 'plan_submit') {
-      return receipt(
-        refusedCommandReply(
-          'This team command is not accepted yet: members cannot send it to their leader.',
-        ),
-      );
+      try {
+        if (teams.plan(params.commandId) === undefined)
+          assertManagedSessionDomainEnabled('team_plan');
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+        if (teams.supersededPlan(params.commandId) !== undefined)
+          throw new SessionCommandBlockedError(
+            'Plan submission partially committed; recovery awaits team_plan enablement.',
+          );
+        return receipt(
+          refusedCommandReply(
+            'This team command is not accepted yet: members cannot send it to their leader.',
+          ),
+        );
+      }
+      if (
+        Object.keys(params.args).some((key) => key !== 'plan') ||
+        typeof params.args['plan'] !== 'string' ||
+        !params.args['plan'].trim()
+      )
+        return receipt(
+          refusedCommandReply('Plan submission requires only a nonempty plan.'),
+        );
+      try {
+        const text = await teams.submitPlan(
+          params.commandId,
+          params.childRunId,
+          params.args['plan'],
+        );
+        return receipt(answeredCommandReply(cutCommandReplyText(text)));
+      } catch (cause) {
+        if (cause instanceof HostedTeamRefusal) {
+          return receipt(
+            refusedCommandReply(cutCommandReplyText(cause.message)),
+          );
+        }
+        throw cause;
+      }
     }
     if (params.kind === 'member_message') {
       return this.executeMemberMessage(params, receipt);

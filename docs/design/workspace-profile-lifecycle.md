@@ -38,6 +38,8 @@ After original RuntimeSession drain, settle stdout/stderr capture, publication m
 
 For foreground inline capture, the receipt outcome is `REFERENCED`, while the indirectly referenced manifest, pages and segments may remain `PUBLISHED`. Verify the original journal source and retained outcome, then check the manifest's original execution identity, stream digests and seals. A blocked capture still requires its manifest evidence even when `resultRef` is null. O2 publication outcomes use `TOOL_PUBLICATION`: perform the existing object/receipt verification before the final transaction, then recheck the publication phase, quarantine flag and exact admission, receipt sequence and revision inside that transaction. The MCP inline-record reader is not an output reader.
 
+Native `read_file`, `write_file`, `edit` and `glob` calls in a Shell profile use ordinary file results, which do not create O3 capture receipts. Their settled Broker ledger may satisfy resource closure only when a committed `managed-tool-input` in the same Session verifies its bytes and digest, names the original Harness and Runtime Sessions, and its exact `payloadJson` digest matches the execution request. The invocation must be legacy `deferred`, without `runtimeProtocol` or a publication grant. Merely missing a capture or receipt does not identify a file call: legacy tool v2 also supports Shell. Unknown executions, foreign/corrupt/uncommitted inputs and Shell calls without their receipts remain blocked. Acceptance includes real Write/Read followed by close on a Shell profile and the running Shell cancel → native-file Turn → close sequence.
+
 The manifest invocation digest follows the original execution protocol. Only a saved `runtimeProtocol: 3` with `dispatchMode: deferred` uses its bare `inputDigest`; a missing or invalid digest blocks cleanup. Its `argsDigest` hashes the complete request and cannot substitute for the input digest. Deferred v3/O2 and H3 start invocations retain their original `argsDigest` comparison; background process holds do not replace the start invocation's identity. Do not select the digest merely by field presence or strip a hash prefix.
 
 A stopped worker does not prove missing output was published. Unknown output remains blocked; do not rerun Shell, start a new capture or rebuild a Monitor to fabricate settlement. A known capture failure is retained as a failure rather than rewritten as successful output.
@@ -61,7 +63,7 @@ A matching NOT_FOUND observation permits the stopped cleanup path to wait for th
 | Managed server     | Profile admission, current-claim writer/record authorization, independent effect/resource verification and final atomic retirement. |
 | Runtime Broker     | Durable owner enumeration, original RuntimeSession drain and claim checks on recovery controls.                                     |
 
-Source changes are concentrated in `packages/cli/src/serve/`, `packages/sdk-java/qwencode/`, `packages/sdk-java/managed-agent-server/` and `packages/sdk-java/runtime-broker/`, with collocated tests. The E2E plan and execution results are in `.qwen/e2e-tests/workspace-profile-lifecycle.md`.
+Source changes are concentrated in `packages/cli/src/serve/`, `packages/sdk-java/qwencode/`, `packages/managed-agent-server/` and `packages/managed-agent-server/`, with collocated tests. The E2E plan and execution results are in `.qwen/e2e-tests/workspace-profile-lifecycle.md`.
 
 ## Validation and rollout
 

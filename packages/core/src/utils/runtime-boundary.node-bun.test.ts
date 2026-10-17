@@ -20,6 +20,7 @@
  * to the standalone packaging acceptance, not this regression.
  */
 
+import { once } from 'node:events';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -30,6 +31,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 // line, 'exit:<code>' exits with that code, 'stay' keeps the event loop
 // alive (for signal tests). A child with an IPC channel always stays alive.
 const fixtureSource = `
+process.on('SIGTERM', () => {
+  process.stdout.write(JSON.stringify({ got: 'SIGTERM' }) + '\\n');
+  process.exit(0);
+});
 const runtime = process.isBun ? 'bun' : 'node';
 process.stdout.write(
   JSON.stringify({
@@ -42,16 +47,13 @@ process.stdout.write(
 );
 if (typeof process.send === 'function') {
   process.on('message', (message) => {
+    if (message && message.type === 'shutdown') process.exit(0);
     if (message && message.type === 'ping') {
       process.send({ type: 'pong', saw: message.type });
     }
   });
   process.send({ type: 'ready' });
 }
-process.on('SIGTERM', () => {
-  process.stdout.write(JSON.stringify({ got: 'SIGTERM' }) + '\\n');
-  process.exit(0);
-});
 const mode = process.argv[2] ?? 'exit';
 if (mode === 'stay' || typeof process.send === 'function') {
   setInterval(() => {}, 1000);
@@ -66,29 +68,92 @@ describe('runtime boundary: same fixture under node and bun', () => {
   let tempRoot: string;
   let fixturePath: string;
   const bunBin = process.env['BUN_TEST_BIN'] ?? 'bun';
-  const bunAvailable =
-    spawnSync(bunBin, ['--version'], { timeout: 15_000 }).status === 0;
+  const bunVersionResult = spawnSync(bunBin, ['--version'], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  const bunAvailable = bunVersionResult.status === 0;
+  const bunVersion = bunVersionResult.stdout?.trim() ?? '';
   const runtimes: Array<'node' | 'bun'> = ['node'];
   if (bunAvailable) runtimes.push('bun');
 
   const interpreterFor = (runtime: 'node' | 'bun'): string =>
-    runtime === 'bun' ? bunBin : (process.env['NODE_TEST_BIN'] ?? process.execPath);
+    runtime === 'bun'
+      ? bunBin
+      : (process.env['NODE_TEST_BIN'] ?? process.execPath);
+
+  const waitForClose = (
+    child: ReturnType<typeof spawn>,
+    timeout = 5000,
+  ): Promise<[number | null, string | null]> => {
+    const onError = (error: Error) => child.emit('error', error);
+    child.stdout?.on('error', onError);
+    child.stderr?.on('error', onError);
+    return once(child, 'close', { signal: AbortSignal.timeout(timeout) })
+      .then(([code, signal]): [number | null, string | null] => [code, signal])
+      .finally(() => {
+        child.stdout?.off('error', onError);
+        child.stderr?.off('error', onError);
+      });
+  };
+
+  const cleanupChild = async (
+    child: ReturnType<typeof spawn>,
+  ): Promise<void> => {
+    try {
+      if (
+        child.pid !== undefined &&
+        child.exitCode === null &&
+        child.signalCode === null
+      ) {
+        const closed = waitForClose(child, 2000);
+        child.kill('SIGKILL');
+        await closed;
+      }
+    } finally {
+      child.stdin?.destroy();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (child.connected) child.disconnect();
+    }
+  };
 
   const collectIdentityLines = async (
     child: ReturnType<typeof spawn>,
   ): Promise<string[]> => {
     const lines: string[] = [];
-    child.stdout!.on('data', (chunk: string | Buffer) => {
-      for (const line of String(chunk).split('\n')) {
-        if (line.length > 0) lines.push(line);
-      }
-    });
-    await new Promise<void>((resolve) => {
-      child.stdout!.on('data', () => {
-        if (lines.length > 0) resolve();
+    let pending = '';
+    child.stdout!.setEncoding('utf8');
+    return new Promise((resolve, reject) => {
+      const done = (error?: Error) => {
+        clearTimeout(timer);
+        child.off('error', onError);
+        child.stdout!.off('error', onError);
+        child.stderr!.off('error', onError);
+        child.stdout!.off('close', onClose);
+        if (error) reject(error);
+        else resolve(lines);
+      };
+      const onError = (error: Error) => done(error);
+      const onClose = () =>
+        done(new Error('Child closed before identity line'));
+      const timer = setTimeout(
+        () => done(new Error('Timed out waiting for child identity')),
+        5000,
+      );
+      child.on('error', onError);
+      child.stdout!.on('error', onError);
+      child.stderr!.on('error', onError);
+      child.stdout!.once('close', onClose);
+      child.stdout!.on('data', (chunk: string) => {
+        const complete = (pending + chunk).split('\n');
+        pending = complete.pop() ?? '';
+        for (const line of complete) {
+          if (line.length > 0) lines.push(line);
+        }
+        if (lines.length > 0) done();
       });
     });
-    return lines;
   };
 
   beforeEach(() => {
@@ -139,18 +204,19 @@ describe('runtime boundary: same fixture under node and bun', () => {
       const child = spawn(interpreterFor(runtime), [fixturePath, 'stay'], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      const lines = await collectIdentityLines(child);
-      child.kill('SIGTERM');
-      const [exitCode, signal] = await new Promise<
-        [number | null, string | null]
-      >((resolve) => {
-        child.on('exit', (code, sig) => resolve([code, sig]));
-      });
-      const termLine = lines.find((line) => line.includes('SIGTERM'));
-      expect(termLine).toBeDefined();
-      expect(JSON.parse(termLine!)).toEqual({ got: 'SIGTERM' });
-      expect(exitCode).toBe(0);
-      expect(signal).toBeNull();
+      try {
+        const lines = await collectIdentityLines(child);
+        const closed = waitForClose(child);
+        child.kill('SIGTERM');
+        const [exitCode, signal] = await closed;
+        const termLine = lines.find((line) => line.includes('SIGTERM'));
+        expect(termLine).toBeDefined();
+        expect(JSON.parse(termLine!)).toEqual({ got: 'SIGTERM' });
+        expect(exitCode).toBe(0);
+        expect(signal).toBeNull();
+      } finally {
+        await cleanupChild(child);
+      }
     },
   );
 
@@ -158,25 +224,25 @@ describe('runtime boundary: same fixture under node and bun', () => {
     '%s: round-trips messages over the Node IPC channel',
     { timeout: 30_000 },
     async (runtime) => {
-      const child = spawn(
-        interpreterFor(runtime),
-        [fixturePath, 'stay'],
-        { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] },
-      );
-      const types: string[] = [];
-      child.on('message', (message) => {
-        const type = (message as { type?: string }).type ?? '';
-        types.push(type);
-        if (type === 'ready') child.send({ type: 'ping' });
-        if (type === 'pong') child.kill();
+      const child = spawn(interpreterFor(runtime), [fixturePath, 'stay'], {
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
       });
-      const [exitCode] = await new Promise<[number | null, string | null]>(
-        (resolve) => {
-          child.on('exit', (code, sig) => resolve([code, sig]));
-        },
-      );
-      expect(types).toEqual(['ready', 'pong']);
-      expect(exitCode).toBe(0);
+      try {
+        const types: string[] = [];
+        const closed = waitForClose(child);
+        child.on('message', (message) => {
+          const type = (message as { type?: string }).type ?? '';
+          types.push(type);
+          if (type === 'ready') child.send({ type: 'ping' });
+          if (type === 'pong') child.send({ type: 'shutdown' });
+        });
+        const [exitCode, signal] = await closed;
+        expect(types).toEqual(['ready', 'pong']);
+        expect(exitCode).toBe(0);
+        expect(signal).toBeNull();
+      } finally {
+        await cleanupChild(child);
+      }
     },
   );
 
@@ -214,19 +280,13 @@ describe('runtime boundary: same fixture under node and bun', () => {
   );
 
   it.skipIf(!bunAvailable)(
-    'bun leg records the interpreter version it ran with',
+    `bun leg records interpreter version: ${bunVersion || 'unavailable'}`,
     { timeout: 30_000 },
     () => {
-      const version = spawnSync(bunBin, ['--version'], {
-        encoding: 'utf8',
-        timeout: 15_000,
-      });
-      // Emitted for the run log; the shipped-version pin is asserted by the
-      // standalone packaging acceptance, not here.
-      console.info(
-        `[runtime-boundary] bun leg ran with bun ${version.stdout.trim()}`,
+      expect(bunVersion).toMatch(/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/);
+      process.stdout.write(
+        `[runtime-boundary] bun leg ran with bun ${bunVersion}\n`,
       );
-      expect(version.status).toBe(0);
     },
   );
 });

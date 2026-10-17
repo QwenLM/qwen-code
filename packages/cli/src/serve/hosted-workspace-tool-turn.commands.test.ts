@@ -20,7 +20,10 @@ import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/mana
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
-import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import {
+  answerResumedTurnCalls,
+  settleCancelledCommandWaitRuns,
+} from './hosted-runtime-recovery.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -73,6 +76,26 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   },
 }));
 
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
+
 const PARENT = randomUUID();
 const LEAF_RUN = 'run-leaf';
 
@@ -80,6 +103,10 @@ let rootDir: string;
 let session: ManagedSession;
 let children: HostedChildAgentSession;
 let commands: HostedSessionCommandSession;
+const executions: Array<{
+  controller: AbortController;
+  result: Promise<Part[]>;
+}> = [];
 let sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
 const lineage: HostedSessionLineage = {
   parentSessionId: PARENT,
@@ -107,6 +134,7 @@ function call(
 function createTurn(
   promptName = 'prompt',
   memberPlanMode = false,
+  hooks?: import('./hosted-hook-session.js').HostedHookSession,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -154,22 +182,28 @@ function createTurn(
         lineage,
       ),
       commands,
+      hooks,
     },
   );
 }
 
-async function execute(
+function execute(
   turn: HostedWorkspaceToolTurn,
   batch: ToolCallRequestInfo[],
 ): Promise<Part[]> {
-  return turn.execute(
+  const controller = new AbortController();
+  const result = turn.execute(
     batch,
     batch.map((entry) => ({
       functionCall: { id: entry.callId, name: entry.name, args: entry.args },
     })),
     'model',
-    new AbortController().signal,
+    controller.signal,
   );
+  executions.push({ controller, result });
+  // Observe failures even when an earlier assertion prevents the await.
+  void result.catch(() => undefined);
+  return result;
 }
 
 function commandIdOf(callId: string, promptName = 'prompt'): string {
@@ -214,6 +248,7 @@ async function seedFirstInput(text: string): Promise<void> {
 }
 
 beforeEach(async () => {
+  planGate.enabled = false;
   vi.resetAllMocks();
   for (const method of [
     broker.warm,
@@ -273,6 +308,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const { controller } of executions) controller.abort();
+  await Promise.allSettled(executions.map(({ result }) => result));
+  executions.length = 0;
   vi.useRealTimers();
   await session?.close();
   await rm(rootDir, { recursive: true, force: true });
@@ -320,6 +358,79 @@ async function journaledResults(): Promise<string> {
   );
 }
 
+// #14063: every wait settlement preserves the member-message guidance.
+it.each([
+  ['live', 'accepting'],
+  ['live', 'unknown'],
+  ['resumed', 'accepting'],
+  ['resumed', 'unknown'],
+  ['interrupted', 'accepting'],
+  ['interrupted', 'unknown'],
+] as const)(
+  'does not suggest resending a member message in the %s %s path',
+  async (route, state) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }),
+    );
+    const callId = 'call-message-timeout';
+    const commandId = commandIdOf(callId);
+    let live: Promise<Part[]> | undefined;
+    let runs: HarnessCommandWaitRun[] = [];
+    if (route === 'live') {
+      live = execute(createTurn(), [
+        call({ to: 'bob', message: 'sync at noon' }, callId, 'send_message'),
+      ]);
+      await vi.waitFor(
+        () => expect(commands.command(commandId)).toBeDefined(),
+        { timeout: 10_000 },
+      );
+    } else {
+      runs = await parkCalls([{ callId, toolName: 'send_message' }]);
+      await commands.runCommand({
+        commandId,
+        kind: 'member_message',
+        args: { to: 'bob', message: 'sync at noon' },
+        executionCallId: callId,
+        closing: false,
+      });
+    }
+    await commands.handover(commandId, PARENT);
+    if (state === 'unknown') await commands.settle(commandId, 'unknown');
+
+    if (route === 'live') {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 121_000);
+      await live;
+      vi.useRealTimers();
+    } else if (route === 'resumed') {
+      await createManagedHarnessHandle(session).markCommandWaitTimeout();
+      await createTurn().resumeCommandWaitRuns(
+        runs,
+        false,
+        'model',
+        new AbortController().signal,
+      );
+    } else {
+      await settleCancelledCommandWaitRuns({
+        managed: session,
+        sessionId: sessionKey.sessionId,
+        promptId: 'prompt',
+        cwd: rootDir,
+        runs,
+        commands,
+      });
+    }
+
+    const answered = await journaledResults();
+    expect(answered).toContain(
+      sessionCommandEvidenceText(state, 'member_message'),
+    );
+    expect(answered).not.toMatch(/read the board/i);
+    expect(answered).toContain('Do not send it again');
+    expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
+  },
+);
+
 async function runnableCheckpoint() {
   const authorization = await session.authority.harnessRunAuthorization();
   if (authorization.status !== 'runnable')
@@ -332,6 +443,128 @@ function texts(parts: Part[]): string {
   // serialization rather than on a text field that never exists.
   return JSON.stringify(parts);
 }
+
+it('gates the member plan tool and submits it through the durable command wait', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }, true),
+  );
+  const signal = new AbortController().signal;
+  expect(
+    (await createTurn('prompt', true).declarations(signal)).map(
+      (tool) => tool.name,
+    ),
+  ).not.toContain('exit_plan_mode');
+  planGate.enabled = true;
+  expect(
+    (await createTurn().declarations(signal)).map((tool) => tool.name),
+  ).not.toContain('exit_plan_mode');
+  const turn = createTurn('prompt', true);
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toContain(
+    'exit_plan_mode',
+  );
+  expect(
+    texts(
+      await execute(turn, [call({ plan: ' ' }, 'empty', 'exit_plan_mode')]),
+    ),
+  ).toContain('nonempty plan');
+  expect(
+    texts(
+      await execute(turn, [
+        call(
+          { subject: 'write', description: 'write' },
+          'write',
+          'task_create',
+        ),
+      ]),
+    ),
+  ).toContain('plan mode');
+  for (const [name, args, id] of [
+    ['task_list', {}, 'list'],
+    ['exit_plan_mode', { plan: 'Read then edit' }, 'plan'],
+  ] as const) {
+    const running = execute(turn, [call(args, id, name)]);
+    await vi.waitFor(
+      () => expect(commands.command(commandIdOf(id))).toBeDefined(),
+      { timeout: 5000 },
+    );
+    expect(commands.command(commandIdOf(id))?.kind).toBe(
+      name === 'task_list' ? 'board_read' : 'plan_submit',
+    );
+    await commands.handover(commandIdOf(id), PARENT);
+    await commands.answered(commandIdOf(id), {
+      outcome: 'answered',
+      text: 'accepted by leader',
+    });
+    expect(texts(await running)).toContain('accepted by leader');
+  }
+});
+
+it.each(['execute', 'resume', 'refused'] as const)(
+  'runs plan submission post hooks: %s',
+  async (mode) => {
+    planGate.enabled = true;
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }, true),
+    );
+    const events: string[] = [];
+    const hooks = {
+      tools: () => [],
+      toolInput: () => undefined,
+      fire: async (event: string) => {
+        events.push(event);
+        return event === 'PostToolUse'
+          ? {
+              continue: false,
+              stopReason: 'plan hook stop',
+              hookSpecificOutput: {
+                hookEventName: 'PostToolUse',
+                additionalContext: 'plan hook context',
+              },
+            }
+          : undefined;
+      },
+    } as unknown as import('./hosted-hook-session.js').HostedHookSession;
+    const turn = createTurn(
+      'prompt',
+      true,
+      mode === 'resume' ? undefined : hooks,
+    );
+    const running = execute(turn, [
+      call({ plan: 'read' }, 'hook-plan', 'exit_plan_mode'),
+    ]);
+    await vi.waitFor(
+      () => expect(commands.command(commandIdOf('hook-plan'))).toBeDefined(),
+      { timeout: 5000 },
+    );
+    await commands.handover(commandIdOf('hook-plan'), PARENT);
+    await commands.answered(commandIdOf('hook-plan'), {
+      outcome: mode === 'refused' ? 'refused' : 'answered',
+      text: 'leader reply',
+    });
+    const responses = await running;
+    const checked =
+      mode === 'resume' ? createTurn('prompt', true, hooks) : turn;
+    if (mode === 'resume') {
+      planGate.enabled = false;
+      await checked.resumeHookResults(
+        responses,
+        'model',
+        new AbortController().signal,
+      );
+    }
+    if (mode === 'refused') {
+      expect(events).not.toContain('PostToolUse');
+      expect(events).not.toContain('PostToolUseFailure');
+      expect(checked.hookStopReason).toBeUndefined();
+    } else {
+      expect(events).toContain('PostToolUse');
+      expect(checked.hookStopReason).toBe('plan hook stop');
+      expect(JSON.stringify(await session.sink.project())).toContain(
+        'plan hook context',
+      );
+    }
+  },
+);
 
 it('declares the member board tools behind the member preamble of a launch', async () => {
   await seedFirstInput(
