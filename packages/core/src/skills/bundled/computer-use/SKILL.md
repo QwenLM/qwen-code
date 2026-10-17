@@ -60,7 +60,18 @@ unavailable, run:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.7
-npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.11
+npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.12
+```
+
+On Windows the SDK's signed UIAccess worker must be installed under
+`Program Files\Qwen\CuaDriver`, which this shell cannot do unless the Qwen
+Code process itself is elevated. If the install fails with a permission
+error, ask the user to run this once from an elevated terminal — it deploys
+the byte-identical path, and the npm command above then short-circuits on
+the already-installed worker:
+
+```powershell
+irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
 Tell the user to restart Qwen Code, then stop. If only the SDK import is missing,
