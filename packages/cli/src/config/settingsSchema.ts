@@ -1303,7 +1303,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Let a bare ↑/↓ scroll the transcript while the composer is empty in Virtualized History, instead of recalling input history. Off by default: ↑/↓ walk your previous prompts, and the transcript scrolls with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Turn it on only for terminals that cannot report the mouse wheel to the app — macOS Terminal.app is the common case — where a wheel or trackpad scroll arrives as a burst of ↑/↓ key presses and would otherwise silently replace the composer with an older prompt. While it is on, use Ctrl+P / Ctrl+N for input history from an empty composer.',
+          'Let a bare ↑/↓ scroll the transcript while the composer is empty in Virtualized History, instead of recalling input history. Off by default: ↑/↓ walk your previous prompts, and the transcript scrolls with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Turn it on only for a terminal or multiplexer that does not pass mouse reporting through and turns wheel/trackpad scrolling into ↑/↓ key presses, where that burst of ↑/↓ would otherwise silently replace the composer with an older prompt. While it is on, use Ctrl+P / Ctrl+N for input history from an empty composer.',
         showInDialog: true,
       },
       showToolCallDetails: {
@@ -1642,6 +1642,12 @@ const SETTINGS_SCHEMA = {
       additionalProperties: {
         type: 'object',
         properties: {
+          toolDialect: {
+            type: 'string',
+            enum: ['native', 'claude'],
+            description:
+              'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
+          },
           options: {
             type: 'object',
             additionalProperties: {
@@ -1657,7 +1663,7 @@ const SETTINGS_SCHEMA = {
       },
     },
     description:
-      'Mod options keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+      'Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
     showInDialog: false,
   },
 

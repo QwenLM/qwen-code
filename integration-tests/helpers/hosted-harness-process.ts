@@ -42,6 +42,10 @@ export class HostedHarnessProcess {
     modelUrl: string,
     options: {
       hostname?: string;
+      /** A pinned port instead of the ephemeral default — the FG10
+       * fixture pins it so the in-JVM Spring can name the Harness in its
+       * boot-time harness.base-url. */
+      port?: number;
       startupTimeout?: number;
       args?: string[];
       extraArgs?: string[];
@@ -94,7 +98,7 @@ export class HostedHarnessProcess {
           '--hostname',
           options.hostname ?? '127.0.0.1',
           '--port',
-          '0',
+          String(options.port ?? 0),
           '--token',
           HOSTED_TOKEN,
           '--hosted-harness-capability-digest',

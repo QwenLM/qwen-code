@@ -490,6 +490,8 @@ import {
   LOAD_REPLAY_VERSION,
   MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
+  getPromptCancelAbortReason,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
@@ -4000,6 +4002,11 @@ class QwenAgent implements Agent {
   >();
   private managedShuttingDown = false;
   /**
+   * A workspace change is being applied. New prompts wait for it, so no turn
+   * is admitted under the revision the change replaces.
+   */
+  private workspaceChangeInFlight = 0;
+  /**
    * The reasons this Managed engine admits no new work: one per Runtime
    * worker stop nobody could prove, lifted by the same reason once the
    * group's death is proven.
@@ -4895,6 +4902,7 @@ class QwenAgent implements Agent {
        * unset and keep their force semantics.
        */
       onlyIfUnheld?: boolean;
+      cancelReason?: 'user';
     },
   ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
@@ -4910,7 +4918,9 @@ class QwenAgent implements Agent {
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
-      : session.beginClose();
+      : opts?.cancelReason === 'user'
+        ? session.beginClose('user')
+        : session.beginClose();
     const conditionalDrainDeadline = opts?.onlyIfUnheld
       ? Date.now() + drainTimeoutMs
       : undefined;
@@ -4942,9 +4952,15 @@ class QwenAgent implements Agent {
         }
       }
 
+      const abortReason = getPromptCancelAbortReason({
+        [PROMPT_CANCEL_REASON_META_KEY]: opts?.cancelReason ?? 'interrupted',
+      });
+      for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+        session.cancelPromptAdmission(call.controller, abortReason);
+      }
       for (const [requestId, generation] of this.generationControllers) {
         if (generation.sessionId !== sessionId) continue;
-        generation.controller.abort();
+        generation.controller.abort(abortReason);
         this.generationControllers.delete(requestId);
       }
       await waitForSessionDrain(
@@ -7023,6 +7039,13 @@ class QwenAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    if (this.workspaceChangeInFlight > 0) {
+      throw new RequestError(
+        -32000,
+        'A workspace change is being applied; retry the prompt.',
+        { errorKind: 'workspace_change_in_progress' },
+      );
+    }
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -7174,8 +7197,9 @@ class QwenAgent implements Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
     await this.runInSessionContext(session, async () => {
+      const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt();
+        await session.cancelPendingPrompt(abortReason);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
@@ -7186,7 +7210,7 @@ class QwenAgent implements Agent {
       // cancelPendingPrompt cannot see them. Abort their controllers too, or a
       // cancelled prompt would run in full once admission frees.
       for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-        call.controller.abort();
+        session.cancelPromptAdmission(call.controller, abortReason);
       }
     });
   }
@@ -9005,16 +9029,16 @@ class QwenAgent implements Agent {
     );
   }
 
-  private buildSessionContextStatus(
+  private async buildSessionContextStatus(
     sessionId: string,
-  ): ServeSessionContextStatus {
+  ): Promise<ServeSessionContextStatus> {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
-      recovery: session.getRecoveryStatus(),
+      recovery: await session.getRecoveryStatusForClient(),
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
@@ -9766,7 +9790,10 @@ class QwenAgent implements Agent {
         if (targetedCalls.size === 0) {
           return { cancelled: false };
         }
-        targetedCalls.forEach((call) => call.controller.abort());
+        const abortReason = getPromptCancelAbortReason(params['_meta']);
+        targetedCalls.forEach((call) =>
+          session.cancelPromptAdmission(call.controller, abortReason),
+        );
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
       }
@@ -10049,10 +10076,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        return this.buildSessionContextStatus(sessionId) as unknown as Record<
-          string,
-          unknown
-        >;
+        return (await this.buildSessionContextStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionContextUsage: {
         const sessionId = params['sessionId'];
@@ -10600,6 +10626,113 @@ class QwenAgent implements Agent {
         return this.buildWorkspaceExtensionsStatus(
           this.config,
         ) as unknown as Record<string, unknown>;
+      case SERVE_CONTROL_EXT_METHODS.workspaceChange: {
+        const revision = params['revision'];
+        const kind = params['kind'];
+        if (
+          params['v'] !== 1 ||
+          typeof revision !== 'number' ||
+          !Number.isSafeInteger(revision) ||
+          typeof kind !== 'string'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid workspace change',
+          );
+        }
+        const changeCwd =
+          typeof params['cwd'] === 'string' ? params['cwd'] : cwd;
+        this.workspaceChangeInFlight += 1;
+        try {
+          // A tightening change asks a turn that cannot be revalidated to
+          // cancel, so the idle-only reload paths below reach it.
+          if (params['tightening'] === true) {
+            await Promise.allSettled(
+              [...this.sessions.values()]
+                .filter((session) => !session.isIdle())
+                .map((session) => session.cancelPendingPrompt()),
+            );
+          }
+          switch (kind) {
+            case 'permissions': {
+              // A settings reload alone does not touch the live permission
+              // managers, so diff the rule sets the control engine persisted
+              // and sync them the way the permission-rule route does.
+              const before = readPermissionRuleSet(this.settings.merged);
+              if (
+                !this.settings.reloadScopesFromDiskAtomically([
+                  SettingScope.User,
+                  SettingScope.Workspace,
+                ])
+              ) {
+                throw new Error(
+                  'The permission rules could not be reloaded for a workspace change.',
+                );
+              }
+              const after = readPermissionRuleSet(this.settings.merged);
+              this.syncLivePermissionManagers(
+                before,
+                after,
+                SettingScope.User,
+                changeCwd,
+              );
+              this.syncLivePermissionManagers(
+                before,
+                after,
+                SettingScope.Workspace,
+                changeCwd,
+              );
+              break;
+            }
+            case 'settings': {
+              const reloaded = await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceReload,
+                { cwd: changeCwd },
+              );
+              // A tightening change that skipped a live session has not
+              // reached it: acknowledge nothing, so the Bridge keeps the
+              // channel quarantined instead of lifting the fence.
+              const skipped = reloaded['sessionsSkipped'];
+              if (
+                params['tightening'] === true &&
+                Array.isArray(skipped) &&
+                skipped.length > 0
+              ) {
+                throw new Error(
+                  `The settings change did not reach ${skipped.length} live session(s).`,
+                );
+              }
+              break;
+            }
+            case 'sessionWorkflow':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                { cwd: changeCwd, enabled: params['enabled'] === true },
+              );
+              break;
+            case 'modelProviders':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+                { cwd: changeCwd },
+              );
+              break;
+            case 'skills':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+                { cwd: changeCwd, reason: params['reason'] ?? 'all' },
+              );
+              break;
+            default:
+              throw RequestError.invalidParams(
+                undefined,
+                `Unknown workspace change kind: ${String(kind)}`,
+              );
+          }
+          return { v: 1, revision, acknowledged: true };
+        } finally {
+          this.workspaceChangeInFlight -= 1;
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
           available:
@@ -12103,7 +12236,15 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
+        const cancelReason = params['cancelReason'];
+        if (cancelReason !== undefined && cancelReason !== 'user') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid session close cancellation reason',
+          );
+        }
         const outcome = await this.closeStoredSession(sessionId, {
+          ...(cancelReason === 'user' ? { cancelReason } : {}),
           requireFlush: params['requireFlush'] === true,
           onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
@@ -13720,7 +13861,11 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const result = await session.continueLastTurn();
+        const result = await session.continueLastTurn(
+          typeof params['confirmCancellation'] === 'string'
+            ? params['confirmCancellation']
+            : undefined,
+        );
         debugLogger.info(
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
         );
