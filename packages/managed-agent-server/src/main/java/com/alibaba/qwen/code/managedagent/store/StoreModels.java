@@ -243,9 +243,11 @@ public final class StoreModels {
     /**
      * D7-2: an operation parked recovery_blocked because its command's
      * acceptance is unknown, due for reconciliation from its kind's evidence.
+     * The kind is the stored operation kind; sessionId is null for a kind that
+     * belongs to no Session.
      */
     public record ParkedOperation(String tenantId, String sessionId,
-            String operationId, OperationKind kind) {
+            String operationId, String kind) {
     }
 
     /** What an operation's own keyed evidence proves about its command. */
