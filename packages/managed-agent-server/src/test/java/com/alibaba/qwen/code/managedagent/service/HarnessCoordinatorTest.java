@@ -973,6 +973,7 @@ class HarnessCoordinatorTest {
         when(refused.getStatusCode()).thenReturn(409);
         when(refused.getErrorCode())
                 .thenReturn("hosted_turn_recovery_required");
+        when(refused.getBodyField("reason")).thenReturn("takeover_unrecovered");
         when(harness.recoverManagedRuntime("tenant", "session", false))
                 .thenThrow(refused);
         HarnessCoordinator coordinator = new HarnessCoordinator(store,
@@ -992,6 +993,61 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyBoolean());
+    }
+
+    // The same coded refusal with a transient reason (a restore read
+    // hiccup, not a lost generation) is NOT evidence the workflow cannot
+    // be observed — a completed result may already sit journaled behind
+    // it. The Turn keeps retrying instead of parking blocked (P1 review
+    // finding on #14461: keep transient restore errors out of the
+    // workflow-loss verdict).
+    @Test
+    void retriesAWorkflowTurnWhenTheTakeoverRefusalIsTransient() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old", 1L,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null, null,
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        DaemonHttpException refused = mock(DaemonHttpException.class);
+        when(refused.getStatusCode()).thenReturn(409);
+        when(refused.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        when(refused.getBodyField("reason"))
+                .thenReturn("restore_verification_failed");
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(refused);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        // The transient refusal retries — the Turn is never parked
+        // blocked and never settled as if observed.
+        verify(store, never()).markTurnRecoveryBlocked(anyString(),
+                anyString(), anyString(), anyString(), anyString(),
+                anyString());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong(), anyBoolean());
     }
 
     // Once refused, the durable mark ends every later re-claim before any

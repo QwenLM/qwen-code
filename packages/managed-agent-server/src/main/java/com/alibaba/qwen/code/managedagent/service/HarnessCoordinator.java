@@ -312,13 +312,20 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed, submissionAttempted.get(),
                     error, false);
         } catch (DaemonHttpException error) {
-            // #14387: a takeover refusal for a workflow Turn is terminal
-            // in effect — the workflow's in-process executor died with the
-            // generation, and no retry re-creates it — so the Turn parks
-            // blocked instead of retrying into a budget-exhausted FAILED.
+            // #14387: a takeover refusal for a workflow Turn with the
+            // takeover_unrecovered verdict is terminal in effect — the
+            // workflow's in-process executor died with the generation, and
+            // no retry re-creates it — so the Turn parks blocked instead
+            // of retrying into a budget-exhausted FAILED. Every other
+            // reason (a transient restore read hiccup, a takeover still in
+            // flight) keeps the retry path: it is not evidence the
+            // workflow cannot be observed, and a committed result may
+            // already sit journaled behind it.
             if (recoveryPath.get() && isWorkflowLaunchTurn(claimed)
                     && "hosted_turn_recovery_required".equals(
-                            error.getErrorCode())) {
+                            error.getErrorCode())
+                    && "takeover_unrecovered".equals(
+                            error.getBodyField("reason"))) {
                 terminal = blockWorkflowRecovery(claimed, leaseLost);
             } else if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
