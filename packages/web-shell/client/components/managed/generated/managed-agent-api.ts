@@ -1130,6 +1130,11 @@ export interface components {
             taskId: string;
             /** Format: uuid */
             sessionId: string;
+            /**
+             * Format: uuid
+             * @description The child Session that runs this task: present for a child_agent or workflow task once the run's committed record names it (the child's attach, or a terminal verdict that names a minted child), and absent for every other kind and before then. The child is a Session in the same Workspace, readable by exactly the callers that can read this task, so its Turns, items and events are the task's own output; reading them needs no other grant.
+             */
+            childSessionId?: string;
             kind: components["schemas"]["TaskKind"];
             state: components["schemas"]["TaskState"];
             /**
@@ -1158,7 +1163,7 @@ export interface components {
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];
-        } & (unknown & unknown & unknown & unknown);
+        } & (unknown & unknown & unknown & unknown & unknown);
         WebShellTaskPage: {
             data: components["schemas"]["WebShellTask"][];
             hasMore: boolean;
