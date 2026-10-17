@@ -15,17 +15,21 @@ import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import {
   InvalidLocalControlTargetError,
+  LocalControlBindError,
   type LocalControlService,
   type LocalControlStatus,
 } from '../local-control/service.js';
 import { requestHasOperatorAuthority } from '../auth.js';
+import type { DaemonLogger } from '../daemon-logger.js';
 import {
   writeStderrLine,
+  writeStderrLineSafe,
   writeStdoutLineSafe,
 } from '../../utils/stdioHelpers.js';
 
 export interface RegisterWorkspaceLocalControlRoutesDeps {
   service: LocalControlService;
+  daemonLog?: Pick<DaemonLogger, 'error'>;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   isDaemonDraining?: () => boolean;
@@ -130,10 +134,8 @@ export function registerWorkspaceLocalControlRoutes(
         });
         return;
       }
-      // Same precondition the `--local-control` CLI flag enforces: the LAN
-      // listener binds the primary listener's port on the selected LAN
-      // address, which a wildcard or LAN primary bind already owns —
-      // enabling there would fail with EADDRINUSE and no remediation.
+      // Preserve the same documented loopback-primary boundary enforced by
+      // the `--local-control` CLI flag.
       if (
         deps.primaryBindHostname !== undefined &&
         !isLoopbackBind(deps.primaryBindHostname)
@@ -176,7 +178,7 @@ export function registerWorkspaceLocalControlRoutes(
         }
         res.status(200).json(presentStatus(req, ui, trustedLoopbackMode));
       } catch (error) {
-        sendEnableError(res, error);
+        sendEnableError(res, error, deps.daemonLog);
       }
     },
   );
@@ -209,7 +211,11 @@ export function registerWorkspaceLocalControlRoutes(
   );
 }
 
-function sendEnableError(res: Response, error: unknown): void {
+function sendEnableError(
+  res: Response,
+  error: unknown,
+  daemonLog: RegisterWorkspaceLocalControlRoutesDeps['daemonLog'],
+): void {
   // 409 rather than 400: the request was well-formed and the operator did
   // nothing wrong — the host simply has more than one answer. The candidate
   // list comes back with it so the client can ask and retry with `address`
@@ -238,8 +244,28 @@ function sendEnableError(res: Response, error: unknown): void {
     res.status(400).json({ error: error.message, code: error.code });
     return;
   }
-  res.status(500).json({
-    error: error instanceof Error ? error.message : String(error),
-    code: 'local_control_enable_failed',
-  });
+  const bindError = error instanceof LocalControlBindError ? error : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  const diagnostic = bindError
+    ? `Local Control enable failed (${bindError.errno}): ${message}`
+    : `Local Control enable failed: ${message}`;
+  try {
+    if (daemonLog) {
+      daemonLog.error(diagnostic, error instanceof Error ? error : undefined, {
+        route: 'POST /workspace/local-control/enable',
+        ...(bindError ? { errno: bindError.errno } : {}),
+      });
+    } else {
+      writeStderrLineSafe(`qwen serve: ${diagnostic}`);
+    }
+  } catch {
+    // Logging must not replace the HTTP error response with another failure.
+    writeStderrLineSafe(`qwen serve: ${diagnostic}`);
+  }
+  res
+    .status(bindError?.code === 'bind_denied' ? 403 : bindError ? 409 : 500)
+    .json({
+      error: message,
+      code: bindError?.code ?? 'local_control_enable_failed',
+    });
 }
