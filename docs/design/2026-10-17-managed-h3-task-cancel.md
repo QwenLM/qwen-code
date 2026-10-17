@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-h3-task-cancel.md) | [简体中文](2026-10-17-managed-h3-task-cancel.zh-CN.md)
 
-Status: implemented in this change. The `background_shell` and `monitor` task kinds join the public task cancel path, and the contract names them in `1.54.0` (provisional: open pull requests already claim `1.53.0`). Landed: the two kinds in the one cancellable-kind rule, a delivery that stops the task's process through the embedded Runtime Broker, a verdict that reads a Monitor's `stop_requested` settlement as its recorded stop, and a real-stack gate (FG8g) that cancels a live background Shell and a live Monitor watch. No TypeScript changes.
+Status: implemented in this change. The `background_shell` and `monitor` task kinds join the public task cancel path, and the contract names them in `1.54.0`. Landed: the two kinds in the one cancellable-kind rule, a delivery that stops the task's process through the embedded Runtime Broker, a verdict that reads a Monitor's `stop_requested` settlement as its recorded stop, and a real-stack gate (FG8g) that cancels a live background Shell and a live Monitor watch. No TypeScript changes.
 
 This is the H3 part of [#13746](https://github.com/QwenLM/qwen-code/issues/13746) F1, slice H4f-c of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of [#12380](https://github.com/QwenLM/qwen-code/issues/12380). The H4f slice (#13823, [design](2026-10-10-managed-task-cancel.md)) cancelled `child_agent` tasks and the H4f-b slice (#14076, [design](2026-10-13-managed-workflow-task-cancel.md)) added `workflow`. Both deferred these two kinds until their gates lifted, which #13889 ([H3 enablement](2026-10-11-managed-h3-enablement.md)) did.
 
