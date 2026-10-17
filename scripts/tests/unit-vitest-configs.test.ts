@@ -112,6 +112,8 @@ const configModules: Record<
     import('../../integrations/external-context-mem0/vitest.config.js'),
   'integrations/test-failure-explorer': () =>
     import('../../integrations/test-failure-explorer/vitest.config.js'),
+  'integrations/generated-ui': () =>
+    import('../../integrations/generated-ui/vitest.config.js'),
   'packages/acp-bridge': () =>
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
@@ -206,6 +208,7 @@ describe('shared-pool test timeout', () => {
     'integrations/external-context',
     'integrations/external-context-mem0',
     'integrations/test-failure-explorer',
+    'integrations/generated-ui',
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',
