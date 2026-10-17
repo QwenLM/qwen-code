@@ -107,17 +107,25 @@ the [file routing contract](lsp-file-routing.md).
   an earlier server returned diagnostics. Workspace synchronization failures
   (unreadable/deleted tracked files, thrown sends, or unsupported changes) escape
   the ordinary pull-request catch; no empty or partial success is returned. A
-  tracked URI remains parked after its first failed read, including ENOENT. Its
-  second consecutive failed read drops only that URI from the parked set; both
-  observing diagnostic calls reject. The shared synchronization helper applies
-  this bound to ordinary queries, warmup and sweeps, counting
-  actual reads rather than calls. A successful read resets the count, and a new
-  connection resets counts and versions. An untracked, unreadable first query
+  tracked URI remains parked after its first failed read or physical-scope
+  resolution, including ENOENT. Its second consecutive failure drops only that
+  URI from the parked set; both observing diagnostic calls reject. The shared
+  synchronization helper applies this bound to ordinary queries, warmup and
+  sweeps, counting attempted synchronization failures rather than calls. A
+  successful read resets the count, and a new connection resets counts and
+  versions. An untracked, unreadable first query
   does not create a replay obligation. After eviction, later sweeps can proceed;
-  a successful document-targeted query is needed to track the restored file again.
-  Eviction retains the same-connection version and any pending close. Unsupported
-  changes and thrown sends do not consume read retries. Configuration-reload
-  replay still consumes the parked set before delivery; retaining failed reload
+  when no pending close remains, a successful document-targeted query is needed
+  to track the restored file again.
+  Eviction retains the same-connection version and any pending close. Pending
+  closes remain eligible for scope rechecks: after two resolution failures,
+  further unresolved attempts defer without blocking the pull. Once scope
+  returns, the old buffer is closed and current text delivered before querying,
+  so workspace diagnostics cannot reuse a stale peer buffer. Recovery parks the
+  URI before closing so a thrown reopen send remains retryable. Confirmed scope
+  revocation, unsupported changes and thrown sends do not consume read retries.
+  Configuration-reload replay still consumes the parked set before delivery;
+  retaining failed reload
   deliveries remains deferred. The manager catches internal TypeScript
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure

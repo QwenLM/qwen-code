@@ -1305,6 +1305,24 @@ export class NativeLspService {
         !(error instanceof LspDocumentScopeError) ||
         error.cause !== undefined
       ) {
+        const lifecycles =
+          this.documentLifecycles.get(serverName) ??
+          new Map<string, DocumentLifecycle>();
+        const lifecycle = lifecycles.get(uri);
+        const replay = this.replayUris.get(serverName);
+        if (lifecycle?.pendingClose || replay?.has(uri)) {
+          if ((lifecycle?.readFailures ?? 0) >= 2) {
+            return { sent: false, opened: false, deferred: true };
+          }
+          const readFailures = (lifecycle?.readFailures ?? 0) + 1;
+          lifecycles.set(uri, {
+            ...lifecycle,
+            version: lifecycle?.version ?? 0,
+            readFailures,
+          });
+          this.documentLifecycles.set(serverName, lifecycles);
+          if (readFailures >= 2) replay?.delete(uri);
+        }
         throw error;
       }
       return { sent: false, opened: false, deferred: true };
@@ -1333,6 +1351,9 @@ export class NativeLspService {
     this.documentLifecycles.set(serverName, lifecycles);
     const lifecycle = lifecycles.get(uri);
     if (lifecycle?.pendingClose) {
+      const replay = this.replayUris.get(serverName) ?? new Set<string>();
+      replay.add(uri);
+      this.replayUris.set(serverName, replay);
       try {
         this.closeUnsynchronizableDocument(serverName, handle, uri);
       } catch (error) {
@@ -2925,8 +2946,10 @@ export class NativeLspService {
                 ? (item as Record<string, unknown>)
                 : undefined;
             const uri = report?.['uri'];
+            const fileItems = report?.['items'];
+            const empty = Array.isArray(fileItems) && fileItems.length === 0;
             if (typeof uri !== 'string') {
-              dropped++;
+              if (!empty) dropped++;
               continue;
             }
             const current = this.isCurrentWorkspaceDocument(
@@ -2934,9 +2957,8 @@ export class NativeLspService {
               directories,
               scopeCache,
             );
-            if (current === undefined) dropped++;
+            if (current === undefined && !empty) dropped++;
             if (!current) continue;
-            const fileItems = report?.['items'];
             const normalized = this.normalizer.normalizeFileDiagnostics(
               item,
               name,

@@ -99,9 +99,11 @@ and symbols omit results outside current workspace scope so revoked buffers are 
 presented as current. Valid virtual result URIs remain visible with a non-file
 marker; malformed URIs and bare paths are omitted. Single-letter URI schemes are
 treated as Windows drive paths after URI parsing, including drive-relative and
-whitespace-padded spellings. Workspace diagnostics reject a report with unusable
-URI entries when no usable nonempty diagnostics remain;
-legitimate out-of-scope file URIs do not count as unusable. Workspace output
+whitespace-padded spellings. Workspace diagnostics omit unusable URI entries
+whose own `items` array is empty without charging diagnostic loss. Entries with
+nonempty or malformed payloads still count as unusable, and reject the report
+when no usable nonempty diagnostics remain. Legitimate out-of-scope file URIs
+do not count as unusable. Workspace output
 discloses that out-of-scope file results are omitted, even when
 empty. Result filtering uses fresh physical paths without per-item refusal logs,
 reusing URI decisions only within one synchronous filter. Before returning, both
@@ -116,8 +118,13 @@ confirmed scope loss still defers the document using the canonical URI of the
 parsed file path, including spellings normalized by URL parsing. This preserves
 symlink aliases and invalidates the same lifecycle and hierarchy identity used by
 file queries. Tracked-document synchronization also rethrows physical-resolution
-failures rather than treating unknown scope as
-excluded. This uses the existing attempted-synchronization close/replay lifecycle,
+failures rather than treating unknown scope as excluded. Like read failures,
+two consecutive resolution failures evict that URI from the parked set while
+both observing calls reject. A retained pending close continues scope rechecks,
+but further unresolved synchronization attempts defer without blocking the pull.
+When scope recovers, the sweep closes the old buffer and delivers current text
+before querying; unresolved server-reported result URIs still reject.
+This uses the existing attempted-synchronization close/replay lifecycle,
 distinct from the state-preserving result-only check. Each workspace query has a `max(1000, limit)` result-scan budget across all servers,
 including rejected, malformed and duplicate entries. Workspace diagnostics refund
 this charge only after a report passes scope and payload validation with an empty

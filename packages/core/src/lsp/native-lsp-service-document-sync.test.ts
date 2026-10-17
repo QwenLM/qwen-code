@@ -1053,6 +1053,68 @@ describe('NativeLspService disk document synchronization', () => {
     }
   });
 
+  it.each(
+    [undefined, 'C:\\proj\\a.ts'].flatMap((target) =>
+      [false, true].map((earlierResults) => ({ target, earlierResults })),
+    ),
+  )(
+    'omits empty workspace reports with unusable URI $target, earlier results $earlierResults',
+    async ({ target, earlierResults }) => {
+      const earlier = createConnection();
+      if (earlierResults) {
+        useHandles([
+          ['earlier', { ...handle, connection: earlier }],
+          ['test', handle],
+        ]);
+        earlier.request.mockResolvedValue({
+          items: [{ uri, items: [{ range, message: 'real error' }] }],
+        });
+      }
+      connection.request.mockResolvedValue({
+        items: [
+          { uri: target, items: [] },
+          { uri, items: [] },
+        ],
+      });
+      const result = await workspaceDiagnostics();
+      expect(result).toEqual(
+        earlierResults
+          ? [
+              {
+                uri,
+                serverName: 'earlier',
+                diagnostics: [
+                  expect.objectContaining({
+                    message: 'real error',
+                    serverName: 'earlier',
+                  }),
+                ],
+              },
+            ]
+          : [],
+      );
+      expect(connection.request).toHaveBeenCalledExactlyOnceWith(
+        'workspace/diagnostic',
+        { previousResultIds: [] },
+      );
+    },
+  );
+
+  it.each([undefined, null, {}])(
+    'rejects an unusable-URI workspace report with unknown payload %j',
+    async (items) => {
+      connection.request.mockResolvedValue({
+        items: [
+          { uri: 'C:\\proj\\a.ts', items },
+          { uri, items: [] },
+        ],
+      });
+      await expect(workspaceDiagnostics()).rejects.toThrow(
+        'unusable diagnostics',
+      );
+    },
+  );
+
   it('accepts a successful empty in-scope workspace file report', async () => {
     connection.request.mockResolvedValue({
       items: [{ uri, kind: 'full', items: [] }],
@@ -2083,7 +2145,14 @@ describe('NativeLspService disk document synchronization', () => {
                       .uri,
                   ),
                 }
-              : { items: [] },
+              : {
+                  items: [
+                    {
+                      uri: extraUri,
+                      items: [{ range, message: buffers.get(extraUri) }],
+                    },
+                  ],
+                },
           );
           expect((await hover(extraUri))?.contents).toBe('extra');
           const parked = `${extra}-parked`;
@@ -2121,7 +2190,9 @@ describe('NativeLspService disk document synchronization', () => {
           }
           fs.writeFileSync(path.join(extra, 'source file.ts'), 'current');
           if (recovery === 'workspace') {
-            await workspaceDiagnostics();
+            expect(await workspaceDiagnostics()).toMatchObject([
+              { uri: extraUri, diagnostics: [{ message: 'current' }] },
+            ]);
             expect(buffers.get(extraUri)).toBe('current');
           }
 
@@ -4374,6 +4445,129 @@ describe('NativeLspService disk document synchronization', () => {
       expect(active.send).toHaveBeenCalledWith(
         didOpen('restored', replace ? 1 : 2),
       );
+    },
+  );
+
+  it.each([false, true])(
+    'bounds consecutive scope-resolution failures and preserves siblings after connection replacement: %s',
+    async (replace) => {
+      const [otherFile, otherUri] = await trackOther();
+      const active = replace ? createConnection() : connection;
+      handle.connection = active;
+      active.request.mockClear();
+      active.send.mockClear();
+      fs.writeFileSync(otherFile, 'healthy update');
+      const realpath = fs.realpathSync;
+      const resolve = vi
+        .spyOn(fs, 'realpathSync')
+        .mockImplementation((target) => {
+          if (target === file) {
+            throw Object.assign(new Error('ELOOP'), { code: 'ELOOP' });
+          }
+          return realpath(target);
+        });
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(workspaceDiagnostics()).rejects.toThrow(
+            'Cannot resolve LSP document',
+          );
+          expect(active.request).not.toHaveBeenCalled();
+        }
+        await expect(workspaceDiagnostics()).resolves.toEqual([]);
+        expect(active.request).toHaveBeenCalledExactlyOnceWith(
+          'workspace/diagnostic',
+          { previousResultIds: [] },
+        );
+        expect(active.send).toHaveBeenCalledWith(
+          replace
+            ? didOpen('healthy update', 1, otherUri)
+            : didChange('healthy update', 2, otherUri),
+        );
+        expect(
+          active.send.mock.calls.some(([message]) => docUri(message) === uri),
+        ).toBe(false);
+      } finally {
+        resolve.mockRestore();
+      }
+      fs.writeFileSync(file, 'restored');
+      active.send.mockClear();
+      await workspaceDiagnostics();
+      if (replace) expect(active.send).not.toHaveBeenCalled();
+      else expect(active.send).toHaveBeenCalledWith(didOpen('restored', 2));
+      await hover();
+      expect(active.send.mock.calls.map(([message]) => message.method)).toEqual(
+        replace
+          ? ['textDocument/didOpen']
+          : ['textDocument/didClose', 'textDocument/didOpen'],
+      );
+      expect(active.send).toHaveBeenCalledWith(
+        didOpen('restored', replace ? 1 : 2),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'retries failed reopen after bounded scope loss, replacement connection: %s',
+    async (replace) => {
+      if (replace) await hover();
+      const active = replace ? replaceConnection() : connection;
+      let buffer: string | undefined;
+      let failOpen = false;
+      active.send.mockImplementation((message) => {
+        if (message.method === 'textDocument/didClose') {
+          expect(buffer).toBeDefined();
+          buffer = undefined;
+        } else if (message.method === 'textDocument/didOpen') {
+          if (failOpen) {
+            failOpen = false;
+            throw new Error('reopen failed');
+          }
+          expect(buffer).toBeUndefined();
+          buffer = (message.params as { textDocument: { text: string } })
+            .textDocument.text;
+        }
+      });
+      active.request.mockImplementation(async (method) =>
+        method === 'textDocument/hover'
+          ? { contents: buffer }
+          : {
+              items:
+                buffer === undefined
+                  ? []
+                  : [{ uri, items: [{ range, message: buffer }] }],
+            },
+      );
+      expect((await hover())?.contents).toBe('old');
+      active.request.mockClear();
+      const realpath = fs.realpathSync;
+      const resolve = vi
+        .spyOn(fs, 'realpathSync')
+        .mockImplementation((target) => {
+          if (target === file) throw new Error('ELOOP');
+          return realpath(target);
+        });
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await expect(workspaceDiagnostics()).rejects.toThrow(
+            'Cannot resolve LSP document',
+          );
+        }
+      } finally {
+        resolve.mockRestore();
+      }
+      fs.writeFileSync(file, 'current');
+      failOpen = true;
+      await expect(workspaceDiagnostics()).rejects.toThrow('reopen failed');
+      expect(buffer).toBeUndefined();
+      expect(active.request).not.toHaveBeenCalled();
+      active.send.mockClear();
+      expect(await workspaceDiagnostics()).toMatchObject([
+        { uri, diagnostics: [{ message: 'current' }] },
+      ]);
+      expect(active.send).toHaveBeenCalledExactlyOnceWith(
+        didOpen('current', 2),
+      );
+      expect(buffer).toBe('current');
     },
   );
 
