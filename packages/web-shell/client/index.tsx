@@ -58,6 +58,10 @@ export {
   type ManagedAgentSessionSummary,
   type ManagedAgentSessionTranscript,
   type ManagedAgentTurnAdmission,
+  type ManagedRuntimeNode,
+  type ManagedWorkspaceDirectory,
+  type ManagedWorkspaceCreateOperation,
+  type ManagedWorkspaceRegistration,
 } from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {

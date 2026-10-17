@@ -75,6 +75,14 @@ Actions (Hosted permission approvals): [English](../../docs/design/2026-09-30-ma
 AgentDefinition revisions: [English](../../docs/design/2026-10-01-managed-agent-definitions.md) |
 [简体中文](../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
+## Tool publication storage
+
+Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
+
+Implement atomic create without overwrite, guarded reads, idempotent physical deletion and `validateConfiguration()` for private, durable, immutable storage. Throw `ToolPublicationStorageException` with `ACCESS_DENIED` for definite storage denial or `FAILURE` for other backend failures, preserving the original cause. Even with scheduled GC disabled, failed-publication cleanup requires deletion. Do not automatically replay completed writes or a returned stream. All server instances sharing a SQL catalog must use the same byte namespace: replacing the bean does not migrate retained objects or enable fallback to another backend.
+
+The extension applies to the Spring server. Standalone `WorkspaceRecoveryMain` and `WorkspaceCsiWorkerAckMain` still construct their documented OSS/inline storage directly; custom-backend deployments must integrate the same backend into their maintenance tooling. No additional production backend is included. Design: [English](../../docs/design/2026-10-16-managed-tool-storage-interface.md) | [简体中文](../../docs/design/2026-10-16-managed-tool-storage-interface.zh-CN.md).
+
 ## Managed tool results (O3)
 
 O3 publishes durable Hosted foreground Shell outcomes to Items, events and
@@ -615,6 +623,12 @@ Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, serve
 
 An uncertain response must be retried with the same key and name. The page preserves that pending operation across refresh and selects the result without clearing the prompt or model. Completed replay never restores revoked access, recreates missing registry rows, or registers held storage again. Pending registration resumes in place after a process restart; failed attempts retain their owned directory for retry. There is no automatic storage deletion or arbitrary host-path import. Workspace persistence does not imply recovery of a resident Harness Session whose writer lease expired during control-plane downtime; that existing Session recovery boundary is separate from creating or reusing a Workspace. Keep the configured root and SQL database durable together. Schema V4 extends the receipt namespace after the published V3 Session-list migration while retaining all published migration resources and existing data.
 
+### Select an existing Linux project directory
+
+With verified LOCAL storage enabled, **New workspace → Choose existing directory** browses the Linux execution host through Java. Select an ACTIVE ROOT Workspace you own, then choose an existing project beneath its authorized root. Administrators can register and grant a projects parent directory once; the root must remain outside all Git worktrees. The selected project stays in place and becomes the new Workspace's persistent default working directory. Other Workspaces on that storage retain the same shared file-access scope and physical-owner lease; selecting a subdirectory does not create filesystem isolation.
+
+`POST /api/agent/web-shell/v1/workspaces/directories/query` accepts `workspaceId` and `cwdRelative`, rechecks OWNER access and native storage, and returns at most 100 real immediate child directories (scanning at most 1024 entries). Only this authorized route discloses its Linux root path. The existing create route accepts `sourceWorkspaceId` and `cwdRelative` together to bind a new logical Workspace to the verified source storage, configuration, and policy. It does not create directories or re-register storage. The creation receipt pins source generation and directory; pending retries refuse source changes or revoked ownership. Completed replay checks the new Workspace's current access. WebShell summaries expose `defaultCwdRelative` and `canSelectDirectory`; missing values mean `.` and unsupported, respectively. The page advertises `workspaceDirectorySelection` separately from empty creation and preserves the selected directory across retries, refresh, and reselect. See the [bilingual design](../../docs/design/2026-10-16-managed-workspace-directory-selection.md).
+
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
 `auto-edit`, any caller with a read grant on the bound Workspace can list and
 inspect pending permission Actions through the public API or WebShell;
@@ -800,6 +814,28 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+After a credential-key rotation, keep each prior key in
+`previous-credential-keys` until no persisted Runtime binding references its
+key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
+`:` and spaces from plain map keys, so an unbracketed ID binds as a key that
+matches no persisted row.
+
+```yaml
+qwen:
+  managed-agent:
+    runtime-broker:
+      credential-key-id: local-dev-v2
+      credential-key: replace-with-base64-encoded-32-byte-v2-key
+      previous-credential-keys:
+        '[local-dev-v1]': replace-with-base64-encoded-32-byte-v1-key
+```
+
+New credentials use only the active key; reads select the active or previous
+key by the ID stored with the ciphertext, and an unavailable ID fails closed.
+The YAML-only ring, the retirement query and the single-key-pair maintenance
+entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
+with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
+
 Two optional knobs change how the Broker listens and how long it waits for a
 dispatched v3 execution's result:
 
@@ -853,9 +889,11 @@ fails before traffic is accepted.
 The Hosted file profile connects through the private Broker endpoint, which
 defaults to `http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
-it does not fall back to in-memory repositories. The credential key must decode
-to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. By default, local worker ownership is durable:
+it does not fall back to in-memory repositories. The active credential key and
+every configured previous key must decode to exactly 32 bytes and protect
+persisted Runtime seeds and static Runtime credentials with AES-256-GCM. New
+writes use only the active key; reads select the exact key ID stored with the
+ciphertext. By default, local worker ownership is durable:
 the Broker registers every launch and a restarted Broker adopts the same live
 worker. This requires Linux and fails startup elsewhere; on such hosts set
 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
@@ -1234,9 +1272,14 @@ separate worker bundle exists. The G0 integration test
 
 The real-model run below creates its Session through the public route as a
 Workspace-bound G0 Session, and proves the physical tool execution through
-the durable `qwen_tool_execution` record (exactly one `SETTLED` row) rather
-than a public `item.tool_call.*` event — Broker-worker tool calls are not
-published without O2 tool publication. The run needs live model credentials,
+the durable `ma_tool_execution` record (exactly one `SETTLED` row). Hosted
+tool intent and receipt events also expose tool names and lifecycle status
+through public `item.tool_call.updated` events without O2 publication. Raw
+arguments and output remain behind the existing publication policy. The
+Hosted model loop follows `model.maxSessionTurns` (default `-1`); it no
+longer imposes a separate 16-round limit. See the
+[progress design](../../docs/design/2026-10-16-managed-webshell-progress.md).
+The run needs live model credentials,
 so no CI job executes it; it has been run locally as evidence (macOS,
 qwen3.8-max), and a green CI run therefore says nothing about this mode. The
 script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it

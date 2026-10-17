@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
@@ -41,6 +42,11 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private final WorkspaceExecutionStore ownership;
     private final RuntimeBindingRepository bindings;
     private final RuntimeSessionRepository sessions;
+    // READY Sessions whose mount went back early (#13800): the worker still
+    // holds their installation, so their full release must reach it even
+    // though the holder is already gone. In memory only — a Broker restart
+    // drops the debt and leaves it to the worker's own lifetime.
+    private final java.util.Set<String> detachOwed = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     WorkspaceRuntimeTransport(HttpRuntimeTransport delegate, WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings,
@@ -78,7 +84,22 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         Context context = context(lease, session, true);
         // Reject a missing directory before a new claim can strand storage ownership.
         if (!ResidentWorkspaceProfile.selects(session.getScope())) {
-            WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+            if (LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
+                WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+            } else if (SshRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
+                try {
+                    resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
+                } catch (RuntimeBrokerException error) {
+                    // Nothing is claimed yet, so the probe verdict is a definite
+                    // refusal: surface the workspace_unavailable contract the
+                    // Hosted tool turn recognizes instead of the ssh_runtime_*
+                    // verdict an unrecognized code would park into Session
+                    // recovery. The original verdict stays as the cause.
+                    throw WorkspaceExecutionStore.unavailable(error);
+                }
+            } else {
+                throw WorkspaceExecutionStore.unavailable();
+            }
         }
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
@@ -191,6 +212,13 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Void> acknowledgeV2(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> reference) {
+        requireOriginalRuntime(lease, session);
+        return delegate.acknowledgeV2(lease, session, reference);
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> receipt) {
@@ -297,7 +325,8 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static Context requireLocalCapture(Context context) {
-        if (!LocalProcessRuntimeProvisioner.KIND.equals(context.runtime().getRequest().getProvisionerKind())) {
+        if (!java.util.Set.of(LocalProcessRuntimeProvisioner.KIND, com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND)
+                .contains(context.runtime().getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return context;
@@ -326,6 +355,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
+        if (managed(session)) {
+            Context selected = context(lease, session, false);
+            if (com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND.equals(selected.runtime().getRequest().getProvisionerKind())
+                    && !java.util.Set.of("history", "raw-file-history", "workspace-context").contains(operation.get("kind"))) {
+                throw new RuntimeBrokerException(501, "ssh_runtime_control_unsupported",
+                        "SSH Runtime supports files and foreground Shell only.", false);
+            }
+        }
         if (JdbcCsiFilesRetirementGuard.isProfile(session.getScope())) {
             throw new RuntimeBrokerException(501, "csi_control_not_qualified",
                     "Generic CSI runtime controls are not qualified.", false);
@@ -374,9 +411,12 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
-        // RELEASING fences later claims; an absent holder needs no physical release.
+        String detach = detachKey(context);
+        // RELEASING fences later claims; an absent holder needs no physical
+        // release unless a mount handback left the worker's detach owed.
         if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
                 && !context.runtime().isDrainRequested()
+                && !detachOwed.contains(detach)
                 && !ownership.isHeld(context.binding(), context.session())) {
             return CompletableFuture.completedFuture(true);
         }
@@ -388,8 +428,49 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         })
                 .thenApply(ignored -> {
                     ownership.release(context.binding(), context.session());
+                    detachOwed.remove(detach);
                     return true;
                 });
+    }
+
+    @Override
+    public CompletionStage<Boolean> releaseMount(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            return RuntimeTransport.super.releaseMount(lease, session);
+        }
+        // Only the execution mount: the Session row stays READY so the
+        // recovery fleet can still adopt this identity. The worker keeps the
+        // installation a re-drive reuses, so the detach stays owed to the
+        // later full release, recorded before the holder clears so that
+        // release can never take the absent-holder shortcut past it. A
+        // RELEASING Session still holding the mount is one whose physical
+        // release has not landed yet (a cleanup release that failed at the
+        // worker), so it owes the same detach; one with no holder never
+        // installed anything and keeps the shortcut.
+        Context context = context(lease, session, false);
+        if (context.session().getState() == RuntimeSessionRecord.State.READY
+                || ownership.isHeld(context.binding(), context.session())) {
+            detachOwed.add(detachKey(context));
+        }
+        ownership.release(context.binding(), context.session());
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public CompletionStage<Void> reclaimMount(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Context context = context(lease, session, false);
+        if (!ownership.isHeld(context.binding(), context.session())) {
+            ownership.claim(context.binding(), context.session());
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    private static String detachKey(Context context) {
+        return context.runtime().getBindingId() + '\0' + context.session().getRuntimeGeneration()
+                + '\0' + context.session().getRuntimeSessionId();
     }
 
     private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize) {

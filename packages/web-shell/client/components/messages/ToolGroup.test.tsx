@@ -228,6 +228,13 @@ describe('tool group summary logic', () => {
         { onToolResultOpen: vi.fn() },
         {},
       );
+      if (result === previewOnlyResult) {
+        expect(container.textContent).not.toContain(expected);
+        const header = container.querySelector(
+          '[role="button"]',
+        ) as HTMLElement;
+        act(() => header.click());
+      }
       expect(container.textContent).toContain(expected);
     },
   );
@@ -243,6 +250,9 @@ describe('tool group summary logic', () => {
       { onToolResultOpen: onOpen },
       customization,
     );
+    expect(container.textContent).not.toContain('Capture complete');
+    const header = container.querySelector('[role="button"]') as HTMLElement;
+    act(() => header.click());
     expect(container.textContent).toContain('Capture complete');
     const { root } = mounted.at(-1)!;
     act(() =>

@@ -411,6 +411,46 @@ export function createJavaManagedAgentProvider(
           workspaceBinding: {
             agentId,
             modelPresets: options.modelPresets,
+            registration: {
+              listNodes: (request) => client.listRuntimeNodes(request.signal),
+              async checkDirectory(request, options) {
+                const checked = await client.checkWorkspaceDirectory(
+                  request,
+                  options.signal,
+                );
+                if (checked.nodeId !== request.nodeId)
+                  throw new Error('Workspace directory identity mismatch');
+                return checked;
+              },
+              async create(request, command) {
+                const operation = await client.registerWorkspace(
+                  {
+                    ...request,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  !operation.operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+              async query(operationId, request) {
+                const operation = await client.getWorkspaceOperation(
+                  operationId,
+                  request.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  operation.operationId !== operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+            },
             async list(request) {
               const page = await client.listWorkspaces(
                 { cursor: request.cursor, limit: request.limit },
@@ -423,6 +463,8 @@ export function createJavaManagedAgentProvider(
                 supported: page.capabilities?.workspaceBinding === true,
                 canCreateWorkspace:
                   page.capabilities?.workspaceCreation === true,
+                canSelectDirectory:
+                  page.capabilities?.workspaceDirectorySelection === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
@@ -435,6 +477,8 @@ export function createJavaManagedAgentProvider(
                 { ...request, idempotencyKey: command.idempotencyKey },
                 command.signal,
               ),
+            directories: (request, command) =>
+              client.workspaceDirectories(request, command.signal),
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (
