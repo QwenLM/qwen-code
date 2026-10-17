@@ -585,6 +585,16 @@ describe('main CI failure issue workflow', () => {
       // the issue is then the only record of a red main.
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
     });
+
+    it('skips the PR comment for infrastructure-only failures', () => {
+      // The issue path deliberately stays silent for an infra-only death and
+      // reruns once; the comment would be a false alarm with no correction
+      // path — its marker is keyed on the run, and only a failure re-enters
+      // this workflow, so a green retry never updates it.
+      const condition = String(jobs.report_pr.if);
+      expect(condition).toContain("needs.analyze.result == 'success'");
+      expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
+    });
   });
 
   const privilegedJobs = Object.entries(jobs).filter(([, job]) =>

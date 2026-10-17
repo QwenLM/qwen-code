@@ -59,6 +59,51 @@ test('reports failed jobs, steps and tests directly on a PR', () => {
   assert.doesNotMatch(comment, /Windows/);
 });
 
+test('runCli comment tolerates a missing or empty jobs listing', () => {
+  // The workflow truncates run-jobs.json with its redirect before `gh api`
+  // writes, so an API death can leave it empty. Both the issue path and the
+  // comment must degrade to naming no job; a throw here would fail the
+  // analyze job and lose the PR comment AND the issue for a real failure.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-comment-'));
+  try {
+    const analysisPath = join(dir, 'analysis.json');
+    writeFileSync(analysisPath, JSON.stringify({ tests: [] }));
+    const occurrence = [
+      '--sha',
+      'abc123456789',
+      '--run-id',
+      '39042781121',
+      '--run-url',
+      'https://github.com/QwenLM/qwen-code/actions/runs/39042781121',
+    ];
+    for (const [name, content] of [
+      ['empty.json', ''],
+      ['missing.json', undefined],
+      ['error.json', '{"message": "Bad credentials"}'],
+    ]) {
+      if (content !== undefined) {
+        writeFileSync(join(dir, name), content);
+      }
+      const comment = captureStdout([
+        'comment',
+        '--analysis',
+        analysisPath,
+        '--jobs-json',
+        join(dir, name),
+        ...occurrence,
+      ]);
+      assert.ok(comment.length > 0, name);
+      assert.ok(comment.includes('No test identifier was available'), name);
+      assert.ok(
+        comment.includes('qwen-managed-agent-ci-failure:39042781121'),
+        name,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Verbatim shape of the lines Actions stored for E2E run 3354 (timestamp
 // prefix + SGR escapes + the failure printed once inline and twice in the
 // summary), so the parser is tested against the real log format.
@@ -785,6 +830,9 @@ test('falls back to a per-commit issue when no test can be identified', () => {
 
   assert.equal(title, 'Main CI failed: E2E Tests on af7a9ec12722');
   assert.ok(body.includes(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`));
+  // Merged-PR failures reach this path too; the body must not claim the run
+  // failed on `main`.
+  assert.ok(!body.includes('main-branch'));
   assert.ok(body.includes('tracked per commit'));
   assert.ok(body.includes(`- Run: ${OCCURRENCE.runUrl}`));
   // No recurrence machinery on this path: each commit gets its own issue.

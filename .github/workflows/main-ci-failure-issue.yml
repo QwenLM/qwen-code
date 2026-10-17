@@ -401,7 +401,10 @@ jobs:
   report_pr:
     name: 'Report Java CI failure on the PR'
     needs: ['analyze', 'file_issue']
-    if: "${{ always() && needs.analyze.result == 'success' && needs.analyze.outputs.pr_number != '' }}"
+    # Same infra gate as file_issue: an infrastructure-only death is rerun
+    # once, not reported; the comment would have no correction path anyway
+    # (the marker is keyed on the run, and only failures re-enter).
+    if: "${{ always() && needs.analyze.result == 'success' && needs.analyze.outputs.pr_number != '' && needs.analyze.outputs.infra_only != 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

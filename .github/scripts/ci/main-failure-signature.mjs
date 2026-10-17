@@ -369,8 +369,8 @@ function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
     '',
-    'A main-branch CI run failed on `main` before any test result was',
-    'reported, so this issue is tracked per commit.',
+    'A CI run failed before any test result was reported, so this issue is',
+    'tracked per commit.',
     '',
     `- Workflow: ${analysis.workflow}`,
     ...(analysis.failedJobs.length
@@ -573,6 +573,19 @@ function readFailedJobs(path) {
     return [];
   }
 }
+/**
+ * The workflow's jobs listing can be missing or truncated (the redirect
+ * empties it when `gh api` dies before writing), and the comment must degrade
+ * the same way the issue path does — name no job — instead of failing the
+ * analyze job and losing both reports.
+ */
+function readJobs(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')).jobs ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export function runCli(argv) {
   const [command, ...rest] = argv;
@@ -587,7 +600,7 @@ export function runCli(argv) {
           runId: options['run-id'],
           runUrl: options['run-url'],
         },
-        jobs: JSON.parse(readFileSync(options['jobs-json'], 'utf8')).jobs,
+        jobs: readJobs(options['jobs-json']),
       }),
     );
     return;
