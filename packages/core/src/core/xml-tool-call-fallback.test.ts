@@ -718,7 +718,7 @@ describe('complete taught-dialect recovery (#10692)', () => {
     },
   );
 
-  it('recovers the intact call after an envelope whose block never closed', () => {
+  it('declines the whole turn after an envelope whose block never closed', () => {
     // The first envelope never closes its function block, so nothing may be
     // dispatched from it — but the rescan still finds the intact second call,
     // and the malformed envelope stays visible in remainingText.
@@ -746,14 +746,12 @@ describe('complete taught-dialect recovery (#10692)', () => {
       tcClose,
     ].join('');
     const text = truncated + intact;
-    const result = tryRecoverXmlToolCalls(text);
-    expect(
-      result.functionCallParts.map((part) => part.functionCall?.name),
-    ).toEqual(['run_shell_command']);
-    expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
-      command: 'pwd',
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
     });
-    expect(result.remainingText).toBe(truncated);
   });
 
   it('preserves a parameterless block whose name contains parameter syntax', () => {
@@ -794,7 +792,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     FN_CLOSE,
   ].join('');
 
-  it('does not dispatch a truncated block that borrows the next call closers', () => {
+  it('preserves the whole turn when a truncated block borrows later closers', () => {
     const text = [
       TC_OPEN,
       '\n<function=write_file>\n',
@@ -813,18 +811,12 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       '\n',
       TC_CLOSE,
     ].join('');
-    const result = tryRecoverXmlToolCalls(text);
-    expect(result.recovered).toBe(true);
-    expect(
-      result.functionCallParts.map((part) => part.functionCall?.name),
-    ).toEqual(['run_shell_command']);
-    expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
-      command: 'pwd',
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
     });
-    // The truncated block stays visible instead of being dispatched with the
-    // next call's markup as its content.
-    expect(result.remainingText).toContain('hello');
-    expect(result.remainingText).not.toContain(FN_CLOSE);
   });
 
   it('leaves a truncated block inert when no donor close follows', () => {
@@ -942,7 +934,7 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     expect(result.remainingText).toContain(documentation);
   });
 
-  it('does not let a rejected block parameter swallow a later valid call', () => {
+  it('declines later recovery after rejecting an ambiguous block parameter', () => {
     // The write_file block is rejected — its content parameter never closes
     // and borrows the function close tag — yet its parameter data must still
     // be masked out of the prose the example scan reads. Unclosed, that
@@ -962,11 +954,12 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       FN_CLOSE,
     ].join('');
     const text = rejected + '\n' + readBlock;
-    const result = tryRecoverXmlToolCalls(text);
-    expect(
-      result.functionCallParts.map((part) => part.functionCall?.name),
-    ).toEqual(['read_file']);
-    expect(result.remainingText).toContain('<example>note');
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
   });
 
   it('does not dispatch a complete call embedded in a rejected block name', () => {
@@ -1002,12 +995,8 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
   });
 
   it('does not dispatch a call quoted inside a parameter value', () => {
-    // A write_file whose content documents this dialect with an unfenced
-    // example call. The outer block is rejected by its own guard — the lazy
-    // body ends at the quoted block's closer — and the rescan then matched
-    // that quoted call on its own merits and ran it, while the write the user
-    // asked for stayed behind as prose. Markup a value quotes is that value's
-    // own text, so it must stay data. See #13492.
+    // The quoted call stays data, and the outer call receives the complete
+    // content instead of ending at the quoted call's closer. See #13492.
     const quoted = invoke(
       'run_shell_command',
       param('command', 'rm -rf /tmp/x'),
@@ -1016,12 +1005,50 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       'write_file',
       param('file_path', 'doc.md') + param('content', `Usage:\n${quoted}\n`),
     );
+    const expected = {
+      name: 'write_file',
+      args: { file_path: 'doc.md', content: `Usage:\n${quoted}` },
+    };
+    expect(extractXmlToolCalls(text)).toEqual([expected]);
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts.map((part) => part.functionCall)).toEqual([
+      expect.objectContaining(expected),
+    ]);
+    expect(result.remainingText).toBe('');
+  });
+
+  it('does not excise a quoted value the block never consumed', () => {
+    // The flat scan binds the unclosed `command` value to the nested
+    // documentation element's closer, so the dispatched argument absorbs that
+    // raw markup. The nested element is a quoted-value range lying inside this
+    // block, but the block's own parameter scan never owned it: excising it
+    // from `unquotedParameters` hid the `<function=` opener from the
+    // rejected-opener guard. See #13492.
+    const text =
+      '<invoke name="shell">' +
+      PARAM_OPEN +
+      ' name="command">run\n' +
+      param('doc', '<function=b>' + FN_CLOSE) +
+      '\n' +
+      CLOSE;
     expect(extractXmlToolCalls(text)).toEqual([]);
     expect(tryRecoverXmlToolCalls(text)).toEqual({
       recovered: false,
       functionCallParts: [],
       remainingText: text,
     });
+  });
+
+  it('keeps a value-quoted call inert when the rescan steps over it', () => {
+    // Fuzz-derived witness for the #13515 guard: on this input the close-tag
+    // rescan never lands inside the quoted call, so the `valueSpans` skip is
+    // the only thing keeping the documented `rm -rf /tmp/x` inert. Dropping
+    // the skip leaves every other test here green. Tidier hand-written shapes
+    // (stray opener, bare closer, unclosed trailing parameter, function
+    // dialect, fence between parameters) are rejected earlier, pin nothing.
+    const text = `<parameter name="content"><invoke name="write_file">    </example></parameter></function>&lt;<invoke name="read_file"><invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter></invoke>\n~~~<function=run_shell_command><parameter=command>rm -rf /tmp/x</parameter></function><parameter name="file_path">doc.md</parameter>\`\`\`<invoke name='edit'><invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter></invoke>`;
+    expect(extractXmlToolCalls(text)).toEqual([]);
   });
 
   it('still dispatches a real call that follows a value quoting one', () => {
@@ -1037,7 +1064,554 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     );
     const text = documented + '\n' + invoke('read_file', param('p', 'b.ts'));
     expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'write_file', args: { content: `Usage:\n${quoted}` } },
       { name: 'read_file', args: { p: 'b.ts' } },
     ]);
   });
+
+  it('keeps a long quoted function value out of the prose and example guards', () => {
+    const quoted =
+      '<function=read_file><parameter=file_path>example.txt</parameter></function>';
+    const content = `${quoted}\n<example>\n\`\`\`xml\n${'data '.repeat(1000)}`;
+    const text =
+      '<function=write_file><parameter=file_path>doc.md</parameter>' +
+      `<parameter=content>${content}</parameter></function>`;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts.map((part) => part.functionCall)).toEqual([
+      expect.objectContaining({
+        name: 'write_file',
+        args: { file_path: 'doc.md', content },
+      }),
+    ]);
+    expect(result.remainingText).toBe('');
+  });
+
+  it('declines a markup-only turn containing a stray opener', () => {
+    // A rejected block leaves its opener behind with no closer for the intent
+    // guard's pattern to pair, so that markup used to be charged to prose. On a
+    // turn made of markup alone — one unclosed invoke opener, well-formed
+    // parameter elements and one complete call — the ratio crosses the
+    // threshold and the whole turn is refused, dropping the genuine call the
+    // extraction had already found. See #13492.
+    const text =
+      '<invoke name="a">' +
+      Array.from({ length: 16 }, (_, index) =>
+        param(`p${index}`, `v${index}`),
+      ).join(' ') +
+      ' ' +
+      invoke('read_file', param('file_path', 'a.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not borrow a closer that following prose merely mentions', () => {
+    // Stepping out of a quoted value searches the rest of the text, so the
+    // advance lands on the closer this prose documents instead of the block's
+    // own. Unchecked, it swallowed that prose: the trailing file_path was never
+    // parsed, a write_file missing its required path was dispatched, and the
+    // block's own markup was reinserted into the visible turn. See #13492.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) +
+        `\nEscape ${CLOSE} in docs.\n` +
+        param('file_path', 'doc.md'),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not borrow a function-dialect closer that prose mentions', () => {
+    const fnOpen = (name: string) => '<' + 'function=' + name + '>';
+    const fnClose = '<' + '/function>';
+    const flat = (name: string, value: string) =>
+      PARAM_OPEN + '=' + name + '>' + value + PARAM_CLOSE;
+    const quoted = fnOpen('read_file') + flat('file_path', 'x.txt') + fnClose;
+    const text =
+      fnOpen('write_file') +
+      flat('content', `Run rm -rf /tmp/x\nWell-formed:\n${quoted}\n`) +
+      `\nEscape ${fnClose} in docs.\n` +
+      flat('file_path', 'doc.md') +
+      fnClose;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not swallow prose between a quoted value and a borrowed closer', () => {
+    // Same advance with nothing but prose after it: the block must stay whole
+    // rather than end at a closer the prose mentions.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) + `\nNote: escape ${CLOSE} here.`,
+    );
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('still recovers a trailing parameter behind a quoted value', () => {
+    // Positive control for the advance check above: the legitimate shape is a
+    // quoted value followed by the block's own parameter element, so what the
+    // advance steps over is that element plus whitespace, not whitespace only.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) + param('file_path', 'doc.md'),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'write_file',
+        args: { content: `Usage:\n${quoted}`, file_path: 'doc.md' },
+      },
+    ]);
+    expect(tryRecoverXmlToolCalls(text).remainingText).toBe('');
+  });
+
+  it('declines mixed name quotes while preserving the paired-quote control', () => {
+    const text = `${OPEN} name='write_file">\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+    const paired = `${OPEN} name='write_file'>\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
+    expect(extractXmlToolCalls(paired)).toEqual([
+      { name: 'write_file', args: { file_path: 'doc.md', content: 'body' } },
+    ]);
+  });
+
+  it('declines a single-parameter block whose name mixes quote characters', () => {
+    // The same split lands past the block's only parameter, which previously
+    // dropped the whole call instead of disabling it.
+    const text = `${OPEN} name='read_file">\n${param('file_path', 'a.ts')}\n${CLOSE}`;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('never dispatches a truncated value when a parameter name mixes quote characters', () => {
+    // A parameter name opened with one quote character and closed with the
+    // other is admitted by PARAMETER_PATTERN's name group, whose delimiters are
+    // likewise independent classes. Classifying such an element as a quoted
+    // value rests on an `openTagEnd` scan that leaves quote mode inside the
+    // value, so the argument would be sliced from behind its own leading text
+    // and a truncated write dispatched with nothing left in the turn to explain
+    // it. The element falls back to the flat match instead, whose parameter
+    // region still holds the quoted opener, so the block is rejected and the
+    // whole turn stays visible. See #13492.
+    const quoted = invoke('a', param('p', 'v'));
+    const text =
+      `${OPEN} name="write_file">` +
+      param('file_path', 'doc.md') +
+      `<parameter name='content">A' x>${quoted}</parameter>` +
+      CLOSE;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('carries the advance past two quoted values in one block', () => {
+    // The lazy match ends at the first quoted closer, so a block quoting one
+    // call per value needs a second advance step to reach its own closer.
+    // Stopping after one step leaves closeStart inside the second value, its
+    // element fails the ownership lookup, the trailing closer is read as a
+    // rejected block and the whole call is dropped into the visible turn.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) +
+        param('note', `Also:\n${quoted}\n`),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'write_file',
+        args: { content: `Usage:\n${quoted}`, note: `Also:\n${quoted}` },
+      },
+    ]);
+    expect(tryRecoverXmlToolCalls(text).remainingText).toBe('');
+  });
+
+  it('keeps documentation inert when only its quoted value closes the example', () => {
+    const quoted = invoke('b', param('p', 'w'));
+    const text =
+      '<example>\n' +
+      `<invoke name="a"><parameter name="content">${quoted}</example>\n</parameter></invoke>\n` +
+      invoke('c', param('q', 'z'));
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not let a value-borne example closer end a prose-opened example', () => {
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      '<example>\n' +
+      invoke(
+        'w',
+        param(
+          'content',
+          'Use the example closer tag to end the block</example>\ntail',
+        ),
+      ) +
+      '\n' +
+      documented +
+      '\n</example>\n' +
+      invoke('read_file', param('file_path', 'b.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'b.ts' } },
+    ]);
+  });
+
+  it('keeps documentation inert when only its quoted value closes the fence', () => {
+    const quoted = invoke('b', param('p', 'w'));
+    const text =
+      '```\n' +
+      '<invoke name="a"><parameter name="content">' +
+      quoted +
+      '\n```\n</parameter></invoke>\n' +
+      invoke('c', param('q', 'z'));
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('declines a following call when documented-value and prose fences disagree', () => {
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      '```\n' +
+      invoke('w', param('content', `${quoted}\n\`\`\`\ntail`)) +
+      '\n' +
+      documented +
+      '\n```\n' +
+      invoke('read_file', param('file_path', 'b.ts'));
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('keeps example documentation inert when prose has no usable closer', () => {
+    const block =
+      '<invoke name="w"><parameter name="content">Usage:\n' +
+      invoke('r', param('p', 'x')) +
+      '\n</example>\n</parameter></invoke>';
+    for (const mention of ['`</example>`', '</example/>']) {
+      const text =
+        '<example>\n' +
+        block +
+        `see ${mention}\n` +
+        invoke('real', param('file_path', 'a.ts'));
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
+    }
+  });
+
+  it('keeps fenced documentation inert when prose has no usable closer', () => {
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const block = invoke('w', param('content', `${quoted}\n\`\`\`\ntail`));
+    for (const later of ['~~~', '```xml']) {
+      const text =
+        '```\n' +
+        block +
+        '\n' +
+        invoke('real', param('file_path', 'a.ts')) +
+        `\n${later}\n`;
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
+    }
+  });
+
+  it('keeps lexer passes length-preserving when a live value extends its mask', () => {
+    const spy = vi.spyOn(Lexer, 'lexInline');
+    try {
+      const quoted = invoke('read_file', param('file_path', 'x.txt'));
+      const text =
+        invoke(
+          'write_file',
+          param('content', `Usage:\n${quoted}\n`) + param('file_path', 'd.md'),
+        ) +
+        '\n<example>model:\n' +
+        readBlock +
+        EXAMPLE_CLOSE;
+      expect(extractXmlToolCalls(text)).toEqual([
+        {
+          name: 'write_file',
+          args: { content: `Usage:\n${quoted}`, file_path: 'd.md' },
+        },
+      ]);
+      expect(spy).toHaveBeenCalledTimes(2);
+      for (const call of spy.mock.calls) {
+        expect(String(call[0]).length).toBe(text.length);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('reviewed XML ownership and documentation regressions', () => {
+  const cases = [
+    {
+      id: 'R2-5',
+      text: '```\n<invoke name="write_file"><parameter name="content">fence line\n````\ntail</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+      expected: ['read_file'],
+    },
+    {
+      id: 'R4-2',
+      text: '```\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\n~~~\ntail</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter></invoke>\n~~~',
+      expected: [],
+    },
+    {
+      id: 'R3-1',
+      text: '<example>\n<invoke name="write_file"><parameter name="content">Use </example> to close a docs region</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">rm -rf ~</parameter></invoke>',
+      expected: [],
+    },
+    {
+      id: 'R2-1',
+      text: '<invoke name="write_file"><parameter name="content">Usage:\n<invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter><parameter name="note">see <invoke name="read_file">...</invoke></parameter></invoke>\n<parameter name="stray"></parameter></invoke>',
+      expected: [],
+    },
+    {
+      id: 'R3-2',
+      text: '<function=write_file><parameter=file_path>doc.md</parameter><parameter=co\'ntent>Leading text A\' x><invoke name="a"></invoke></parameter></function>',
+      expected: [],
+    },
+    {
+      id: 'R4-1',
+      text: '<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+      expected: [],
+    },
+  ];
+  it.each(cases)(
+    '$id keeps quoted syntax inert and preserves genuine calls',
+    ({ text, expected }) => {
+      expect(extractXmlToolCalls(text).map(({ name }) => name)).toEqual(
+        expected,
+      );
+      const result = tryRecoverXmlToolCalls(text);
+      expect(
+        result.functionCallParts.map((part) => part.functionCall?.name),
+      ).toEqual(expected);
+      if (expected.length === 0) {
+        expect(result).toEqual({
+          recovered: false,
+          functionCallParts: [],
+          remainingText: text,
+        });
+      } else {
+        expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
+          file_path: 'real.ts',
+        });
+        expect(result.remainingText).toContain('run_shell_command');
+      }
+    },
+  );
+
+  it('declines the whole turn after an unclosed value before a sibling', () => {
+    const witness = cases.find(({ id }) => id === 'R2-1')!.text;
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = `${witness}\n${read}`;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('declines the whole turn when quoted-value and prose fences disagree', () => {
+    const content =
+      '<invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail';
+    const write = invoke('write_file', param('content', content));
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = `${write}\n\`\`\`\nDocumentation\n\`\`\`\n${read}`;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+});
+
+describe('live quoted-value masks', () => {
+  it.each([
+    ['example', '<example>literal value tail'],
+    ['fence', '```\nDocumentation\n~~~\ntail'],
+  ])(
+    'declines the whole turn when a value-only %s changes sibling ownership',
+    (_kind, tail) => {
+      const quoted = invoke('read_file', param('file_path', 'quoted-only.txt'));
+      const content = `${quoted}\n${tail}`;
+      const write = invoke('write_file', param('content', content));
+      const read = invoke('read_file', param('file_path', 'real.ts'));
+      const text = `${write}\n${read}`;
+      expect(extractXmlToolCalls(text)).toEqual([]);
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
+    },
+  );
+});
+
+describe('ambiguous documentation fences', () => {
+  it('declines a suffix that documented values move out of a prose fence', () => {
+    const quoted = invoke('read_file', param('file_path', 'quoted-only.txt'));
+    const write = invoke(
+      'write_file',
+      param('content', `${quoted}\n\`\`\`\ntail`),
+    );
+    const shell = invoke(
+      'run_shell_command',
+      param('command', 'printf DOC_ONLY'),
+    );
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = ['```', write, '```', shell, '```', read].join('\n');
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+});
+
+describe('refreshed documentation fences', () => {
+  it('checks a newly eligible suffix against documented-value ambiguity', () => {
+    const quoted = invoke('read_file', param('file_path', 'quoted-only.txt'));
+    const content = `${quoted}\n\`\`\`\ntail`;
+    const live = invoke('write_file', param('content', content));
+    const documented = invoke('write_file', param('content', content));
+    const shell = invoke(
+      'run_shell_command',
+      param('command', 'printf DOC_ONLY'),
+    );
+    const text = `${live}\n<example>\n${documented}\n</example>\n${shell}`;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+});
+
+describe('sequential documentation masks', () => {
+  const cases = [
+    {
+      id: 'fence',
+      text: '```\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail</parameter></invoke>\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke>\n```\ntail</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">harmless-doc-only</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+    },
+    {
+      id: 'example',
+      text: '<example>\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke></example>\n</parameter></invoke>\n<invoke name="write_file"><parameter name="content"><invoke name="b"><parameter name="p">w</parameter></invoke></example>\n</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">harmless-doc-only</parameter></invoke>\n</example>\n<invoke name="read_file"><parameter name="file_path">real.ts</parameter></invoke>',
+    },
+  ];
+  it.each(cases)(
+    '$id keeps repeated quoted values in their prose documentation',
+    ({ id, text }) => {
+      if (id === 'example') {
+        expect(extractXmlToolCalls(text)).toEqual([]);
+        expect(tryRecoverXmlToolCalls(text)).toEqual({
+          recovered: false,
+          functionCallParts: [],
+          remainingText: text,
+        });
+        return;
+      }
+      const expected = [{ name: 'read_file', args: { file_path: 'real.ts' } }];
+      expect(extractXmlToolCalls(text)).toEqual(expected);
+      const result = tryRecoverXmlToolCalls(text);
+      expect(result.functionCallParts.map((part) => part.functionCall)).toEqual(
+        [expect.objectContaining(expected[0])],
+      );
+      expect(result.remainingText).toBe(
+        text.slice(0, text.lastIndexOf('<invoke name="read_file">')).trim(),
+      );
+    },
+  );
+});
+
+describe('whole-turn ambiguity rejection', () => {
+  const cases = [
+    {
+      id: 'R2-1-single-to-double',
+      text: '<invoke name="write_file"><parameter name="file_path">anonymous-output.txt</parameter><parameter name=\'content">Usage:\n<invoke name="run_shell_command"><parameter name="command">printf DOC_ONLY</parameter></invoke></parameter></invoke>',
+    },
+    {
+      id: 'R2-1-double-to-single',
+      text: '<invoke name="write_file"><parameter name="file_path">anonymous-output.txt</parameter><parameter name="content\'>Usage:\n<invoke name="run_shell_command"><parameter name="command">printf DOC_ONLY</parameter></invoke></parameter></invoke>',
+    },
+    {
+      id: 'R5-2-mutable-fence-guard',
+      text: '<invoke name="write_file"><parameter name="file_path">anonymous-output.txt</parameter><parameter name="content"><invoke name="read_file"><parameter name="file_path">quoted-only.txt</parameter></invoke>\n```\ntail</parameter></invoke>\n<invoke name="run_shell_command"><parameter name="command">printf DOC_ONLY</parameter></invoke>\n```\n<invoke name="read_file"><parameter name="file_path">anonymous-input.txt</parameter></invoke>',
+    },
+    {
+      id: 'R7-2-nested-example-depth',
+      text: '<example>\n<invoke name="write_file"><parameter name="file_path">anonymous-output.txt</parameter><parameter name="content"><invoke name="read_file"><parameter name="file_path">quoted-only.txt</parameter></invoke>\n<example>\ndata</parameter></invoke>\n</example>\n<invoke name="run_shell_command"><parameter name="command">printf DOC_ONLY</parameter></invoke>\n</example>\n<invoke name="read_file"><parameter name="file_path">anonymous-input.txt</parameter></invoke>',
+    },
+    {
+      id: 'R7-1-erased-pass1-protection',
+      text: '<invoke name="write_file"><parameter name="file_path">anonymous-output.txt</parameter><parameter name="content"><invoke name="read_file"><parameter name="file_path">quoted-only.txt</parameter></invoke>\n<example>literal value tail</parameter></invoke>\nThe format mentions <parameter name="x"> without a terminator.\n<example>\n<invoke name="run_shell_command"><parameter name="command">printf DOC_ONLY</parameter></invoke>\n</example>',
+    },
+    {
+      id: 'R2-1-extra-quote-before-flat-match',
+      text: '<invoke name="write_file"><parameter name="file_path">anonymous-output.txt</parameter><parameter name=\'con\'tent">Usage:\n<invoke name="run_shell_command"><parameter name="command">printf DOC_ONLY</parameter></invoke></parameter></invoke>',
+    },
+  ];
+  it.each(cases)(
+    '$id preserves the complete turn without dispatch',
+    ({ text }) => {
+      expect(extractXmlToolCalls(text)).toEqual([]);
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
+    },
+  );
 });
