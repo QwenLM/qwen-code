@@ -55,7 +55,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Runtime Broker, whose worker answers only after the stop-marked finalize
  * settled the record: the record's own stop is the authority's statement,
  * a request revision for a Shell, the {@code stop_requested} settlement
- * for a Monitor, whose record carries no request.</li>
+ * for a Monitor, whose record carries no request;</li>
+ * <li>a planned channel delivery takes its cancel through the Hosted
+ * Harness's channel operation route, whose {@code cancelRequested} flag is
+ * the request: a planned one settles cancelled with it, and one an adapter
+ * claimed meanwhile keeps sending with the flag recorded.</li>
  * </ul>
  * A delivery whose outcome stays unproven retries with the dispatch
  * backoff, bounded at {@link #ATTEMPT_BUDGET} claims; past it the
@@ -227,6 +231,7 @@ public class TaskCancelCoordinator {
                     "task_action_unavailable"), target);
         }
         if (target.body().path("stopRequested").asBoolean(false)
+                || target.body().path("cancelRequested").asBoolean(false)
                 || "stop_requested".equals(
                         target.body().path("stopReason").textValue())) {
             return new Verdict(TaskCancelOutcome.completed(), target);
@@ -386,10 +391,19 @@ public class TaskCancelCoordinator {
     }
 
     /**
-     * A child Session run's stop request onto the parent's journal, or a
-     * background process's stop through the Broker; both replay-safe.
+     * A child Session run's stop request onto the parent's journal, a
+     * background process's stop through the Broker, or a delivery's cancel
+     * onto its route Session's journal; all replay-safe.
      */
     private void send(OperationRecord operation, TaskTarget target) {
+        if ("channel_delivery".equals(target.kind())) {
+            harness.runChannelOperation(operation.tenantId(),
+                    operation.sessionId(), Map.of(
+                            "operationId", attemptId(operation),
+                            "kind", "cancel_delivery",
+                            "deliveryId", target.recordId()));
+            return;
+        }
         if (BACKGROUND_TASK_KINDS.contains(target.kind())) {
             if (broker == null) {
                 throw new IllegalStateException(
@@ -401,13 +415,17 @@ public class TaskCancelCoordinator {
             return;
         }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("operationId", UUID.nameUUIDFromBytes(("qwen-task-cancel:\0"
-                + operation.operationId() + "\0" + operation.attemptCount())
-                .getBytes(StandardCharsets.UTF_8)).toString());
+        body.put("operationId", attemptId(operation));
         body.put("kind", "cancel");
         body.put("childRunId", target.recordId());
         harness.runChildOperation(operation.tenantId(),
                 operation.sessionId(), body);
+    }
+
+    private static String attemptId(OperationRecord operation) {
+        return UUID.nameUUIDFromBytes(("qwen-task-cancel:\0"
+                + operation.operationId() + "\0" + operation.attemptCount())
+                .getBytes(StandardCharsets.UTF_8)).toString();
     }
 
     private static boolean runtimeNotHere(Throwable error) {
