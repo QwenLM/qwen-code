@@ -37,18 +37,24 @@ machine hours per day.
 - Changing the nightly schedule or the release callers.
 - Fixing the intermittent Hosted gate failure (#14361), which is tracked
   separately.
+- Shipping a separate Java compile gate. #14385 proposed one as its own
+  workflow over the same paths; this gate supersedes it. The compile coverage
+  rides the fast tier's Linux Java 21 leg, which installs the SDK and then
+  test-compiles and runs `managed-agent-server`, and that leg also carries the
+  Managed Agent Server checkstyle step. The Java SDK checkstyle step is pinned
+  to the Java 11 leg, so only the full tier runs it.
 
 ## Design
 
 ### Tiers
 
-| Trigger                    | Condition                                             | Tier | Lanes                                        |
-| -------------------------- | ----------------------------------------------------- | ---- | -------------------------------------------- |
-| `pull_request` push        | touches Managed Agent paths                           | fast | flyway guard, real-daemon E2E, Linux Java 21 |
-| `pull_request_review`      | first approval of the current head, touches the paths | full | all 11 lanes                                 |
-| `push` to main             | touches the paths                                     | fast | as above                                     |
-| `merge_group`              | touches the paths                                     | fast | as above                                     |
-| nightly, dispatch, release | unchanged (`sdk-java.yml` called directly)            | full | all 11 lanes                                 |
+| Trigger                    | Condition                                                        | Tier | Lanes                                        |
+| -------------------------- | ---------------------------------------------------------------- | ---- | -------------------------------------------- |
+| `pull_request` push        | touches Managed Agent paths                                      | fast | flyway guard, real-daemon E2E, Linux Java 21 |
+| `pull_request_review`      | first maintainer approval of the current head, touches the paths | full | all 11 lanes                                 |
+| `push` to main             | touches the paths                                                | fast | as above                                     |
+| `merge_group`              | touches the paths                                                | fast | as above                                     |
+| nightly, dispatch, release | unchanged (`sdk-java.yml` called directly)                       | full | all 11 lanes                                 |
 
 `managed-agent-gate.yml` selects the tier and calls `sdk-java.yml` through
 `workflow_call` with a new `tier` input. `tier: fast` narrows the `test` matrix
@@ -105,9 +111,17 @@ cancels in progress, so it is a timeout or an operator stop.
 ### First approval of the current head
 
 `dismiss_stale_reviews` is on for main, so the first approval of a head
-always follows its last push. The `scope` job runs the full tier for an
-approval unless an earlier `pull_request_review` run already reported a
-passing or running `Managed Agent gate` for the same head. A run's own reruns
+always follows its last push. Only a maintainer's approval starts the full
+tier: the reviewer's `author_association` must be `OWNER`, `MEMBER` or
+`COLLABORATOR`, and an absent association fails closed.
+`qwen-triage-finalize.yml` watches this workflow and posts a deferred
+`APPROVE` once a PR's checks land green, so without that check the gate's own
+fast tier would buy the most expensive run in the repository with no human
+involved.
+
+The `scope` job runs the full tier for such an approval unless an earlier
+`pull_request_review` run already reported a passing or running
+`Managed Agent gate` for the same head. A run's own reruns
 do not count, and a pass from the PR push run (an untouched classification)
 does not count. The covering run must also belong to the same pull request and
 show the `SDK Java (full)` callee in its jobs: a review run of another PR on
@@ -117,11 +131,15 @@ no Java lane and does not count. After a failed full run, the next approval or
 
 ### Concurrency
 
-- PR pushes share one group per PR and cancel superseded runs.
-- Approvals queue per review state and head commit without cancelling, so a
-  second approval waits for the first full run and then skips it, and a
-  comment review never replaces a pending approval run.
-- Main pushes get one group per commit.
+- Every event of one PR shares a single group, and `cancel-in-progress` is a
+  property of the incoming run and stays true only for `pull_request`. A push
+  therefore cancels the approval run it superseded, which would otherwise run
+  for about 125 minutes and then report a head that branch protection no
+  longer reads.
+- Approvals never cancel: a second approval waits for the first full run and
+  then skips it through the deduplication above, and a comment review does not
+  replace a pending approval run.
+- Main pushes carry no pull request, so they get one group per commit.
 - `sdk-java.yml`'s own group now includes the event name and the called
   commit, so a fast run and a full run on the same PR no longer queue behind
   each other, where a newer pending run would have replaced the older one.
@@ -148,12 +166,17 @@ of `SDK Java`, which has had no `pull_request` trigger since #14205.
 
 ## Cost
 
-- A touched push: about 40 machine minutes (Java 21 leg 25, daemon E2E 13,
-  flyway under 1).
-- A touched head that gets approved: one full run, about 330 machine minutes
-  before the Maven cache fix (`ci/setup-java-hosted-cache`), which removes
-  the self-hosted post-job cache save that took 14 to 37 minutes per job.
-- An untouched PR: two hosted jobs of a few seconds each.
+- A touched push: about 55 machine minutes — Java 21 leg 25 plus the ~16 the
+  full module suite adds above, daemon E2E 13, flyway under 1.
+- A touched head that gets a maintainer approval: one full run, about 330
+  machine minutes. Dropping the self-hosted post-job Maven cache save,
+  measured at 14 to 37 minutes per job, is planned work with no implementation
+  in the tree, so 330 is what runs today rather than a figure that a landed
+  fix would lower.
+- An untouched PR: two runner allocations, for the `scope` and `gate` jobs.
+  Trusted runs take the ECS pool, where `scope` deletes `.git` and checks out
+  again at `fetch-depth: 2`, so an event costs a cold clone plus seconds of
+  work; fork runs stay on hosted runners.
 
 Further levers, not in this change: build the CLI once and share it as an
 artifact, split `hosted-harness-mysql` (97 minutes wall time) into parallel

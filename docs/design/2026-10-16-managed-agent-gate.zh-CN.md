@@ -29,18 +29,23 @@
   成为可能。
 - 修改夜间排程或发布调用方。
 - 修复 Hosted 门禁的间歇性失败（#14361），它单独跟踪。
+- 另做一个独立的 Java 编译门禁。#14385 曾按同样的路径提出一个独立 workflow，本门禁
+  取代它：编译覆盖搭 fast 层级的 Linux Java 21 leg——它先 install SDK，再对
+  `managed-agent-server` 做 test-compile 并跑测试，该 leg 同时也带 Managed Agent
+  Server 的 checkstyle 步骤。Java SDK 的 checkstyle 步骤钉在 Java 11 leg 上，因此
+  只有 full 层级会跑它。
 
 ## 设计
 
 ### 分层
 
-| 触发                  | 条件                                     | 层级 | 检查项                                      |
-| --------------------- | ---------------------------------------- | ---- | ------------------------------------------- |
-| `pull_request` push   | 改到 Managed Agent 路径                  | fast | flyway 检查、真实 daemon E2E、Linux Java 21 |
-| `pull_request_review` | 当前 head 的首个 approve，且改到这些路径 | full | 全部 11 项                                  |
-| `push` 到 main        | 改到这些路径                             | fast | 同上                                        |
-| `merge_group`         | 改到这些路径                             | fast | 同上                                        |
-| 夜间、手动、发布      | 不变（直接调用 `sdk-java.yml`）          | full | 全部 11 项                                  |
+| 触发                  | 条件                                           | 层级 | 检查项                                      |
+| --------------------- | ---------------------------------------------- | ---- | ------------------------------------------- |
+| `pull_request` push   | 改到 Managed Agent 路径                        | fast | flyway 检查、真实 daemon E2E、Linux Java 21 |
+| `pull_request_review` | 当前 head 的首个维护者 approve，且改到这些路径 | full | 全部 11 项                                  |
+| `push` 到 main        | 改到这些路径                                   | fast | 同上                                        |
+| `merge_group`         | 改到这些路径                                   | fast | 同上                                        |
+| 夜间、手动、发布      | 不变（直接调用 `sdk-java.yml`）                | full | 全部 11 项                                  |
 
 `managed-agent-gate.yml` 选择层级，并通过 `workflow_call` 调用 `sdk-java.yml`，
 传入新增的 `tier` 输入。`tier: fast` 把 `test` 矩阵收窄到 Linux Java 21 一条，并跳过
@@ -91,7 +96,13 @@ checkout 的是裸 head，因此改为对比事件负载中的 base sha。push �
 ### 当前 head 的首个 approve
 
 main 开启了 `dismiss_stale_reviews`，所以一个 head 的首个 approve 必然在它最后一次
-push 之后。对一个 approve，`scope` job 会运行全量层级，除非之前已有
+push 之后。只有维护者的 approve 才会启动全量层级：reviewer 的 `author_association`
+必须是 `OWNER`、`MEMBER` 或 `COLLABORATOR`，缺失该字段时同样按不放行处理。
+`qwen-triage-finalize.yml` 监听本工作流，并在一个 PR 的检查全绿后自动发 deferred
+`APPROVE`；少了这道限制，门禁自己的 fast 层级就会在无人参与的情况下买下仓库里最贵的
+一次运行。
+
+对这样的 approve，`scope` job 会运行全量层级，除非之前已有
 `pull_request_review` 运行为同一 head 报告了通过或运行中的 `Managed Agent gate`。
 本次运行自己的重跑不算，PR push 运行的通过（未改到的分类）也不算。被认定的运行还必须
 属于同一个 pull request，且其 job 列表中存在 `SDK Java (full)` callee：同一 head 上
@@ -100,10 +111,13 @@ push 之后。对一个 approve，`scope` job 会运行全量层级，除非之�
 
 ### 并发
 
-- PR push 每个 PR 一组，取消被取代的运行。
-- approve 按 review 状态和 head commit 排队、不取消：第二个 approve 等第一次全量跑完
-  后跳过；comment review 不会顶掉排队中的 approve 运行。
-- main push 每个 commit 一组。
+- 同一个 PR 的所有事件共用一个组，而 `cancel-in-progress` 是「新进来的那个运行」的
+  属性、且只对 `pull_request` 为 true。因此一次 push 会取消它所取代的 approve 运行
+  ——否则那次运行还要跑约 125 分钟，最后把结果报在一个 branch protection 已不再读取
+  的 head 上。
+- approve 之间不取消：第二个 approve 等第一次全量跑完，再由上面的去重跳过它；
+  comment review 也不会顶掉排队中的 approve 运行。
+- main push 不带 pull request，所以每个 commit 一组。
 - `sdk-java.yml` 自身的并发组现在包含事件名和被调用的 commit，同一 PR 的 fast 与
   full 运行不再互相排队（否则新排队的运行会顶掉旧的）。
 
@@ -126,10 +140,14 @@ fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret
 
 ## 成本
 
-- 改到路径的一次 push：约 40 机器分钟（Java 21 25、daemon E2E 13、flyway 不到 1）。
-- 改到路径且获得 approve 的 head：一次全量，Maven 缓存修复（`ci/setup-java-hosted-cache`）
-  前约 330 机器分钟；该修复去掉了自托管机器上每个 job 耗时 14 到 37 分钟的缓存保存。
-- 未改到路径的 PR：两个各几秒的托管 job。
+- 改到路径的一次 push：约 55 机器分钟——Java 21 leg 25，加上上文全量模块套件带来的
+  约 16，daemon E2E 13，flyway 不到 1。
+- 改到路径且获得维护者 approve 的 head：一次全量，约 330 机器分钟。去掉自托管机器上
+  每个 job 耗时 14 到 37 分钟的 post-job Maven 缓存保存属于计划中的工作，树里还没有
+  实现，所以 330 是今天实际会跑出来的数字，而不是某个已落地修复把它压低之后的数字。
+- 未改到路径的 PR：两次 runner 分配，分别是 `scope` 与 `gate` job。受信任的运行走
+  ECS 池，`scope` 在那里会删掉 `.git` 再以 `fetch-depth: 2` 重新 checkout，所以一次
+  事件的成本是一次冷克隆加几秒钟的实际工作；fork 的运行留在托管 runner 上。
 
 本次不包含的进一步手段：CLI 只构建一次并以 artifact 共享；把 `hosted-harness-mysql`
 （97 分钟墙上时间）拆成并行 job；Java 17 只在夜间跑。

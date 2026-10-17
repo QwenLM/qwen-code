@@ -260,7 +260,7 @@ describe('Managed Agent gate triggers', () => {
     });
   });
 
-  it('separates pushes, approvals and comments in the concurrency groups', () => {
+  it('groups every event of one pull request so a push cancels its approval run', () => {
     const group = (ctx) => interpolate(gate.concurrency.group, ctx);
     const review = (state, sha) =>
       github('pull_request_review', {
@@ -268,20 +268,22 @@ describe('Managed Agent gate triggers', () => {
         pull_request: { number: 7, head: { sha } },
       });
     const pr = (number) => github('pull_request', { pull_request: { number } });
+    const push = (sha) => ({ github: { ...github('push'), sha } });
+    // One group per pull request across pushes, approvals and comments: a push
+    // that supersedes an in-flight approval run must be able to cancel it,
+    // since that run reports a head branch protection no longer reads.
+    expect(group({ github: pr(7) })).toBe(
+      group({ github: review('approved', 'h1') }),
+    );
     expect(group({ github: review('approved', 'h1') })).toBe(
-      group({ github: review('approved', 'h1') }),
+      group({ github: review('commented', 'h2') }),
     );
-    expect(group({ github: review('approved', 'h1') })).not.toBe(
-      group({ github: review('commented', 'h1') }),
-    );
-    expect(group({ github: review('approved', 'h1') })).not.toBe(
-      group({ github: review('approved', 'h2') }),
-    );
-    expect(group({ github: pr(7) })).toBe(group({ github: pr(7) }));
     expect(group({ github: pr(7) })).not.toBe(group({ github: pr(8) }));
-    expect(group({ github: pr(7) })).not.toBe(
-      group({ github: review('approved', 'h1') }),
-    );
+    // A main push carries no pull request, so it stays keyed per commit.
+    expect(group(push('s1'))).not.toBe(group(push('s2')));
+    // cancel-in-progress belongs to the incoming run: only a pull_request run
+    // cancels, so a second approval queues behind the first full run and then
+    // finds it through the deduplication instead of displacing it.
     const cancel = gate.concurrency['cancel-in-progress'];
     for (const event of ['pull_request_review', 'push', 'merge_group']) {
       expect(evaluate(cancel, { github: github(event) }), event).toBe(false);
@@ -422,6 +424,7 @@ describe('Managed Agent gate tier selection', () => {
         HEAD_SHA: 'h1',
         BASE_REF: 'main',
         PR_NUMBER: '7',
+        REVIEW_AUTHOR_ASSOCIATION: 'MEMBER',
         TOUCHED: 'true',
         FAKE_URLS: '',
         FAKE_EVENTS: '',
@@ -453,6 +456,27 @@ describe('Managed Agent gate tier selection', () => {
     expect(tier({ ...approve, TOUCHED: 'false' })).toBe('tier=none');
     expect(tier({ ...approve, REVIEW_STATE: 'commented' })).toBe('tier=none');
     expect(tier({ ...approve, BASE_REF: 'feature' })).toBe('tier=none');
+  });
+
+  it('starts the full tier only for a maintainer approval', () => {
+    const approve = {
+      EVENT_NAME: 'pull_request_review',
+      REVIEW_STATE: 'approved',
+    };
+    // qwen-triage-finalize.yml watches this workflow and posts a deferred
+    // APPROVE once a PR's checks land green; without this gate the fast tier
+    // would buy the full suite with no human involved.
+    for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+      expect(tier({ ...approve, REVIEW_AUTHOR_ASSOCIATION: association })).toBe(
+        'tier=full',
+      );
+    }
+    for (const association of ['NONE', 'FIRST_TIME_CONTRIBUTOR', '']) {
+      expect(
+        tier({ ...approve, REVIEW_AUTHOR_ASSOCIATION: association }),
+        JSON.stringify(association),
+      ).toBe('tier=none');
+    }
   });
 
   it('skips an approval only when an earlier approval run covers the head', () => {

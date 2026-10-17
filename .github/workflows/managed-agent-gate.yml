@@ -14,15 +14,16 @@ on:
 permissions:
   contents: 'read'
 
-# Pull request pushes supersede each other. Approvals queue per head commit and
-# review state, so a second approval waits for the first full run and then
-# finds it instead of starting another, and a comment review never displaces
-# a pending approval.
+# One group per pull request, so a push that supersedes an in-flight approval
+# run cancels it: that run would otherwise keep going for ~125 minutes and then
+# report a head branch protection no longer reads. cancel-in-progress is a
+# property of the incoming run and stays true only for pull_request, so a second
+# approval queues behind the first full run and then finds it through the
+# deduplication below instead of starting another, and a comment review never
+# displaces a pending approval. Main pushes stay keyed per commit.
 concurrency:
   group: >-
-    managed-agent-gate-${{ github.event_name }}-${{
-    github.event_name == 'pull_request' && github.event.pull_request.number ||
-    github.event_name == 'pull_request_review' && format('{0}-{1}', github.event.review.state, github.event.pull_request.head.sha) ||
+    managed-agent-gate-${{ github.event.pull_request.number ||
     github.event_name == 'push' && github.sha ||
     github.ref }}
   cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
@@ -199,6 +200,7 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           TOUCHED: '${{ steps.paths.outputs.touched }}'
           REVIEW_STATE: '${{ github.event.review.state }}'
+          REVIEW_AUTHOR_ASSOCIATION: '${{ github.event.review.author_association }}'
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
@@ -212,7 +214,13 @@ jobs:
             case "${EVENT_NAME}" in
               pull_request | push | merge_group) tier=fast ;;
               pull_request_review)
-                if [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' ]]; then
+                # A maintainer's approval only. qwen-triage-finalize.yml watches
+                # this workflow and posts a deferred APPROVE once a PR's checks
+                # land green, so an ungated check lets the gate's own fast tier
+                # buy the most expensive run in the repository with no human
+                # involved. An empty association fails closed the same way.
+                if [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
+                  ' OWNER MEMBER COLLABORATOR ' == *" ${REVIEW_AUTHOR_ASSOCIATION} "* ]]; then
                   tier=full
                   urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&per_page=100" \
                     --jq '.check_runs[] | select(.status != "completed" or .conclusion == "success") | .details_url')"
