@@ -75,7 +75,14 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
 4. **"Cannot write" is the profile, and the store sets it.**
    - **The profile.** A new hosted profile, `hosted-workspace-read/1`, declares `read_file` and `glob` and nothing else, whatever lanes, child orchestration or MCP the Session has: no `write_file`, `edit`, `run_shell_command` or `monitor`, no Agent or team tool, no `send_message`, no MCP tool and no `skill` tool. A read-profile Session takes no skill catalog from its agent definition either: the catalog's instructions would name a tool the profile refuses, and an undeclared call fails the Turn.
    - **Who sets it.** `insertChildSession` gives a child the read profile whenever the child Workspace row it binds records `snapshot`. It reads that row in the same transaction that checks it is ready, so no caller can bind a snapshot copy to a writing profile. Only the profile changes; the approval mode is still the parent's.
-   - **Approvals.** `read_file` and `glob` are pre-approved under `default` and `auto-edit`, so a snapshot child asks nothing of its own. Since #14319 it inherits its agent definition's hook catalog like any child: a `PreToolUse` hook may still ask, and a hook command runs against the copy, which is discarded.
+   - **Approvals.** `read_file` and `glob` are pre-approved under `default` and `auto-edit`, so a snapshot child asks nothing of its own.
+   - **Hooks are kept (#13905 item 37).** A child Session takes its parent's agent definition, so since #14319 a snapshot child runs its parent's hook catalog, as any child does.
+     - **Why.** A hook catalog is the operator's policy, not the model's choice. A `PreToolUse` hook can deny a `read_file` or `glob` call or rewrite its input, for example to keep a secret from being read. Without its hooks, a snapshot child would read what the same agent is refused everywhere else, whenever the model chose `isolation: "snapshot"`. The skill catalog is dropped for a different reason: its instructions name tools the profile refuses, while a hook offers the model no tool.
+     - **What it costs.** None of it is particular to snapshots:
+       - a `PreToolUse` hook may ask, so the child can wait on an approval like any child;
+       - a hook command runs against the copy, so anything it writes is discarded with the copy;
+       - a turn resumed after its Runtime was replaced reacquires through the Session's Hook owner instead of taking decision 8's step-3 path, which serves only Sessions with neither hooks nor MCP, as for `hosted-workspace-files/1`;
+       - once a command, http or function hook runs, the child's Hook owner holds the storage until the child Session closes, as a Hook owner does in any Session, so the parent's tool turns and its other children's wait until then.
    - **What makes it hold.** Each piece already holds for every hosted Session:
      - the declaration set carries no tool that writes;
      - the tool turn refuses any other name before the Broker is acquired, and ends the Turn;

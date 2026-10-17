@@ -75,7 +75,14 @@ Issue #13753 对 I3 提出两点：
 4. **“不能写”就是 profile，并由存储层设置。**
    - **Profile。** 新的 hosted profile `hosted-workspace-read/1` 只声明 `read_file` 与 `glob`，无论 Session 有什么 lane、child 编排或 MCP：不声明 `write_file`、`edit`、`run_shell_command` 或 `monitor`，不声明 Agent 或团队工具，不声明 `send_message`、MCP 工具或 `skill` 工具。只读 profile 的 Session 也不从 agent definition 获取 skill 目录：目录的说明会提到一个该 profile 拒绝的工具，而未声明的调用会让 Turn 失败。
    - **由谁设置。** 只要 child 绑定的 child Workspace 行记录的是 `snapshot`，`insertChildSession` 就给 child 只读 profile。它在检查该行就绪的同一个事务中读取该行，所以任何调用方都无法把快照副本绑定到可写的 profile 上。只有 profile 不同；审批模式仍是父的。
-   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 自身不发起审批询问。自 #14319 起，它像任何 child 一样继承 agent definition 的 hook 目录：`PreToolUse` hook 仍可能发起询问，hook 命令作用于副本，而副本最终会被丢弃。
+   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 自身不发起审批询问。
+   - **保留 hooks（#13905 第 37 项）。** child Session 沿用父的 agent definition，所以自 #14319 起，snapshot child 像任何 child 一样运行父的 hook 目录。
+     - **为什么。** hook 目录是运维的策略，不由模型选择。`PreToolUse` hook 可以拒绝 `read_file` 或 `glob` 调用，或改写其输入，例如阻止读取密钥。如果去掉 hooks，只要模型选择 `isolation: "snapshot"`，snapshot child 就能读到同一个 agent 在其他任何地方都被拒绝读取的内容。skill 目录被去掉另有原因：它的说明会提到该 profile 拒绝的工具，而 hook 不向模型提供任何工具。
+     - **代价。** 下面这些都不是 snapshot 特有的：
+       - `PreToolUse` hook 可能发起询问，所以 child 可能像任何 child 一样等待审批；
+       - hook 命令作用于副本，所以它写入的任何内容都随副本一起丢弃；
+       - Runtime 被替换后恢复的 turn 通过 Session 的 Hook owner 重新 acquire，而不走决策 8 的第 3 步路径；该路径只服务既没有 hooks 也没有 MCP 的 Session，`hosted-workspace-files/1` 也是如此；
+       - command、http 或 function 类 hook 一旦运行，child 的 Hook owner 就会一直占用 storage，直到 child Session 关闭，任何 Session 的 Hook owner 都是如此，所以父的工具回合以及其他 child 的工具回合都要等到那时。
    - **凭什么成立。** 每一环本来就对所有 hosted Session 成立：
      - 声明集合中没有任何会写入的工具；
      - tool turn 在获取 Broker 之前拒绝任何其他名称，并结束该 Turn；
