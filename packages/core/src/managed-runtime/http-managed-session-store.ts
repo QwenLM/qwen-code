@@ -113,6 +113,7 @@ export interface HttpManagedSessionStores {
   readonly publication: HttpToolPublicationOwner;
   readonly toolResultResources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  stopLocal(): Promise<void>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
@@ -165,6 +166,7 @@ export function createHttpManagedSessionStores(
       read: (ref) => client.readResource(ref),
     },
     assertWritable: () => client.assertWritable(),
+    stopLocal: () => client.stopLocal(),
     close: () => client.seal(),
     setLifecycleAuthority: (authority) =>
       client.setLifecycleAuthority(authority),
@@ -626,6 +628,7 @@ class ManagedSessionStoreHttpClient {
   private renewTimer: NodeJS.Timeout | undefined;
   private renewalStopped = false;
   private sealed = false;
+  private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
 
   get writerSealed(): boolean {
@@ -720,7 +723,7 @@ class ManagedSessionStoreHttpClient {
   }
 
   async acquireWriter(): Promise<void> {
-    if (this.grant !== undefined || this.sealed) {
+    if (this.grant !== undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is already opened or sealed.',
       );
@@ -1283,6 +1286,12 @@ class ManagedSessionStoreHttpClient {
     this.resources.clear();
   }
 
+  async stopLocal(): Promise<void> {
+    this.locallyStopped = true;
+    this.stopRenewal();
+    await this.renewPromise?.catch(() => undefined);
+  }
+
   stopWriterRenewal(): void {
     this.renewalStopped = true;
     this.stopRenewal();
@@ -1296,6 +1305,13 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
+    if (this.locallyStopped) {
+      return Promise.reject(
+        new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is locally stopped.',
+        ),
+      );
+    }
     if (this.renewPromise !== undefined) {
       if (
         this.lifecycleAuthority?.operationId ===
@@ -1340,6 +1356,7 @@ class ManagedSessionStoreHttpClient {
     if (
       this.renewalStopped ||
       this.sealed ||
+      this.locallyStopped ||
       this.grant === undefined ||
       this.grant.leaseUntil <= Date.now()
     )
@@ -1395,7 +1412,7 @@ class ManagedSessionStoreHttpClient {
   }
 
   private requireGrant(): WriterGrant {
-    if (this.grant === undefined || this.sealed) {
+    if (this.grant === undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is not active.',
       );
@@ -1568,6 +1585,11 @@ class ManagedSessionStoreHttpClient {
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
   ): Promise<Response> {
+    if (this.locallyStopped) {
+      throw new ManagedSessionRecordError(
+        'the HTTP Managed Session writer is locally stopped.',
+      );
+    }
     let response: Response;
     try {
       response = await this.fetchFn(`${this.sessionUrl()}${path}`, {

@@ -118,9 +118,9 @@ class HostedSessionRelayFaultGatesIT {
     private static final String DIGEST = "sha256:" + "b".repeat(64);
     /** The store client's bounded uncertain-error retry of one commit:
      * `ManagedSessionStoreHttpClient.appendTransaction`'s commit loop
-     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`,
-     * `for (let attempt = 0; attempt < 3; attempt++)`), which retries a
-     * 429/5xx/transport failure 250 ms apart before it throws. */
+     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`),
+     * which retries a 429/5xx/transport failure 250 ms apart and rethrows
+     * once `const exhausted = attempt >= 2`, the third attempt. */
     private static final int STORE_ATTEMPTS = 3;
     private static final Pattern MEMBER = Pattern.compile(
             "FG9_MEMBER_([a-z]+)_([A-Z]+)");
