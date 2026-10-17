@@ -254,7 +254,11 @@ export default defineConfig({
     outputFile: {
       junit: 'junit.xml',
     },
-    setupFiles: ['./test-setup.ts'],
+    // Order matters: the witness registers its teardown hook before
+    // test-setup.ts, and vitest runs root-level afterAll hooks in reverse
+    // registration order, so the witness observes the QWEN_HOME pin after
+    // every other hook in every test file.
+    setupFiles: ['./test-setup-qwen-home-witness.ts', './test-setup.ts'],
     // Fail fast with an actionable message when workspace dist/ output or
     // generated files are missing (fresh clone, new worktree, deep clean).
     // See scripts/vitest-global-setup.js and issue #9149.

@@ -7,7 +7,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll } from 'vitest';
 
 // Unset NO_COLOR environment variable to ensure consistent theme behavior between local and CI test runs
 if (process.env['NO_COLOR'] !== undefined) {
@@ -59,21 +58,62 @@ delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
 // with other jobs, and a malformed $HOME/.qwen/settings.json there fails
 // every operator-settings reader at once — readOperatorSettingsScopes fails
 // closed by design (one polluted file failed 408 tests across 15 files in a
-// measured gate run). Pin a private empty home per test-file process when the
-// environment did not select one; tests that exercise QWEN_HOME set, stub, or
-// delete it themselves. The truthiness test matches every production reader
-// (Storage.getGlobalQwenDir does `if (envDir)`), so an ambient empty string is
-// pinned over rather than falling through to $HOME/.qwen.
-if (!process.env['QWEN_HOME']) {
-  const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cli-test-'));
-  process.env['QWEN_HOME'] = qwenHome;
-  // Vitest workers are terminated, not exited, so a `process.on('exit')`
-  // cleanup never runs and leaks one directory per test file; afterAll does
-  // run at the end of each file, which is exactly the pin's lifetime.
-  afterAll(() => {
-    fs.rmSync(qwenHome, { recursive: true, force: true });
-  });
+// measured gate run). The pin is unconditional: this repo's own agent gates
+// export QWEN_HOME on steps that allowlist vitest, and honoring an ambient
+// home reopens the mass-failure mode above and lets settings-writing tests
+// write into the agent's live home (both measured on this suite). Tests that
+// exercise QWEN_HOME set, stub, or delete it themselves.
+const QWEN_HOME_PIN_PREFIX = 'qwen-cli-test-';
+// A live pin is seconds old — one per test-file worker — so anything older
+// than an hour is a leak from a terminated run, never a directory a live
+// suite is using.
+const QWEN_HOME_PIN_MAX_AGE_MS = 60 * 60 * 1000;
+
+export function pinQwenHome(env: NodeJS.ProcessEnv): string {
+  // The pinned value must stay non-empty: every production reader gates on
+  // truthiness (Storage.getGlobalQwenDir does `if (envDir)`), so an ambient
+  // empty string must be pinned over rather than falling through to
+  // $HOME/.qwen.
+  const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), QWEN_HOME_PIN_PREFIX));
+  env['QWEN_HOME'] = qwenHome;
+  return qwenHome;
 }
+
+// Reclaim pins leaked by earlier runs. Vitest workers are terminated, not
+// exited, so a `process.on('exit')` cleanup never runs; and the pin must NOT
+// be deleted at teardown either — an afterAll sweep of the live pin raced
+// un-awaited extension-store work still reading it (the required ubuntu check
+// went red on ENOENT in extension-store/transactions). So the pin stays alive
+// for the process lifetime and reaping happens here, by age, before the new
+// pin is created. Best-effort: a reaper failure must never fail setup.
+export function reapStaleQwenHomePins(now: number = Date.now()): void {
+  let names: string[];
+  try {
+    names = fs
+      .readdirSync(os.tmpdir(), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(QWEN_HOME_PIN_PREFIX)) continue;
+    try {
+      const pin = path.join(os.tmpdir(), name);
+      if (now - fs.statSync(pin).mtimeMs < QWEN_HOME_PIN_MAX_AGE_MS) continue;
+      fs.rmSync(pin, { recursive: true, force: true });
+    } catch {
+      // A sibling run may hold or have just removed the directory; reaping
+      // leaked pins is hygiene and must not fail the suite's setup.
+    }
+  }
+}
+
+reapStaleQwenHomePins();
+// Exported so the teardown witness in test-setup-qwen-home-witness.ts can
+// assert the pin outlives every test file's hooks; tests that reassign
+// process.env['QWEN_HOME'] do not move this.
+export const suiteQwenHome: string = pinQwenHome(process.env);
 
 import { configure } from '@testing-library/react';
 import { beforeEach } from 'vitest';

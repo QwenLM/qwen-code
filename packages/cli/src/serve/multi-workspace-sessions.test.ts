@@ -7532,7 +7532,29 @@ describe('batch workspace session live-state route', () => {
       },
     ]);
     expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+    expect(primaryBridge.spawnCalls).toEqual([]);
     expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+    expect(secondaryBridge.spawnCalls).toEqual([]);
+  });
+
+  it('does not merge persisted catalog rows into a member snapshot', async () => {
+    await withRuntimeDir(async () => {
+      const { app, secondaryBridge } = makeHarness();
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-4466554402ff',
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:03:00.000Z',
+        prompt: 'persisted secondary session absent from the live set',
+        mtime: new Date('2026-07-08T00:03:00.000Z'),
+      });
+      const res = await batch(app, ['secondary-id']).expect(200);
+      expect(
+        res.body.workspaces[0].sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual(['22222222-2222-4222-a222-222222222222']);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+    });
   });
 
   it('reflects running and waiting changes without advancing catalogVersion', async () => {
