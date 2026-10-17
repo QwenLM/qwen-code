@@ -42,10 +42,11 @@ interface Entry {
   readonly publisher: ManagedShellCapturePublisher;
   readonly identity: ToolResultExpectedIdentity;
   /**
-   * Set once any stop path (terminate/stopSession/stopAll) asks for the
+   * Set when any stop path (terminate/stopSession/stopAll) asks for the
    * process's end: the finalize then carries the platform-stop marker, so
    * the record can project `stop_requested` instead of a bare exit
-   * (#13856 A8). A natural exit never sets it.
+   * (#13856 A8). A natural exit never sets it, and a stop the supervisor
+   * cannot prove clears it again (#13930 R1-42).
    */
   stopRequested: boolean;
   completion: Promise<BackgroundShellReceipt>;
@@ -136,11 +137,15 @@ export class ManagedBackgroundShellRegistry {
     const entry = this.entries.get(unitName);
     if (!entry) return undefined;
     // The platform asked for this end: mark it before the stop so the
-    // completion's finalize projects a requested stop, not a bare exit —
-    // even when the process happened to exit on its own in the same window.
+    // completion's finalize projects a requested stop, not a bare exit.
+    // The mark belongs to this stop's own window only: an end the
+    // supervisor cannot prove keeps the hold, and we unmark instead — a
+    // run that survives and later exits on its own must record its real
+    // end, not a requested stop nobody observed (#13930 R1-42).
     entry.stopRequested = true;
     const evidence = await entry.process.terminate(graceMs);
     if (evidence === null) {
+      entry.stopRequested = false;
       return { unitName, evidence: null, captureError: null };
     }
     return entry.completion;
