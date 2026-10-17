@@ -54,9 +54,10 @@
 `packages/managed-agent-server/`、`packages/sdk-java/`、
 `packages/cli/src/serve/`、`packages/core/src/managed-runtime/`、Hosted 集成测试
 helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。Pull request 类事件用
-测试 merge commit 对比它的第一父提交，得到的就是 PR 自身的变更集；push 对比
-`before..after`，merge group 对比其 base。重命名的新旧路径都计入。范围外的改动仍由
-夜间运行兜底。
+测试 merge commit 对比它的第一父提交，得到的就是 PR 自身的变更集；review 事件
+checkout 的是裸 head，因此改为对比事件负载中的 base sha。push 对比
+`before..after`，merge group 对比其 base。重命名的新旧路径都计入；diff 关闭 git 的
+路径引号化，因此含非 ASCII 字符的文件名也能匹配。范围外的改动仍由夜间运行兜底。
 
 ### 必需检查
 
@@ -76,13 +77,20 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 全量运行（或失败）能报告这个名字。check run 不需要写权限 token，所以门禁对 fork PR
 同样有效。
 
+被取代的 fast 层级是中性的、而非红色：当新的 push 取消 pull request 正在进行的运行时，
+门禁把 `Managed Agent fast tier` 报告为警告级通过。其他取消仍然失败——全量运行的取消
+如此，下一个 approve 才能重试套件，而不是对着一个绿色 check 去重；push 与 merge group
+臂上的取消也如此，因为那里不会取消正在进行的运行，取消意味着超时或人工停止。
+
 ### 当前 head 的首个 approve
 
 main 开启了 `dismiss_stale_reviews`，所以一个 head 的首个 approve 必然在它最后一次
 push 之后。对一个 approve，`scope` job 会运行全量层级，除非之前已有
 `pull_request_review` 运行为同一 head 报告了通过或运行中的 `Managed Agent gate`。
-本次运行自己的重跑不算，PR push 运行的通过（未改到的分类）也不算。全量失败后，下一个
-approve 或 **Re-run failed jobs** 会重试。
+本次运行自己的重跑不算，PR push 运行的通过（未改到的分类）也不算。被认定的运行还必须
+属于同一个 pull request，且其 job 列表中存在 `SDK Java (full)` callee：同一 head 上
+另一个 PR 的 review 运行、或未跑套件就报告该名字的运行，都没有跑过任何 Java lane，
+不算数。全量失败后，下一个 approve 或 **Re-run failed jobs** 会重试。
 
 ### 并发
 

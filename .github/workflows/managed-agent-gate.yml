@@ -160,25 +160,32 @@ jobs:
           persist-credentials: false
 
       # Pull request events check out the test merge commit, whose first
-      # parent is the base, so the diff is the PR's own change set.
+      # parent is the base, so the diff is the PR's own change set. A review
+      # event checks out the bare head instead, where HEAD^1 is the head's
+      # own parent; the PR's base comes from the event payload.
       - name: 'Match the changed paths'
         id: 'paths'
         env:
           EVENT_NAME: '${{ github.event_name }}'
           PUSH_BEFORE: '${{ github.event.before }}'
           MERGE_GROUP_BASE: '${{ github.event.merge_group.base_sha }}'
+          PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}'
         run: |-
           set -euo pipefail
           case "${EVENT_NAME}" in
             push) base="${PUSH_BEFORE}" ;;
             merge_group) base="${MERGE_GROUP_BASE}" ;;
+            pull_request_review) base="${PR_BASE_SHA}" ;;
             *) base="$(git rev-parse HEAD^1)" ;;
           esac
           if [[ "${base}" =~ ^0+$ ]]; then
             touched=true
           else
             git fetch --no-tags --depth=1 origin "${base}"
-            touched="$(git diff --name-only --no-renames "${base}" HEAD | node .github/scripts/managed-agent-gate-scope.mjs)"
+            # quotePath off: git's default octal-quoted rendering of a
+            # non-ASCII path matches none of the matcher's ^-anchored
+            # patterns and would fail this classification open.
+            touched="$(git -c core.quotePath=false diff --name-only --no-renames "${base}" HEAD | node .github/scripts/managed-agent-gate-scope.mjs)"
           fi
           echo "touched=${touched}" >> "${GITHUB_OUTPUT}"
           echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
@@ -194,6 +201,7 @@ jobs:
           REVIEW_STATE: '${{ github.event.review.state }}'
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
           GH_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'
           RUN_ID: '${{ github.run_id }}'
@@ -209,10 +217,19 @@ jobs:
                   urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&per_page=100" \
                     --jq '.check_runs[] | select(.status != "completed" or .conclusion == "success") | .details_url')"
                   for run in $({ grep -oE '/runs/[0-9]+/' <<< "${urls}" || true; } | tr -dc '0-9\n' | sort -u); do
-                    if [[ "${run}" != "${RUN_ID}" && "$(gh api "repos/${REPO}/actions/runs/${run}" --jq .event)" == 'pull_request_review' ]]; then
-                      echo "Run ${run} already covers ${HEAD_SHA}."
-                      tier=none
-                    fi
+                    [[ "${run}" == "${RUN_ID}" ]] && continue
+                    IFS=$'\t' read -r event prs <<< "$(gh api "repos/${REPO}/actions/runs/${run}" --jq '[.event, ([.pull_requests[].number] | map(tostring) | join(" "))] | @tsv')"
+                    # A passing check of the required name covers this head
+                    # only when it came from THIS pull request's review run
+                    # whose callee actually ran: another PR's review run on
+                    # the shared head sha and a run that reported without a
+                    # suite both ran no Java lane.
+                    [[ "${event}" == 'pull_request_review' ]] || continue
+                    [[ " ${prs} " == *" ${PR_NUMBER} "* ]] || continue
+                    [[ "$(gh api "repos/${REPO}/actions/runs/${run}/jobs?per_page=100" --jq '[.jobs[].name | startswith("SDK Java (full)")] | any')" == 'true' ]] || continue
+                    echo "Run ${run} already covers ${HEAD_SHA}."
+                    tier=none
+                    break
                   done
                 fi
                 ;;
@@ -249,6 +266,7 @@ jobs:
     steps:
       - name: 'Report the tier result'
         env:
+          EVENT_NAME: '${{ github.event_name }}'
           SCOPE_RESULT: '${{ needs.scope.result }}'
           SUITE_RESULT: '${{ needs.suite.result }}'
           TIER: '${{ needs.scope.outputs.tier }}'
@@ -268,6 +286,15 @@ jobs:
             exit 0
           fi
           if [[ "${SUITE_RESULT}" != 'success' ]]; then
+            if [[ "${TIER}" == 'fast' && "${EVENT_NAME}" == 'pull_request' && "${SUITE_RESULT}" == 'cancelled' ]]; then
+              # A superseding push cancels the in-flight fast tier: this check
+              # then means "replaced by a newer run", not "broken". Only the
+              # pull request arm cancels in progress, and only the fast tier
+              # may soften: a cancelled full run stays red so the next
+              # approval retries the suite instead of deduping against it.
+              echo "::warning::The fast tier was cancelled, superseded by a newer push."
+              exit 0
+            fi
             echo "::error::The ${TIER} tier ${SUITE_RESULT}."
             exit 1
           fi

@@ -64,9 +64,11 @@ unchanged.
 `packages/cli/src/serve/`, `packages/core/src/managed-runtime/`, the Hosted
 integration helpers and config, the scripts `sdk-java.yml` runs, and the gate
 files themselves. Pull request events diff the test merge commit against its
-first parent, so the set is the PR's own change. A push diffs `before..after`
-and a merge group diffs its base. Renames count both paths. Changes outside
-the scope still reach the nightly run.
+first parent, so the set is the PR's own change; a review event checks out the
+bare head, so its diff runs against the payload's base sha instead. A push
+diffs `before..after` and a merge group diffs its base. Renames count both
+paths, and the diff runs with git's path quoting off so a non-ASCII file name
+still matches. Changes outside the scope still reach the nightly run.
 
 ### Required check
 
@@ -86,6 +88,13 @@ PR therefore shows `Managed Agent gate` as expected until the full run on its
 head reports it, and only a full run, or a failure, can report that name for
 it. Check runs need no write token, so the gate works for fork PRs.
 
+A superseded fast tier is neutral, not red: when a newer push cancels a pull
+request's in-flight run, the gate reports `Managed Agent fast tier` as a
+warning-level pass. Every other cancellation stays failing — a cancelled full
+run, so the next approval retries the suite instead of deduping against a
+green check, and a push or merge-group cancellation, because nothing there
+cancels in progress, so it is a timeout or an operator stop.
+
 ### First approval of the current head
 
 `dismiss_stale_reviews` is on for main, so the first approval of a head
@@ -93,8 +102,11 @@ always follows its last push. The `scope` job runs the full tier for an
 approval unless an earlier `pull_request_review` run already reported a
 passing or running `Managed Agent gate` for the same head. A run's own reruns
 do not count, and a pass from the PR push run (an untouched classification)
-does not count. After a failed full run, the next approval or **Re-run failed
-jobs** retries it.
+does not count. The covering run must also belong to the same pull request and
+show the `SDK Java (full)` callee in its jobs: a review run of another PR on
+the same head, or a run that reported the name without running the suite, ran
+no Java lane and does not count. After a failed full run, the next approval or
+**Re-run failed jobs** retries it.
 
 ### Concurrency
 
