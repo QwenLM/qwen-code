@@ -3134,6 +3134,53 @@ describe('buildHumanReadableRuleLabel', () => {
   });
 });
 
+describe('PermissionManager.removePersistentRule', () => {
+  it.each(['allow', 'ask', 'deny'] as const)(
+    'removes a persistent %s rule from subsequent permission decisions',
+    async (type) => {
+      const pm = makePm();
+      pm.addPersistentRule('Agent(review)', type);
+      pm.addPersistentRule('Agent(deploy)', type);
+      expect(await pm.evaluate(agentCtx({}, 'review'))).toBe(type);
+
+      expect(pm.removePersistentRule('Agent(review)', type)).toBe(true);
+      expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+      expect(await pm.evaluate(agentCtx({}, 'deploy'))).toBe(type);
+      expect(pm.removePersistentRule('Agent(review)', type)).toBe(false);
+      expect(await pm.evaluate(agentCtx({}, 'deploy'))).toBe(type);
+    },
+  );
+
+  it('preserves other persistent rule types and matching session rules', async () => {
+    const raw = 'Agent(review)';
+    const pm = makePm({
+      permissionsAllow: [raw],
+      permissionsAsk: [raw],
+      permissionsDeny: [raw],
+    });
+    pm.addSessionAllowRule(raw);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('deny');
+
+    expect(pm.removePersistentRule(raw, 'deny')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('ask');
+    expect(pm.removePersistentRule(raw, 'ask')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.removePersistentRule(raw, 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.listRules()).toEqual([
+      { rule: parseRule(raw), type: 'allow', scope: 'session' },
+    ]);
+  });
+
+  it('leaves rules active when the raw string or rule type does not match', async () => {
+    const pm = makePm({ permissionsAllow: ['Agent(review)'] });
+
+    expect(pm.removePersistentRule('agent(review)', 'allow')).toBe(false);
+    expect(pm.removePersistentRule('Agent(review)', 'deny')).toBe(false);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+  });
+});
+
 // ─── PermissionManager.findMatchingDenyRule ──────────────────────────────────
 
 describe('PermissionManager.findMatchingDenyRule', () => {
