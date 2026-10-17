@@ -142,6 +142,7 @@ describe('Hosted proxy header relay', () => {
       'hosted-shell-output-driver.ts',
       'hosted-shell-unicode-driver.ts',
       'hosted-store-failure-driver.ts',
+      'hosted-workflow-fault-driver.ts',
       'hosted-workspace-tool-turn-driver.ts',
     ]);
   });

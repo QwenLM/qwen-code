@@ -313,7 +313,7 @@ class HostedWorkspaceToolTurnIT {
             arguments.add("--qwen.managed-agent.events.poll-interval=60s");
             arguments.add("--qwen.managed-agent.events.heartbeat-interval=60s");
             application.initializers(context -> context.getBeanFactory().registerSingleton(
-                    "fg6eAuthentication", HostedSseGapProbe.authentication(tenant)));
+                    "fg6eAuthentication", HostedGateTestSupport.authentication(tenant, "fg6e-fixture")));
         }
         try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);

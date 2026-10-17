@@ -342,6 +342,9 @@ public final class WorkspaceMigrationStore {
                 + " ON t.tenant_id = s.tenant_id AND t.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')") == 0,
                 "migration_work_unsettled");
+        // A parked task cancel counts here although it holds no lifecycle
+        // hostage: its acceptance is unknown and its task may still use this
+        // storage, so the move waits for the reconciler (D7-2).
         check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_operation o"
                 + " ON o.session_scope_key = s.session_scope_key AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')") == 0,
@@ -350,9 +353,11 @@ public final class WorkspaceMigrationStore {
                 + " ON c.tenant_id = s.tenant_id AND c.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND c.namespace = 'SESSION_COMMAND' AND c.state = 'PENDING'") == 0,
                 "migration_work_unsettled");
+        // An open or parked title waits; one a later title superseded, or
+        // one proven never delivered, has settled.
         check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_operation r"
                 + " ON r.session_scope_key = s.session_scope_key AND r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
-                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state <> 'COMPLETED'") == 0,
+                + " AND s.workspace_storage_id = ? AND r.operation_kind = 'RENAME' AND r.state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED', 'UNKNOWN')") == 0,
                 "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage

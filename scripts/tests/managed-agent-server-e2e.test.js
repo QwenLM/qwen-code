@@ -639,14 +639,14 @@ describe('managed-agent-server e2e runner', () => {
 
   it('keeps the review-corrections merge gates behind the CI-gated Hosted proofs', () => {
     // The hosted-harness-mysql CI job runs HostedWorkspaceToolTurnIT (a real
-    // file-tool Turn through the packaged worker) and the three
-    // owner-failover E2E modes against the production HTTP durable-store
-    // adapter, all fail-closed via the failsafe includes and
-    // check-failsafe-reports.js. While both oracles stand, the
-    // review-corrections gates must not re-assert those capabilities as
-    // unproven — the foundation-boundary banner names that document the
-    // current authority, so the false claim reaches integrators in either
-    // language.
+    // file-tool Turn through the packaged worker), fail-closed via the
+    // failsafe includes and check-failsafe-reports.js, and the
+    // hosted-failover-e2e job runs the three owner-failover E2E modes
+    // against the production HTTP durable-store adapter. While both
+    // oracles stand, the review-corrections gates must not re-assert those
+    // capabilities as unproven — the foundation-boundary banner names that
+    // document the current authority, so the false claim reaches
+    // integrators in either language.
     const toolTurnIt =
       'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
     expect(
