@@ -395,6 +395,16 @@ async function recoveredShellCancellationReceipt(input: {
     generation = storedGeneration;
   } else {
     const settled = await broker.readSettledShellResult(item.executionCallId);
+    if (!settled) return undefined;
+    const capture = settled.result.capture;
+    if (
+      settled.result.executionStatus !== 'cancelled' ||
+      capture?.deliveryStatus !== 'blocked' ||
+      (!capture.manifest &&
+        (capture.captureStatus !== 'unavailable' ||
+          capture.captureReason !== 'producer_lost'))
+    )
+      return undefined;
     generation = settled.bindingGeneration;
     candidate = settled.result;
   }

@@ -5043,7 +5043,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public boolean cancelUnadmittedTurn(String tenantId, String sessionId,
             String turnId, String owner) {
-        requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!"CANCELLING".equals(turn.status())
                 || !owner.equals(turn.dispatchOwner())
@@ -5069,31 +5069,15 @@ public class ManagedAgentStore implements AgentStateStore {
         // The locked, fenced writer cannot admit a late HTTP request. Even an
         // idle journal may contain this prompt's completed admission: replay
         // its real result instead of replacing it with cancellation.
+        java.util.Set<String> accepted;
         try {
-            WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
-                    tenantId, sessionId);
+            accepted = WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
+                    tenantId, sessionId, false,
+                    WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2);
         } catch (ApiException unverified) {
             return false;
         }
-        boolean accepted = Boolean.TRUE.equals(jdbc.query(
-                "SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?",
-                rows -> {
-                    while (rows.next()) {
-                        for (String line : new String(rows.getBytes(1), StandardCharsets.UTF_8).split("\n")) {
-                            try {
-                                var event = objectMapper.readTree(line).path("managedSession");
-                                if ("input.accepted".equals(event.path("kind").asText())
-                                        && turn.promptId().equals(event.path("payload").path("turnId").asText())) {
-                                    return true;
-                                }
-                            } catch (java.io.IOException unverified) {
-                                return true;
-                            }
-                        }
-                    }
-                    return false;
-                }, tenantId, sessionId));
-        if (accepted || !withdrawSubmissionAttempted(tenantId, sessionId, turnId, owner)) {
+        if (accepted.contains(turn.promptId()) || !withdrawSubmissionAttempted(tenantId, sessionId, turnId, owner)) {
             return false;
         }
         cancelBeforeAdmission(tenantId, sessionId, turnId, owner);

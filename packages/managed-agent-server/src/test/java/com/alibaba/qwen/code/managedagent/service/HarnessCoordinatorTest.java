@@ -1787,6 +1787,171 @@ class HarnessCoordinatorTest {
         verify(harness, never()).cancel(anyString(), anyString());
     }
 
+    @Test
+    void settlesUnadmittedCancellationWithoutContactingHarness() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "CANCELLING", true, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(store.cancelUnadmittedTurn(eq("tenant"), eq("session"), eq("turn"), anyString()))
+                .thenReturn(true);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer, directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).cancelUnadmittedTurn(eq("tenant"), eq("session"), eq("turn"), anyString());
+        verify(store, never()).cancelBeforeAdmission(anyString(), anyString(), anyString(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyBoolean());
+        verify(store, never()).releaseTurnLease(anyString(), anyString(), anyString(), anyString());
+        verifyNoInteractions(harness, runtimeWarmer);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing-admission", "failure-takeover", "cancel-takeover",
+            "unknown-cancellation"})
+    void unsettledRecoveryRetryDoesNotLogTerminalFailure(String lane) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        boolean unknownCancellation = "unknown-cancellation".equals(lane);
+        boolean missingAdmission = "missing-admission".equals(lane) || unknownCancellation;
+        boolean workspaceFailure = "failure-takeover".equals(lane);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                missingAdmission ? null : "epoch-old", missingAdmission ? 0 : 4,
+                unknownCancellation ? "CANCELLING" : "RUNNING", true, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(claimed));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        SessionRecord session = workspaceFailure
+                ? new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-old", "epoch-old", 4, 4, 0, 1, 1, null, 1,
+                        new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1),
+                        "default", "hosted-workspace-shell/1")
+                : new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1);
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        if (unknownCancellation) {
+            HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+            when(recovery.hasUnknownOutcome()).thenReturn(true);
+            when(harness.recoverManagedRuntime("tenant", "session", true))
+                    .thenReturn(new Attachment("boot-new", recovery, 4L, "epoch-new"));
+        } else {
+            when(harness.recoverManagedRuntime("tenant", "session", false))
+                    .thenThrow(new HostedHarnessRecoveryDeclinedException("shell_in_flight"));
+        }
+        if (workspaceFailure) {
+            when(harness.recoverManagedFailureCancellation(eq("tenant"), eq("session"),
+                    eq("turn"), anyString()))
+                    .thenThrow(new HostedHarnessRecoveryDeclinedException("generation_gone"));
+        } else if (!missingAdmission) {
+            when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq("boot-old"))).thenReturn(true);
+            DaemonHttpException parked = mock(DaemonHttpException.class);
+            when(parked.getStatusCode()).thenReturn(409);
+            when(parked.getErrorCode()).thenReturn("hosted_turn_recovery_required");
+            doThrow(parked).when(harness).cancel("tenant", "session");
+            when(harness.recoverManagedCancellation("tenant", "session"))
+                    .thenThrow(new HostedHarnessRecoveryDeclinedException("generation_gone"));
+        }
+        ch.qos.logback.classic.Logger coordinatorLog =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(HarnessCoordinator.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        coordinatorLog.addAppender(logged);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer, directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+            coordinatorLog.detachAppender(logged);
+            logged.stop();
+        }
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), anyLong(), eq(true));
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(store, never()).failRecoveryBlockedTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString());
+        verify(store, never()).releaseTurnLease(anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).submit(anyString(), anyString(), anyString(), any(), anyString());
+        if (unknownCancellation) {
+            verify(store).cancelUnadmittedTurn(eq("tenant"), eq("session"), eq("turn"), anyString());
+        } else {
+            verify(store, never()).cancelUnadmittedTurn(anyString(), anyString(), anyString(), anyString());
+        }
+        assertThat(logged.list).noneSatisfy(event ->
+                assertThat(event.getFormattedMessage()).contains("Managed Turn failed terminally"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void terminalFailureLogRequiresSuccessfulTerminalWrite(boolean written) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(claimed));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(new HostedHarnessRecoveryDeclinedException("generation_gone"));
+        ch.qos.logback.classic.Logger coordinatorLog =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(HarnessCoordinator.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        coordinatorLog.addAppender(logged);
+        doAnswer(invocation -> {
+            assertThat(logged.list).isEmpty();
+            return written;
+        }).when(store).failRecoveryBlockedTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), anyString());
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer, directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+            coordinatorLog.detachAppender(logged);
+            logged.stop();
+        }
+        verify(store).failRecoveryBlockedTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyBoolean());
+        verify(store, times(written ? 0 : 1)).releaseTurnLease(anyString(), anyString(),
+                anyString(), anyString());
+        assertThat(logged.list).hasSize(written ? 1 : 0);
+        if (written) {
+            ILoggingEvent event = logged.list.getFirst();
+            assertThat(event.getLevel()).isEqualTo(Level.WARN);
+            assertThat(event.getFormattedMessage()).contains("Managed Turn failed terminally");
+            assertThat(event.getThrowableProxy()).isNotNull();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void terminalRecoveryDeclineReconcilesParkedTurnThroughCancellationTakeover(

@@ -945,14 +945,16 @@ class ManagedSessionStoreHttpClient {
           error instanceof TypeError ||
           (error instanceof DOMException &&
             ['AbortError', 'TimeoutError'].includes(error.name));
-        // withRetry marks its terminal error as exhausted only when guard
-        // retries actually consumed the shared budget; without the mark
-        // one attempt's own stall burned its own time, so the baseline
-        // restart stays allowed instead of being gated off by wall-clock
-        // inference alone (#13800 P2, R2-2).
+        // Activation can retry beyond the usual attempt cap. A guard refusal
+        // must still stop that lane once the shared budget cannot fit another
+        // guard retry, even when the inner call never retried the guard.
         const contentionSpent =
           error instanceof ManagedSessionStoreHttpError &&
-          error.contentionExhausted === true;
+          (error.contentionExhausted === true ||
+            (descriptor.operation === 'renewActivation' &&
+              error.status === 503 &&
+              error.remoteCode === 'tenant_guard_contended' &&
+              contentionDeadline - Date.now() <= 250));
         const exhausted = attempt >= 2;
         if (
           !uncertain ||

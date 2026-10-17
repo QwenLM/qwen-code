@@ -1144,6 +1144,10 @@ public class HarnessCoordinator {
     }
 
     private boolean fail(TurnRecord turn, String code, String message) {
+        return fail(turn, code, message, null);
+    }
+
+    private boolean fail(TurnRecord turn, String code, String message, RuntimeException error) {
         // The terminal record makes an admitted Turn unreachable: failTurn
         // clears the dispatch owner and leaves the active states, so
         // nothing could later cancel it or re-attach to journal its
@@ -1165,11 +1169,20 @@ public class HarnessCoordinator {
             }
         }
         if (recoveryBlocked && !"CANCELLING".equals(turn.status())) {
-            return store.failRecoveryBlockedTurn(turn.tenantId(), turn.sessionId(),
-                    turn.turnId(), owner, message);
+            if (!store.failRecoveryBlockedTurn(turn.tenantId(), turn.sessionId(),
+                    turn.turnId(), owner, message)) {
+                return false;
+            }
+        } else {
+            store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    owner, code, message);
         }
-        store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
-                owner, code, message);
+        if (error != null) {
+            LOG.warn("Managed Turn failed terminally tenant={} session={}"
+                            + " turn={} code={} message={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(), code,
+                    message, error);
+        }
         return true;
     }
 
@@ -1178,15 +1191,7 @@ public class HarnessCoordinator {
     // actual cause.
     private boolean failTerminally(TurnRecord turn, String code,
             String message, RuntimeException error) {
-        boolean terminal = fail(turn, code, message);
-        if (!terminal) {
-            return false;
-        }
-        LOG.warn("Managed Turn failed terminally tenant={} session={}"
-                        + " turn={} code={} message={}",
-                turn.tenantId(), turn.sessionId(), turn.turnId(), code,
-                message, error);
-        return true;
+        return fail(turn, code, message, error);
     }
 
     private boolean transientFailure(TurnRecord turn,

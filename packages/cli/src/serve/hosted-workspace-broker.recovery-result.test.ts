@@ -43,12 +43,19 @@ async function fixture(change?: string) {
   if (change === 'runtime') response['runtimeSessionId'] = 'other';
   if (change === 'execution') response['executionCallId'] = 'other';
   if (change === 'binding') response['runtimeBindingId'] = '';
+  if (change === 'protocol-version') response['protocolVersion'] = 2;
+  if (change === 'non-string-generation') response['bindingGeneration'] = 7;
   if (change === 'zero-generation') response['bindingGeneration'] = '0';
   if (change === 'overflow')
     response['bindingGeneration'] = '9223372036854775808';
   if (change === 'executing')
     response['status'] = { state: 'executing', result };
   if (change === 'missing-result') response['status'] = { state: 'settled' };
+  if (change === 'malformed-legacy-status')
+    response['status'] = {
+      state: 'settled',
+      result: { executionStatus: ['cancelled'], responseParts: [] },
+    };
   server = createServer((request, reply) => {
     const url = new URL(request.url!, 'http://127.0.0.1');
     requests.push(`${request.method} ${url.pathname}`);
@@ -88,6 +95,7 @@ it('reads the original settled Shell result without preparing or starting work',
   expect(requests).toEqual([
     'GET /internal/runtime-broker/v1/executions/original-call',
   ]);
+  expect(broker.runtime).toBeUndefined();
 });
 
 it.each([
@@ -95,20 +103,16 @@ it.each([
   'runtime',
   'execution',
   'binding',
+  'protocol-version',
+  'non-string-generation',
   'zero-generation',
   'overflow',
   'executing',
   'missing-result',
+  'malformed-legacy-status',
   'unknown',
-  'new-binding',
 ])('refuses recovered Shell evidence with %s', async (change) => {
   const { broker, requests } = await fixture(change);
-  if (change === 'new-binding')
-    broker.runtime = {
-      bindingId: 'replacement-binding',
-      generation: '8',
-      workspaceGeneration: '1',
-    };
   await expect(
     broker.readSettledShellResult('original-call'),
   ).rejects.toThrow();

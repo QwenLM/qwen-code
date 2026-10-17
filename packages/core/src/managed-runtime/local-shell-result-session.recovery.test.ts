@@ -468,6 +468,9 @@ it('returns the original durable receipt on a lost-reply retry without rewriting
     f.modelCallId,
     f.candidate,
   );
+  const saved = await f.session.resources.read(receipt.outcomeRef);
+  const publish = vi.spyOn(f.session.resources, 'publish');
+  const publishCapture = vi.spyOn(f.durable, 'publish');
   const committed = f.session.authority.committedSequence;
   await f.freshStore.close();
   const fresh = new ResourceToolResultSegmentStore(f.durable);
@@ -481,8 +484,35 @@ it('returns the original durable receipt on a lost-reply retry without rewriting
   ).toEqual(receipt);
   expect(f.session.authority.committedSequence).toBe(committed);
   expect(f.receipts()).toHaveLength(1);
-  expect(await f.session.resources.read(receipt.outcomeRef)).toEqual(
-    await f.native.read(receipt.outcomeRef),
-  );
+  expect(await f.session.resources.read(receipt.outcomeRef)).toEqual(saved);
+  expect(publish).not.toHaveBeenCalled();
+  expect(publishCapture).not.toHaveBeenCalled();
   await fresh.close();
+});
+
+it.each(['success', 'error'] as const)(
+  'refuses a recovered %s result without producing a cancellation receipt',
+  async (executionStatus) => {
+    const f = await fixture();
+    await expect(
+      f.admission.acceptRecoveredCancelled(f.request, f.modelCallId, {
+        ...f.candidate,
+        executionStatus,
+      }),
+    ).rejects.toThrow('not a blocked cancellation');
+    expect(f.receipts()).toHaveLength(0);
+    await f.freshStore.close();
+  },
+);
+
+it('refuses an unacknowledged recovered result without producing a cancellation receipt', async () => {
+  const f = await fixture();
+  await expect(
+    f.admission.acceptRecoveredCancelled(f.request, f.modelCallId, {
+      ...f.candidate,
+      capture: { ...f.candidate.capture!, deliveryStatus: 'pending' },
+    }),
+  ).rejects.toThrow('not a blocked cancellation');
+  expect(f.receipts()).toHaveLength(0);
+  await f.freshStore.close();
 });

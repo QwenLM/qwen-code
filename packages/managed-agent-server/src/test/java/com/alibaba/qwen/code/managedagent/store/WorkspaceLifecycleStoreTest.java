@@ -22,6 +22,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -58,7 +59,7 @@ class WorkspaceLifecycleStoreTest {
         var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");
         var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
-                HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest("{}".getBytes(StandardCharsets.UTF_8))), "e30=");
+                DigestUtils.sha256Hex("{}"), "e30=");
         ObjectNode registration = templates.get("hook_registration").deepCopy();
         registration.withObject("/catalogRef").put("digest", data.digest());
         for (String state : List.of("admitted", "running", "settled")) {
@@ -621,7 +622,7 @@ class WorkspaceLifecycleStoreTest {
     }
 
     @Test
-    void terminalPublicTurnWithoutJournalSettlementStillBlocksClose() {
+    void terminalPublicTurnWithoutJournalSettlementStillBlocksClose() throws Exception {
         var fixture = fixture();
         String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
                 "original-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
@@ -635,31 +636,45 @@ class WorkspaceLifecycleStoreTest {
 
         var journal = new ExtensionRecordJournal(new ManagedSessionStore(fixture.jdbc), "tenant", "workspace", fixture.session);
         fixture.transactions.executeWithoutResult(ignored -> journal.open());
-        var accepted = fixture.json.createObjectNode();
-        accepted.putObject("managedSession").put("kind", "input.accepted").putObject("payload")
-                .put("turnId", turn).put("source", "user");
-        // Seed only the native journal projection, as the existing queued-input gate test does.
-        // No native turn.settled has landed merely because the public projection failed.
-        fixture.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?",
-                (accepted + "\n").getBytes(StandardCharsets.UTF_8));
+        byte[] genesis = fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class);
+        String prompt = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
+        var request = fixture.promptCommit(prompt, false);
+        fixture.transactions.executeWithoutResult(ignored -> new ManagedSessionStore(fixture.jdbc).commit(
+                "tenant", fixture.session, "extension-writer-token-0123456789", request));
+        assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(2L);
+        assertThat(fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class)).isEqualTo(genesis);
 
         var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
                 "cancel-failed-turn", "digest", fixture.session, turn, "owner"));
         assertThat(cancel.commandEffect()).isFalse();
-        assertThatThrownBy(() -> fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant",
-                fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-failed-turn", "digest", true, 1)))
-                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
+        var operations = fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class);
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> {
+            try {
+                fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.CLOSE, "owner",
+                        "a".repeat(64), "close-failed-turn", "digest", true, 1);
+            } catch (ApiException refusal) {
+                assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+                        .containsExactlyInAnyOrderElementsOf(operations);
+                throw refusal;
+            }
+        })).isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+                .containsExactlyInAnyOrderElementsOf(operations);
         assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
     }
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"expired-idle", "sealed-idle", "live-idle",
-            "expired-pending", "expired-settled", "expired-other-settled", "expired-compacted", "missing-head", "stale-dispatch", "admitted"})
-    void unacknowledgedCancellationRequiresFencedWriterAndIdleJournal(String cut) {
+            "expired-pending", "expired-settled", "expired-other-settled", "expired-compacted", "missing-head", "stale-dispatch", "admitted",
+            "expired-monitor-v1", "expired-monitor-v2"})
+    void unacknowledgedCancellationRequiresFencedWriterAndIdleJournal(String cut) throws Exception {
         var fixture = fixture();
         var journal = new ExtensionRecordJournal(new ManagedSessionStore(fixture.jdbc), "tenant", "workspace", fixture.session);
         fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        byte[] genesis = fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class);
         String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
                 "ambiguous-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
         fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
@@ -668,24 +683,20 @@ class WorkspaceLifecycleStoreTest {
                 turn, "dispatch-owner"));
         fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
                 "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
-        if (!"live-idle".equals(cut)) {
-            fixture.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
-        }
         switch (cut) {
             case "sealed-idle" -> fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
-            case "expired-pending", "expired-settled", "expired-other-settled" -> {
-                String prompt = "expired-other-settled".equals(cut) ? "other-prompt"
+            case "expired-pending", "expired-settled", "expired-other-settled", "expired-monitor-v1", "expired-monitor-v2" -> {
+                boolean monitor = cut.startsWith("expired-monitor");
+                if ("expired-monitor-v2".equals(cut)) {
+                    fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+                }
+                String prompt = "expired-other-settled".equals(cut) || monitor ? "other-prompt"
                         : fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
-                var accepted = fixture.json.createObjectNode();
-                accepted.putObject("managedSession").put("kind", "input.accepted").putObject("payload")
-                        .put("turnId", prompt)
-                        .put("source", "user");
-                var settled = fixture.json.createObjectNode();
-                settled.putObject("managedSession").put("kind", "turn.settled").putObject("payload")
-                        .put("turnId", prompt).put("outcome", "completed");
-                String records = accepted + "\n" + (!"expired-pending".equals(cut) ? settled + "\n" : "");
-                fixture.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?",
-                        records.getBytes(StandardCharsets.UTF_8));
+                var request = fixture.promptCommit(prompt, !"expired-pending".equals(cut) && !monitor,
+                        monitor ? "monitor" : "user");
+                fixture.transactions.executeWithoutResult(ignored -> new ManagedSessionStore(fixture.jdbc).commit(
+                        "tenant", fixture.session, "extension-writer-token-0123456789", request));
+                assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(2L);
             }
             case "expired-compacted" -> fixture.jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
             case "missing-head" -> fixture.jdbc.update("DELETE FROM ma_session_head");
@@ -693,7 +704,12 @@ class WorkspaceLifecycleStoreTest {
             case "admitted" -> fixture.jdbc.update("UPDATE ma_turn SET harness_event_epoch = 'old-epoch'");
             default -> assertThat(cut).isIn("expired-idle", "live-idle");
         }
-        boolean expected = List.of("expired-idle", "sealed-idle", "expired-other-settled").contains(cut);
+        if (!"live-idle".equals(cut)) {
+            fixture.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
+        }
+        assertThat(fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class)).isEqualTo(genesis);
+        boolean expected = List.of("expired-idle", "sealed-idle", "expired-other-settled", "expired-monitor-v2").contains(cut);
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.cancelUnadmittedTurn("tenant",
                 fixture.session, turn, "dispatch-owner"))).isEqualTo(expected);
         var result = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
@@ -744,6 +760,36 @@ class WorkspaceLifecycleStoreTest {
                     + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
             session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand("tenant", "owner", "create", "digest", "qwen-code",
                     null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
+        }
+
+        ManagedSessionStoreModels.CommitTransactionRequest promptCommit(String turn, boolean settled) throws Exception {
+            return promptCommit(turn, settled, "user");
+        }
+
+        ManagedSessionStoreModels.CommitTransactionRequest promptCommit(String turn, boolean settled, String source) throws Exception {
+            ObjectNode accepted = json.createObjectNode().put("v", 1).put("sequence", 1)
+                    .put("eventId", "late-accepted").put("kind", "input.accepted").put("occurredAt", 1_000);
+            accepted.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace")
+                    .put("sessionId", session);
+            var payload = accepted.putObject("payload").put("inputId", "late-input").put("turnId", turn)
+                    .put("source", source).putNull("deadline");
+            var ref = json.createObjectNode().put("resourceId", "late-input").put("kind", "managed-session-input")
+                    .put("schemaVersion", 1).put("byteLength", 2).put("digest", DigestUtils.sha256Hex("{}"));
+            payload.set("contentRef", ref);
+            payload.set("admissionRef", ref.deepCopy());
+            ObjectNode terminal = accepted.deepCopy();
+            terminal.put("sequence", 2).put("eventId", "late-settled").put("kind", "turn.settled");
+            terminal.putObject("payload").put("turnId", turn).put("outcome", "completed");
+            String records = "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + accepted + "}\n"
+                    + (settled ? "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + terminal + "}\n" : "")
+                    + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+            int events = settled ? 2 : 1;
+            return new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "writer-extension", 1,
+                    1, 0, "late-transaction", "completeTurn", "late-command", DigestUtils.sha256Hex("late-command"), 1, events,
+                    events, DigestUtils.sha256Hex("late-events"), null, DigestUtils.sha256Hex("late-commit"), 0, null, events + 1,
+                    Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)), DigestUtils.sha256Hex(records),
+                    List.of(new ManagedSessionStoreModels.CommitResource("late-input", "managed-session-input", 1, 2,
+                            DigestUtils.sha256Hex("{}"), "e30=")));
         }
 
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {

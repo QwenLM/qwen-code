@@ -2077,10 +2077,9 @@ describe('HTTP Managed Session store', () => {
         >;
         expect(
           server.commits.filter(
-            (commit) =>
-              commit['transactionId'] === transaction['transactionId'],
+            (commit) => commit['commandId'] === transaction['commandId'],
           ),
-        ).toHaveLength(1);
+        ).toEqual([transaction]);
       } finally {
         await session.close().catch(() => undefined);
         await stores.close().catch(() => undefined);
@@ -2143,6 +2142,86 @@ describe('HTTP Managed Session store', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(['slow-first-guard', 'timeout-then-guard'])(
+    'does not restart activation contention without an internal guard retry (%s)',
+    async (failure) => {
+      const startedAt = 1_790_000_000_000;
+      vi.useFakeTimers({ now: startedAt });
+      const server = new FakeManagedSessionStore();
+      const originalFetch = server.fetch.getMockImplementation()!;
+      const attempts: Array<{ at: number; body: string }> = [];
+      server.fetch.mockImplementation(async (input, init) => {
+        const url = requestUrl(input);
+        if (/\/transactions:commit(?:-v2)?$/.test(url)) {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          if (body['operation'] === 'renewActivation') {
+            attempts.push({ at: Date.now(), body: String(init?.body) });
+            if (failure === 'slow-first-guard') {
+              await new Promise((resolve) => setTimeout(resolve, 1100));
+            } else if (attempts.length === 1) {
+              await new Promise((resolve) => setTimeout(resolve, 1200));
+              throw new DOMException('request budget elapsed', 'TimeoutError');
+            }
+            return jsonResponse(
+              { error: { code: 'tenant_guard_contended', message: 'held' } },
+              503,
+            );
+          }
+        }
+        const response = await originalFetch(input, init);
+        if (/\/writers:(?:acquire|renew)$/.test(url)) {
+          return jsonResponse({
+            ...(await response.json()),
+            leaseUntil: Date.now() + 60_000,
+          });
+        }
+        return response;
+      });
+      const { stores, session } = await bootStoresAndSession(server, 1200);
+      const renewal = vi.spyOn(session.authority, 'renewActivation');
+      try {
+        await vi.advanceTimersByTimeAsync(24_000);
+        const after24s = {
+          attempts: attempts.length,
+          writesStopped: session.authority.writesStopped,
+        };
+        await vi.advanceTimersByTimeAsync(41_000);
+        console.info('ACTIVATION_CONTENTION_WITHOUT_GUARD_RETRY', {
+          failure,
+          after24s,
+          totalAttempts: attempts.length,
+          firstAttemptMs: attempts[0]!.at - startedAt,
+          lastAttemptMs: attempts.at(-1)!.at - startedAt,
+          writesStopped: session.authority.writesStopped,
+        });
+        await expect(renewal.mock.results[0]?.value).rejects.toMatchObject({
+          status: 503,
+          remoteCode: 'tenant_guard_contended',
+        });
+        expect.soft(after24s.writesStopped).toBe(true);
+        expect
+          .soft(attempts.length)
+          .toBe(failure === 'slow-first-guard' ? 1 : 2);
+        expect(new Set(attempts.map((attempt) => attempt.body)).size).toBe(1);
+        expect(
+          server.fetch.mock.calls.filter(([input]) =>
+            requestUrl(input).endsWith('/writers:acquire'),
+          ),
+        ).toHaveLength(1);
+        expect(server.sealCount).toBe(0);
+      } finally {
+        await stores.close().catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(2000);
+        await session.close().catch(() => undefined);
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('preserves a newer writer lease when a delayed activation commit returns', async () => {
     const startedAt = 1_790_000_000_000;

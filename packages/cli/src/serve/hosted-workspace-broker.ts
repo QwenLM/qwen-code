@@ -682,13 +682,23 @@ export class HostedWorkspaceBroker {
     return { state: state as HostedBrokerExecutionState };
   }
 
-  async readSettledShellResult(id: string): Promise<{
-    bindingGeneration: string;
-    result: ToolResultEnvelope;
-  }> {
-    const response = await this.request(
-      `/executions/${encodeURIComponent(id)}`,
-    );
+  async readSettledShellResult(
+    id: string,
+  ): Promise<
+    { bindingGeneration: string; result: ToolResultEnvelope } | undefined
+  > {
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+    } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 404 &&
+        cause.code === 'runtime_execution_not_found'
+      )
+        return undefined;
+      throw cause;
+    }
     const generation = response['bindingGeneration'];
     const bindingId = response['runtimeBindingId'];
     const status = object(response['status']);
@@ -702,18 +712,39 @@ export class HostedWorkspaceBroker {
       typeof generation !== 'string' ||
       !/^[1-9][0-9]{0,18}$/u.test(generation) ||
       BigInt(generation) > 2n ** 63n - 1n ||
-      (this.runtime !== undefined &&
-        (this.runtime.bindingId !== bindingId ||
-          this.runtime.generation !== generation)) ||
       status['state'] !== 'settled'
     ) {
       throw new Error(
         'Original Shell result is not settled under its binding.',
       );
     }
+    const result = object(status['result']);
+    if (!('capture' in result)) {
+      const error = 'error' in result ? object(result['error']) : undefined;
+      if (
+        Object.keys(result).some(
+          (key) => !['executionStatus', 'responseParts', 'error'].includes(key),
+        ) ||
+        typeof result['executionStatus'] !== 'string' ||
+        !['success', 'error', 'cancelled', 'not_started'].includes(
+          result['executionStatus'],
+        ) ||
+        !Array.isArray(result['responseParts']) ||
+        (error &&
+          (Object.keys(error).some(
+            (key) => !['message', 'type'].includes(key),
+          ) ||
+            typeof error['message'] !== 'string' ||
+            !error['message'] ||
+            ('type' in error &&
+              (typeof error['type'] !== 'string' || !error['type']))))
+      )
+        throw new Error('Legacy Shell result is invalid.');
+      return undefined;
+    }
     return {
       bindingGeneration: generation,
-      result: parseToolResultEnvelope(status['result']),
+      result: parseToolResultEnvelope(result),
     };
   }
 

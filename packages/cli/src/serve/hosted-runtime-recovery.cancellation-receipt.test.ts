@@ -41,7 +41,16 @@ afterEach(async () => {
   server = undefined;
 });
 
-it('records a durable Shell receipt when cancellation recovery settles a producer-lost execution', async () => {
+async function cancellationFixture(
+  resultKind:
+    | 'producer-lost'
+    | 'not-found'
+    | 'settled-success'
+    | 'settled-error'
+    | 'settled-not-started'
+    | 'legacy-cancelled' = 'producer-lost',
+  identity: { harnessSessionId?: string; bindingGeneration?: string } = {},
+) {
   root = await mkdtemp(path.join(tmpdir(), 'hosted-cancel-receipt-'));
   const key = {
     tenantId: 'tenant-cancel',
@@ -214,35 +223,50 @@ it('records a durable Shell receipt when cancellation recovery settles a produce
       response.end(JSON.stringify({ code: 'unexpected_test_route' }));
       return;
     }
+    if (resultKind === 'not-found') {
+      response.writeHead(404, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ code: 'runtime_execution_not_found' }));
+      return;
+    }
+    const settled = cancelled || resultKind !== 'producer-lost';
+    const brokerResult =
+      resultKind === 'legacy-cancelled'
+        ? {
+            executionStatus: 'cancelled',
+            responseParts: envelope.responseParts,
+            error: envelope.error,
+          }
+        : resultKind.startsWith('settled-')
+          ? {
+              executionStatus: resultKind
+                .slice('settled-'.length)
+                .replace('-', '_'),
+              responseParts: envelope.responseParts,
+              capture:
+                resultKind === 'settled-not-started' ? null : envelope.capture,
+            }
+          : envelope;
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(
       JSON.stringify({
         protocolVersion: 1,
-        harnessSessionId: key.sessionId,
+        harnessSessionId: identity.harnessSessionId ?? key.sessionId,
         runtimeSessionId: promptId,
         executionCallId,
         requestDigest,
         runtimeBindingId: 'binding-cancel',
-        bindingGeneration: '1',
-        reference: {
-          runtimeProtocol: 3,
-          dispatchMode: 'deferred',
-          sessionId: promptId,
-          promptId,
-          callId: workerCallId,
-          argsDigest: requestDigest,
-          inputDigest,
-        },
+        bindingGeneration: identity.bindingGeneration ?? '1',
         status: {
-          state: cancelled ? 'settled' : 'executing',
-          ...(cancelled ? { result: envelope } : {}),
+          state: settled ? 'settled' : 'executing',
+          ...(settled ? { result: brokerResult } : {}),
         },
       }),
     );
   });
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
-  const result = await settleInterruptedTurnRuntime({
+  const managed = session;
+  const settleInput = {
     session,
     sessionId: key.sessionId,
     cwd: root,
@@ -269,9 +293,39 @@ it('records a durable Shell receipt when cancellation recovery settles a produce
         }
       },
     },
-  });
+  };
+  return {
+    key,
+    executionCallId,
+    workerCallId,
+    modelCallId,
+    promptId,
+    transcriptPath,
+    resources,
+    envelope,
+    requests,
+    session: managed,
+    cancelled: () => cancelled,
+    settle: () => settleInterruptedTurnRuntime(settleInput),
+  };
+}
+
+it('records a durable Shell receipt when cancellation recovery settles a producer-lost execution', async () => {
+  const f = await cancellationFixture();
+  const {
+    key,
+    executionCallId,
+    workerCallId,
+    promptId,
+    transcriptPath,
+    resources,
+    envelope,
+    requests,
+    session: managed,
+  } = f;
+  const result = await f.settle();
   expect(result.kind).toBe('ready');
-  expect(cancelled).toBe(true);
+  expect(f.cancelled()).toBe(true);
   expect(requests.filter((r) => r.endsWith(':cancel'))).toHaveLength(1);
   expect(requests.some((r) => /:start|:prepare/.test(r))).toBe(false);
   const journal = await LocalJsonlManagedSessionJournalStore.read(
@@ -307,9 +361,102 @@ it('records a durable Shell receipt when cancellation recovery settles a produce
   });
   expect(receipts[0].payload['resultRef']).toBeNull();
   expect(receipts[0].payload['resources']).toEqual([]);
-  const authorization = await session.authority.harnessRunAuthorization();
+  const authorization = await managed.authority.harnessRunAuthorization();
   expect(authorization.status).toBe('runnable');
   if (authorization.status === 'runnable') {
     expect(authorization.checkpoint.tools?.items[0].outcomeRef).toEqual(ref);
   }
 });
+
+it.each([
+  'not-found',
+  'settled-success',
+  'settled-error',
+  'settled-not-started',
+  'legacy-cancelled',
+] as const)(
+  'settles %s through a generic cancellation outcome without a native receipt',
+  async (resultKind) => {
+    const f = await cancellationFixture(resultKind);
+    await expect(f.settle()).resolves.toMatchObject({ kind: 'ready' });
+    const authorization = await f.session.authority.harnessRunAuthorization();
+    expect(authorization.status).toBe('runnable');
+    if (authorization.status !== 'runnable') return;
+    expect(authorization.checkpoint.continuation.phase).toBe('results_ready');
+    const item = authorization.checkpoint.tools!.items[0];
+    expect(item.state).toBe('settled');
+    const ref = item.outcomeRef;
+    if (ref === null) throw new Error('Missing generic cancellation outcome.');
+    expect(ref.kind).toBe('managed-tool-outcome');
+    const outcome = JSON.parse((await f.resources.read(ref)).toString());
+    expect(Object.keys(outcome).sort()).toEqual([
+      'executionCallId',
+      'functionResponse',
+    ]);
+    expect(outcome).toMatchObject({
+      executionCallId: f.executionCallId,
+      functionResponse: {
+        id: f.modelCallId,
+        name: 'run_shell_command',
+        response: { executionStatus: 'cancelled' },
+      },
+    });
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      f.transcriptPath,
+      f.key,
+    );
+    expect(
+      journal.events.filter((event) => event.kind === 'tool.receipt'),
+    ).toHaveLength(0);
+    await expect(f.settle()).resolves.toMatchObject({ kind: 'ready' });
+    const repeated = await f.session.authority.harnessRunAuthorization();
+    expect(repeated.status).toBe('runnable');
+    if (repeated.status === 'runnable') {
+      expect(repeated.checkpoint.tools!.items[0].outcomeRef).toEqual(ref);
+    }
+    const repeatedJournal = await LocalJsonlManagedSessionJournalStore.read(
+      f.transcriptPath,
+      f.key,
+    );
+    expect(
+      repeatedJournal.events.filter((event) => event.kind === 'tool.receipt'),
+    ).toHaveLength(0);
+    expect(repeatedJournal.events).toHaveLength(journal.events.length);
+    expect(f.cancelled()).toBe(false);
+    expect(f.requests.some((request) => /:start|:prepare/.test(request))).toBe(
+      false,
+    );
+  },
+);
+
+it.each([
+  {
+    identity: { harnessSessionId: 'foreign-session' },
+    message: 'Runtime Broker response identity changed.',
+  },
+  {
+    identity: { bindingGeneration: '0' },
+    message: 'Original Shell result is not settled under its binding.',
+  },
+])(
+  'keeps a legacy result with conflicting identity pending (%j)',
+  async ({ identity, message }) => {
+    const f = await cancellationFixture('legacy-cancelled', identity);
+    await expect(f.settle()).rejects.toThrow(message);
+    const authorization = await f.session.authority.harnessRunAuthorization();
+    expect(authorization.status).toBe('runnable');
+    if (authorization.status === 'runnable') {
+      expect(authorization.checkpoint.continuation.phase).toBe('await_runtime');
+      expect(authorization.checkpoint.tools!.items[0].state).toBe(
+        'in_progress',
+      );
+    }
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      f.transcriptPath,
+      f.key,
+    );
+    expect(
+      journal.events.filter((event) => event.kind === 'tool.receipt'),
+    ).toHaveLength(0);
+  },
+);

@@ -69,6 +69,7 @@ async function registryFixture(
   let refusals = 0;
   publisherApp.post(HOSTED_SHELL_PUBLISHER_PATH, (request, response) => {
     response.set('Cache-Control', 'no-store');
+    response.set('Connection', 'close');
     if (refusal && request.body.operation === refusal.operation) {
       refusals++;
       response.status(refusal.status).json({
@@ -144,6 +145,7 @@ it.skipIf(process.platform === 'win32')(
       path.join(directory, 'global'),
     );
     const { registry, prepares } = await registryFixture();
+    const prepare = vi.spyOn(registry, 'prepare');
     const program = [
       'const fs=require("node:fs"),cp=require("node:child_process");',
       'const child=cp.spawn(process.execPath,["-e","setTimeout(()=>{},60000)"],{stdio:"ignore"});',
@@ -232,6 +234,7 @@ it.skipIf(process.platform === 'win32')(
     });
     expect(executor.statusV3(reference)).toEqual(view);
     expect(prepares()).toBe(1);
+    expect(prepare).toHaveBeenCalledTimes(1);
   },
 );
 
@@ -331,9 +334,13 @@ it.skipIf(process.platform === 'win32')(
   'accepts only the original private lost-capture result, never its clone or matching shape',
   async () => {
     const { registry, prepares } = await registryFixture();
+    const prepare = vi.spyOn(registry, 'prepare');
     const { sink, identity } = await registry.prepare(captureRequest);
     sink.setStarted(recordedPid);
     sink.setProcessResult({ ...physicalResult(), pid: undefined });
+    const retry = await registry.prepare(captureRequest);
+    expect(retry.sink).toBe(sink);
+    expect(retry.identity).toEqual(identity);
     await close(publisher);
     groupProbe('gone');
     const result = await sink.finalize('cancelled', []);
@@ -358,7 +365,8 @@ it.skipIf(process.platform === 'win32')(
     await expect(
       registry.accept(identity, { ...result, responseParts: [] }),
     ).rejects.toThrow();
-    expect(prepares()).toBe(1);
+    expect(prepares()).toBe(2);
+    expect(prepare).toHaveBeenCalledTimes(2);
   },
 );
 
