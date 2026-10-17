@@ -46,9 +46,15 @@ interface Entry {
    * process's end: the finalize then carries the platform-stop marker, so
    * the record can project `stop_requested` instead of a bare exit
    * (#13856 A8). A natural exit never sets it, and a stop the supervisor
-   * cannot prove clears it again (#13930 R1-42).
+   * cannot prove clears it again (#13930 R1-42). The mark belongs to the
+   * unit's shared in-flight stop attempt, never to one caller: concurrent
+   * stops on this unit merge into the same supervisor attempt, so an
+   * early caller's unproven answer cannot erase the proof a late caller
+   * earned (#14464 P2).
    */
   stopRequested: boolean;
+  /** The unit's shared in-flight supervisor stop attempt. */
+  stop: Promise<ChildRunExitEvidence | null> | null;
   completion: Promise<BackgroundShellReceipt>;
 }
 
@@ -114,6 +120,7 @@ export class ManagedBackgroundShellRegistry {
     const entry: Entry = {
       ...params,
       stopRequested: false,
+      stop: null,
       completion: undefined as unknown as Promise<BackgroundShellReceipt>,
     };
     entry.completion = this.complete(entry);
@@ -138,17 +145,26 @@ export class ManagedBackgroundShellRegistry {
     if (!entry) return undefined;
     // The platform asked for this end: mark it before the stop so the
     // completion's finalize projects a requested stop, not a bare exit.
-    // The mark belongs to this stop's own window only: an end the
-    // supervisor cannot prove keeps the hold, and we unmark instead — a
+    // The mark is cleared only when the unit's shared attempt proves
+    // nothing — an end the supervisor cannot prove keeps the hold, and a
     // run that survives and later exits on its own must record its real
     // end, not a requested stop nobody observed (#13930 R1-42).
     entry.stopRequested = true;
-    const evidence = await entry.process.terminate(graceMs);
-    if (evidence === null) {
-      entry.stopRequested = false;
-      return { unitName, evidence: null, captureError: null };
+    // Overlapping stops on this unit share ONE in-flight supervisor
+    // attempt: a late caller joins the first caller's answer instead of
+    // earning its own, so the unproven one's unmark cannot erase the
+    // proof another caller is still owed (#14464 P2).
+    const pending = (entry.stop ??= entry.process.terminate(graceMs));
+    try {
+      const evidence = await pending;
+      if (evidence === null) {
+        entry.stopRequested = false;
+        return { unitName, evidence: null, captureError: null };
+      }
+      return entry.completion;
+    } finally {
+      if (entry.stop === pending) entry.stop = null;
     }
-    return entry.completion;
   }
 
   /** Worker close: terminate everything; holds release as each drain ends. */
