@@ -215,6 +215,14 @@ class WorkspaceCsiApplicationInventoryTest {
                 details.deepCopy().put("registrationId", "1-1-1-1-1"),
                 details.deepCopy().put("registrationId", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"),
                 details.deepCopy().put("registrationId", 1),
+                details.deepCopy().put("sourceWorkspaceId", "other-workspace"),
+                details.deepCopy().put("sourceWorkspaceId", "workspace"),
+                details.deepCopy().put("sourceGeneration", 1),
+                details.deepCopy().put("sourceGeneration", "1"),
+                details.deepCopy().put("cwdRelative", "."),
+                details.deepCopy().without("sourceWorkspaceId"),
+                details.deepCopy().without("sourceGeneration"),
+                details.deepCopy().without("cwdRelative"),
                 details.deepCopy().putNull("workspaceId"),
                 details.deepCopy().without("displayName"),
                 details.deepCopy().put("unknown", "ordinary"),
@@ -230,6 +238,28 @@ class WorkspaceCsiApplicationInventoryTest {
         }
         jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", original, receipt);
         assertThat(inspect().blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+    }
+
+    @Test
+    void originalFourFieldWorkspaceReceiptRemainsExactAlongsideTheNewNullExtension() throws Exception {
+        String receipt = createOtherWorkspace("foreign").workspaceId().substring("workspace-".length());
+        String current = jdbc.queryForObject("SELECT result_json FROM ma_request_receipt WHERE receipt_key = ?", String.class, receipt);
+        var legacy = (com.fasterxml.jackson.databind.node.ObjectNode) new ObjectMapper().readTree(current);
+        for (String field : List.of("sourceWorkspaceId", "sourceGeneration", "cwdRelative")) {
+            assertThat(legacy.path(field).isNull()).isTrue();
+            legacy.remove(field);
+        }
+        assertThat(legacy.size()).isEqualTo(4);
+        for (String raw : List.of(legacy.toString(), current)) {
+            jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", raw, receipt);
+            var found = inspect();
+            assertThat(found.blockers()).noneMatch(blocker -> blocker.table().equals("ma_request_receipt"));
+            assertThat(found.table("ma_request_receipt").rows()).filteredOn(row -> receipt.equals(row.text("receipt_key")))
+                    .hasSize(1).allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.OTHER
+                            && raw.equals(row.text("result_json")));
+            assertThat(jdbc.queryForObject("SELECT result_json FROM ma_request_receipt WHERE receipt_key = ?", String.class, receipt))
+                    .isEqualTo(raw);
+        }
     }
 
     @Test
@@ -273,6 +303,22 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE receipt_key = ?", String.class, receipt)).isEqualTo("PENDING");
         assertWorkspaceReceiptBlocked(receipt);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?", Integer.class, "foreign")).isZero();
+    }
+
+    @Test
+    void sshWorkspaceOperationsDoNotBorrowThePassiveLocalReceiptClassification() throws Exception {
+        var ssh = new SshWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
+        for (String tenant : List.of("tenant", "foreign")) {
+            var operation = ssh.begin(tenant, "actor", "ssh-data-only", "synthetic-node", "/ordinary", "SSH");
+            var before = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_id = ?", operation.operationId());
+            var found = inspect();
+            assertThat(found.table("ma_operation").rows())
+                    .filteredOn(row -> operation.operationId().equals(row.text("operation_id")))
+                    .hasSize(1).allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL);
+            assertThat(found.blockers()).anyMatch(blocker -> blocker.table().equals("ma_operation"));
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_id = ?", operation.operationId()))
+                    .usingRecursiveComparison().isEqualTo(before);
+        }
     }
 
     private void assertWorkspaceReceiptBlocked(String receipt) throws Exception {

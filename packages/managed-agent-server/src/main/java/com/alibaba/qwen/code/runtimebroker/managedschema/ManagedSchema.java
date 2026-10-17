@@ -18,15 +18,26 @@ public final class ManagedSchema {
     public static final String PRIVATE_AUTHORITY =
             "/db/managed-schema/V2__private_csi_authority.sql";
     public static final String K2_RETIREMENT =
-            "/db/managed-schema/V7__k2_retirement_evidence.sql";
+            "/db/managed-schema/V9__k2_retirement_evidence.sql";
     public static final String SESSION_LIST =
             "/db/managed-schema/V3__session_list_created_at.sql";
     public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
     public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
     public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
     // Additive migrations over the published V1 baseline, in version order.
-    private static final List<String> EXTENSIONS = List.of(PRIVATE_AUTHORITY, SESSION_LIST, WORKSPACE_CREATION, MODEL_SELECTION, APPROVAL_SELECTION, K2_RETIREMENT);
-    private static final int CURRENT = EXTENSIONS.size() + 1;
+    public static final String SSH_WORKSPACE =
+            "/db/managed-schema/V7__ssh_workspace_registration.sql";
+    public static final String TURN_COMMAND_OPERATIONS =
+            "/db/managed-schema/V8__turn_command_operations.sql";
+    private static final List<Migration> EXTENSIONS = List.of(new Migration(2, PRIVATE_AUTHORITY),
+            new Migration(3, SESSION_LIST), new Migration(4, WORKSPACE_CREATION),
+            new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
+            new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS),
+            new Migration(9, K2_RETIREMENT));
+    private static final int CURRENT = EXTENSIONS.getLast().version();
+
+    private record Migration(int version, String resource) {
+    }
 
     private ManagedSchema() {}
 
@@ -44,10 +55,17 @@ public final class ManagedSchema {
                 if (version < CURRENT) {
                     if (ManagedSchemaCatalog.hasHistory(connection)) {
                         throw new SQLException(
-                                "The canonical V" + version + " catalog requires the application's V" + (version + 1) + " migration");
+                                "The canonical V"
+                                        + version
+                                        + " catalog requires the application's V"
+                                        + EXTENSIONS.stream().filter(extension -> extension.version() > version)
+                                                .findFirst().orElseThrow().version()
+                                        + " migration");
                     }
-                    for (String extension : EXTENSIONS.subList(version - 1, EXTENSIONS.size())) {
-                        execute(connection, read(extension));
+                    for (Migration extension : EXTENSIONS) {
+                        if (extension.version() > version) {
+                            execute(connection, read(extension.resource()));
+                        }
                     }
                     ManagedSchemaCatalog.validate(connection, ddl);
                 }
@@ -83,25 +101,31 @@ public final class ManagedSchema {
 
     private static String ddl(int version) {
         String ddl = read(RESOURCE);
-        for (String extension : EXTENSIONS.subList(0, version - 1)) {
-            ddl = extend(ddl, read(extension));
+        for (Migration extension : EXTENSIONS) {
+            if (extension.version() <= version) {
+                ddl = extend(ddl, read(extension.resource()));
+            }
         }
         return ddl;
     }
 
     private static String extend(String ddl, String extension) {
+        var checks = Pattern.compile("ALTER TABLE (ma_[a-z_]+) DROP CONSTRAINT ([a-z_]+);\\s*"
+                + "ALTER TABLE \\1 ADD CONSTRAINT \\2 CHECK ([^;]+);").matcher(extension);
+        while (checks.find()) {
+            String name = checks.group(2);
+            var original = Pattern.compile("(?m)CONSTRAINT " + name + " CHECK [^\\n]+").matcher(ddl);
+            if (!original.find()) {
+                throw new IllegalStateException("Changed check is absent from the canonical baseline");
+            }
+            ddl = original.replaceFirst(java.util.regex.Matcher.quoteReplacement(
+                    "CONSTRAINT " + name + " CHECK " + checks.group(3)
+                            + (original.group().endsWith(",") ? "," : "")));
+        }
+        extension = checks.replaceAll("");
         for (String raw : extension.replaceAll("(?m)^--[^\\n]*", "").split(";")) {
             String command = raw.trim();
             if (command.isEmpty()) {
-                continue;
-            }
-            if (command.equals("ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace")) {
-                var constraint = Pattern.compile("(?m)^    CONSTRAINT ck_ma_request_namespace CHECK[^\\n]+\\n?")
-                        .matcher(ddl);
-                if (!constraint.find()) {
-                    throw new IllegalStateException("Receipt namespace constraint is absent from the baseline");
-                }
-                ddl = constraint.replaceFirst("");
                 continue;
             }
             var drop = Pattern.compile("DROP INDEX ([a-z_]+) ON (ma_[a-z_]+)").matcher(command);
@@ -156,7 +180,8 @@ public final class ManagedSchema {
 
     private static int schemaVersion(Connection connection) throws SQLException {
         SQLException current = null;
-        for (int version = CURRENT; version >= 1; version--) {
+        for (int index = EXTENSIONS.size(); index >= 0; index--) {
+            int version = index == 0 ? 1 : EXTENSIONS.get(index - 1).version();
             try {
                 if (version == CURRENT) {
                     ManagedSchemaCatalog.validate(connection, ddl(version));

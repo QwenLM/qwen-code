@@ -189,7 +189,7 @@ public class WorkspaceExecutionStore {
         }
         var resident = residents.find(binding);
         if (resident == null) {
-            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         } else {
             if (!WorkspaceToolProfiles.FILES.equals(session.toolProfile())
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
@@ -332,7 +332,7 @@ public class WorkspaceExecutionStore {
         String holder = holderKey(session);
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
-            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             String key = storageKey(binding);
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state, drain_requested,"
@@ -362,10 +362,10 @@ public class WorkspaceExecutionStore {
                 throw unavailable();
             }
             jdbc.update("INSERT INTO ma_storage_owner"
-                    + " (storage_key, storage_kind) VALUES (?, 'LOCAL') ON DUPLICATE KEY UPDATE"
-                    + " storage_key = storage_key", key);
+                    + " (storage_key, storage_kind) VALUES (?, ?) ON DUPLICATE KEY UPDATE"
+                    + " storage_key = storage_key", key, SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId()) == null ? "LOCAL" : "SSH_LOCAL");
             String current = jdbc.queryForObject("SELECT holder_key FROM"
-                    + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
+                    + " ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE",
                     String.class, key);
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
@@ -375,7 +375,7 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
                     + " binding_id = ?, runtime_generation = ?, runtime_session_id = ?"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL'", holder, session.getBindingId(),
+                    + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", holder, session.getBindingId(),
                     session.getRuntimeGeneration(), session.getRuntimeSessionId(), key);
         });
     }
@@ -398,9 +398,9 @@ public class WorkspaceExecutionStore {
             requireResidentHeld(binding, session, true);
             return session.getState() != RuntimeSessionRecord.State.RELEASED;
         }
-        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
-                + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'",
+                + " ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')",
                 String.class, storageKey(binding));
         return holders.size() == 1 && holderKey(session).equals(holders.getFirst());
     }
@@ -419,7 +419,7 @@ public class WorkspaceExecutionStore {
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
-            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state"
                     + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE",
                     (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
@@ -432,7 +432,7 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ?",
+                    + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key = ?",
                     storageKey(binding), holderKey(session));
         });
     }
@@ -450,6 +450,7 @@ public class WorkspaceExecutionStore {
      */
     public String holdForMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         WorkspaceStorageKindGuard.requireFreshTransaction();
         String holder = maintenanceHolderKey(maintenanceId, claimGeneration);
         return transaction.execute(status -> {
@@ -520,7 +521,7 @@ public class WorkspaceExecutionStore {
     public boolean canStopDrained(RuntimeBindingRecord saved) {
         if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
                 || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
-                || !LocalProcessRuntimeProvisioner.KIND.equals(saved.getRequest().getProvisionerKind())
+                || !java.util.Set.of(LocalProcessRuntimeProvisioner.KIND, com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND).contains(saved.getRequest().getProvisionerKind())
                 || !WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())) {
             return false;
         }
@@ -544,7 +545,7 @@ public class WorkspaceExecutionStore {
             return false;
         }
         var holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'", (row, index) -> {
+                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", (row, index) -> {
                     String holder = row.getString("holder_key");
                     String binding = row.getString("binding_id");
                     String session = row.getString("runtime_session_id");
@@ -557,7 +558,7 @@ public class WorkspaceExecutionStore {
                             && jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                                     + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
                                     Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1;
-                }, LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()));
+                }, storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()));
         return holders.isEmpty() || holders.size() == 1 && holders.getFirst();
     }
 
@@ -596,9 +597,9 @@ public class WorkspaceExecutionStore {
             if (jdbc.queryForList(ORIGINAL_HOLDER_SQL, String.class, saved.getBindingId(), saved.getGeneration()).isEmpty()) {
                 return;
             }
-            String key = LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
+            String key = storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
             jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id, maintenance_id"
-                    + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", row -> {
+                    + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", row -> {
                         String holder = row.getString("holder_key");
                         String bindingId = row.getString("binding_id");
                         String sessionId = row.getString("runtime_session_id");
@@ -629,7 +630,7 @@ public class WorkspaceExecutionStore {
                             }
                             int changed = jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
                                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ? AND binding_id = ?"
+                                    + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key = ? AND binding_id = ?"
                                     + " AND runtime_generation = ? AND runtime_session_id = ?",
                                     key, holder, bindingId, generation, sessionId);
                             if (changed != 1) {
@@ -688,8 +689,14 @@ public class WorkspaceExecutionStore {
         return storageKey(jdbc, binding);
     }
 
+    private String storageKey(String tenant, String storage) {
+        String ssh = SshWorkspaceStore.physicalKey(jdbc, tenant, storage);
+        return ssh == null ? LocalStorageOwners.key(jdbc, tenant, storage) : ssh;
+    }
+
     static String storageKey(JdbcTemplate jdbc, ContextBinding binding) {
-        return LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId());
+        String ssh = SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId());
+        return ssh == null ? LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId()) : ssh;
     }
 
     private static String maintenanceHolderKey(String maintenanceId, long claimGeneration) {

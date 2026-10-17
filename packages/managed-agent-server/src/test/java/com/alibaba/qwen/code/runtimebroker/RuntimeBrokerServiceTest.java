@@ -2096,6 +2096,105 @@ class RuntimeBrokerServiceTest {
         }
     }
 
+    // H4f-c: a public task cancel stops exactly one of the Session's own
+    // hold rows — status first, then the family's stop — and only the
+    // worker's exit evidence settles it; an unproven stop keeps the hold.
+    @Test
+    void stopBackgroundProcessStopsOnlyTheSessionsOwnProcess() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            awaitExecution(fixture.executionRepository, prepared.getExecutionCallId() + ":process",
+                    ToolExecutionRecord.State.PREPARED);
+            String id = prepared.getExecutionCallId();
+            fixture.transport.controlHandler = operation ->
+                    CompletableFuture.completedFuture(Map.of(
+                            "operationId", "call", "state", "running"));
+
+            // Another Harness Session, another tenant, or a call with no
+            // hold row names no process this cancel may stop.
+            assertEquals("runtime_execution_not_found", failure(
+                    fixture.service.stopBackgroundProcess("tenant",
+                            "other-harness", id)).getCode());
+            assertEquals("runtime_execution_not_found", failure(
+                    fixture.service.stopBackgroundProcess("other-tenant",
+                            "harness", id)).getCode());
+            assertEquals("runtime_execution_not_found", failure(
+                    fixture.service.stopBackgroundProcess("tenant",
+                            "harness", id + ":process")).getCode());
+            assertTrue(fixture.transport.controls.isEmpty());
+
+            // A stop the worker cannot prove keeps the hold.
+            ToolExecutionRecord unproven = join(fixture.service
+                    .stopBackgroundProcess("tenant", "harness", id));
+            assertEquals(ToolExecutionRecord.State.PREPARED, unproven.getState());
+            assertEquals(java.util.List.of("shell-status", "shell-terminate",
+                    "shell-status"), fixture.transport.controls.stream()
+                            .map(operation -> operation.get("kind")).toList());
+            assertEquals("runtime_session_held",
+                    failure(fixture.service.release("harness", "runtime")).getCode());
+
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("operationId", "call");
+            exited.put("state", "exited");
+            exited.put("unitName", "qwen-bg-call");
+            exited.put("evidence", Map.of("exitSignal", "SIGTERM"));
+            fixture.transport.controls.clear();
+            fixture.transport.controlHandler = operation ->
+                    CompletableFuture.completedFuture(
+                            "shell-terminate".equals(operation.get("kind"))
+                                    ? exited
+                                    : Map.of("operationId", "call",
+                                            "state", "running"));
+            ToolExecutionRecord stopped = join(fixture.service
+                    .stopBackgroundProcess("tenant", "harness", id));
+            assertEquals(ToolExecutionRecord.State.SETTLED, stopped.getState());
+            assertEquals(java.util.List.of("shell-status", "shell-terminate"),
+                    fixture.transport.controls.stream()
+                            .map(operation -> operation.get("kind")).toList());
+            assertEquals("call", fixture.transport.controls.get(1)
+                    .get("targetOperationId"));
+            // A settled row is not asked again, and the hold is gone.
+            fixture.transport.controls.clear();
+            assertEquals(ToolExecutionRecord.State.SETTLED, join(fixture.service
+                    .stopBackgroundProcess("tenant", "harness", id)).getState());
+            assertTrue(fixture.transport.controls.isEmpty());
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
     @Test
     void releaseSettlesAnExitedBackgroundProcessBeforeBusy() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";

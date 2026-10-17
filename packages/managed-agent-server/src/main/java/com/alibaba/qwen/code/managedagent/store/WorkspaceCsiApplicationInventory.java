@@ -2352,7 +2352,15 @@ final class WorkspaceCsiApplicationInventory {
                 }
             }
             JsonNode details = parse(row.text("result_json"));
-            WorkspaceCsiApplicationJson.closed(details, Set.of("workspaceId", "storageId", "displayName", "registrationId"));
+            WorkspaceCsiApplicationJson.closed(details, details.size() == 4
+                    ? Set.of("workspaceId", "storageId", "displayName", "registrationId")
+                    : Set.of("workspaceId", "storageId", "displayName", "registrationId",
+                            "sourceWorkspaceId", "sourceGeneration", "cwdRelative"));
+            for (String field : List.of("sourceWorkspaceId", "sourceGeneration", "cwdRelative")) {
+                if (details.has(field) && !details.path(field).isNull()) {
+                    return false;
+                }
+            }
             for (String field : List.of("workspaceId", "storageId", "displayName", "registrationId")) {
                 if (!details.path(field).isTextual()) {
                     return false;

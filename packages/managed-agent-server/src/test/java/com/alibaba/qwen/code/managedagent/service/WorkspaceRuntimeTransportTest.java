@@ -33,6 +33,8 @@ import java.util.concurrent.CompletableFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -57,6 +59,79 @@ class WorkspaceRuntimeTransportTest {
                             error -> assertThat(error.getCode()).isEqualTo("csi_control_not_qualified"));
         }
         verifyNoInteractions(fixture.http(), fixture.ownership(), fixture.resolver(), fixture.bindings(), fixture.sessions());
+    }
+
+    @Test
+    void invalidRemoteCwdIsRejectedBeforeClaimingStorageOrInstallingContext() throws Exception {
+        var fixture = sshAcquisitionFixture();
+        var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
+        doThrow(WorkspaceExecutionStore.unavailable()).when(fixture.resolver())
+                .verifyInstallable(binding, binding.getCwdRelative());
+        unavailable(() -> fixture.transport().acquire(fixture.lease(), fixture.session()));
+        verifyNoInteractions(fixture.ownership(), fixture.http());
+    }
+
+    @Test
+    void sshPreflightVerdictsTranslateToTheDefiniteRefusalContract() throws Exception {
+        var fixture = sshAcquisitionFixture();
+        var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
+        for (String verdict : new String[] {"ssh_runtime_state_unavailable", "ssh_runtime_identity_conflict"}) {
+            doThrow(new RuntimeBrokerException(409, verdict, "SSH preflight refused the directory.", false))
+                    .when(fixture.resolver()).verifyInstallable(binding, binding.getCwdRelative());
+            assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                        assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                        assertThat(error.getCause()).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                                cause -> assertThat(cause.getCode()).isEqualTo(verdict));
+                    });
+            verify(fixture.ownership(), never()).claim(any(), any());
+            verifyNoInteractions(fixture.http());
+        }
+    }
+
+    @Test
+    void remotePreflightPrecedesClaimButAnUncertainInstallStillRetainsOwnership() throws Exception {
+        var fixture = sshAcquisitionFixture();
+        var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
+        when(fixture.http().installContext(any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("Response lost")));
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()).toCompletableFuture().join())
+                .hasCauseInstanceOf(RuntimeBrokerException.class)
+                .cause().extracting(error -> ((RuntimeBrokerException) error).getCode())
+                .isEqualTo("runtime_session_acquire_failed");
+        var order = inOrder(fixture.resolver(), fixture.ownership(), fixture.http());
+        order.verify(fixture.resolver()).verifyInstallable(binding, binding.getCwdRelative());
+        order.verify(fixture.ownership()).claim(binding, fixture.record());
+        order.verify(fixture.http()).installContext(any(), any(), any(), any());
+        verify(fixture.ownership(), never()).release(any(), any());
+    }
+
+    @Test
+    void v2AcknowledgementUsesTheReleasedOriginalSshSessionWithoutReclaimingStorage() throws Exception {
+        var fixture = fixture();
+        var original = fixture.runtime();
+        var oldScope = fixture.session().getScope();
+        var scope = new RuntimeScope(oldScope.getTenantId(), oldScope.getWorkspaceId(), oldScope.getWorkspaceGeneration(),
+                oldScope.getCanonicalCwd(), oldScope.getCapabilityDigest(), "session");
+        var session = new RuntimeSession(fixture.session().getHarnessSessionId(), fixture.session().getRuntimeSessionId(),
+                fixture.session().getTurnKind(), scope);
+        var request = new RuntimeProvisionRequest(scope, session.getHarnessSessionId(), "ssh-process", original.getRequest().getStorageId());
+        var runtime = new RuntimeBindingRecord(original.getBindingId(), request, original.getProvisionSeed(), original.getGeneration(),
+                RuntimeBindingRecord.State.DRAINING, original.getLease(), new RuntimeResourceHandle("ssh-process", 1, Map.of("fixture", true)),
+                3, true, null, null, 0, 1, null, Instant.now(), Instant.now());
+        var record = new RuntimeSessionRecord(session, runtime.getBindingId(), runtime.getGeneration(),
+                RuntimeSessionRecord.State.RELEASED, 1, Instant.now());
+        when(fixture.bindings().findById(runtime.getBindingId())).thenReturn(runtime);
+        when(fixture.sessions().findById(scope, session.getRuntimeSessionId())).thenReturn(record);
+        when(fixture.http().acknowledgeV2(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        Map<String, Object> reference = Map.of("callId", "file-call");
+        fixture.transport().acknowledgeV2(fixture.lease(), session, reference).toCompletableFuture().join();
+        verify(fixture.http()).acknowledgeV2(fixture.lease(), session, reference);
+        verify(fixture.resolver(), never()).resolve(any(), any());
+        verifyNoInteractions(fixture.ownership());
+        var crossed = new RuntimeLease("other", fixture.lease().getEndpoint(), fixture.lease().getToken(),
+                fixture.lease().getLeaseId(), fixture.lease().getEpoch());
+        unavailable(() -> fixture.transport().acknowledgeV2(crossed, session, reference));
     }
 
     @Test
@@ -237,6 +312,30 @@ class WorkspaceRuntimeTransportTest {
         var http = mock(HttpRuntimeTransport.class);
         return new Fixture(new WorkspaceRuntimeTransport(http, resolver, ownership, bindings, sessions), http, resolver,
                 ownership, bindings, sessions, runtime, record, lease, session, boot, map(fixture.get("expectedPod")), request, capture);
+    }
+
+    private static Fixture sshAcquisitionFixture() throws Exception {
+        var fixture = fixture();
+        var original = fixture.runtime();
+        var oldScope = fixture.session().getScope();
+        var scope = new RuntimeScope(oldScope.getTenantId(), oldScope.getWorkspaceId(), oldScope.getWorkspaceGeneration(),
+                oldScope.getCanonicalCwd(), oldScope.getCapabilityDigest(), "session");
+        var session = new RuntimeSession(fixture.session().getHarnessSessionId(), fixture.session().getRuntimeSessionId(),
+                fixture.session().getTurnKind(), scope);
+        var request = new RuntimeProvisionRequest(scope, session.getHarnessSessionId(), "ssh-process", original.getRequest().getStorageId());
+        var runtime = new RuntimeBindingRecord(original.getBindingId(), request, original.getProvisionSeed(), original.getGeneration(),
+                RuntimeBindingRecord.State.READY, original.getLease(), new RuntimeResourceHandle("ssh-process", 1, Map.of("fixture", true)),
+                3, false, null, null, 0, 1, null, Instant.now(), Instant.now());
+        var record = new RuntimeSessionRecord(session, runtime.getBindingId(), runtime.getGeneration(),
+                RuntimeSessionRecord.State.READY, 1, Instant.now());
+        var binding = fixture.resolver().savedBinding(session.getHarnessSessionId());
+        when(fixture.bindings().findById(runtime.getBindingId())).thenReturn(runtime);
+        when(fixture.sessions().findById(scope, session.getRuntimeSessionId())).thenReturn(record);
+        when(fixture.resolver().resolve(session.getHarnessSessionId(), null))
+                .thenReturn(new WorkspaceRuntimeResolver.Resolved(binding, scope));
+        return new Fixture(fixture.transport(), fixture.http(), fixture.resolver(), fixture.ownership(),
+                fixture.bindings(), fixture.sessions(), runtime, record, fixture.lease(), session,
+                fixture.boot(), fixture.pod(), fixture.request(), fixture.capture());
     }
 
     private record Fixture(WorkspaceRuntimeTransport transport, HttpRuntimeTransport http, WorkspaceRuntimeResolver resolver,

@@ -59,7 +59,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
 class ManagedTurnQueryTest {
     static final String URL = "jdbc:h2:mem:managed-turn-query;"
-            + "MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE";
+            + "MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;RECOMPILE_ALWAYS=TRUE";
     private static final String TENANT = TenantContextFilter.HEADER;
     private static final long NEVER = Long.MAX_VALUE / 2;
 

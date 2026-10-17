@@ -22,7 +22,7 @@ Broker scope/request/execution 散列、CSI alias/physical 散列和 token 散�
 
 ## 标准结构明确清单（33 表、749 列）
 
-应用清单为 `qwen-csi-application-inventory/2`，组件 checkpoint 为 `qwen-csi-retirement-inventory/2`，拒绝版本 1。准确字段名、顺序、JDBC 类型和主键由 `WorkspaceCsiApplicationInventory` 声明；全新 DDL 为 `packages/managed-agent-server/src/main/resources/db/managed-schema/`（V1–V7）。目录验证和检查使用同一真实 JDBC Connection，不添加兼容视图、别名或旧数据回填。
+应用清单为 `qwen-csi-application-inventory/2`，组件 checkpoint 为 `qwen-csi-retirement-inventory/2`，拒绝版本 1。准确字段名、顺序、JDBC 类型和主键由 `WorkspaceCsiApplicationInventory` 声明；全新 DDL 为 `packages/managed-agent-server/src/main/resources/db/managed-schema/`（V1–V9）。目录验证和检查使用同一真实 JDBC Connection，不添加兼容视图、别名或旧数据回填。
 
 | 表                       | 字段数 | 主键 / keyset 顺序                                                       |
 | ------------------------ | ------ | ------------------------------------------------------------------------ |

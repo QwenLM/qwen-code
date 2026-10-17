@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -962,7 +963,14 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         exchange.getResponseHeaders().set("Content-Type",
                 "application/json; charset=utf-8");
         exchange.sendResponseHeaders(status, bytes.length);
-        exchange.getResponseBody().write(bytes);
+        // Close the response stream before the exchange. Since JDK 23
+        // (JDK-6968351) the status line, headers and body stay buffered until
+        // this stream is flushed, and HttpExchange.close() drains the unread
+        // request body first: an early 413 would then wait for that drain, or
+        // be dropped when the client's EOF fails it.
+        try (OutputStream output = exchange.getResponseBody()) {
+            output.write(bytes);
+        }
         exchange.close();
     }
 }

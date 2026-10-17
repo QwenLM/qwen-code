@@ -73,6 +73,12 @@ export interface HostedHarnessModelResult {
   model: string;
 }
 
+export class HostedModelRoundLimitError extends Error {
+  constructor() {
+    super('The Hosted Harness Turn reached its configured model round limit.');
+  }
+}
+
 export interface HostedHarnessTextDeltas {
   delta(text: string): Promise<void>;
   /**
@@ -470,19 +476,22 @@ export async function runHostedHarnessTextTurn(input: {
     let preparedRecovery = input.resumeModel?.prepared;
     let stopHookActive =
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
+    const maxRounds = config.getMaxSessionTurns();
     for (
       let round = input.resumeModel?.round ?? input.initialRound ?? 0;
-      round < 16;
+      ;
       round++
     ) {
-      input.toolTurn?.setModelRound?.(round);
       input.signal.throwIfAborted();
+      input.toolTurn?.setModelRound?.(round);
       if (input.hooks?.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
       if (input.toolTurn?.hookStopReason) {
         const text = input.toolTurn.hookStopReason;
         return { text, parts: [{ text }], model: config.getModel() };
       }
+      if (maxRounds > 0 && round >= maxRounds)
+        throw new HostedModelRoundLimitError();
       const declarations =
         (await input.toolTurn?.declarations(input.signal)) ?? [];
       client
@@ -655,6 +664,9 @@ export async function runHostedHarnessTextTurn(input: {
           } else if (event.type === LlmEventType.UserCancelled) {
             modelFailure = false;
             throw new Error('Hosted Harness turn was cancelled.');
+          } else if (event.type === LlmEventType.MaxSessionTurns) {
+            modelFailure = false;
+            throw new HostedModelRoundLimitError();
           } else if (
             event.type !== LlmEventType.ChatCompressed &&
             event.type !== LlmEventType.Thought &&
@@ -779,7 +791,6 @@ export async function runHostedHarnessTextTurn(input: {
       );
       pendingToolResults = true;
     }
-    throw new Error('Hosted tool turn exceeded 16 model rounds.');
   } finally {
     input.hooks?.setMessagesProvider(undefined);
     try {

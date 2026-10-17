@@ -22,7 +22,7 @@ An unrelated owner must be proven from its actual parent/domain chain. Shared te
 
 ## Explicit canonical catalogue (33 tables, 749 columns)
 
-Application inventory is `qwen-csi-application-inventory/2`; the component checkpoint is `qwen-csi-retirement-inventory/2`. Version 1 is refused. The exact column names, order, JDBC kinds and primary keys are declared in `WorkspaceCsiApplicationInventory`; the fresh DDL is `packages/managed-agent-server/src/main/resources/db/managed-schema/` (V1–V7). Catalog validation uses the same actual JDBC Connection as inspection. There are no compatibility views, aliases or legacy backfills.
+Application inventory is `qwen-csi-application-inventory/2`; the component checkpoint is `qwen-csi-retirement-inventory/2`. Version 1 is refused. The exact column names, order, JDBC kinds and primary keys are declared in `WorkspaceCsiApplicationInventory`; the fresh DDL is `packages/managed-agent-server/src/main/resources/db/managed-schema/` (V1–V9). Catalog validation uses the same actual JDBC Connection as inspection. There are no compatibility views, aliases or legacy backfills.
 
 | Table                    | Columns | Primary key / keyset order                                               |
 | ------------------------ | ------- | ------------------------------------------------------------------------ |

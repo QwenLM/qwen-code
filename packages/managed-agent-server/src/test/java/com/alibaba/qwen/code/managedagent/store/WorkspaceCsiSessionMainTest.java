@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.StreamReadFeature;
@@ -323,16 +324,40 @@ class WorkspaceCsiSessionMainTest {
     }
 
     @Test
-    void oldWorkspaceCreationRefusesTheCsiStorageWithoutAPinOrSession() {
+    void ordinaryWorkspaceCreationCannotBorrowUnselectedCsiStorage() {
         var before = allTables();
-        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand(
-                "tenant", "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("workspace", "."))))
-                .isInstanceOfSatisfying(RuntimeBrokerException.class,
-                        error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"))
-                .hasMessage("Workspace execution authority is unavailable.");
-        assertEmpty("ma_session", "ma_request_receipt", "ma_public_event", "ma_event_stream");
+        var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns()
+                + " FROM ma_storage_owner");
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store()
+                .insertWorkspaceSessionCommand("tenant", "actor", "old", "sha256:" + "b".repeat(64),
+                        "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                });
+        assertEmpty("ma_session", "ma_request_receipt", "ma_public_event", "ma_event_stream",
+                "ma_turn", "ma_runtime_binding", "ma_runtime_session", "ma_tool_execution", "ma_session_head");
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns()
+                + " FROM ma_storage_owner")).isEqualTo(owner);
         assertThat(allTables()).isEqualTo(before);
+    }
+
+    @Test
+    void ordinaryLocalCreationKeepsTheExistingProfileWithoutARequestPin() {
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'local-workspace', 1,"
+                + " 'local-storage', 'Local', ?, ?, 'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES ('tenant', 'local-workspace', ?, 'OPERATOR')",
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        var legacy = new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand("tenant",
+                "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("local-workspace", ".")));
+        assertThat(legacy).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session", String.class))
+                .isEqualTo("hosted-workspace-files/1");
+        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM ma_session", String.class)).isNull();
     }
 
     @Test
