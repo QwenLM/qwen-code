@@ -614,6 +614,36 @@ class ChildWorkspaceServiceTest {
         assertPinsGone(ready);
     }
 
+    // A relay from before snapshots asks a merge of any ready row, and its
+    // store records it as asked. The scan runs that merge as the discard a
+    // snapshot's every finish is: what the copy holds never lands.
+    @Test
+    void aMergeRecordedOnASnapshotByAnOlderRelayRunsAsADiscard() throws Exception {
+        var parent = createSession("project");
+        service.request(parent.tenantId(), parent.sessionId(), "run-1", ChildWorkspaceStore.SNAPSHOT);
+        service.scan();
+        Row ready = service.find(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(ready.snapshot()).isTrue();
+        String child = bindChild(parent, "run-1", ready.childCwdRelative());
+        updateChild("UPDATE ma_workspace SET finish_request = 'merge'"
+                + " WHERE child_workspace_id = ?", ready.childWorkspaceId());
+        assertThat(service.find(parent.tenantId(), parent.sessionId(), "run-1").finishRequest())
+                .isEqualTo(ChildWorkspaceStore.MERGE);
+        // The copy lies in the parent's storage, so a shell there can change it.
+        Files.writeString(root.resolve(ready.childCwdRelative()).resolve("stray.txt"), "stray\n");
+        close(child);
+        clock.addAndGet(ChildWorkspaceService.CHILD_CLOSE_DELAY_MS);
+        service.scan();
+
+        Row discarded = service.find(parent.tenantId(), parent.sessionId(), "run-1");
+        assertThat(discarded.state()).isEqualTo(ChildWorkspaceStore.DISCARDED);
+        assertThat(discarded.outcomeCode()).isEqualTo("discarded");
+        assertThat(discarded.resultCommit()).isNull();
+        assertThat(project.resolve("stray.txt")).doesNotExist();
+        assertThat(root.resolve(ChildWorktreeGit.childDirectory(ready.childWorkspaceId()))).doesNotExist();
+        assertPinsGone(ready);
+    }
+
     // A worktree's request names no mode, as every row admitted before
     // snapshots did: such a row is a worktree, merged as before, and its
     // child keeps the parent's profile.
