@@ -569,10 +569,16 @@ export function useQueuedSubmissionDrain({
             // and correct the receipt instead.
             if (reason === 'error') {
               peerMessaging?.settleFailedPeerTurn(submission.delivery);
+              // The drain is deliberately not parked: the entry is gone
+              // and admissionFailed stays false, so the next queued
+              // entry drains. Through a provider outage that spends each
+              // queued peer message once — one submission, one `expired`
+              // receipt — instead of stalling the queue on its head.
               return;
             }
             // An admission failure is already restored by
-            // onAdmissionFailed above; restoring here too would leave two
+            // onAdmissionFailed above — every `not-admitted` site fires
+            // that callback too — so restoring here would leave two
             // copies of one envelope in the queue.
             if (reason !== 'cancelled') {
               return;

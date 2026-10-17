@@ -429,11 +429,13 @@ export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
  * apart: restoring a cancelled turn is recovery, restoring a turn that
  * ended on a model error is an automatic retry nobody asked for.
  *
- * - `cancelled`: the turn started and the user interrupted it (Esc).
+ * - `cancelled`: the user interrupted the turn (Esc), either while it
+ *   was running or while it was still being prepared.
  * - `error`: the turn ran and ended on a terminal model error.
  * - `not-admitted`: the submission never started (the session was busy,
- *   a mod failed to load, the steer drain found nothing to send). The
- *   admission callback fires for these too.
+ *   a mod failed to load, an empty steer drain). Every site that reports
+ *   this also fires the admission callback, and that callback — not this
+ *   one — is what puts a queued entry back.
  */
 export type DeliveryFailureReason = 'cancelled' | 'error' | 'not-admitted';
 
@@ -3912,7 +3914,14 @@ export const useLlmStream = (
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
-          metadata?.onDeliveryFailed?.('not-admitted');
+          // This is the one delivery failure that does not also fire
+          // onAdmissionFailed, so a caller cannot lean on that callback
+          // to put its entry back. Report it as an interrupt, which is
+          // what it is: of the `shouldProceed: false` returns upstream,
+          // the only one a Teammate submit can reach is
+          // `turnCancelledRef` (a peer envelope is never empty, and the
+          // remaining returns sit behind the Teammate early-return).
+          metadata?.onDeliveryFailed?.('cancelled');
           return;
         }
 
