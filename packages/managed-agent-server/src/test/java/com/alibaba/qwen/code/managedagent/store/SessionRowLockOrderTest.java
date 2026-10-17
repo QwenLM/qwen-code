@@ -402,6 +402,10 @@ class SessionRowLockOrderTest {
                         "releaseTurnLease", "renewTurn", "requireTurn",
                         "requireTurnForUpdate", "requireIdlePolicyChange", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
+                        "settleTurnCommands",
+                        // D7-2's journal evidence for a parked input reads
+                        // its Turn and takes no lock.
+                        "turnInputAcceptance",
                         "updateHarnessCursor", "validateOperationStart",
                         "withdrawSubmissionAttempted");
         // The references the parse cannot resolve to one member —
