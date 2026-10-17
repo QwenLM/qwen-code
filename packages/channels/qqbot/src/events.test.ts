@@ -73,7 +73,19 @@ vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
 }));
 
+// The purge's routing-key shape helpers and the sanitizers are pure: keep the
+// shipped implementations in the double below rather than mirrors, so the mock
+// cannot diverge from what production imports. The test double suite at the
+// bottom of this file pins every one of those exports to the real module, so a
+// reintroduced hand mirror reddens instead of silently drifting.
+const realChannelBase = await vi.importActual<
+  typeof import('@qwen-code/channel-base')
+>('@qwen-code/channel-base');
+
 vi.mock('@qwen-code/channel-base', () => ({
+  singleScopeRoutingKey: realChannelBase.singleScopeRoutingKey,
+  unwrapMessageRoutingKey: realChannelBase.unwrapMessageRoutingKey,
+  wrapMessageRoutingKey: realChannelBase.wrapMessageRoutingKey,
   ChannelBase: class {
     protected config: Record<string, unknown> = {};
     protected bridge: Record<string, unknown> = {};
@@ -112,6 +124,12 @@ vi.mock('@qwen-code/channel-base', () => ({
   SessionRouter: class {
     restoreSessions(): Promise<void> {
       return Promise.resolve();
+    }
+    getAll(): Array<{ key: string; sessionId: string; target: unknown }> {
+      return [];
+    }
+    removeSessionId(_sessionId: string): boolean {
+      return false;
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
@@ -1999,6 +2017,125 @@ describe('Gateway message handling', () => {
 
     restoreQQSpy.mockRestore();
     restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY cold start: a failed restore still purges orphaned routes', async () => {
+    const ch = makeChannel({ sessionScope: 'thread' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+    // A partial restore: earlier sessions were loaded (each one is exactly what
+    // the purge releases) and a later one rejects.
+    const restoreSessionsSpy = vi
+      .spyOn(
+        chp['router'] as unknown as { restoreSessions: () => Promise<void> },
+        'restoreSessions',
+      )
+      .mockRejectedValue(new Error('half restored'));
+    const purgeSpy = vi.spyOn(
+      ch as unknown as { purgeSingleScopeOrphans: () => void },
+      'purgeSingleScopeOrphans',
+    );
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    // The repair branch runs in the rejected promise's catch: flush microtasks.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(purgeSpy).toHaveBeenCalled();
+
+    purgeSpy.mockRestore();
+    restoreQQSpy.mockRestore();
+    restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY cold start: purgeSingleScopeOrphans clears single-scope orphans, keeps live thread-scope keys', async () => {
+    // The purge must run as part of the READY restore chain and drop
+    // single-era orphan keys from the router (thread 62 gate: previously the
+    // purge had no wiring-level test).
+    const ch = makeChannel({
+      sessionScope: 'thread',
+      purgeLegacySessions: true,
+    });
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    expect(chp['coldStart']).toBe(true);
+
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
+    chp['router'] = {
+      restoreSessions: vi.fn().mockResolvedValue(undefined),
+      getAll: () => [
+        // Single-era orphan (exact-match on this channel's name).
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // User-scope key under thread scope: purged — unroutable under
+        // thread scope, where the routing key is channel:chatId.
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'user-era-1',
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
+        },
+        // Live thread-scope two-part key: never purged.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+      ],
+      removeSessionId,
+    };
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    // purgeSingleScopeOrphans ran inside the restore chain and removed both
+    // the single-scope orphan and this channel's unroutable user-scope key,
+    // keeping the live thread-scope key.
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-1');
+    expect(chp['_ready']).toBe(true);
+
+    restoreQQSpy.mockRestore();
     ch.disconnect();
   });
 

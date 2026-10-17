@@ -101,6 +101,14 @@ export interface QQChannelConfig {
   maxFlushRetries?: number;
   /** Max gateway retries per reconnect cycle. Default 5. 0 = unlimited. */
   maxGwRetries?: number;
+  /**
+   * Delete this channel's legacy single-scope `<channel>:__single__` key and
+   * legacy user-scope `<channel>:<senderId>:<chatId>` routes when the current
+   * `sessionScope` can never route to them. Default false: the default scope
+   * changing is not the operator asking to delete persisted conversations.
+   * Enabling it also releases the routes' daemon-side sessions.
+   */
+  purgeLegacySessions?: boolean;
 }
 
 /** Robot added to a group. */

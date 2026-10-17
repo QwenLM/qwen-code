@@ -19,7 +19,9 @@ import {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  singleScopeRoutingKey,
   truncateCodePoints,
+  unwrapMessageRoutingKey,
 } from '@qwen-code/channel-base';
 import type {
   Attachment,
@@ -29,6 +31,7 @@ import type {
   ChannelOutputSegmentContext,
   Envelope,
   ToolCallEvent,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -101,6 +104,18 @@ interface QQReplyContext {
   timestamp: number;
 }
 
+/**
+ * A persisted route as the session router reports it. `target` stays optional
+ * because the purge scans whatever router object it was given: `getAll()` is
+ * duck-typed and a route without one is still purgeable when its key matches
+ * (ownership falls back to the key, see `ownsEntry`), never a reason to abort
+ * the scan.
+ */
+interface RouterRoute {
+  key: string;
+  sessionId: string;
+  target?: SessionTarget;
+}
 interface QQStreamState {
   chatId: string;
   buffer: string;
@@ -259,6 +274,8 @@ export class QQChannel extends ChannelBase {
   private static readonly IDLE_FLUSH_BACKOFF_MS = 4000;
   /** Max buffer length before forcing an immediate flush. */
   private static readonly MAX_BUFFER_LENGTH = 4096;
+  /** Purge records kept in the rescue file, oldest dropped first. */
+  private static readonly MAX_PURGE_RECORDS = 20;
 
   // ── Group / cron fields ────────────────────────────────────────
 
@@ -345,6 +362,12 @@ export class QQChannel extends ChannelBase {
   private readonly globalSessionsPath: string;
   /** Backup of sessions.json so conversations survive daemon restarts. */
   private readonly sessionsBackupPath: string;
+  /**
+   * Append-only rescue log of the routes the orphan purge deletes, written
+   * immediately before the first deletion when `purgeLegacySessions` is on, so
+   * an operator can restore a legacy conversation by hand.
+   */
+  private readonly sessionsPurgedPath: string;
 
   constructor(
     name: string,
@@ -402,6 +425,10 @@ export class QQChannel extends ChannelBase {
     this.sessionsBackupPath = join(
       stateDir,
       `${safeName}-sessions-backup.json`,
+    );
+    this.sessionsPurgedPath = join(
+      stateDir,
+      `${safeName}-sessions-purged.json`,
     );
 
     // Permanent textChunk listener for cron/non-prompt messages.
@@ -1862,6 +1889,430 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  /**
+   * The session scope the router actually routes this channel with, or
+   * undefined when the router does not expose one. The channel's own config is
+   * not authoritative: the constructor rewrites its local copy to 'single' for
+   * `groupAllPolicy`, while the caller built the router from the unrewritten
+   * value, and nothing re-syncs the router afterwards. A purge that trusted the
+   * rewritten config would treat the router's live keys as orphans.
+   */
+  private routerSessionScope(): string | undefined {
+    const router = this.router as unknown as {
+      channelScopes?: { get?: (channelName: string) => unknown };
+      defaultScope?: unknown;
+    };
+    const perChannel = router.channelScopes?.get?.(this.name);
+    if (typeof perChannel === 'string') return perChannel;
+    return typeof router.defaultScope === 'string'
+      ? router.defaultScope
+      : undefined;
+  }
+
+  /**
+   * Purge orphaned session mappings left over from older scope eras:
+   * `<channel>:__single__` keys (single-scope era, see PR #6457) and this
+   * channel's own three-part user-scope keys.
+   *
+   * `<channel>:__single__` is the live routing key under an explicit 'single'
+   * sessionScope, so it is an orphan only under any other scope. There it can
+   * never be routed to again and is dead weight in the router maps and the
+   * persisted sessions file — and worse, restore re-attaches it via
+   * bridge.loadSession on every restart, silently resetting continuity.
+   *
+   * User-scope keys (`<channel>:<sender>:<chat>`) are unroutable under every
+   * scope other than 'user' (including 'single'): SessionRouter's
+   * thread/chat_thread routing key is `<channel>:<chatId>` and its 'single'
+   * key is `<channel>:__single__`, while resolve() is a bare map lookup with
+   * no shape fallback. This channel's own user-scope entries are therefore
+   * purged under every recognized non-'user' scope; an unrecognized scope
+   * fails closed (see knownScope below). A sibling channel's are left alone,
+   * decided by target ownership, never by key prefix. The purge runs after
+   * restore, so on the first boot those keys are still re-attached once by
+   * bridge.loadSession and then released here; afterwards they are gone from
+   * the persisted file.
+   *
+   * The destructive half is opt-in via `purgeLegacySessions` (default false):
+   * the default scope changing is not the operator asking to delete persisted
+   * conversations. With it off, the doomed routes are only counted and
+   * reported, and nothing is released. With it on, before the first deletion
+   * the doomed routes are appended to `<name>-sessions-purged.json` in the
+   * channel state directory so an operator can restore a legacy conversation
+   * by hand; if that write fails, nothing is deleted. Each record carries the
+   * route's `cwd` when the router's persisted route store still has it, so a
+   * restored route resolves to the same workspace. The file accumulates purge
+   * records and is never read back automatically.
+   *
+   * Runs AFTER restoreSessions(): SessionRouter exposes no public API to drop
+   * persisted entries before restore (readPersistedEntries/deleteByKey are
+   * private), and rewriting the persist file from here would be fragile and
+   * race-prone. The orphan is therefore re-attached by bridge.loadSession
+   * during restore and then released here — both the router mapping and the
+   * daemon-side session (see bridge.discardSession below) are torn down.
+   */
+  private purgeSingleScopeOrphans(): void {
+    const configScope: string = this.config.sessionScope;
+    // The channel's own config is not authoritative for what the router can
+    // route. The constructor rewrites its local copy to 'single' when
+    // groupAllPolicy is 'keyword'/'all', while the caller built this router
+    // from the unrewritten value and nothing re-syncs it — so a purge trusting
+    // the config would treat the router's LIVE user-scope keys as orphans and
+    // delete them on every start. Reason from the scope the router actually
+    // routes with; when it exposes none, a config scope the rewrite may have
+    // produced cannot be trusted either (see scopeTrusted below).
+    const routerScope = this.routerSessionScope();
+    const scope = routerScope ?? configScope;
+    const scopeTrusted =
+      routerScope !== undefined ||
+      !(
+        (this.qqConfig.groupAllPolicy === 'keyword' ||
+          this.qqConfig.groupAllPolicy === 'all') &&
+        configScope === 'single'
+      );
+    // Fail closed on an unrecognized scope. SessionRouter.routingKey() switches
+    // on scope with `case 'user': default:`, so any value outside the
+    // SessionScope union still builds LIVE `<channel>:<sender>:<chat>` keys.
+    // Testing orphanhood with `scope !== 'user'` therefore treats an operator
+    // typo (or a value written by a different version) as "every live route is
+    // an orphan" and discards all of the channel's persisted sessions on each
+    // cold start. Only a scope this code can reason about may authorise a
+    // destructive purge.
+    const knownScope =
+      scope === 'user' ||
+      scope === 'thread' ||
+      scope === 'chat_thread' ||
+      scope === 'single';
+    const singleScope = scope === 'single';
+    if (!knownScope) {
+      // Fail closed, but not silently: the operator asked for a cleanup (or at
+      // least has a scope this build cannot reason about) and must know that
+      // nothing was counted or purged.
+      process.stderr.write(
+        `[QQ:${this.name}] purgeSingleScopeOrphans skipped: unrecognized sessionScope '${sanitizeLogText(scope, 32)}' — refusing to guess which keys a scope would build, so nothing was purged\n`,
+      );
+      return;
+    }
+    try {
+      // Optional-call like the READY path: an externally supplied router may
+      // not expose getAll; fall back to an empty list rather than crash.
+      const all =
+        (
+          this.router as unknown as {
+            getAll?: () => RouterRoute[];
+          }
+        ).getAll?.() ?? [];
+      // Phase 1: collect what would be deleted, with the predicate that doomed
+      // it. Nothing is torn down yet — the rescue copy below must reach disk
+      // before the first removeSessionId(), because that call persists.
+      // getAll() reports no cwd, so the only source for a doomed route's cwd is
+      // the store the router persists to, which records entry.cwd verbatim
+      // (SessionRouter.persist). In daemon mode that is the shared router's own
+      // routes.json, not this channel's sessions.json, so resolve the path off
+      // the router and fall back to globalSessionsPath only for a supplied
+      // router that exposes no persistPath (external/duck-typed). The fallback
+      // cannot serve standalone mode: there the internally built router's own
+      // persistPath is the per-channel file and wins, so the fallback reads the
+      // shared sessions.json. Read it once, best-effort: a missing, empty, or
+      // unparsable file — or a key absent from it — must leave cwd off the
+      // record rather than fall back to the router default, which would point a
+      // hand-restored route at the wrong workspace.
+      const routerPersistPath = (
+        this.router as unknown as Record<string, unknown>
+      )['persistPath'];
+      const cwdStorePath =
+        typeof routerPersistPath === 'string' && routerPersistPath.length > 0
+          ? routerPersistPath
+          : this.globalSessionsPath;
+      // A message route persists its key as a fixed wrapper around its
+      // chat-level key (SessionRouter.routingKey), so an entry's base key has
+      // to be unwrapped before the orphan predicates can match it. The unwrap
+      // lives next to the wrap in channels/base, so the two cannot drift apart
+      // and leave this purge matching a shape the router no longer writes.
+      type PersistedRouteMeta = {
+        cwd?: string;
+        isolation?: 'worktree';
+        workspaceCwd?: string;
+        turns?: number;
+        startedAt?: number;
+      };
+      const persistedCwdByKey = new Map<string, PersistedRouteMeta>();
+      try {
+        if (existsSync(cwdStorePath)) {
+          const raw: unknown = JSON.parse(readFileSync(cwdStorePath, 'utf-8'));
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            for (const [key, value] of Object.entries(
+              raw as Record<string, unknown>,
+            )) {
+              const entry = value as Record<string, unknown> | null;
+              const meta: PersistedRouteMeta = {};
+              if (
+                typeof entry?.['cwd'] === 'string' &&
+                entry['cwd'].length > 0
+              ) {
+                meta.cwd = entry['cwd'];
+              }
+              if (entry?.['isolation'] === 'worktree') {
+                meta.isolation = 'worktree';
+              }
+              if (
+                typeof entry?.['workspaceCwd'] === 'string' &&
+                entry['workspaceCwd'].length > 0
+              ) {
+                meta.workspaceCwd = entry['workspaceCwd'];
+              }
+              if (typeof entry?.['turns'] === 'number') {
+                meta.turns = entry['turns'];
+              }
+              if (typeof entry?.['startedAt'] === 'number') {
+                meta.startedAt = entry['startedAt'];
+              }
+              if (Object.keys(meta).length > 0) {
+                persistedCwdByKey.set(key, meta);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Best-effort: a rescue record without cwd is still restorable by hand.
+        process.stderr.write(
+          `[QQ:${this.name}] purgeSingleScopeOrphans route metadata read failed, rescue copies omit cwd/isolation: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
+      }
+      const doomed: Array<
+        RouterRoute & { kind: 'single' | 'user' } & PersistedRouteMeta
+      > = [];
+      for (const entry of all) {
+        // Match only this channel's own keys, on the entry's base key (a
+        // message route wraps it, see unwrapMessageRoutingKey):
+        // in daemon mode the router is shared across
+        // channels, so a suffix match on ':__single__' would also hit sibling
+        // channels' live single-scope routing state and silently reset their
+        // sessions. Orphan keys from the single-scope era are
+        // `<thisChannel>:__single__`, so the base-key match still cleans up
+        // this channel's orphans without touching sibling routes — but only
+        // when the current scope is not 'single', where this key is the live
+        // one. Gated on knownScope too, and there the purge is suppressed
+        // deliberately (with a log): an unrecognized scope cannot tell us which
+        // keys a scope would build, so even a currently unreachable
+        // `__single__` route is left for the operator rather than guessed at.
+        // Key equality alone is not ownership: channel names are unrestricted
+        // user config and may contain colons, so a sibling named `<ourName>:x`
+        // can route `chatId: 'x', threadId: '__single__'` (or `senderId: 'x',
+        // chatId: '__single__'` under 'user') to the same base string. Apply
+        // the target check here too; a target-less entry still has to be
+        // purgeable, which is why the check permits `undefined`.
+        // Legacy user-scope routes of THIS channel are unroutable under every
+        // non-'user' scope (including 'single', whose key is
+        // `<channel>:__single__`), so a persisted user-era key there can never
+        // resolve again. Ownership comes from the entry's target, not from a
+        // key prefix, so a sibling channel whose name prefixes ours is never
+        // touched. The base key is compared against the exact string the
+        // router builds for 'user' scope rather than being split on ':' — the
+        // channel name is unrestricted user config and may itself contain
+        // colons, so the part count does not identify the scope.
+        const baseKey = unwrapMessageRoutingKey(entry.key);
+        const ownsEntry =
+          entry.target === undefined || entry.target.channelName === this.name;
+        const isSingleOrphan =
+          knownScope &&
+          !singleScope &&
+          baseKey === singleScopeRoutingKey(this.name) &&
+          ownsEntry;
+        const isOwnLegacyUserKey =
+          knownScope &&
+          scopeTrusted &&
+          scope !== 'user' &&
+          entry.target?.channelName === this.name &&
+          baseKey ===
+            `${entry.target.channelName}:${entry.target.senderId}:${entry.target.chatId}`;
+        if (isSingleOrphan || isOwnLegacyUserKey) {
+          doomed.push({
+            kind: isSingleOrphan ? 'single' : 'user',
+            key: entry.key,
+            sessionId: entry.sessionId,
+            target: entry.target,
+            ...(persistedCwdByKey.get(entry.key) ?? {}),
+          });
+        }
+      }
+      // A sessionId a non-doomed route still uses must not be released:
+      // removeSessionId drops every key mapped to a sessionId (a restore's
+      // superseded-id redirect can point several keys at one), so releasing it
+      // would tear that live route — and its daemon session — down with the
+      // orphan. Resolve this before the rescue ledger is written, so the ledger
+      // lists the routes the purge plans to delete and this guard did not
+      // withhold, never one the guard leaves in place. (removeSessionId runs
+      // after the write, so a router that refuses it can still leave an
+      // over-listed record — the safe direction for a rescue copy.)
+      const doomedKeys = new Set(doomed.map((entry) => entry.key));
+      const liveSessionIds = new Set<string>();
+      for (const entry of all) {
+        if (!doomedKeys.has(entry.key)) liveSessionIds.add(entry.sessionId);
+      }
+      const deletable = doomed.filter(
+        (entry) => !liveSessionIds.has(entry.sessionId),
+      );
+      if (doomed.length > 0 && this.qqConfig.purgeLegacySessions !== true) {
+        // A default changing is not an operator request to delete persisted
+        // conversations, so the destructive half is opt-in.
+        process.stderr.write(
+          `[QQ:${this.name}] Left ${doomed.length} orphaned session route(s) in place (nothing removed); set "purgeLegacySessions": true to delete them\n`,
+        );
+        return;
+      }
+      if (!scopeTrusted && this.qqConfig.purgeLegacySessions === true) {
+        // Fail closed and say so: the channel's scope may have been rewritten
+        // and this router exposes none to check it against, so the user-scope
+        // branch is refused rather than guessed at.
+        process.stderr.write(
+          `[QQ:${this.name}] purgeSingleScopeOrphans cannot confirm the router's session scope, leaving this channel's user-scope routes in place\n`,
+        );
+      }
+      for (const entry of doomed) {
+        if (!liveSessionIds.has(entry.sessionId)) continue;
+        process.stderr.write(
+          `[QQ:${this.name}] purgeSingleScopeOrphans left orphan route ${sanitizeLogText(entry.key, 200)} in place: session ${sanitizeLogText(entry.sessionId, 200)} is still used by a live route\n`,
+        );
+      }
+      if (deletable.length > 0) {
+        // Append to any earlier record instead of truncating it: it is the
+        // only copy of routes a previous purge already deleted. A file that
+        // cannot be read, or does not hold a records list, is quarantined
+        // rather than replaced, so a torn-but-hand-recoverable copy survives
+        // the new record.
+        let earlier: unknown[] = [];
+        let unreadable: string | undefined;
+        try {
+          if (existsSync(this.sessionsPurgedPath)) {
+            const raw: unknown = JSON.parse(
+              readFileSync(this.sessionsPurgedPath, 'utf-8'),
+            );
+            if (Array.isArray(raw)) {
+              earlier = raw;
+            } else if (
+              raw !== null &&
+              typeof raw === 'object' &&
+              Array.isArray((raw as { routes?: unknown }).routes)
+            ) {
+              // An earlier build of this branch wrote a single record as a bare
+              // object. It is the only copy of routes that purge already
+              // deleted, so keep it as one prior record rather than discard it.
+              earlier = [raw];
+            } else {
+              unreadable = 'is not a purge-record list';
+            }
+          }
+        } catch (e) {
+          unreadable = `unreadable: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}`;
+        }
+        if (unreadable !== undefined) {
+          // Quarantine on the same pattern SessionRouter uses for its persist
+          // file: keep the damaged copy instead of letting the write below
+          // destroy whatever an operator could still salvage by hand.
+          const quarantinePath = `${this.sessionsPurgedPath}.corrupt-${Date.now()}`;
+          try {
+            renameSync(this.sessionsPurgedPath, quarantinePath);
+            process.stderr.write(
+              `[QQ:${this.name}] purgeSingleScopeOrphans rescue file ${unreadable}, quarantined to ${quarantinePath}\n`,
+            );
+          } catch (e) {
+            process.stderr.write(
+              `[QQ:${this.name}] purgeSingleScopeOrphans rescue file ${unreadable}, quarantine failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+            );
+            // Fail closed: the ledger write below would overwrite the damaged
+            // copy this quarantine was meant to preserve, so nothing is
+            // recorded and nothing is deleted.
+            return;
+          }
+        }
+        // Self-describing so an operator can restore a route by hand; there is
+        // no automatic restore, and no other path writes this file.
+        const tmpPath = `${this.sessionsPurgedPath}.tmp`;
+        try {
+          // Write a sibling temp file then rename it over the rescue file: an
+          // in-place truncating write that fails (ENOSPC/EIO, a kill mid-write)
+          // would erase the earlier records just read, and `{ mode: 0o600 }`
+          // does not tighten an existing 0o644 file the way a fresh rename does.
+          writeFileSync(
+            tmpPath,
+            JSON.stringify(
+              [
+                ...earlier,
+                {
+                  purgedAt: new Date().toISOString(),
+                  sessionScope: scope,
+                  routes: deletable,
+                },
+              ].slice(-QQChannel.MAX_PURGE_RECORDS),
+              null,
+              2,
+            ),
+            { mode: 0o600 },
+          );
+          renameSync(tmpPath, this.sessionsPurgedPath);
+          process.stderr.write(
+            `[QQ:${this.name}] Saved ${deletable.length} session route(s) about to be purged to ${this.sessionsPurgedPath}\n`,
+          );
+        } catch (e) {
+          // A failed write can leave a partial sibling behind; drop it
+          // best-effort so a failed purge leaves no garbage, never masking the
+          // original error.
+          try {
+            unlinkSync(tmpPath);
+          } catch {
+            /* best-effort cleanup */
+          }
+          // Fail closed: without the rescue copy the deletions are not
+          // recoverable by hand, so nothing is removed.
+          process.stderr.write(
+            `[QQ:${this.name}] purgeSingleScopeOrphans rescue write failed, leaving ${deletable.length} session route(s) in place: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+          );
+          return;
+        }
+      }
+      // Phase 2: perform the deletions exactly as before, one entry at a time.
+      let singlePurged = 0;
+      let userPurged = 0;
+      for (const entry of deletable) {
+        // Release the daemon-side session too: restoreSessions() already
+        // re-attached it via bridge.loadSession, so without this the orphan
+        // stays alive in the daemon until the process ends. removeSessionId
+        // below only clears the router maps. Best-effort — a bridge without
+        // discardSession (or a failed discard) must not break the purge.
+        // No binding token: the orphan is no longer routed to, and purge
+        // runs before any new route can reference it.
+        try {
+          void this.bridge
+            .discardSession?.(entry.sessionId)
+            .catch(() => undefined);
+        } catch {
+          // Best-effort cleanup must not abort the purge.
+        }
+        if (this.router.removeSessionId(entry.sessionId)) {
+          if (entry.kind === 'single') singlePurged++;
+          else userPurged++;
+        }
+      }
+      // Report the two kinds separately: the user-scope branch deletes persisted
+      // conversations that a reader may still want to recover, so it must not be
+      // reported as single-scope housekeeping.
+      if (singlePurged > 0) {
+        process.stderr.write(
+          `[QQ:${this.name}] Purged ${singlePurged} orphaned single-scope session mapping(s)\n`,
+        );
+      }
+      if (userPurged > 0) {
+        process.stderr.write(
+          `[QQ:${this.name}] Purged ${userPurged} orphaned user-scope session mapping(s)\n`,
+        );
+      }
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] purgeSingleScopeOrphans failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
+    }
+  }
+
   // ── ReplyMsgId helpers ────────────────────────────────────────
 
   private setReplyMsgId(chatId: string, msgId: string): void {
@@ -2214,6 +2665,7 @@ export class QQChannel extends ChannelBase {
               .restoreSessions()
               .then(() => {
                 this.fixRestoredSessions();
+                this.purgeSingleScopeOrphans();
                 const all = (
                   this.router as unknown as {
                     getAll?: () => Array<{
@@ -2232,6 +2684,10 @@ export class QQChannel extends ChannelBase {
               })
               .catch(() => {
                 this.fixRestoredSessions();
+                // A partial restore attached orphans too (each loaded session
+                // is exactly what the purge releases), so the repair branch
+                // must run the same purge as the success branch.
+                this.purgeSingleScopeOrphans();
                 process.stderr.write(
                   `[QQ:${this.name}] WARNING: router session restore failed — cron messages will be dropped until sessions re-establish\n`,
                 );
