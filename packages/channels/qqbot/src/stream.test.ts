@@ -599,8 +599,17 @@ describe('onResponseComplete', () => {
   it('clears an in-flight flush marker at response boundary', () => {
     const ch = makeChannel();
     const channel = ch as unknown as Record<string, unknown>;
-    const flushingSessions = channel['flushingSessions'] as Set<string>;
-    flushingSessions.add('sess-1');
+    const flushingSessions = channel['flushingSessions'] as Map<
+      string,
+      unknown
+    >;
+    flushingSessions.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 1,
+    });
 
     onResponseBoundary(ch, 'test-chat', 'sess-1');
 
@@ -656,7 +665,7 @@ describe('pendingStreamDelete coordination', () => {
     await drain();
 
     const chp = ch as unknown as Record<string, unknown>;
-    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
@@ -755,8 +764,14 @@ describe('streaming guards', () => {
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
 
     const chp = ch as unknown as Record<string, unknown>;
-    const flushingSessions = chp['flushingSessions'] as Set<string>;
-    flushingSessions.add('sess-1');
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    flushingSessions.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 1,
+    });
 
     (chp['idleFlush'] as (sid: string, rid: number) => void)(
       'sess-1',
@@ -904,11 +919,17 @@ describe('error recovery paths', () => {
     onResponseChunk(ch, 'test-chat', 'buffered', 'sess-1');
 
     const chp = ch as unknown as Record<string, unknown>;
-    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
     const flushedSessions = chp['flushedSessions'] as Set<string>;
 
-    flushingSessions.add('sess-1');
+    flushingSessions.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 1,
+    });
     pendingStreamDelete.add('sess-1');
     flushedSessions.add('sess-1');
 
@@ -934,7 +955,9 @@ describe('error recovery paths', () => {
     expect(streamState(ch).has('sess-1')).toBe(false);
 
     const chp = ch as unknown as Record<string, unknown>;
-    expect((chp['flushingSessions'] as Set<string>).has('sess-1')).toBe(false);
+    expect(
+      (chp['flushingSessions'] as Map<string, unknown>).has('sess-1'),
+    ).toBe(false);
     expect((chp['pendingStreamDelete'] as Set<string>).has('sess-1')).toBe(
       false,
     );
@@ -948,7 +971,7 @@ describe('error recovery paths', () => {
     onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
 
     const chp = ch as unknown as Record<string, unknown>;
-    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
 
     // First idleFlush triggers
     vi.advanceTimersByTime(2000);
@@ -957,7 +980,13 @@ describe('error recovery paths', () => {
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
 
     // Simulate that the session is now marked as flushing (duplicate prevention)
-    flushingSessions.add('sess-1');
+    flushingSessions.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 1,
+    });
 
     // Retry timer fires but idleFlush bails due to flushingSessions guard
     vi.advanceTimersByTime(2000);
@@ -1001,8 +1030,14 @@ describe('error recovery paths', () => {
     onResponseChunk(ch, 'test-chat', 'tool text', 'sess-1');
 
     const chp = ch as unknown as Record<string, unknown>;
-    const flushingSessions = chp['flushingSessions'] as Set<string>;
-    flushingSessions.add('sess-1');
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    flushingSessions.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 1,
+    });
 
     ch.onToolCall('test-chat', toolCall('sess-1'));
 
@@ -1043,6 +1078,55 @@ describe('buffer limit flush (#11)', () => {
     expect((body.markdown as Record<string, string>).content).toBe(
       bigChunk + 'b'.repeat(2000),
     );
+  });
+});
+
+// The send path now reports why it did not reach the wire, and the streaming
+// path routes a route-blocked send through the same transient-retry /
+// permanent-teardown arms a thrown DeliveryError uses instead of recording it
+// delivered.
+describe('send path route reporting', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reports an unresolvable route through the permanent-failure arm, not as a delivered send', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    onResponseChunk(ch, 'test-chat', 'text', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(streamState(ch).has('s1')).toBe(false);
+    // The block is permanent, so flushAndTrack takes its permanent-failure
+    // teardown instead of recording the send as delivered. resolveRoute's own
+    // diagnostic stays, so the drop is traceable either way.
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      logged.some((c) =>
+        c.includes(
+          'resolveRoute: no chat type for test-chat, dropping message',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      logged.some((c) =>
+        c.includes('idleFlush delivery failed (FALLBACK_FAILED)'),
+      ),
+    ).toBe(true);
+    stderrSpy.mockRestore();
   });
 });
 
@@ -1233,5 +1317,150 @@ describe('identity guard (#3, #6)', () => {
     // it's a different state object, so the guard returns early.
     // flushedSessions may or may not have sess-1 depending on if the first send
     // added it before onSessionDied cleared it. onSessionDied clears flushedSessions.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-turn stream identity (stale-state branch and anchor reuse)
+// ---------------------------------------------------------------------------
+describe('per-turn stream identity', () => {
+  it('drops a previous turn entry and creates a fresh one under the new anchor', () => {
+    const ch = makeChannel();
+    const start = (
+      ch as unknown as {
+        onPromptStart: (c: string, s: string, m?: string) => void;
+      }
+    ).onPromptStart.bind(ch);
+
+    start('test-chat', 'sess-1', 'msg-1');
+    onResponseChunk(ch, 'test-chat', 'turn-1', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.turn).toBe(1);
+    expect(streamState(ch).get('sess-1')!.msgId).toBe('msg-1');
+
+    // Turn 2 starts before turn 1's entry is torn down: the next chunk hits the
+    // stale-state branch, which drops the old entry and builds a fresh one
+    // under turn 2's own anchor instead of appending to the old buffer.
+    start('test-chat', 'sess-1', 'msg-2');
+    onResponseChunk(ch, 'test-chat', 'turn-2', 'sess-1');
+
+    const st = streamState(ch).get('sess-1')!;
+    expect(st.turn).toBe(2);
+    expect(st.msgId).toBe('msg-2');
+    expect(st.buffer).toBe('turn-2');
+  });
+
+  it('reuses the session anchor across buffer windows', () => {
+    const ch = makeChannel();
+    (
+      ch as unknown as {
+        onPromptStart: (c: string, s: string, m?: string) => void;
+      }
+    ).onPromptStart('test-chat', 'sess-1', 'msg-1');
+
+    onResponseChunk(ch, 'test-chat', 'first', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.msgId).toBe('msg-1');
+
+    // A second window (the entry was torn down between chunks) must reuse the
+    // same anchor, not fall back to the chat-level entry.
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['streamState'] as Map<string, unknown>).delete('sess-1');
+    onResponseChunk(ch, 'test-chat', 'second', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.msgId).toBe('msg-1');
+  });
+
+  it('drops a stale session anchor past its TTL', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const anchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    anchors.set('sess-1', {
+      msgId: 'msg-old',
+      timestamp: Date.now() - 400_000,
+    });
+
+    onResponseChunk(ch, 'test-chat', 'chunk', 'sess-1');
+
+    // The anchor outlived the 5-minute window: the entry goes out unanchored
+    // and the stale anchor is released (cascading its msg_seq counter).
+    expect(streamState(ch).get('sess-1')!.msgId).toBeUndefined();
+    expect(anchors.has('sess-1')).toBe(false);
+  });
+});
+
+describe('flush marker ownership', () => {
+  it('clears the marker when a stale turn is replaced before the send settles', async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const start = (
+      ch as unknown as {
+        onPromptStart: (c: string, s: string, m?: string) => void;
+      }
+    ).onPromptStart.bind(ch);
+
+    start('test-chat', 'sess-1', 'msg-1');
+    onResponseChunk(ch, 'test-chat', 'turn-1', 'sess-1');
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+    expect(flushingSessions.has('sess-1')).toBe(true);
+
+    // Turn 2 starts before that send settles: the next chunk hits the stale
+    // branch and replaces the streamState entry.
+    start('test-chat', 'sess-1', 'msg-2');
+    onResponseChunk(ch, 'test-chat', 'turn-2', 'sess-1');
+
+    resolveSend!(mockResponse(true));
+    await drain();
+
+    // The settling chain owns the marker and must clear it: leaving it set
+    // would veto every later flush for this session with no path able to
+    // clear it (silent reply loss in the documented divert window).
+    expect(flushingSessions.has('sess-1')).toBe(false);
+  });
+  it("does not clear a successor turn's in-flight marker", async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const start = (
+      ch as unknown as {
+        onPromptStart: (c: string, s: string, m?: string) => void;
+      }
+    ).onPromptStart.bind(ch);
+
+    start('test-chat', 'sess-1', 'msg-1');
+    onResponseChunk(ch, 'test-chat', 'turn-1', 'sess-1');
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+    expect(flushingSessions.has('sess-1')).toBe(true);
+
+    // Turn 2 replaces the entry, then arms its own flush marker while turn 1's
+    // send is still awaited.
+    start('test-chat', 'sess-1', 'msg-2');
+    onResponseChunk(ch, 'test-chat', 'turn-2', 'sess-1');
+    const successorMarker = {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 2,
+    };
+    flushingSessions.set('sess-1', successorMarker);
+
+    resolveSend!(mockResponse(true));
+    await drain();
+
+    // Turn 1's chain owns neither the entry nor the marker any more: it must
+    // clear only its own marker, never the successor's in-flight one.
+    expect(flushingSessions.get('sess-1')).toBe(successorMarker);
   });
 });
