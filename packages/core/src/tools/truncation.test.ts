@@ -10,6 +10,8 @@ import {
   truncateAndSaveToFile,
   truncateToolOutput,
   truncateLlmContent,
+  contextAwareTruncateThreshold,
+  CONTEXT_AWARE_MIN_CHARS,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   persistAndTruncateToolResult,
 } from './truncation.js';
@@ -17,6 +19,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 vi.mock('node:fs/promises');
@@ -619,4 +622,43 @@ describe('truncateAndSaveToFile preview budget', () => {
       expect(preview).toContain('line ');
     },
   );
+});
+
+describe('contextAwareTruncateThreshold', () => {
+  const cfg = (windowSize?: number) =>
+    ({
+      getContentGeneratorConfig: () =>
+        windowSize === undefined ? {} : { contextWindowSize: windowSize },
+    }) as unknown as Config;
+
+  it('returns the configured threshold unchanged when the window size is unknown', () => {
+    uiTelemetryService.setLastPromptTokenCount(0);
+    expect(contextAwareTruncateThreshold(cfg(undefined), 25_000)).toBe(25_000);
+  });
+
+  it('returns the configured threshold when the window still has room', () => {
+    // 128k window, 10k used, 8192 reserved -> ~439k chars left, well above 25k
+    uiTelemetryService.setLastPromptTokenCount(10_000);
+    expect(contextAwareTruncateThreshold(cfg(128_000), 25_000)).toBe(25_000);
+  });
+
+  it('floors at the minimum when the window is already over the reserve', () => {
+    // 128k window, 120k used, 8192 reserved -> negative remaining
+    uiTelemetryService.setLastPromptTokenCount(120_000);
+    expect(contextAwareTruncateThreshold(cfg(128_000), 25_000)).toBe(
+      CONTEXT_AWARE_MIN_CHARS,
+    );
+  });
+
+  it('tightens to the remaining chars when between the floor and the configured value', () => {
+    // 128k window, 118k used, 8192 reserved -> 1808 tokens -> 7232 chars
+    uiTelemetryService.setLastPromptTokenCount(118_000);
+    expect(contextAwareTruncateThreshold(cfg(128_000), 25_000)).toBe(7232);
+  });
+
+  it('honors a custom output reserve', () => {
+    // With no reserve the same near-full window keeps the full configured budget
+    uiTelemetryService.setLastPromptTokenCount(120_000);
+    expect(contextAwareTruncateThreshold(cfg(128_000), 25_000, 0)).toBe(25_000);
+  });
 });
