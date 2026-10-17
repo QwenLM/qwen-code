@@ -195,26 +195,38 @@ async function probe<T>(
 }
 
 // One Session per case on the background-capable v3 lane: the captureBytes
-// budget is what admits is_background and monitor at all.
+// budget is what admits is_background and monitor at all. FG8c's reload
+// sends the same body to /load under the new Harness's writer identity.
+function sessionBody(
+  cli: HostedHarnessProcess,
+  storeBaseUrl: string,
+  leaseDurationMs: number,
+) {
+  return {
+    sessionScope: 'thread',
+    toolProfile: 'hosted-workspace-shell/1',
+    captureBytes: 64 * 1024 * 1024,
+    managedSessionStore: {
+      baseUrl: storeBaseUrl,
+      tenantId: config.tenantId,
+      workspaceId: current.workspaceId,
+      writerId: cli.bootId,
+      leaseDurationMs,
+    },
+  };
+}
+
 async function createSession(
   cli: HostedHarnessProcess,
   storeBaseUrl: string,
+  leaseDurationMs = 60_000,
 ): Promise<{ clientId: string; created: Record<string, unknown> }> {
   const created = await cli.request('/session', {
     method: 'POST',
     headers: { ...cli.headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({
       sessionId: current.sessionId,
-      sessionScope: 'thread',
-      toolProfile: 'hosted-workspace-shell/1',
-      captureBytes: 64 * 1024 * 1024,
-      managedSessionStore: {
-        baseUrl: storeBaseUrl,
-        tenantId: config.tenantId,
-        workspaceId: current.workspaceId,
-        writerId: cli.bootId,
-        leaseDurationMs: 60_000,
-      },
+      ...sessionBody(cli, storeBaseUrl, leaseDurationMs),
     }),
   });
   const createdBody = await created.text();
@@ -404,12 +416,28 @@ function pacedProducer(): string {
   ].join('\n');
 }
 
+// FG8c's monitor producer: announce its pid, emit one observation, then
+// hold on a FIFO the driver never opens — the watch is live and silent, so
+// only its idle window can end it.
+function crashMonitorProducer(): string {
+  return [
+    "const fs = require('fs');",
+    "fs.writeFileSync('bg-started.txt', String(process.pid));",
+    "process.stdout.write('FG8_MON_0\\n');",
+    "fs.readFileSync('monitor-gate');",
+  ].join('\n');
+}
+
 function producerFor(name: string): { monitor: boolean; script: string } {
+  if (name === 'monitor-worker-kill') {
+    return { monitor: true, script: crashMonitorProducer() };
+  }
   if (name.includes('monitor') || name.startsWith('observation')) {
     return { monitor: true, script: monitorProducer() };
   }
   switch (name) {
     case 'publisher-kill-mid-capture':
+    case 'harness-kill-capture':
       return { monitor: false, script: pacedProducer() };
     case 'in-flight-cap':
     case 'receipt-drop-after-watermark':
@@ -491,6 +519,24 @@ let heldStartArrived = false;
 let pausedBrokerControls = false;
 const heldStartReplies: Array<(destroy: boolean) => void> = [];
 const heldControlReplies: Array<() => void> = [];
+// FG8c: every broker answer (op, status, declared code; a release's
+// Runtime Session and arm), and the after-commit :start hold.
+const brokerAnswers: Array<{
+  op: string;
+  status: number;
+  code: string;
+  kind?: string;
+  runtimeSessionId?: string;
+  drain?: boolean;
+}> = [];
+let holdCommittedStart = false;
+let committedStartHeld = false;
+const heldCommittedStarts: Array<() => void> = [];
+
+function releaseCommittedStarts() {
+  holdCommittedStart = false;
+  for (const resolve of heldCommittedStarts.splice(0)) resolve();
+}
 
 function releaseHeldStart(destroy: boolean) {
   holdNextStart = false;
@@ -509,7 +555,15 @@ function releaseBrokerControls() {
 const brokerProxy = createServer(async (req, res) => {
   try {
     const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    try {
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    } catch (cause) {
+      // A request body fails only with its connection — a client killed
+      // mid-request, as FG8c kills the Harness: the request was never
+      // forwarded, and the proxy itself has not failed.
+      console.log(`FG8_PROXY client went away mid-request: ${cause}`);
+      return;
+    }
     const body = Buffer.concat(chunks);
     const url = new URL(req.url!, config.brokerUrl);
     const operation =
@@ -585,6 +639,50 @@ const brokerProxy = createServer(async (req, res) => {
     }
     const bytes = Buffer.from(await upstream.arrayBuffer());
     console.log(`FG8_PROXY ${req.method} ${operation} -> ${upstream.status}`);
+    // FG8c reads every broker answer by its declared code — a crash case's
+    // refusals are its evidence — and every release by the Runtime Session
+    // it names and the arm it asked for.
+    let answerCode = '';
+    if (upstream.status >= 400) {
+      try {
+        answerCode = String(
+          (JSON.parse(bytes.toString('utf8')) as Record<string, unknown>)[
+            'code'
+          ] ?? '',
+        );
+      } catch {
+        // an unparsable refusal keeps the empty code
+      }
+    }
+    const released = /\/tool-sessions\/([^/]+):release$/.exec(url.pathname);
+    brokerAnswers.push({
+      op: operation,
+      status: upstream.status,
+      code: answerCode,
+      ...(controlKind ? { kind: controlKind } : {}),
+      ...(released
+        ? {
+            runtimeSessionId: decodeURIComponent(released[1]),
+            drain: parsed?.['drain'] === true,
+          }
+        : {}),
+    });
+    if (
+      holdCommittedStart &&
+      operation === 'start' &&
+      upstream.status === 200
+    ) {
+      // FG8c harness-kill-dispatch: the broker committed the admission and
+      // started the process; the reply never reaches the Harness, which the
+      // case kills while this socket is parked.
+      holdCommittedStart = false;
+      committedStartHeld = true;
+      console.log('FG8_PROXY holding the committed :start reply');
+      await new Promise<void>((resolve) => heldCommittedStarts.push(resolve));
+      console.log('FG8_DROPPED broker committed :start reply');
+      req.socket.destroy();
+      return;
+    }
     const matchDrop =
       (dropNextStart && operation === 'start') ||
       (dropNextMonitorStop && isMonitorStop);
@@ -772,9 +870,29 @@ function checkStoreProxy() {
 
 let current = config.cases[0];
 let modelCalls = 0;
+// FG8c generation-remint: the post-crash prompt's first model call asks for
+// a foreground Shell, so the turn awaits the Runtime warm every turn issues
+// and its refusal lands among that prompt's broker answers (the Shell
+// itself never runs).
+let foregroundNext = false;
 const model = await startFakeOpenAIServer(() => {
   modelCalls++;
   const producer = producerFor(current.name);
+  if (foregroundNext) {
+    foregroundNext = false;
+    return {
+      toolCalls: [
+        fakeToolCall(
+          'run_shell_command',
+          {
+            command: 'echo FG8_FOREGROUND',
+            description: `fg8 ${current.name} foreground`,
+          },
+          'foreground-shell',
+        ),
+      ],
+    };
+  }
   if (modelCalls === 1) {
     return {
       toolCalls: [
@@ -788,7 +906,13 @@ const model = await startFakeOpenAIServer(() => {
                 // WebShell resume for a full poll cycle; the watch's idle
                 // window must outlive that, or it idle-kills the gated
                 // producer mid-gap and the gate never reopens.
-                idle_timeout_ms: 180_000,
+                // FG8c's monitor-worker-kill wants the idle stop inside
+                // the case, after the worker is gone: the window runs from
+                // the watch's last flush (its one observation), and a loaded
+                // lane was seen to take ~25 s from there to the kill, so
+                // 60 s keeps the order.
+                idle_timeout_ms:
+                  current.name === 'monitor-worker-kill' ? 60_000 : 180_000,
                 description: `fg8 ${current.name}`,
               },
               'monitor-watch',
@@ -1740,6 +1864,7 @@ async function bootHarness() {
 async function brokerRequest(
   pathSuffix: string,
   fields: Record<string, unknown>,
+  timeoutMs = 30_000,
 ): Promise<{ status: number; code: string; body: Record<string, unknown> }> {
   const runtimeSessionId = brokerIdentity.runtimeSessionId;
   assert(
@@ -1761,7 +1886,7 @@ async function brokerRequest(
         runtimeSessionId,
         ...fields,
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     },
   );
   const text = await response.text();
@@ -1779,10 +1904,11 @@ async function brokerRequest(
   };
 }
 
-async function brokerRelease(drain: boolean) {
+async function brokerRelease(drain: boolean, timeoutMs?: number) {
   return brokerRequest(
     `/tool-sessions/${encodeURIComponent(brokerIdentity.runtimeSessionId!)}:release`,
     drain ? { drain: true } : {},
+    timeoutMs,
   );
 }
 
@@ -1792,6 +1918,600 @@ function bgStartedFile(): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+// FG8g (H4f-c): the public task cancel of a live background Shell or
+// Monitor watch. The process holds on its gate, so only the cancel can end
+// it: the operation completes from the committed record, the record
+// settles cancelled by stop_requested, and the retained key replays.
+async function api(
+  route: string,
+  init: { method?: string; key?: string } = {},
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await fetch(new URL(route, config.storeUrl), {
+    method: init.method ?? 'GET',
+    headers: {
+      'X-Qwen-Tenant-Id': config.tenantId,
+      ...(init.key ? { 'Idempotency-Key': init.key } : {}),
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : {} };
+}
+
+async function runCancelCase() {
+  const monitor = current.name.includes('monitor');
+  const cli = await bootHarness();
+  try {
+    execFileSync('mkfifo', [
+      path.join(current.directory, monitor ? 'monitor-gate' : 'run-gate'),
+    ]);
+    const { clientId } = await createSession(cli, config.storeUrl);
+    await submitPrompt(cli, clientId, `fg8 ${current.name} launch`);
+    step('prompt admitted');
+    const sessionRoute = `/v1/agents/sessions/${current.sessionId}`;
+    const kind = monitor ? 'monitor' : 'background_shell';
+    let task: Record<string, unknown> | undefined;
+    await waitUntil(async () => {
+      checkProxy();
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const live = monitor
+        ? ((state.monitors[0] as { observationSequence?: number })
+            ?.observationSequence ?? 0) >= 1
+        : state.executions.some(
+            (row) =>
+              row.execution_call_id.endsWith(':process') &&
+              row.execution_state === 'PREPARED',
+          );
+      if (!live) return false;
+      const tasks = await api(`${sessionRoute}/tasks`);
+      assert.equal(tasks.status, 200, JSON.stringify(tasks.body));
+      task = (tasks.body['data'] as Array<Record<string, unknown>>).find(
+        (candidate) => candidate['kind'] === kind,
+      );
+      return task !== undefined;
+    }, 120_000);
+    assert.deepEqual(task!['action_capabilities'], ['cancel']);
+    step(`${kind} live as ${task!['id']}`);
+    const cancelRoute = `${sessionRoute}/tasks/${task!['id']}/cancel`;
+    const admitted = await api(cancelRoute, {
+      method: 'POST',
+      key: `fg8g-${current.name}`,
+    });
+    assert.equal(admitted.status, 202, JSON.stringify(admitted.body));
+    assert.equal(admitted.body['type'], 'task_cancel');
+    const operationId = admitted.body['id'] as string;
+    let operation: Record<string, unknown> = admitted.body;
+    await waitUntil(async () => {
+      operation = (await api(`${sessionRoute}/operations/${operationId}`)).body;
+      return operation['status'] === 'completed';
+    }, 120_000);
+    step('cancel completed');
+    const state = await probe<ProbeState>(current.sessionId, 'state');
+    const record = (monitor ? state.monitors[0] : state.childRuns[0]) as {
+      stopReason?: string | null;
+      stopRequested?: boolean;
+      run?: { state?: string };
+    };
+    assert.equal(record.run?.state, 'cancelled');
+    assert.equal(record.stopReason, 'stop_requested');
+    if (!monitor) assert.equal(record.stopRequested, true);
+    const settledTask = (await api(`${sessionRoute}/tasks/${task!['id']}`))
+      .body;
+    assert.equal(settledTask['state'], 'cancelled');
+    assert.deepEqual(settledTask['action_capabilities'], []);
+    const replay = await api(cancelRoute, {
+      method: 'POST',
+      key: `fg8g-${current.name}`,
+    });
+    assert.equal(replay.body['id'], operationId);
+    assert.equal(replay.body['status'], 'completed');
+    assert.equal(replay.body['replayed'], true);
+    return {
+      case: current.name,
+      taskId: task!['id'],
+      operation,
+      operations: [...operations],
+    };
+  } catch (cause) {
+    await diagnose(cli, `operations=${operations.join(',')}`);
+    throw cause;
+  } finally {
+    await cli.close();
+  }
+}
+
+// FG8c — process crashes. The Harness, the managed worker, and the
+// background process itself are killed (or stopped) for real, one at a
+// time, under a live background run; a Harness restart reloads the Session
+// cold from the store under a new writer identity. Crash Sessions run a
+// 10 s writer lease: a reload outlives the killed writer without a minute's
+// wait, the capture a crashed or closed Session leaves OPEN expires within
+// seconds — the fixture tenant admits four active captures, and seven cases
+// in a row under a 60 s lease exhausted it on the seventh — and a renewal,
+// due at half the lease, still has 5 s of slack on a loaded lane. Crash
+// Sessions talk to the store directly: a Harness killed mid-upload must not
+// leave the store proxy holding an aborted request.
+const CRASH_LEASE_MS = 10_000;
+
+type RuntimeProbe = {
+  bindings: Array<{
+    binding_id: string;
+    binding_state: string;
+    runtime_generation: number;
+    loss_evidence: number | boolean;
+    stop_evidence: number | boolean;
+  }>;
+  slots: Array<{ last_generation: number; active_binding_id: string | null }>;
+  runtimeSessions: Array<{ runtime_session_id: string; session_state: string }>;
+  executions: Array<{
+    execution_call_id: string;
+    execution_state: string;
+    execution_status: string | null;
+    runtime_generation: number;
+    runtime_session_id: string;
+    loss_evidence_id: string | null;
+    abandoned: number | boolean;
+    result_json: string | null;
+  }>;
+};
+
+function procState(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat[stat.lastIndexOf(')') + 2];
+  } catch {
+    return undefined;
+  }
+}
+
+const pidAlive = (pid: number) => {
+  const state = procState(pid);
+  return state !== undefined && state !== 'Z' && state !== 'X';
+};
+
+function bgPid(): number {
+  const pid = Number(
+    readFileSync(path.join(current.directory, 'bg-started.txt'), 'utf8'),
+  );
+  assert(Number.isSafeInteger(pid) && pid > 0, `bg pid ${pid}`);
+  return pid;
+}
+
+async function crashSnapshot(label: string) {
+  const state = await probe<ProbeState>(current.sessionId, 'state');
+  const runtime = await probe<RuntimeProbe>(current.sessionId, 'runtime');
+  const snapshot = {
+    label,
+    record: childRunOf(state) ?? null,
+    monitor: state.monitors[0] ?? null,
+    bindings: runtime.bindings,
+    slots: runtime.slots,
+    runtimeSessions: runtime.runtimeSessions,
+    executions: runtime.executions,
+    fullSegments: fullSegments(state).length,
+  };
+  console.log(`FG8_CRASH_STATE ${current.name} ${JSON.stringify(snapshot)}`);
+  return snapshot;
+}
+
+async function harnessJson(
+  cli: HostedHarnessProcess,
+  method: string,
+  route: string,
+  clientId?: string,
+  body?: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await cli.request(route, {
+    method,
+    headers: {
+      ...cli.headers(clientId),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  const text = await response.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    parsed = { text };
+  }
+  return { status: response.status, body: parsed };
+}
+
+async function sigkillHarness(cli: HostedHarnessProcess) {
+  const child = cli.child!;
+  const pid = child.pid!;
+  const exited = new Promise<[number | null, string | null]>((resolve) =>
+    child.once('exit', (code, signal) => resolve([code, signal])),
+  );
+  assert(child.kill('SIGKILL'));
+  const [code, signal] = await exited;
+  assert.equal(code, null);
+  assert.equal(signal, 'SIGKILL');
+  step(`harness ${pid} SIGKILLed`);
+  return { process: 'harness', pid, signal };
+}
+
+// The case's own worker: the JVM's worker children diffed around the
+// case's first dispatch — exactly one is new.
+async function caseWorker(before: number[]): Promise<number> {
+  const after = await probe<number[]>(current.sessionId, 'workers');
+  const fresh = after.filter((pid) => !before.includes(pid));
+  assert.equal(fresh.length, 1, `one new worker: ${before} -> ${after}`);
+  return fresh[0];
+}
+
+// The case's Session status as the Harness reports it.
+async function sessionStatus(cli: HostedHarnessProcess, clientId: string) {
+  const status = await harnessJson(
+    cli,
+    'GET',
+    `/session/${current.sessionId}/status`,
+    clientId,
+  );
+  assert.equal(status.status, 200, JSON.stringify(status.body));
+  return status.body;
+}
+
+// Create the Session on a booted Harness and launch the case's background
+// run through a launch turn that settles while the run keeps its hold
+// (unless the case parks the :start reply, when `settle` is false). The run
+// is live once its supervised process announced itself and the `:process`
+// row is PREPARED; the turn has settled once the Session reports no active
+// prompt.
+async function launchCrashRun(cli: HostedHarnessProcess, settle: boolean) {
+  const workersBefore = await probe<number[]>(current.sessionId, 'workers');
+  const monitor = current.name === 'monitor-worker-kill';
+  if (current.name !== 'harness-kill-capture') {
+    execFileSync('mkfifo', [
+      path.join(current.directory, monitor ? 'monitor-gate' : 'run-gate'),
+    ]);
+  }
+  const { clientId } = await createSession(
+    cli,
+    config.storeUrl,
+    CRASH_LEASE_MS,
+  );
+  const promptId = await submitPrompt(
+    cli,
+    clientId,
+    `fg8c ${current.name} launch`,
+  );
+  step('prompt admitted');
+  await waitUntil(async () => {
+    checkProxy();
+    checkStoreProxy();
+    if (!bgStartedFile()) return false;
+    const state = await probe<ProbeState>(current.sessionId, 'state');
+    return state.executions.some(
+      (row) =>
+        row.execution_call_id.endsWith(':process') &&
+        row.execution_state === 'PREPARED',
+    );
+  }, 120_000);
+  step('run live');
+  if (settle) {
+    await waitUntil(async () => {
+      checkProxy();
+      if ((await sessionStatus(cli, clientId))['hasActivePrompt'] !== false)
+        return false;
+      if (!monitor) return true;
+      // The watch committed its observation before the case faults it.
+      const watch = (await probe<ProbeState>(current.sessionId, 'state'))
+        .monitors[0] as { observationSequence?: number } | undefined;
+      return (watch?.observationSequence ?? 0) >= 1;
+    }, 120_000);
+    step('launch turn settled, run still live');
+  }
+  const worker = await caseWorker(workersBefore);
+  return { clientId, promptId, worker };
+}
+
+// The cold reload on a fresh Harness, under its own writer identity. The
+// killed writer's lease runs from its last renewal, which the store can
+// commit just after the kill, so the one 409 that heals on its own — the
+// writer conflict — is retried until the lease lapses; any other answer is
+// the reload's.
+async function reloadSession(cli: HostedHarnessProcess) {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const loaded = await harnessJson(
+      cli,
+      'POST',
+      `/session/${current.sessionId}/load`,
+      undefined,
+      sessionBody(cli, config.storeUrl, CRASH_LEASE_MS),
+    );
+    step(`reload -> ${loaded.status} ${JSON.stringify(loaded.body)}`);
+    if (
+      loaded.status !== 409 ||
+      loaded.body['code'] !== 'managed_session_writer_conflict' ||
+      Date.now() >= deadline
+    ) {
+      return loaded;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+// DELETE /session — the close whose drain arm releases every hold the
+// Session knows of, live or restored.
+async function closeCrashSession(cli: HostedHarnessProcess, clientId: string) {
+  const at = brokerAnswers.length;
+  const closed = await harnessJson(
+    cli,
+    'DELETE',
+    `/session/${current.sessionId}`,
+    clientId,
+  );
+  step(`close -> ${closed.status}`);
+  return {
+    status: closed.status,
+    releases: brokerAnswers
+      .slice(at)
+      .filter((answer) => answer.op === 'release')
+      .map(({ runtimeSessionId, drain, status, code }) => ({
+        runtimeSessionId,
+        drain,
+        status,
+        code,
+      })),
+  };
+}
+
+async function sigkillWorker(worker: number, signals: unknown[]) {
+  process.kill(worker, 'SIGKILL');
+  await waitUntil(() => !pidAlive(worker), 10_000);
+  signals.push({ process: 'worker', pid: worker, signal: 'SIGKILL' });
+  step(`worker ${worker} SIGKILLed`);
+}
+
+async function runCrashCase() {
+  const name = current.name;
+  const report: Record<string, unknown> = { case: name };
+  const signals: Array<Record<string, unknown>> = [];
+  report['signals'] = signals;
+  const harnesses: HostedHarnessProcess[] = [];
+  let bg: number | undefined;
+  let stoppedWorker: number | undefined;
+  try {
+    // harness-kill-dispatch parks the committed :start reply, so its launch
+    // turn never learns the run started and never settles.
+    if (name === 'harness-kill-dispatch') holdCommittedStart = true;
+    const first = await bootHarness();
+    harnesses.push(first);
+    const launched = {
+      cli: first,
+      ...(await launchCrashRun(first, name !== 'harness-kill-dispatch')),
+    };
+    bg = bgPid();
+    report['promptId'] = launched.promptId;
+    if (name === 'harness-kill-dispatch' || name === 'harness-kill-capture') {
+      if (name === 'harness-kill-dispatch') {
+        // The broker writes the row and starts the process before it
+        // answers, so the parked reply can trail the live run.
+        await waitUntil(() => committedStartHeld, 30_000);
+      } else {
+        // Mid-capture is a state: three full segments committed, the paced
+        // producer still appending.
+        await waitUntil(async () => {
+          const state = await probe<ProbeState>(current.sessionId, 'state');
+          return fullSegments(state).length >= 3;
+        }, 60_000);
+      }
+      signals.push(await sigkillHarness(launched.cli));
+      releaseCommittedStarts();
+      report['committedStartDropped'] = committedStartHeld;
+      // The killed writer's lease must lapse before another writer may
+      // open (the reload retries a writer conflict until it has).
+      await new Promise((resolve) => setTimeout(resolve, CRASH_LEASE_MS + 200));
+      const at = brokerAnswers.length;
+      const cli = await bootHarness();
+      harnesses.push(cli);
+      const loaded = await reloadSession(cli);
+      // Once another writer opened, the dead one is fenced: any commit it
+      // still had in flight has landed or been refused, so this count is
+      // the capture's last.
+      report['segmentsAtReload'] = (
+        await crashSnapshot('after-reload')
+      ).fullSegments;
+      report['reload'] = {
+        status: loaded.status,
+        code: loaded.body['code'] ?? null,
+        reason: loaded.body['reason'] ?? null,
+      };
+      report['reloadOps'] = brokerAnswers
+        .slice(at)
+        .map(({ op, status, code }) => ({ op, status, code }));
+      report['bgAliveAfterReload'] = pidAlive(bg);
+      if (loaded.status === 200) {
+        report['close'] = await closeCrashSession(
+          cli,
+          loaded.body['clientId'] as string,
+        );
+        // The restored drain's stop is the only thing that may end the run.
+        await waitUntil(() => !pidAlive(bg!), 30_000).catch(() => undefined);
+        report['bgAliveAfterClose'] = pidAlive(bg);
+      }
+    } else if (name === 'worker-kill' || name === 'generation-remint') {
+      await sigkillWorker(launched.worker, signals);
+      await crashSnapshot('after-kill');
+      if (name === 'generation-remint') {
+        // Two ordinary prompts after the loss, each reaching for the
+        // Runtime with a foreground Shell: the first finds the dead worker,
+        // the second the lost generation.
+        const attempts = [];
+        for (const attempt of [1, 2]) {
+          const at = brokerAnswers.length;
+          foregroundNext = true;
+          await submitPrompt(
+            launched.cli,
+            launched.clientId,
+            `fg8c ${name} post-crash ${attempt}`,
+          );
+          await waitUntil(
+            async () =>
+              (await sessionStatus(launched.cli, launched.clientId))[
+                'hasActivePrompt'
+              ] === false,
+            120_000,
+          );
+          attempts.push(
+            brokerAnswers
+              .slice(at)
+              .map(({ op, status, code }) => ({ op, status, code })),
+          );
+        }
+        report['postCrash'] = attempts;
+      }
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    } else if (name === 'worker-stop') {
+      process.kill(launched.worker, 'SIGSTOP');
+      stoppedWorker = launched.worker;
+      await waitUntil(() => procState(launched.worker) === 'T', 5_000);
+      signals.push({
+        process: 'worker',
+        pid: launched.worker,
+        signal: 'SIGSTOP',
+      });
+      step('worker SIGSTOPped');
+      // The uncertainty window: a release sweep's status read against the
+      // stopped worker runs into the broker's 30 s worker-request bound.
+      const started = Date.now();
+      const held = await brokerRelease(false, 90_000);
+      report['stoppedRelease'] = {
+        status: held.status,
+        code: held.code,
+        elapsedMs: Date.now() - started,
+      };
+      step(`routine release while stopped -> ${held.status} ${held.code}`);
+      const during = await crashSnapshot('while-stopped');
+      report['whileStopped'] = {
+        recordState: during.record?.run?.state ?? null,
+        stopReason: during.record?.stopReason ?? null,
+        processRow: during.executions.find((row) =>
+          row.execution_call_id.endsWith(':process'),
+        )?.execution_state,
+        bindingStates: during.bindings.map((row) => row.binding_state),
+      };
+      process.kill(launched.worker, 'SIGCONT');
+      await waitUntil(() => procState(launched.worker) !== 'T', 5_000);
+      stoppedWorker = undefined;
+      signals.push({
+        process: 'worker',
+        pid: launched.worker,
+        signal: 'SIGCONT',
+      });
+      step('worker SIGCONTed');
+      await releaseFifo(current.directory, 'run-gate');
+      await waitUntil(async () => {
+        checkStoreProxy();
+        const record = childRunOf(
+          await probe<ProbeState>(current.sessionId, 'state'),
+        );
+        return record?.run?.state === 'settled';
+      }, 120_000);
+      step('resumed run settled');
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    } else if (name === 'process-kill') {
+      process.kill(bg, 'SIGKILL');
+      await waitUntil(() => !pidAlive(bg!), 10_000);
+      signals.push({ process: 'background', pid: bg, signal: 'SIGKILL' });
+      step('background process SIGKILLed');
+      await waitUntil(async () => {
+        checkStoreProxy();
+        const record = childRunOf(
+          await probe<ProbeState>(current.sessionId, 'state'),
+        );
+        return record?.run?.state === 'settled';
+      }, 120_000);
+      step('killed run settled');
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    } else {
+      assert.equal(name, 'monitor-worker-kill');
+      // The idle window must still be open at the kill, or the stop would
+      // meet a live worker and settle honestly — a case that never faulted.
+      const watch = (await probe<ProbeState>(current.sessionId, 'state'))
+        .monitors[0] as
+        | { run?: { state?: string }; stopReason?: string | null }
+        | undefined;
+      assert.equal(
+        watch?.run?.state,
+        'running',
+        'the watch is live at the kill',
+      );
+      assert.equal(watch?.stopReason, null);
+      await sigkillWorker(launched.worker, signals);
+      // The watch is silent past its observation, so its idle window ends
+      // it — and that auto-stop must ask the worker the Runtime lost.
+      await waitUntil(async () => {
+        const watch = (await probe<ProbeState>(current.sessionId, 'state'))
+          .monitors[0] as { run?: { state?: string } } | undefined;
+        return watch?.run?.state === 'recovery_blocked';
+      }, 120_000).catch((cause) => {
+        throw new Error(
+          'the watch never parked after its idle stop met the lost worker',
+          { cause },
+        );
+      });
+      step('watch parked');
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    }
+    report['monitorStops'] = brokerAnswers
+      .filter((answer) => answer.kind === 'monitor-stop')
+      .map(({ status, code }) => ({ status, code }));
+    report['starts'] = brokerAnswers.filter(
+      (answer) => answer.op === 'start',
+    ).length;
+    report['modelCalls'] = modelCalls;
+    checkProxy();
+    checkStoreProxy();
+    return report;
+  } catch (cause) {
+    await diagnose(
+      harnesses.at(-1) ?? new HostedHarnessProcess(),
+      `modelCalls=${modelCalls} signals=${JSON.stringify(signals)}\n` +
+        `answers=${JSON.stringify(brokerAnswers)}`,
+    );
+    throw cause;
+  } finally {
+    releaseCommittedStarts();
+    if (stoppedWorker !== undefined) {
+      try {
+        process.kill(stoppedWorker, 'SIGCONT');
+      } catch {
+        // already gone
+      }
+    }
+    for (const cli of harnesses) await cli.close();
+    // The case owns its physical leftovers: a refused reload or a killed
+    // worker leaves the background process running, and nothing in
+    // production reaps it in this topology.
+    if (bg === undefined && bgStartedFile()) bg = bgPid();
+    if (bg !== undefined && pidAlive(bg)) {
+      try {
+        process.kill(bg, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
   }
 }
 
@@ -1824,14 +2544,22 @@ try {
     dropNextPagePublish = false;
     droppedPagePublishes = 0;
     dropCommitOps.clear();
+    brokerAnswers.length = 0;
+    holdCommittedStart = false;
+    committedStartHeld = false;
+    foregroundNext = false;
     if (config.letter === 'fg8a') {
       reports.push(await runReplyLossCase());
     } else if (config.letter === 'fg8b') {
       reports.push(await runStoreFailureCase());
     } else if (config.letter === 'fg8d') {
       reports.push(await runCancelDrainCase());
+    } else if (config.letter === 'fg8c') {
+      reports.push(await runCrashCase());
     } else if (config.letter === 'fg8f') {
       reports.push(await runPublishCase());
+    } else if (config.letter === 'fg8g') {
+      reports.push(await runCancelCase());
     } else {
       const surface = current.name.startsWith('public') ? 'public' : 'web';
       reports.push(await runStreamCase(surface));
@@ -1850,7 +2578,11 @@ try {
           ? 'FG8_STORE_FAILURE_OK'
           : config.letter === 'fg8d'
             ? 'FG8_CANCEL_DRAIN_OK'
-            : 'FG8_STREAM_GAPS_OK',
+            : config.letter === 'fg8g'
+              ? 'FG8_TASK_CANCEL_OK'
+              : config.letter === 'fg8c'
+                ? 'FG8_PROCESS_CRASH_OK'
+                : 'FG8_STREAM_GAPS_OK',
   );
 } catch (cause) {
   console.error('FG8 failed at', current?.name, cause);
