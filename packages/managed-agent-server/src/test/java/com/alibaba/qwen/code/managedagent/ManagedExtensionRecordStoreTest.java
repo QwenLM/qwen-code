@@ -137,6 +137,8 @@ class ManagedExtensionRecordStoreTest {
         ManagedExtensionRecordStore.TaskRow row = records
                 .findTask(TENANT, sessionId, taskId).orElseThrow();
         assertThat(row.kind()).isEqualTo("background_shell");
+        // #13746 F2: only a child Session kind names a child Session.
+        assertThat(records.childSessionId(TENANT, sessionId, row)).isNull();
         assertThat(row.projection().state()).isEqualTo("waiting");
         assertThat(row.projection().runtimeState()).isEqualTo("ready");
         assertThat(row.projection().startedAt()).isEqualTo(2_000L);
@@ -712,7 +714,23 @@ class ManagedExtensionRecordStoreTest {
         dispatching.withObject("/run").put("execution", "dispatch_started");
         dispatching.putNull("childSessionId");
         commitDomain(journal, "stop-2", "child_run", dispatching, List.of());
+        // #13746 F2: no child Session is named before the attach records it.
+        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+                .childSessionId()).isNull();
+        assertThat(tasks.getWebShellTask(TENANT, TENANT, sessionId, taskId)
+                .childSessionId()).isNull();
         commitDomain(journal, "stop-3", "child_run", attached, List.of());
+        // From the attach on, both surfaces name it, on detail and list.
+        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+                .childSessionId()).isEqualTo("session-child");
+        assertThat(tasks.listPublicTasks(TENANT, TENANT, sessionId, null, 10)
+                .data().getFirst().childSessionId())
+                .isEqualTo("session-child");
+        assertThat(tasks.getWebShellTask(TENANT, TENANT, sessionId, taskId)
+                .childSessionId()).isEqualTo("session-child");
+        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+                10).data().getFirst().childSessionId())
+                .isEqualTo("session-child");
         ObjectNode stopping = attached.deepCopy();
         stopping.put("stopRequested", true);
         commitDomain(journal, "stop-4", "child_run", stopping, List.of());
@@ -754,6 +772,8 @@ class ManagedExtensionRecordStoreTest {
         var settled = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
         assertThat(settled.state()).isEqualTo("cancelled");
         assertThat(settled.actionCapabilities()).isEmpty();
+        // The settled run keeps naming the child that carries its output.
+        assertThat(settled.childSessionId()).isEqualTo("session-child");
         var events = tasks.listPublicTaskEvents(TENANT, TENANT, sessionId,
                 taskId, null, 20);
         assertThat(events.data())
@@ -798,6 +818,9 @@ class ManagedExtensionRecordStoreTest {
         commitDomain(journal, "stop-2", "child_run", dispatching,
                 List.of());
         commitDomain(journal, "stop-3", "child_run", attached, List.of());
+        // #13746 F2: a workflow child names its Session like a child agent.
+        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+                .childSessionId()).isEqualTo("session-child");
         ObjectNode stopping = attached.deepCopy();
         stopping.put("stopRequested", true);
         commitDomain(journal, "stop-4", "child_run", stopping, List.of());
@@ -1787,8 +1810,10 @@ class ManagedExtensionRecordStoreTest {
                 assertThat(seen).as("limit %d", limit).isEqualTo(first);
             }
         }
-        assertThat(tasks.getPublicTask(TENANT, null, sessionId,
-                first.get(0).substring(5)).kind()).isEqualTo("monitor");
+        PublicTask monitor = tasks.getPublicTask(TENANT, null, sessionId,
+                first.get(0).substring(5));
+        assertThat(monitor.kind()).isEqualTo("monitor");
+        assertThat(monitor.childSessionId()).isNull();
         assertThatThrownBy(() -> tasks.listPublicTasks(TENANT, null,
                 sessionId, "not-a-cursor", 1))
                 .hasFieldOrPropertyWithValue("code", "invalid_cursor");
