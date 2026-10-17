@@ -3,8 +3,10 @@
 [English](2026-10-15-managed-workspace-resident-runtime.md) | [简体中文](2026-10-15-managed-workspace-resident-runtime.zh-CN.md)
 
 Status: Section 4.1 is implemented by PR1
-([#14254](https://github.com/QwenLM/qwen-code/pull/14254)) and Section 4.2 by
-PR2. The remaining sections are proposals. Tracking issue:
+([#14254](https://github.com/QwenLM/qwen-code/pull/14254)), Section 4.2 by PR2
+([#14339](https://github.com/QwenLM/qwen-code/pull/14339)) and Section 4.3 by
+PR3. Section 4.4 (Session-create warm) and Section 4.5 remain proposals.
+Tracking issue:
 [#14211](https://github.com/QwenLM/qwen-code/issues/14211). Part of the Managed
 Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). Code
 references are to `main` @ `c3012a523f`, before PR2.
@@ -20,6 +22,34 @@ Revision history:
   - idle retirement and the generation budget are deferred (Section 4.5);
   - the slices are reordered: PR2 re-keys Harness ownership, PR3 enables
     Workspace residency, PR4 adds Session-create warm.
+- Revision 4 (PR3):
+  - close/recovery side: a closing Session releases only its own Runtime
+    Sessions on a shared binding (the worker and the binding stay `READY`) on
+    both close protocols; v2 cleanup authority is fenced by the Runtime
+    Session's own Harness Session claim; a lost shared worker fails the close
+    closed instead of retiring the binding; storage retirement still stops
+    the shared worker; recovery maintenance and retention admit shared
+    bindings;
+  - new finding: the old close fails open on a shared binding — protocols v0
+    and v1 enumerate only Session-isolated bindings, so a Session with active
+    shared Runtime Sessions could reach `CLOSED` without releasing them (v2
+    refused). It was unreachable until the policy admitted Workspace
+    isolation; the v2 never-initialized receipt now additionally requires
+    that no Runtime Session of the Session was ever placed on a shared
+    binding;
+  - enablement: `bound-session-isolation-class` (`session` default,
+    `workspace` opt-in) switches bound-Session placement to Workspace-isolated
+    bindings, and lifecycle authority on a shared binding is fenced by the
+    Runtime Session's own Harness Session claim, so the closing Session's
+    lifecycle Hook places and runs on the resident worker;
+  - correction: the enumeration index is the `V7` migration, a single-column
+    `harness_session_id` index — both columns are VARBINARY(2048), so the
+    `(tenant_id, harness_session_id)` pair sketched in Section 4.3 exceeds
+    InnoDB's 3072-byte key length;
+  - relation to #14340: the resident Workspace close for private Kubernetes
+    CSI shipped separately; its semantics are unchanged;
+  - validation scope: this slice carries unit/H2 and mutation evidence; the
+    real-process Linux scenarios of Section 9 remain a follow-up.
 
 ## 1. Problem
 
@@ -150,12 +180,13 @@ construction.
 | `WorkspaceRuntimeTransport` context check (server)                              | Matches the Runtime Session record's Harness Session.                                                                                                                                   |
 | Operator recovery (server)                                                      | Records the held Runtime Session's Harness Session as the owner.                                                                                                                        |
 
-**Kept unchanged:** CSI-only code, warm placement (a shared binding has no
-single owner and warm admits no work), and paths that require lifecycle
-authority (they keep refusing on shared bindings).
+**Kept unchanged:** CSI-only code and warm placement (a shared binding has no
+single owner and warm admits no work). Lifecycle-authority paths were refused
+on shared bindings in PR2; PR3 admits them fenced by the Runtime Session's own
+Harness Session claim (Section 4.3).
 
-**Deferred to PR3** (reachable only once the policy admits Workspace
-isolation): close and lifecycle evidence (`findHarnessExecutions`,
+**Delivered in PR3** (reachable once the policy admits Workspace isolation):
+close and lifecycle evidence (`findHarnessExecutions`,
 `verifyHarnessResources`, `verifyHarnessStopped`), stopped release and
 `canStopDrained`, recovery-maintenance fences, retention of shared bindings,
 and provisioning scope resolution.
@@ -212,10 +243,13 @@ splits today's close into two operations:
    3. conditionally clears the original storage holder;
    4. records `RELEASED`.
 
-   Enumerating by Harness Session needs a new `(tenant_id, harness_session_id)`
-   index on `ma_runtime_session`, added as a `V4` migration. An unsettled or
-   `UNKNOWN` execution of this Session blocks completion exactly as today. The
-   binding stays `READY` for other Sessions.
+   Enumerating by Harness Session needs a new index on `ma_runtime_session`,
+   added as the `V7` migration. It is a single-column `harness_session_id`
+   index: both columns are VARBINARY(2048), so the `(tenant_id,
+harness_session_id)` pair originally sketched here exceeds InnoDB's
+   3072-byte key length, and the tenant is filtered in the query instead. An
+   unsettled or `UNKNOWN` execution of this Session blocks completion exactly
+   as today. The binding stays `READY` for other Sessions.
 
 2. **Binding retirement.** This is the existing `drainBinding` path: drain,
    release the remaining Sessions, `stopDrained`, persist the drain receipt,
@@ -299,10 +333,10 @@ needed. Research for revision 2 found what they will have to handle:
 
 All keys are proposed. Every behaviour change defaults off.
 
-| Key (`qwen.managed-agent.runtime-broker.`)                                                | Default   | Slice |
-| ----------------------------------------------------------------------------------------- | --------- | ----- |
-| Bound-Session isolation (name decided in PR3; separate from the global `isolation-class`) | `session` | PR3   |
-| `session-create-warm`                                                                     | `false`   | PR4   |
+| Key (`qwen.managed-agent.runtime-broker.`)                                                       | Default   | Slice |
+| ------------------------------------------------------------------------------------------------ | --------- | ----- |
+| `bound-session-isolation-class` (bound Sessions only; the global `isolation-class` is unchanged) | `session` | PR3   |
+| `session-create-warm`                                                                            | `false`   | PR4   |
 
 Durations follow the existing unit rules and must be written with a suffix.
 
@@ -392,7 +426,12 @@ and links the run in the pull request body.
     shared binding;
   - disabling the predicate makes every new test fail;
   - existing suites stay green.
-- **PR3:** real-process tests on Linux with durable local workers and MySQL:
+- **PR3 (landed):** unit/H2 suites pin the close split on shared bindings
+  (both close protocols), the cleanup-claim fence, the lost-shared-worker
+  fail-closed branch, the never-initialized fail-open fix, the configuration
+  gate and the resolver switch; each new branch fails under a targeted
+  mutation. The real-process scenarios below (Linux, durable local workers,
+  MySQL) remain a follow-up tracked in #14211:
   - two Sessions share one binding ID, generation and worker PID;
   - same-storage turns serialize with `workspace_busy`;
   - closing A leaves B's next Turn on the same worker;
@@ -435,10 +474,11 @@ and links the run in the pull request body.
 
 1. Which measurements decide when per-turn worker growth needs the generation
    budget?
-2. What is the bound-Session isolation setting called, and does it need a
-   per-Workspace override?
 
 Resolved:
+
+- Bound-Session isolation setting: `bound-session-isolation-class` (PR3); no
+  per-Workspace override in this delivery.
 
 - Workspace-isolated close evidence: the original worker's activation-release
   acknowledgement plus holder release (maintainer, 2026-10-16).
