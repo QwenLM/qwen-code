@@ -90,7 +90,7 @@ import type {
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { LlmChat } from '../../core/llm-chat.js';
+import { LlmChat, type StreamEvent } from '../../core/llm-chat.js';
 import { toolCallArgumentsWereIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
@@ -1074,6 +1074,7 @@ export class AgentCore {
       // parent propagation; the try/finally below guarantees reverse-cleanup
       // fires for every exit (success, break, return, throw).
       const roundAbortController = createChildAbortController(abortController);
+      let responseStream: AsyncIterableIterator<StreamEvent> | undefined;
       let retryWaitScope: RetryWaitScope | undefined;
 
       try {
@@ -1124,11 +1125,15 @@ export class AgentCore {
               DEFAULT_QWEN_MODEL,
             messageParams,
             promptId,
+            undefined,
+            stickyMaxOutputTokens !== undefined
+              ? { maxOutputTokensFromRecovery: true }
+              : undefined,
           );
         // The request (and any send-time compaction) runs partly before the
         // stream is returned and partly while it is iterated; both belong to
         // this round's retry-wait observer.
-        const responseStream = retryWaitScope
+        responseStream = retryWaitScope
           ? retryWaitScope.bind(await retryWaitScope.run(sendMessage))
           : await sendMessage();
         this.eventEmitter?.emit(AgentEventType.ROUND_START, {
@@ -1183,6 +1188,32 @@ export class AgentCore {
             }
             if (streamEvent.maxOutputTokensEscalated !== undefined) {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            }
+            functionCalls.length = 0;
+            loopGuardStreamedCallIds.clear();
+            if (!streamEvent.isContinuation) {
+              roundText = '';
+              roundThoughtText = '';
+              lastUsage = undefined;
+            }
+            currentResponseId = undefined;
+            wasOutputTruncated = false;
+            continue;
+          }
+
+          if (streamEvent.type === 'model_fallback') {
+            if (
+              checkSubagentLoop({
+                type: LlmEventType.ModelFallback,
+                fromModel: streamEvent.info.fromModel,
+                toModel: streamEvent.info.toModel,
+                statusCode: streamEvent.info.statusCode,
+                fallbackIndex: streamEvent.info.fallbackIndex,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
             }
             functionCalls.length = 0;
             loopGuardStreamedCallIds.clear();
@@ -1504,6 +1535,13 @@ export class AgentCore {
         // long-running parents like the per-message roundAbortController in
         // AgentInteractive or the session-lived externalSignal in headless.
         roundAbortController.abort();
+        try {
+          await responseStream?.return?.(undefined);
+        } catch (error) {
+          this.runtimeContext
+            .getDebugLogger()
+            .warn(`Failed to close response stream: ${String(error)}`);
+        }
       }
     }
 
