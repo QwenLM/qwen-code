@@ -45,6 +45,20 @@ immutable 可执行文件及 enforce 模式的 AppArmor label。传递持续持�
 通道丢失、peer 或输入对象变化会阻断活动关联。必须接通匹配的来源 handler 和日志读端后
 才能安装该 shim；独立 producer 不等于可工作的来源。
 
+### 原创建通道 peer 的命名空间
+
+source/shim 创建通道通过既有原 proc 目录，另持原 peer 的 user、mount namespace
+描述符，核实际 NSFS、普通文件类型、namespace 类型及 device/inode。要求既有支持
+范围的初始 user inode 不变量和有界完整初始 uid_map，不用权限错误推断初始 namespace。
+保留原 peer 的 mount namespace，它可以与另一角色的私有 mount namespace 不同。每次
+原 peer 验证都比较 held 与当前命名对象，前后仍复核原 pidfd/start/executable/label。
+对象缺失、变化或关闭即拒绝；清理关闭两个新描述符，不重新取得替代 namespace 身份。
+
+这些检查针对原 process leader 和既有通道边界，不覆盖所有线程，也不证明两次观察之间
+没有变化。准确 namespace-link 命名、NS_GET_NSTYPE ioctl 调解及继承 seccomp 兼容性
+仍是安装要求。既有 source/shim profiles 包含固定 namespace 叶子路径，但实际加载权限
+未验收。本候选原生路径仅编译，不改 wire/SQL 格式，不授予释放权限。
+
 ## 持续持有服务输入
 
 source 与 gateway 从启动起持续持有 immutable ext4 配置、CA、证书和私钥对象。

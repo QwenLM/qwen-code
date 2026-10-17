@@ -64,6 +64,27 @@ every reply. A lost channel, changed peer or input object blocks the live
 association. The source's matching handler and journal consumer must be wired
 before this shim is installable; an isolated producer is not a working source.
 
+### Original pre-execution peer namespaces
+
+The source/shim creator channel additionally retains the original peer's user
+and mount namespace descriptors through its existing proc directory. Verify
+actual NSFS, regular-file type, namespace type and device/inode. Require the
+existing supported initial-user inode invariant and a bounded full initial
+uid_map; never infer an initial namespace from a permission error. Preserve
+the peer's original mount namespace, which may differ from the other role's
+private mount namespace. Each existing peer verification compares both retained
+and current named objects, bracketed by the original pidfd/start/executable/label
+checks. Missing, changed or closed objects refuse; cleanup closes both new
+descriptors. No namespace identity is reacquired as a replacement.
+
+These are checks of the original process leader at the existing channel
+boundaries, not every thread or proof against an intervening change. Exact
+namespace-link naming, NS_GET_NSTYPE ioctl mediation and inherited seccomp
+compatibility remain installation requirements. Existing source/shim profiles
+name the fixed namespace leaves; their actual loaded permissions are unverified.
+This candidate is compile-only for the native path, changes no wire/SQL format
+and grants no release authority.
+
 ## Retained service inputs
 
 Source and gateway retain the immutable ext4 configuration, CA, certificate and
