@@ -40,6 +40,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -111,6 +112,10 @@ class HostedWorkflowRelayFaultGatesIT {
     private static final String SUBAGENT_PROMPT =
             "subagent spawned by a workflow";
     private static final String SUB_ANSWER = "FG10_SUB_ANSWER";
+    /** An SSE comment: the client's parser skips it, but a write that
+     * meets a connection its client aborted fails. */
+    private static final byte[] KEEPALIVE = ": fg10 hold\n\n"
+            .getBytes(StandardCharsets.UTF_8);
     private static final String SCRIPT = "export const meta = { name:"
             + " \"fg10relay\", description: \"fg10\" };\n"
             + "const answer = await agent(\"FG10_SUB_PROMPT\");\n"
@@ -120,8 +125,10 @@ class HostedWorkflowRelayFaultGatesIT {
     private static final Pattern COMMAND = Pattern.compile(" cmd=(\\S+) ");
     /** The store client's bounded uncertain-error retry of one commit:
      * `ManagedSessionStoreHttpClient.appendTransaction`'s commit loop
-     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`,
-     * `for (let attempt = 0; attempt < 3; attempt++)`). */
+     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`)
+     * rethrows once `const exhausted = attempt >= 2`, the third attempt,
+     * for every operation but `renewActivation`, which alone may retry
+     * past the cap while its lease lasts. */
     private static final int STORE_ATTEMPTS = 3;
 
     private final ObjectMapper json = new ObjectMapper();
@@ -137,8 +144,8 @@ class HostedWorkflowRelayFaultGatesIT {
     private final List<Observer> observers = new CopyOnWriteArrayList<>();
     private final AtomicInteger caseSlot = new AtomicInteger();
     private final List<String> refusals = new ArrayList<>();
-    private volatile CountDownLatch subagentReturned = new CountDownLatch(1);
-    private volatile boolean subagentAbandoned;
+    private volatile CountDownLatch subagentAborted = new CountDownLatch(1);
+    private volatile boolean subagentAbortExpected;
 
     @TempDir
     private Path temporary;
@@ -249,8 +256,8 @@ class HostedWorkflowRelayFaultGatesIT {
             wakeRounds.set(0);
             subagentHold.set(null);
             subagentHeld = new CountDownLatch(1);
-            subagentReturned = new CountDownLatch(1);
-            subagentAbandoned = false;
+            subagentAborted = new CountDownLatch(1);
+            subagentAbortExpected = false;
             switch (name) {
                 case "dispatch-reply" -> dispatchReply();
                 case "child-message-reply" -> childMessageReply();
@@ -468,6 +475,7 @@ class HostedWorkflowRelayFaultGatesIT {
             child = onlyChildSession(lead);
             taskId = taskIdOf(lead);
             key = "fg10e-cancel-" + taskId;
+            subagentAbortExpected = true;
             if (replyLost) {
                 String path = cancelPath(lead, taskId);
                 publicProxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
@@ -492,15 +500,19 @@ class HostedWorkflowRelayFaultGatesIT {
                     .as("the re-issued cancel answers the committed one")
                     .isEqualTo(replyLost);
             awaitCancelled(lead, child);
-            subagentAbandoned = true;
+            // The run settling cancelled is not the subagent stopping: the
+            // sandbox's abort race settles the run with its dispatch still
+            // in flight. Only the request failing while still held proves
+            // the stop reached the subagent itself.
+            assertThat(subagentAborted.await(60, TimeUnit.SECONDS))
+                    .as("the cancel aborted the held subagent request")
+                    .isTrue();
         } finally {
             hold.countDown();
             subagentHold.set(null);
         }
-        // The held answer is released into the cancelled run; give it the
-        // chance to land before proving it did not.
-        assertThat(subagentReturned.await(60, TimeUnit.SECONDS))
-                .as("the held subagent request returned").isTrue();
+        // Give a re-dispatch or a stray answer the chance to land before
+        // proving neither did.
         waiting().pollDelay(Duration.ofSeconds(3))
                 .atMost(Duration.ofSeconds(10)).until(() -> true);
         assertNoModelFailure();
@@ -867,8 +879,9 @@ class HostedWorkflowRelayFaultGatesIT {
                 + " FROM ma_session_record WHERE tenant_id = ? AND"
                 + " session_id = ? AND domain = 'child_run'", String.class,
                 tenant, lead);
-        return "task_" + ManagedExtensionProjection.recordKey(lead,
-                "child_run", runId);
+        return ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(lead, "child_run",
+                        runId));
     }
 
     private static String cancelPath(String lead, String taskId) {
@@ -1483,22 +1496,10 @@ class HostedWorkflowRelayFaultGatesIT {
             if (text.contains(SUBAGENT_PROMPT)) {
                 subagentCalls.incrementAndGet();
                 CountDownLatch hold = subagentHold.get();
-                if (hold != null) {
-                    subagentHeld.countDown();
-                    if (!hold.await(180, TimeUnit.SECONDS)) {
-                        throw new AssertionError("subagent hold never opened");
-                    }
-                }
-                try {
+                if (hold == null) {
                     reply(exchange, List.of(), SUB_ANSWER);
-                } catch (IOException gone) {
-                    // A cancelled run aborted its subagent's request: the
-                    // released answer meets a closed connection.
-                    if (!subagentAbandoned) {
-                        throw gone;
-                    }
-                } finally {
-                    subagentReturned.countDown();
+                } else {
+                    holdSubagent(exchange, hold);
                 }
                 return;
             }
@@ -1538,8 +1539,52 @@ class HostedWorkflowRelayFaultGatesIT {
         return results;
     }
 
+    /**
+     * Holds a subagent request open on a live stream: the headers go out
+     * at once and an SSE comment every 250 ms, so a request its client
+     * aborts fails the next write while the hold is still closed. That
+     * failure is {@link #subagentAborted}, the witness that a stop reached
+     * the subagent's own request, not only the run awaiting it.
+     */
+    private void holdSubagent(HttpExchange exchange, CountDownLatch hold)
+            throws IOException, InterruptedException {
+        exchange.getResponseHeaders().set("Content-Type",
+                "text/event-stream");
+        exchange.sendResponseHeaders(200, 0);
+        OutputStream out = exchange.getResponseBody();
+        out.write(KEEPALIVE);
+        out.flush();
+        subagentHeld.countDown();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(180);
+        try {
+            while (!hold.await(250, TimeUnit.MILLISECONDS)) {
+                if (System.nanoTime() > deadline) {
+                    throw new AssertionError("subagent hold never opened");
+                }
+                out.write(KEEPALIVE);
+                out.flush();
+            }
+            out.write(completion(List.of(), SUB_ANSWER));
+            out.flush();
+        } catch (IOException aborted) {
+            subagentAborted.countDown();
+            if (!subagentAbortExpected) {
+                throw aborted;
+            }
+        }
+    }
+
     private void reply(HttpExchange exchange,
             List<Map<String, Object>> calls, String text) throws IOException {
+        byte[] response = completion(calls, text);
+        exchange.getResponseHeaders().set("Content-Type",
+                "text/event-stream");
+        exchange.sendResponseHeaders(200, response.length);
+        exchange.getResponseBody().write(response);
+    }
+
+    private byte[] completion(List<Map<String, Object>> calls, String text)
+            throws IOException {
         ObjectNode chunk = json.createObjectNode().put("id", "fg10")
                 .put("object", "chat.completion.chunk").put("created", 0)
                 .put("model", "fg10-fixture");
@@ -1566,13 +1611,8 @@ class HostedWorkflowRelayFaultGatesIT {
         String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
         choice.putObject("delta");
         choice.put("finish_reason", calls.isEmpty() ? "stop" : "tool_calls");
-        byte[] response = (first + "data: "
-                + json.writeValueAsString(chunk) + "\n\ndata: [DONE]\n\n")
-                .getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type",
-                "text/event-stream");
-        exchange.sendResponseHeaders(200, response.length);
-        exchange.getResponseBody().write(response);
+        return (first + "data: " + json.writeValueAsString(chunk)
+                + "\n\ndata: [DONE]\n\n").getBytes(StandardCharsets.UTF_8);
     }
 
     private static int freePort() throws IOException {

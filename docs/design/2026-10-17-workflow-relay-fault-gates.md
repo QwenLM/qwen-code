@@ -256,15 +256,19 @@ The cancel is the public task cancel on the lead
 (`POST /v1/agents/sessions/{lead}/tasks/{taskId}/cancel`, the task id being
 `task_` + the record key of the `child_run`). The in-flight window is a held
 `agent()` request at the scripted model, released only after the case
-read the cancel's outcome. The released answer then meets the closed
-connection of the subagent request the cancel aborted, and the case
-waits for that reply to return before proving it never landed.
+read the cancel's outcome. The held request is a live stream: its headers
+go out at once and an SSE comment every 250 ms. The run settling
+`cancelled` does not show that the subagent stopped — the sandbox's abort
+race settles the run with its dispatch still in flight — so the case has
+its own witness: a keepalive write failing while the hold is still
+closed, which only a Harness that aborted the subagent's request itself
+produces.
 
-| Case                        | Injection                                                                                                                                        | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cancel-subagent-in-flight` | Cancel the workflow task while its `agent()` request is held                                                                                     | 202, then the child Turn ends `CANCELLED` and the record settles `cancelled` / `stop_requested`. One `TASK_CANCEL` operation, with one admission under the key. Nothing runs under the cancelled record: the `agent()` dispatch count stays one, and the held answer, released afterwards, never reaches the child journal. No notification and no wake: the `CHILD_RESULT` reception never reads `accepted`. The task view reads `cancelled` |
-| `cancel-reply-lost`         | The same window, with the cancel POST sent through a public-API proxy that drops its reply after it committed; the client re-issues the same key | The lost POST fails client-side, with the drop witnessed once. The re-issue answers 202 `replayed: true` for the same task, and every `cancel-subagent-in-flight` expectation holds — still one `TASK_CANCEL` operation and one admission under the key                                                                                                                                                                                       |
-| `cancel-after-settlement`   | Cancel a workflow task whose run already completed and was consumed                                                                              | 409 `task_action_unavailable`. No `TASK_CANCEL` operation; the record's revision is unchanged; every `assertOneWorkflowInstance` expectation still holds (one notification, one wake round)                                                                                                                                                                                                                                                   |
+| Case                        | Injection                                                                                                                                        | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-subagent-in-flight` | Cancel the workflow task while its `agent()` request is held                                                                                     | 202, then the child Turn ends `CANCELLED` and the record settles `cancelled` / `stop_requested`. One `TASK_CANCEL` operation, with one admission under the key. Nothing runs under the cancelled record: the held `agent()` request is aborted while still held, the dispatch count stays one, and no answer reaches the child journal. No notification and no wake: the `CHILD_RESULT` reception never reads `accepted`. The task view reads `cancelled` |
+| `cancel-reply-lost`         | The same window, with the cancel POST sent through a public-API proxy that drops its reply after it committed; the client re-issues the same key | The lost POST fails client-side, with the drop witnessed once. The re-issue answers 202 `replayed: true` for the same task, and every `cancel-subagent-in-flight` expectation holds — still one `TASK_CANCEL` operation and one admission under the key                                                                                                                                                                                                   |
+| `cancel-after-settlement`   | Cancel a workflow task whose run already completed and was consumed                                                                              | 409 `task_action_unavailable`. No `TASK_CANCEL` operation; the record's revision is unchanged; every `assertOneWorkflowInstance` expectation still holds (one notification, one wake round)                                                                                                                                                                                                                                                               |
 
 Mechanics notes recorded at landing:
 
@@ -282,6 +286,12 @@ Mechanics notes recorded at landing:
   signal handed to `WorkflowRunner.start`, and the abort listener calling
   `handle.abort()` (`hosted-workflow-turn.ts:261-278`). Either alone stops
   the run.
+- The run's stop reaches its in-flight `agent()` dispatch only through
+  the run controller's signal, handed to `createProductionDispatch`
+  (`workflow-runner.ts:519-523`). Without it the run still settles
+  `cancelled`, the child Turn `CANCELLED`, and the answer released later
+  lands nowhere; only the aborted-request witness tells the two apart
+  (mutation 9).
 - #14456 (merged while slice 1 was in review) changed
   `TaskCancelCoordinator`'s reconciliation of parked rows; the live cancel
   path these cases drive is green on top of it.
@@ -401,10 +411,16 @@ Slice 2, each run against its case alone (`-Dqwen.fg10c.case` /
    signal handed to `WorkflowRunner.start` and the `handle.abort()`
    listener both dropped): `cancel-subagent-in-flight` red; the child Turn
    never leaves `CANCELLING`. Either path alone stops the run.
-9. FG10e — the task cancel's request digest not stable across a retry (a
-   per-call nonce): `cancel-reply-lost` red; the re-issued cancel answers
-   409 instead of replaying the committed admission.
-10. FG10e — a settled task still advertising and admitting cancel
+9. FG10e — the run's stop not forwarded to its `agent()` dispatch (a fresh
+   signal handed to `createProductionDispatch` in place of the run
+   controller's; the workflow's own cancellation intact):
+   `cancel-subagent-in-flight` red at the aborted-request witness. The run
+   still settles `cancelled` and the child Turn `CANCELLED` first, so
+   without that witness the case passed.
+10. FG10e — the task cancel's request digest not stable across a retry (a
+    per-call nonce): `cancel-reply-lost` red; the re-issued cancel answers
+    409 instead of replaying the committed admission.
+11. FG10e — a settled task still advertising and admitting cancel
     (`completed` added to the cancellable states):
     `cancel-after-settlement` red; the cancel is admitted with 202 instead
     of 409 `task_action_unavailable`.

@@ -220,14 +220,16 @@ store 客户端在一次提交调用内部重驱的丢弃，根本到不了 rela
 
 取消是 lead 上的公开任务取消（`POST /v1/agents/sessions/{lead}/tasks/{taskId}/cancel`，
 任务 id 为 `task_` 加上该 `child_run` 的 record key）。在飞窗口是脚本化模型处被扣住的
-`agent()` 请求，直到用例读到取消的结果之后才放开。放开的回答会撞上已被取消中止的子
-agent 请求的已关闭连接；用例要等这次回复返回，再证明它从未落地。
+`agent()` 请求，直到用例读到取消的结果之后才放开。被扣住的请求是一条活的流：响应头
+立即发出，之后每 250 ms 写一条 SSE 注释。运行结算为 `cancelled` 并不说明子 agent 停了
+—— sandbox 的中止竞速会在派发仍在飞时就结算运行 —— 所以用例有自己的见证：在扣留仍未
+放开时，keepalive 写入失败。只有亲自中止了子 agent 请求的 Harness 才会造成这种失败。
 
-| 用例                        | 注入                                                                                         | 期望                                                                                                                                                                                                                                                                                                                                          |
-| --------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cancel-subagent-in-flight` | 在 `agent()` 请求被扣住时取消 workflow 任务                                                  | 返回 202，随后子 Turn 结束为 `CANCELLED`，记录结算为 `cancelled` / `stop_requested`。一个 `TASK_CANCEL` 操作，该 key 下只有一行受理。被取消的记录下不留任何仍在运行的东西：`agent()` 派发次数保持为一，被扣住的回答随后放开，也绝不进入子 journal。没有通知、没有唤醒：`CHILD_RESULT` 的接收状态绝不读到 `accepted`。任务视图读到 `cancelled` |
-| `cancel-reply-lost`         | 同一窗口，取消的 POST 经过挡在公开 API 前的 proxy，提交后其应答被丢弃；客户端以同一 key 重发 | 丢失的那次 POST 在客户端失败，丢弃被见证一次。重发对同一任务返回 202 `replayed: true`，`cancel-subagent-in-flight` 的每条期望都成立 —— 仍是一个 `TASK_CANCEL` 操作、该 key 下一行受理                                                                                                                                                         |
-| `cancel-after-settlement`   | 取消一个运行早已完成并被消费的 workflow 任务                                                 | 409 `task_action_unavailable`。没有 `TASK_CANCEL` 操作；记录的 revision 不变；`assertOneWorkflowInstance` 的每条期望仍然成立（一份通知、一次唤醒轮）                                                                                                                                                                                          |
+| 用例                        | 注入                                                                                         | 期望                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-subagent-in-flight` | 在 `agent()` 请求被扣住时取消 workflow 任务                                                  | 返回 202，随后子 Turn 结束为 `CANCELLED`，记录结算为 `cancelled` / `stop_requested`。一个 `TASK_CANCEL` 操作，该 key 下只有一行受理。被取消的记录下不留任何仍在运行的东西：被扣住的 `agent()` 请求在扣留期间就被中止，派发次数保持为一，没有任何回答进入子 journal。没有通知、没有唤醒：`CHILD_RESULT` 的接收状态绝不读到 `accepted`。任务视图读到 `cancelled` |
+| `cancel-reply-lost`         | 同一窗口，取消的 POST 经过挡在公开 API 前的 proxy，提交后其应答被丢弃；客户端以同一 key 重发 | 丢失的那次 POST 在客户端失败，丢弃被见证一次。重发对同一任务返回 202 `replayed: true`，`cancel-subagent-in-flight` 的每条期望都成立 —— 仍是一个 `TASK_CANCEL` 操作、该 key 下一行受理                                                                                                                                                                          |
+| `cancel-after-settlement`   | 取消一个运行早已完成并被消费的 workflow 任务                                                 | 409 `task_action_unavailable`。没有 `TASK_CANCEL` 操作；记录的 revision 不变；`assertOneWorkflowInstance` 的每条期望仍然成立（一份通知、一次唤醒轮）                                                                                                                                                                                                           |
 
 落地时记录的机制说明：
 
@@ -241,6 +243,10 @@ agent 请求的已关闭连接；用例要等这次回复返回，再证明它�
 - workflow Turn 通过两条路径响应停止：交给 `WorkflowRunner.start` 的 Turn 中止信号，
   以及调用 `handle.abort()` 的中止监听（`hosted-workflow-turn.ts:261-278`）。任一路径
   单独都能停下这次运行。
+- 运行的停止只经由交给 `createProductionDispatch` 的运行控制器信号
+  （`workflow-runner.ts:519-523`）到达在飞的 `agent()` 派发。没有它，运行照样结算为
+  `cancelled`、子 Turn 照样为 `CANCELLED`，之后放开的回答也无处落地；只有"请求被中止"
+  这个见证能区分两者（变异 9）。
 - #14456（第 1 片评审期间合入）改了 `TaskCancelCoordinator` 对停放行的对账；这些用例
   驱动的在线取消路径在它之上全绿。
 
@@ -328,9 +334,13 @@ profile 用于本地运行。每片重新推导共享 fork 预算时，都要把
 8. FG10e —— 子运行的停止到不了进程内运行（交给 `WorkflowRunner.start` 的中止信号和
    `handle.abort()` 监听都被去掉）：`cancel-subagent-in-flight` 红；子 Turn 永远离不开
    `CANCELLING`。任一路径单独都能停下运行。
-9. FG10e —— 任务取消的请求摘要在重试间不稳定（每次调用带 nonce）：`cancel-reply-lost`
-   红；重发的取消返回 409，而不是重放已提交的受理。
-10. FG10e —— 已结算的任务仍然提供并受理取消（把 `completed` 加进可取消状态）：
+9. FG10e —— 运行的停止没有转发给它的 `agent()` 派发（交给 `createProductionDispatch`
+   的是一个新信号而不是运行控制器的信号；workflow 自身的取消完好）：
+   `cancel-subagent-in-flight` 红在"请求被中止"见证上。运行照样先结算为 `cancelled`、
+   子 Turn 照样为 `CANCELLED`，所以没有这个见证时该用例是绿的。
+10. FG10e —— 任务取消的请求摘要在重试间不稳定（每次调用带 nonce）：`cancel-reply-lost`
+    红；重发的取消返回 409，而不是重放已提交的受理。
+11. FG10e —— 已结算的任务仍然提供并受理取消（把 `completed` 加进可取消状态）：
     `cancel-after-settlement` 红；取消被以 202 受理，而不是 409 `task_action_unavailable`。
 
 ## 验证与验收
