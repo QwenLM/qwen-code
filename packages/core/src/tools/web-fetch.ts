@@ -5,6 +5,8 @@
  */
 
 import { LRUCache } from 'mnemonist';
+
+import { addTableRules } from './html-table-rules.js';
 import type { Config } from '../config/config.js';
 import {
   fetchWithPolicy,
@@ -135,6 +137,9 @@ function getTurndownService(): Promise<HtmlToMarkdownConverter> {
       filter: 'img',
       replacement: () => '',
     });
+    // Turndown has no table rules of its own; without them a <table> is
+    // flattened into one paragraph per cell.
+    addTableRules(service);
     return service;
   }));
 }
