@@ -386,9 +386,12 @@ class WorkspaceMigrationStoreTest {
                 WorkspaceOperations.hash("cancel"), scope, scope, WorkspaceOperations.hash("session"));
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        // Settled, it no longer holds the move: the migration gets past its
+        // idle check to the source check, which this bare Session fails.
         jdbc.update("UPDATE ma_operation SET state = 'FAILED', phase = 'FAILED', failure_code = 'task_already_settled'"
                 + " WHERE operation_kind = 'TASK_CANCEL'");
-        assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("source_drift")
+                .hasMessageNotContaining("migration_work_unsettled");
     }
 
     @Test
