@@ -507,11 +507,13 @@ describe('Hosted real-process gates', () => {
   // three acceptance runs (~534s budgeted at >1.7x the heaviest measured
   // run, up from slice 1's ~300s) in the same envelope, and the FG8c
   // process-crash letter adds 144s measured locally on JDK 21 + MySQL
-  // 8.4.6 (~290s budgeted at 2x); with the fork itself ~14s, 2930s covers
-  // them. A larger ceiling lets failsafe kill the fork mid-run, and the
-  // classes left unrun never report, failing the gate undiagnosably
-  // (#13780).
-  const hostedForkHealthySeconds = 2930;
+  // 8.4.6 (~290s budgeted at 2x), and the FG10a workflow digest letter —
+  // four cases since #14390 — measures 15.9–16.2s for the letter locally
+  // on macOS JDK 26 + MySQL 8.4.6 across four acceptance runs (~33s
+  // budgeted at 2x); with the fork itself ~14s, 2963s covers them. A
+  // larger ceiling lets failsafe kill the fork mid-run, and the classes
+  // left unrun never report, failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 2963;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
