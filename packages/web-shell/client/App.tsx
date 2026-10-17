@@ -13174,6 +13174,39 @@ export function App({
     activePanel === 'live' ||
       (activePanel === 'settings' && !liveSidebarEnabled),
   );
+  const enableLoadingPhrases = useMemo(() => {
+    const setting = workspaceSettings.find(
+      (s) => s.key === 'ui.accessibility.enableLoadingPhrases',
+    );
+    return setting?.values.effective !== false;
+  }, [workspaceSettings]);
+
+  const configuredCustomWittyPhrases = useMemo(() => {
+    const setting = workspaceSettings.find(
+      (s) => s.key === 'ui.customWittyPhrases',
+    );
+    const val = setting?.values.effective;
+    return Array.isArray(val) && val.length > 0
+      ? val.filter(
+          (p): p is string => typeof p === 'string' && p.trim().length > 0,
+        )
+      : undefined;
+  }, [workspaceSettings]);
+
+  const effectiveChatCustomization = useMemo(() => {
+    if (mainChatCustomization.loadingPhrases) return mainChatCustomization;
+    if (
+      configuredCustomWittyPhrases &&
+      configuredCustomWittyPhrases.length > 0
+    ) {
+      return {
+        ...mainChatCustomization,
+        loadingPhrases: () => configuredCustomWittyPhrases,
+      };
+    }
+    return mainChatCustomization;
+  }, [mainChatCustomization, configuredCustomWittyPhrases]);
+
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
   // required to fail closed in that case too. `loading` is deliberately NOT
@@ -22790,7 +22823,7 @@ export function App({
                       : styles.chatSubtree
                   }
                 >
-                  <WebShellCustomizationProvider value={mainChatCustomization}>
+                  <WebShellCustomizationProvider value={effectiveChatCustomization}>
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}
@@ -23303,6 +23336,7 @@ export function App({
                                 failedPromptRetry?.startedAt ??
                                 activeTurnStartedAt
                               }
+                              showPhrase={enableLoadingPhrases}
                               hasActivePrompt={sessionHasActivePrompt}
                               backgroundLabel={
                                 connection.backgroundTurn?.label ??
