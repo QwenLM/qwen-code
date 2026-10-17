@@ -38,9 +38,23 @@ function isDocsOnlyFile(file) {
   );
 }
 
+// Markdown outside docs/ skips application tests but keeps full-effort
+// review: it is often runtime instructions (skills, AGENTS.md), so it must not
+// share docs_only's review downgrade. src/ and fixture trees are excluded
+// because their Markdown ships in packages or feeds test contracts, and
+// colocated tests assert its content (bundled SKILL.md parity checks).
+function isTestFreeMarkdown(file) {
+  const normalized = file.replace(/\\/g, '/');
+  return (
+    /\.md$/i.test(normalized) &&
+    !/(?:^|\/)(?:src|[^/]*fixtures)\//i.test(normalized)
+  );
+}
+
 function classifyPath(file) {
   if (isDocsOnlyFile(file)) return CI_PROFILES.DOCS_ONLY;
   if (GITHUB_CI_ONLY_FILES.has(file)) return CI_PROFILES.GITHUB_CI_ONLY;
+  if (isTestFreeMarkdown(file)) return CI_PROFILES.GITHUB_CI_ONLY;
   return CI_PROFILES.FULL;
 }
 
@@ -63,22 +77,15 @@ export function classifyChangedFiles(files) {
   const changedFiles = files.filter(Boolean);
   if (changedFiles.length === 0) return CI_PROFILES.FULL;
 
-  if (
-    changedFiles.every(
-      (entry) => classifyFileEntry(entry) === CI_PROFILES.DOCS_ONLY,
-    )
-  ) {
+  const profiles = changedFiles.map(classifyFileEntry);
+  if (profiles.every((profile) => profile === CI_PROFILES.DOCS_ONLY)) {
     return CI_PROFILES.DOCS_ONLY;
   }
-
-  if (
-    changedFiles.every(
-      (entry) => classifyFileEntry(entry) === CI_PROFILES.GITHUB_CI_ONLY,
-    )
-  ) {
+  // Any mix of docs, test-free Markdown and helper files still needs no
+  // application tests; it keeps full review because it is not pure docs.
+  if (profiles.every((profile) => profile !== CI_PROFILES.FULL)) {
     return CI_PROFILES.GITHUB_CI_ONLY;
   }
-
   return CI_PROFILES.FULL;
 }
 
