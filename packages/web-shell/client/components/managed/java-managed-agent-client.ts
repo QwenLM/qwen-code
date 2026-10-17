@@ -187,6 +187,13 @@ export class JavaManagedAgentClient {
     return this.post('/workspaces/create', request, signal);
   }
 
+  workspaceDirectories(
+    request: Schemas['WebShellWorkspaceDirectoryQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceDirectoryPage']> {
+    return this.post('/workspaces/directories/query', request, signal);
+  }
+
   getSessionApproval(
     sessionId: string,
     signal?: AbortSignal,
