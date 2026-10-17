@@ -272,6 +272,12 @@ public class HarnessCoordinator {
             if ("await_action".equals(error.getReason())) {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error, true);
+            } else if (recoveryPath.get() && isWorkflowLaunchTurn(claimed)) {
+                // #14387: a decline is terminal for a workflow Turn — the
+                // in-process executor died with its generation and no
+                // retry re-creates it — so the Turn parks blocked, never
+                // FAILED as if its outcome were observed.
+                terminal = blockWorkflowRecovery(claimed, leaseLost);
             } else {
                 // The reason is remote-supplied; the terminal write lands
                 // in managed_agent_turn.error_message VARCHAR(2048), so bound it
@@ -306,7 +312,15 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed, submissionAttempted.get(),
                     error, false);
         } catch (DaemonHttpException error) {
-            if (error.getStatusCode() >= 400
+            // #14387: a takeover refusal for a workflow Turn is terminal
+            // in effect — the workflow's in-process executor died with the
+            // generation, and no retry re-creates it — so the Turn parks
+            // blocked instead of retrying into a budget-exhausted FAILED.
+            if (recoveryPath.get() && isWorkflowLaunchTurn(claimed)
+                    && "hosted_turn_recovery_required".equals(
+                            error.getErrorCode())) {
+                terminal = blockWorkflowRecovery(claimed, leaseLost);
+            } else if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
                     && error.getStatusCode() != 409) {
                 terminal = failTerminally(claimed, "hosted_harness_rejected",
@@ -438,7 +452,7 @@ public class HarnessCoordinator {
             // settles the record blocked. A cancel still drives: settling
             // the Turn cancelled is the cancel's own act, not a re-run.
             if (!recoveringCancellation && isWorkflowLaunchTurn(claimed)) {
-                return blockWorkflowRecovery(claimed);
+                return blockWorkflowRecovery(claimed, leaseLost);
             }
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
@@ -577,6 +591,19 @@ public class HarnessCoordinator {
             }
             cancelledOnAttach = true;
         } else {
+            // #14387: a workflow Turn re-submitted onto a different
+            // generation may double-run its script — its prior submission
+            // may have been admitted by the lost generation without
+            // recording it (R10-4). The same live boot is safe: the
+            // daemon dedupes the replayed admission, so the drive falls
+            // through to the 409 adopt and the stream. Refuse only with
+            // evidence the generation changed.
+            if (claimed.harnessEventEpoch() == null
+                    && claimed.submissionAttempted()
+                    && isWorkflowLaunchTurn(claimed)
+                    && !attachment.bootId().equals(session.harnessBootId())) {
+                return blockWorkflowRecovery(claimed, leaseLost);
+            }
             boolean bound;
             if (claimed.submissionAttempted()
                     && claimed.harnessEventEpoch() != null
@@ -679,17 +706,6 @@ public class HarnessCoordinator {
             current = store.findTurn(claimed.tenantId(),
                     claimed.sessionId(), claimed.turnId()).orElseThrow();
             if (current.harnessEventEpoch() == null) {
-                // #14387: a workflow Turn whose submission went out on a
-                // prior generation without recording an admission may
-                // have been admitted by the dead generation (R10-4) —
-                // re-submitting re-runs the script while that first run
-                // stays unwitnessed. Refuse and mark; a never-submitted
-                // Turn provably never ran, so its first launch still
-                // drives.
-                if (recoveryPath.get() && claimed.submissionAttempted()
-                        && isWorkflowLaunchTurn(claimed)) {
-                    return blockWorkflowRecovery(claimed);
-                }
                 store.markSubmissionAttempted(current.tenantId(),
                         current.sessionId(), current.turnId(), owner);
                 submissionAttempted.set(true);
@@ -1319,10 +1335,15 @@ public class HarnessCoordinator {
     // it durably (the child result relay reads the code off the Turn line
     // and settles the record blocked) and end the drive. The Turn itself
     // stays unsettled: its work's outcome was never observed, so no
-    // terminal status may claim otherwise. The mark releases the dispatch
-    // lease, so the drive reports terminal; a lost mark CAS only means
-    // another owner now holds the Turn and re-walks the same refusal.
-    private boolean blockWorkflowRecovery(TurnRecord claimed) {
+    // terminal status may claim otherwise. The mark is fenced by the live
+    // dispatch lease (the CAS checks dispatch_lease_until), and a locally
+    // lost lease skips the decision outright — another owner re-walks the
+    // same refusal on its own claim.
+    private boolean blockWorkflowRecovery(TurnRecord claimed,
+            AtomicBoolean leaseLost) {
+        if (leaseLost.get()) {
+            return true;
+        }
         store.markTurnRecoveryBlocked(claimed.tenantId(), claimed.sessionId(),
                 claimed.turnId(), owner,
                 AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,

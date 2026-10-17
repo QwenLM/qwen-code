@@ -1483,6 +1483,25 @@ class ManagedAgentServerIntegrationTest {
                 .contains(target);
         assertThat(store.findTurn(tenant, session.sessionId(),
                 turn.turnId()).get().status()).isEqualTo("CANCELLING");
+
+        // The mark is lease-fenced: an owner whose lease already expired
+        // parks nothing — the CAS misses and the row stays unmarked.
+        Admission session2 = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "blocked-create-2",
+                "sha256:" + "5".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn2 = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "blocked-turn-2", "sha256:" + "6".repeat(64),
+                session2.sessionId(), List.of(),
+                "sha256:" + "7".repeat(64));
+        assertThat(store.claimTurn(tenant, session2.sessionId(),
+                turn2.turnId(), owner, Duration.ofMillis(-1))).isPresent();
+        assertThat(store.markTurnRecoveryBlocked(tenant,
+                session2.sessionId(), turn2.turnId(), owner,
+                "hosted_workflow_recovery_blocked",
+                "the Harness generation was lost")).isFalse();
+        assertThat(store.findTurn(tenant, session2.sessionId(),
+                turn2.turnId()).get().errorCode()).isNull();
     }
 
     // The terminal retry budget counts consecutive failures without
