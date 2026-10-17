@@ -650,9 +650,12 @@ class HostedShellLifecycleRecoveryIT {
             } finally {
                 Path evidence = Path.of("target/l4-shell-lifecycle", cut);
                 Files.createDirectories(evidence);
-                try (var files = Files.list(root)) {
-                    for (Path file : files.filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
-                        Files.copy(file, evidence.resolve(file.getFileName()), StandardCopyOption.REPLACE_EXISTING);
+                // Walk, not list: the daemon log sits under runtime/debug/daemon/.
+                try (var files = Files.walk(root)) {
+                    for (Path file : files.filter(Files::isRegularFile).filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
+                        Path target = evidence.resolve(root.relativize(file).toString());
+                        Files.createDirectories(target.getParent());
+                        Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING);
                     }
                 }
             }
