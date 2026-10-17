@@ -361,7 +361,16 @@
                                  still covers. The FG8c process-crash
                                  letter (seven cases, 144 s healthy
                                  locally on a fresh MySQL 8.4.6) rides
-                                 inside the same envelope. -->
+                                 inside the same envelope. The FG10a
+                                 workflow digest letter
+                                 (HostedWorkflowFaultGatesIT: four
+                                 cases, 15.9–16.2 s healthy locally on
+                                 macOS JDK 26 + MySQL 8.4.6 across four
+                                 acceptance runs, ~33 s budgeted at
+                                 2×) joins the same fork — one 600 s
+                                 ceiling plus the re-derived healthy
+                                 sum (2963 s) still fits the 3600 s
+                                 fork with headroom. -->
                             <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
@@ -478,6 +487,24 @@
                          this local-run profile keeps step with that
                          budget (#14164). -->
                     <forkedProcessTimeoutInSeconds>2100</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-workflow-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedWorkflow*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- The class's letters are independent fixtures
+                         sharing one fork: each letter's @Timeout ceiling
+                         (600 s) plus the healthy runtime must fit, the
+                         per-ceiling relation the CI profile pins. -->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
