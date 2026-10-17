@@ -1369,17 +1369,41 @@ describe('Hosted Harness no-tool session', () => {
     ).toEqual([request.modelSelection, { modelId: 'model-b', revision: 2 }]);
   });
 
-  it.each([undefined, { mode: 'yolo', revision: 1 }])(
-    'preserves approval selection %j and refuses changed resident and cold prompt replays',
-    async (approvalSelection) => {
+  it.each(
+    [
+      { toolProfile: 'hosted-workspace-files/1', custom: false },
+      { toolProfile: 'hosted-workspace-files/1', custom: true },
+      { toolProfile: 'hosted-workspace-shell/1', custom: true },
+      { toolProfile: 'hosted-workspace-shell/2', custom: true },
+    ].flatMap((profile) =>
+      [undefined, { mode: 'yolo', revision: 1 }].map((approvalSelection) => ({
+        ...profile,
+        approvalSelection,
+      })),
+    ),
+  )(
+    'preserves approval selection $approvalSelection for $toolProfile custom=$custom across resident and cold replays',
+    async ({ approvalSelection, toolProfile, custom }) => {
+      const agentDefinition = custom
+        ? {
+            agentId: `agent_${'a'.repeat(32)}`,
+            revision: '1',
+            digest: 'b'.repeat(64),
+          }
+        : undefined;
       let server = await app(true);
       const created = await headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        toolProfile: 'hosted-workspace-files/1',
+        toolProfile,
         approvalMode: 'default',
+        agentDefinition: agentDefinition && {
+          ...agentDefinition,
+          model: { id: 'configured' },
+        },
       });
+      expect(created.status).toBe(200);
       let clientId = created.body.clientId as string;
       const prompt = [{ type: 'text', text: 'approval selection' }];
       const request = {
@@ -1393,12 +1417,15 @@ describe('Hosted Harness no-tool session', () => {
           .set('X-Qwen-Client-Id', clientId)
           .send(body);
       const idle = () =>
-        vi.waitFor(async () => {
-          const result = await headers(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          ).set('X-Qwen-Client-Id', clientId);
-          expect(result.body.hasActivePrompt).toBe(false);
-        });
+        vi.waitFor(
+          async () => {
+            const result = await headers(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', clientId);
+            expect(result.body.hasActivePrompt).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
       await send().expect(202);
       await idle();
       expect(state.model).toHaveBeenCalledTimes(1);
@@ -1415,7 +1442,8 @@ describe('Hosted Harness no-tool session', () => {
         supertest(server).post(`/session/${SESSION_ID}/load`),
       ).send({
         managedSessionStore: store(),
-        toolProfile: 'hosted-workspace-files/1',
+        toolProfile,
+        agentDefinition,
       });
       expect(loaded.status).toBe(200);
       clientId = loaded.body.clientId as string;
@@ -1431,6 +1459,46 @@ describe('Hosted Harness no-tool session', () => {
       }).expect(202);
       await idle();
       expect(state.model).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    undefined,
+    'hosted-workspace-files/2',
+    'hosted-workspace-read/1',
+    'hosted-workspace-team-lead/1',
+  ])(
+    'refuses custom approval selection outside the supported profiles (%s)',
+    async (toolProfile) => {
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile,
+        approvalMode: 'default',
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          model: { id: 'configured' },
+        },
+      });
+      expect(created.status).toBe(200);
+      const prompt = [{ type: 'text', text: 'unsupported selection' }];
+      const refused = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          approvalSelection: { mode: 'yolo', revision: 1 },
+        });
+      expect(refused.status).toBe(400);
+      expect(refused.body.code).toBe('invalid_hosted_approval_selection');
+      expect(state.model).not.toHaveBeenCalled();
     },
   );
 
@@ -19342,6 +19410,195 @@ describe('Hosted Harness tool approvals', () => {
       },
     ]);
   });
+
+  it.each(['default', 'auto-edit', 'yolo'] as const)(
+    'keeps custom initial %s identity and timeout while applying live and cold Turn overrides',
+    async (initialMode) => {
+      const identity = {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+      };
+      const agentDefinition = { ...identity, model: { id: 'configured' } };
+      const requestIds: string[] = [];
+      const wait = HostedApprovalWaiters.prototype.wait;
+      vi.spyOn(HostedApprovalWaiters.prototype, 'wait').mockImplementation(
+        function (this: HostedApprovalWaiters, requestId, ...rest) {
+          requestIds.push(requestId);
+          return wait.call(this, requestId, ...rest);
+        },
+      );
+      state.model.mockImplementation(async ({ toolTurn, signal }) => {
+        const call = {
+          name: 'write_file',
+          callId: randomUUID(),
+          args: { file_path: 'override.txt', content: 'selected' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        await toolTurn!.consumeResults();
+        return { text: 'done', model: 'test-model' };
+      });
+      let server = await app(true);
+      const createBody = {
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: files,
+        approvalMode: initialMode,
+        approvalTimeoutMs: 12_345,
+        agentDefinition,
+      };
+      const created = await headers(supertest(server).post('/session')).send(
+        createBody,
+      );
+      expect(created.status).toBe(200);
+      let clientId = created.body.clientId as string;
+      const saved = {
+        engine: 'managed',
+        sessionId: SESSION_ID,
+        agentDefinition,
+        toolProfile: files,
+        ...(initialMode === 'yolo'
+          ? {}
+          : {
+              approvalMode: initialMode,
+              approvalTimeoutMs: 12_345,
+            }),
+      };
+      expect(await definitions()).toEqual([saved]);
+      const initialJournal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      const send = async (mode: 'default' | 'yolo', revision: number) => {
+        const prompt = [
+          { type: 'text', text: 'write using the admitted policy' },
+        ];
+        const promptId = randomUUID();
+        const askedBefore = requestIds.length;
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+            approvalSelection: { mode, revision },
+          })
+          .expect(202);
+        if (mode === 'default') {
+          await waitFor(() => expect(requestIds).toHaveLength(askedBefore + 1));
+          const resources = LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: state.root,
+            sessionKey: {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          });
+          const journal = await LocalJsonlManagedSessionJournalStore.read(
+            path.join(state.root, `${SESSION_ID}.jsonl`),
+            {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          );
+          const requested = journal.events.findLast(
+            (event) =>
+              event.kind === 'action.changed' &&
+              event.payload['requestId'] === requestIds.at(-1),
+          );
+          const options = JSON.parse(
+            (
+              await resources.read(
+                assertManagedSessionDurableRef(
+                  requested!.payload['optionsRef'],
+                  'approval options',
+                ),
+              )
+            ).toString('utf8'),
+          );
+          expect(options.expiresAt - options.createdAt).toBe(
+            initialMode === 'yolo' ? HOSTED_APPROVAL_TIMEOUT_MS : 12_345,
+          );
+          await headers(
+            supertest(server).post(
+              `/session/${SESSION_ID}/actions/${requestIds.at(-1)}/resolve`,
+            ),
+          )
+            .set('X-Qwen-Client-Id', clientId)
+            .send({
+              optionId: 'allow',
+              inputRevision: 1,
+              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+            })
+            .expect(200);
+        }
+        await waitFor(async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        });
+        expect(requestIds).toHaveLength(
+          askedBefore + (mode === 'default' ? 1 : 0),
+        );
+      };
+      await send('default', 1);
+      await send('yolo', 2);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      server = await app(true);
+      // An earlier committed create whose ACK was lost still conflicts;
+      // the connector must load its original definition instead of recreating it.
+      await headers(supertest(server).post('/session'))
+        .send(createBody)
+        .expect(409);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        toolProfile: files,
+        agentDefinition: identity,
+      });
+      expect(loaded.status).toBe(200);
+      expect(loaded.body.approvalMode).toBe(initialMode);
+      clientId = loaded.body.clientId as string;
+      await send('default', 3);
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
+      for (const definition of await definitions())
+        expect(definition).toEqual(saved);
+      const finalJournal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(finalJournal.header!.definitionRef).toEqual(
+        initialJournal.header!.definitionRef,
+      );
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+    },
+  );
 
   it('answers approvals through the resolve route across turns and a reload', async () => {
     const requestIds: string[] = [];

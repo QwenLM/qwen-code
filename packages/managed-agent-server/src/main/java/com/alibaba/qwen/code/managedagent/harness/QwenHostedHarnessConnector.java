@@ -432,6 +432,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsAgentDefinitionApprovalSelection() {
+        try {
+            var features = client().capabilities().getFeatures();
+            return features.contains("approval-selection/1")
+                    && features.contains("agent-definition-approval-selection/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    private boolean supportsApprovalSelection(SessionRecord session) {
+        return session.agentDefinitionDigest() == null
+                ? supportsApprovalSelection() : supportsAgentDefinitionApprovalSelection();
+    }
+
+    @Override
     public boolean supportsModelSelection() {
         try {
             return client().capabilities().getFeatures().contains("model-selection/1");
@@ -443,7 +459,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
-        requireReadyForNewWork(tenantId, sessionId, false);
+        SessionRecord session = requireReadyForNewWork(tenantId, sessionId, false);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
@@ -459,7 +475,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         var policy = sessions.findTurnApprovalSelection(tenantId, sessionId, promptId);
         // Revision zero uses the immutable definition on every Harness generation.
         if (policy != null && policy.revision() > 0) {
-            if (supportsApprovalSelection()) {
+            if (supportsApprovalSelection(session)) {
                 builder.approvalSelection(policy.mode(), policy.revision());
             } else {
                 throw new IllegalStateException("Hosted approval selection is unavailable");
@@ -1247,7 +1263,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         var selected = sessions.findApprovalSelections(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
         boolean changed = selected != null && selected.revision() > 0;
-        if (!supportsApprovalSelection() && (changed
+        if (!supportsApprovalSelection(session) && (changed
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && "yolo".equals(session.approvalMode()))) {
             throw new IllegalStateException("Hosted approval selection is unavailable");
         }
