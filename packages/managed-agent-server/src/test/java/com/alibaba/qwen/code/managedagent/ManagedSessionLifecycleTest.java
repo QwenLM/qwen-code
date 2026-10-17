@@ -411,8 +411,12 @@ class ManagedSessionLifecycleTest {
                         .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("operation_outcome_unknown"));
         assertThat(harness.renameCount()).isEqualTo(sends);
-        lifecycle(post("/v1/agents/sessions/{id}/close", ambiguous), tenant, "close")
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("session_operation_active"));
+        // The parked title waits for the reconciler and holds no lifecycle
+        // hostage (D7-2): the Session still closes, and the title is never
+        // sent again.
+        awaitCompleted(tenant, ambiguous, admit(post("/v1/agents/sessions/{id}/close", ambiguous),
+                tenant, "close-ambiguous").get("id").asText());
+        assertThat(harness.renameCount()).isEqualTo(sends);
         String sessionId = attachedSession(tenant);
         String closeId;
         harness.setAvailable(false);
@@ -927,7 +931,7 @@ class ManagedSessionLifecycleTest {
         if (!"lookup".equals(phase)) {
             await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
                     assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'RENAME'"
-                                    + " AND tenant_id = ? AND session_id = ?", String.class, tenant, sessionId)).isEqualTo("UNKNOWN"));
+                                    + " AND tenant_id = ? AND session_id = ?", String.class, tenant, sessionId)).isEqualTo("RECOVERY_BLOCKED"));
             int sent = harness.renameCount();
             assertThat(store.deliverableRenames(System.currentTimeMillis()))
                     .noneMatch(delivery -> sessionId.equals(delivery.sessionId()));
