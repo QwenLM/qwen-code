@@ -64,9 +64,8 @@ Runtime Broker 子集。其中一部分测试要加载已构建的 Core 与 CLI 
 `.github/scripts/managed-agent-gate-scope.mjs` 匹配变更路径：
 `packages/managed-agent-server/`、`packages/sdk-java/`、
 `packages/cli/src/serve/`、`packages/core/src/managed-runtime/`、Hosted 集成测试
-helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。Pull request 类事件用
-测试 merge commit 对比它的第一父提交，得到的就是 PR 自身的变更集；review 事件
-checkout 的是裸 head，因此改为对比事件负载中的 base sha。push 对比
+helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。Pull request 与 review
+事件都用测试 merge commit 对比它的第一父提交，得到的就是 PR 自身的变更集；push 对比
 `before..after`，merge group 对比其 base。重命名的新旧路径都计入；diff 关闭 git 的
 路径引号化，因此含非 ASCII 字符的文件名也能匹配。范围外的改动仍由夜间运行兜底。
 

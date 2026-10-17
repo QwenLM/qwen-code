@@ -76,12 +76,11 @@ workspace install as `mysql-integration`. Together that adds about 16 minutes:
 `packages/managed-agent-server/`, `packages/sdk-java/`,
 `packages/cli/src/serve/`, `packages/core/src/managed-runtime/`, the Hosted
 integration helpers and config, the scripts `sdk-java.yml` runs, and the gate
-files themselves. Pull request events diff the test merge commit against its
-first parent, so the set is the PR's own change; a review event checks out the
-bare head, so its diff runs against the payload's base sha instead. A push
-diffs `before..after` and a merge group diffs its base. Renames count both
-paths, and the diff runs with git's path quoting off so a non-ASCII file name
-still matches. Changes outside the scope still reach the nightly run.
+files themselves. Pull request and review events diff the test merge commit
+against its first parent, so the set is the PR's own change. A push diffs
+`before..after` and a merge group diffs its base. Renames count both paths,
+and the diff runs with git's path quoting off so a non-ASCII file name still
+matches. Changes outside the scope still reach the nightly run.
 
 ### Required check
 

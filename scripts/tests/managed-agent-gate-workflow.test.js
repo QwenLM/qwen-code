@@ -166,7 +166,6 @@ describe('Managed Agent gate path matching', () => {
         EVENT_NAME: '',
         PUSH_BEFORE: '',
         MERGE_GROUP_BASE: '',
-        PR_BASE_SHA: '',
         ...env,
       },
       encoding: 'utf8',
@@ -179,25 +178,6 @@ describe('Managed Agent gate path matching', () => {
         .map((line) => line.split('=')),
     );
   };
-
-  it("diffs a review event against the PR base, not the head's parent", () => {
-    // The head's own last commit touches no Managed Agent path, so a HEAD^1
-    // diff classifies the review run untouched and skips the full suite.
-    const { ws, base } = workspace('review-base', (origin) => {
-      write(origin, 'README.md', 'a');
-      const base = commit(origin, 'base');
-      write(origin, 'packages/managed-agent-server/src/B.java', 'b');
-      commit(origin, 'touch java');
-      write(origin, 'README.md', 'ab');
-      return { base, head: commit(origin, 'readme only') };
-    });
-    expect(
-      runPaths(ws, {
-        EVENT_NAME: 'pull_request_review',
-        PR_BASE_SHA: base,
-      }).touched,
-    ).toBe('true');
-  });
 
   it('matches a touched path whose name needs quoting', () => {
     const { ws, base } = workspace('quoted-path', (origin) => {

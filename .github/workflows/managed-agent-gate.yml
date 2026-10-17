@@ -160,23 +160,19 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      # Pull request events check out the test merge commit, whose first
-      # parent is the base, so the diff is the PR's own change set. A review
-      # event checks out the bare head instead, where HEAD^1 is the head's
-      # own parent; the PR's base comes from the event payload.
+      # Pull request and review events check out the test merge commit, whose
+      # first parent is the base, so the diff is the PR's own change set.
       - name: 'Match the changed paths'
         id: 'paths'
         env:
           EVENT_NAME: '${{ github.event_name }}'
           PUSH_BEFORE: '${{ github.event.before }}'
           MERGE_GROUP_BASE: '${{ github.event.merge_group.base_sha }}'
-          PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}'
         run: |-
           set -euo pipefail
           case "${EVENT_NAME}" in
             push) base="${PUSH_BEFORE}" ;;
             merge_group) base="${MERGE_GROUP_BASE}" ;;
-            pull_request_review) base="${PR_BASE_SHA}" ;;
             *) base="$(git rev-parse HEAD^1)" ;;
           esac
           if [[ "${base}" =~ ^0+$ ]]; then
