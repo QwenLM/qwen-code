@@ -226,6 +226,22 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
+  it('saves the Maven cache on hosted runners only', () => {
+    // The post-job save tars the host-shared ~/.m2 behind every pool job and
+    // then loses the key reservation to a sibling job; runs whose save never
+    // returned were cancelled on the job timeout with every step green.
+    // Self-hosted legs resolve from the host's own repository instead.
+    const setupJava = Object.values(parse(workflow).jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter((s) => (s.uses ?? '').startsWith('actions/setup-java@'));
+    expect(setupJava).toHaveLength(6);
+    for (const s of setupJava) {
+      expect(s.with.cache, s.name).toBe(
+        "${{ runner.environment == 'github-hosted' && 'maven' || '' }}",
+      );
+    }
+  });
+
   it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
     // A step copied between jobs and later fixed in only one is the #13506
     // drift class; the checksum gate in this body is the security-relevant
@@ -678,15 +694,14 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(install.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
     );
-    // The write-back closes the cache: 'maven' loop — the seed above only
-    // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
-    // thin entry that never recaptures the managed-agent-server tree. The
-    // excludes name the two in-house fixed release coordinates, not the
-    // whole com/alibaba group, so third-party artifacts under it (druid)
-    // still recapture. The pipeline is best-effort like the seed: the
-    // warning arm keeps a copy failure from reddening the gate after mvn
-    // has already passed, and pipefail keeps a failing left-hand tar from
-    // being masked by the extractor's exit 0.
+    // The write-back keeps the host-shared ~/.m2 current for the seed above:
+    // without it a pom rotation leaves the server tree only in the job-local
+    // copy, which dies with the job. The excludes name the two in-house fixed
+    // release coordinates, not the whole com/alibaba group, so third-party
+    // artifacts under it (druid) still recapture. The pipeline is best-effort
+    // like the seed: the warning arm keeps a copy failure from reddening the
+    // gate after mvn has already passed, and pipefail keeps a failing
+    // left-hand tar from being masked by the extractor's exit 0.
     expect(verify.run).toContain('set -o pipefail');
     expect(verify.run).toContain(
       'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
