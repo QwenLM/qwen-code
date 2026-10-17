@@ -20252,6 +20252,13 @@ describe('App session callbacks', () => {
       act(() => {
         rerender();
       });
+      // The retry reuses the block the failed attempt appended.
+      expect(
+        mockSessionActions.sendPrompt.mock.calls.at(-1)?.[1],
+      ).toMatchObject({
+        optimisticUserMessage: false,
+        bindBlockId: failedUsers[0].id,
+      });
       const users = transcript
         .getSnapshot()
         .blocks.filter((block) => block.kind === 'user');

@@ -767,6 +767,7 @@ interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  bindBlockId?: string;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -11312,6 +11313,7 @@ export function App({
       files?: PromptFile[],
       opts?: {
         optimisticUserMessage?: boolean;
+        bindBlockId?: string;
         retry?: boolean;
         // Skips prepareSubmit without daemon retry semantics; used
         // by the failed-prompt retry, whose user message was never
@@ -11605,6 +11607,7 @@ export function App({
             ? preparedInputAnnotations
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
+        ...(opts?.bindBlockId ? { bindBlockId: opts.bindBlockId } : {}),
         retry: opts?.retry,
         ...(opts?.beforeDispatch
           ? { beforeDispatch: opts.beforeDispatch }
@@ -12071,6 +12074,8 @@ export function App({
     let admissionStarted = false;
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
+      // The failed attempt appended this block but never got it bound.
+      bindBlockId: failed.messageId,
       skipPrepareSubmit: true,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
