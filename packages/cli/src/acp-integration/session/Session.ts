@@ -15,6 +15,10 @@ import {
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
@@ -130,7 +134,6 @@ import {
   NotificationType,
   persistPermissionOutcome,
   createHookOutput,
-  wrapUserPromptSubmitContext,
   generateToolUseId,
   isValidCronTaskRoutingId,
   MessageBusType,
@@ -6815,12 +6818,19 @@ export class Session implements SessionContext {
 
               // Add additional context from hooks to the request, wrapped in
               // the reserved tag so it stays distinguishable from
-              // user-authored text (same shape as the interactive path).
+              // user-authored text (same shape as the interactive path). An
+              // unchanged payload already in session history is skipped for
+              // the same reason as there.
               const additionalContext = hookOutput?.getAdditionalContext();
-              if (additionalContext) {
+              if (
+                additionalContext &&
+                !this.#getCurrentChat().findLastHistoryEntry((entry) =>
+                  hasUserPromptSubmitContext(entry, additionalContext),
+                )
+              ) {
                 parts = [
                   ...parts,
-                  { text: wrapUserPromptSubmitContext(additionalContext) },
+                  createUserPromptSubmitContextPart(additionalContext),
                 ];
               }
             }
