@@ -35,3 +35,13 @@ Web Shell 对 `qwen-live` 侧栏行隐藏删除和归档操作，并将这些任
 这是 UI 策略，不是授权边界：客户端声明的来源元数据不授予 daemon 变更保护。
 显式 REST 和 ACP close、delete、archive 保持既有行为，包括保护内置活动 Live
 通话拥有的会话。外部客户端仍负责自身任务生命周期；这些 API 调用可以终止其工作。
+
+## Standalone 会话
+
+Session Overview 与 workspace 会话并列展示 standalone（无工作区）会话，在
+`standalone_sessions_v1` 能力开关下从 standalone 客户端目录合并而来。
+standalone 行的目录 `workspaceCwd` 是 daemon 内部 Conversations 根目录，
+而不是产品工作区，因此面板将其重命名、导出、归档和删除操作路由到
+standalone 客户端接口；workspace 限定接口会打到 Conversations 工作区，
+绕过 standalone 生命周期（工作目录、删除日志、运行时保护）。
+宿主锁定的 shell 隐藏 standalone 目录，与侧栏的范围门控保持一致。
