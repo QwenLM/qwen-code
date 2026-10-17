@@ -23823,10 +23823,13 @@ export function App({
                           ref={statusBarRef}
                           onOpenTasks={() => openTasksPanel()}
                           onReturnToInput={handleReturnToEditor}
+                          // The pill filters composer tasks itself; it also
+                          // counts running background agents, which the
+                          // pre-filtered list would have dropped.
                           tasks={
                             isChatEmptyState ||
                             !environmentTasksReplacementEnabled
-                              ? backgroundTasks
+                              ? sessionTasks
                               : []
                           }
                           hideSettings={
