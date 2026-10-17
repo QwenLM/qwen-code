@@ -1044,8 +1044,30 @@ class HostedHarnessClientTest {
         assertEquals(Boolean.TRUE, enabled.toJson().get("childSnapshots"));
         assertEquals(Boolean.TRUE, enabled.forLifecycle("op-1", 3).toJson().get("childSnapshots"));
         assertEquals(Boolean.TRUE, enabled.withStoppedMessages().toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.withForegroundOnly(false).toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.withForegroundOnly(true).forLifecycle("op-1", 3, 2)
+                .withStoppedMessages().toJson().get("childSnapshots"));
         assertEquals(Boolean.TRUE, load.forLifecycle("op-1", 3).withChildWorkspaces(true, true)
                 .toJson().get("childSnapshots"));
+    }
+
+    @Test
+    void preservesTheForegroundOnlyRestrictionAcrossEveryLoadCopy() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID);
+        assertFalse(create.build().toJson().containsKey("foregroundOnly"));
+        assertEquals(Boolean.TRUE, create.foregroundOnly(true).build().toJson().get("foregroundOnly"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.toJson().containsKey("foregroundOnly"));
+        LoadHarnessSession restricted = load.withForegroundOnly(true);
+        for (LoadHarnessSession copy : java.util.List.of(restricted,
+                restricted.withChildWorkspaces(false), restricted.withStoppedMessages(),
+                restricted.forLifecycle("close-1", 2, 2),
+                load.forLifecycle("close-1", 2, 2).withStoppedMessages().withForegroundOnly(true))) {
+            assertEquals(Boolean.TRUE, copy.toJson().get("foregroundOnly"));
+            assertEquals(Boolean.TRUE, copy.toJson().get("passiveManagedRuntimeRecovery"));
+        }
+        assertFalse(load.toJson().containsKey("foregroundOnly"));
     }
 
     @Test
@@ -1061,7 +1083,9 @@ class HostedHarnessClientTest {
         LoadHarnessSession load = new LoadHarnessSession(SESSION_ID).withMcpServers(mcp).withHookCatalog(hooks);
         for (LoadHarnessSession copy : java.util.List.of(load, load.withChildWorkspaces(true),
                 load.forLifecycle("op-1", 3, 2), load.withStoppedMessages(),
-                load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true))) {
+                load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true),
+                load.withForegroundOnly(false), load.withForegroundOnly(true),
+                load.withForegroundOnly(true).forLifecycle("op-1", 3, 2).withStoppedMessages())) {
             assertEquals(mcp, copy.toJson().get("mcpServers"));
             assertEquals(hooks, copy.toJson().get("hookCatalog"));
         }

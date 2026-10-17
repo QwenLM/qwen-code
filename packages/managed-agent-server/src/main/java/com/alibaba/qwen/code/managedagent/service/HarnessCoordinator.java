@@ -73,6 +73,19 @@ public class HarnessCoordinator {
     // `hosted_turn_recovery_required` and still meets the budget.
     private static final Set<String> TRANSIENT_RECOVERY_WINDOW_409_CODES =
             Set.of("hosted_turn_recovery_in_progress");
+    // A generation change on a bound Session is exempt from the retry
+    // budget because one change is bounded by the prior generation's
+    // lease. A Harness that restarts between every attempt keeps throwing
+    // it, though, and the exemption alone would retry such a Turn forever
+    // with nothing to tell it from a healthy retry. The exemption therefore
+    // lapses once the Turn has gone this many budgets without journaled
+    // progress (review round 3, R3-6). The cap reads consecutive_failures,
+    // so it bounds the whole run without progress that ends on a generation
+    // wait, whatever wait family filled the run: no counter tells the
+    // families apart, and the other exempt waits stay uncapped while they
+    // are the current failure. A zero budget is floored to one so a single
+    // change still re-attaches (review round 1, R1-1 and R1-8).
+    private static final int GENERATION_CHURN_BUDGET_FACTOR = 4;
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -276,7 +289,8 @@ public class HarnessCoordinator {
             // G3: a generation change is adopted, not failed. The next
             // dispatch attempt re-attaches through the takeover load; on a
             // bound Session the wait is bounded by the prior generation's
-            // lease, so only that path escapes the retry budget.
+            // lease, so only that path escapes the retry budget — up to the
+            // churn cap transientFailure applies to generation waits.
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error, recoveryPath.get());
         } catch (DaemonProtocolException error) {
@@ -1197,9 +1211,27 @@ public class HarnessCoordinator {
         // but not toward the terminal budget (review round 10, R10-2).
         int chargedFailures =
                 current.consecutiveFailures() - current.budgetExemptFailures();
+        // A generation wait keeps its exemption only while the Turn's run
+        // of failures without journaled progress stays under the churn cap.
+        // Past it, the arm for the Turn's phase fails it with that phase's
+        // unavailable code, as if the budget were spent (review round 3,
+        // R3-6).
+        // The wait is read off the failure itself, like every other fact
+        // this method derives from it, so no caller can route a generation
+        // change here without the cap (review round 1, R1-5).
+        boolean generationWait =
+                error instanceof HostedHarnessGenerationException;
+        int budget = submissionAttempted ? maxPostAdmissionRetries
+                : maxPreAdmissionRetries;
+        boolean generationChurn = generationWait && exemptFromRetryBudget
+                && current.consecutiveFailures()
+                        >= (long) Math.max(1, budget)
+                                * GENERATION_CHURN_BUDGET_FACTOR;
+        boolean exempt = exemptFromRetryBudget && !generationChurn;
         if (!submissionAttempted
-                && !exemptFromRetryBudget
-                && chargedFailures >= maxPreAdmissionRetries) {
+                && !exempt
+                && (chargedFailures >= maxPreAdmissionRetries
+                        || generationChurn)) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1236,8 +1268,9 @@ public class HarnessCoordinator {
         // it against this Turn would terminally fail a wait that is still
         // resolving on its own.
         if (submissionAttempted
-                && !exemptFromRetryBudget
-                && chargedFailures >= maxPostAdmissionRetries) {
+                && !exempt
+                && (chargedFailures >= maxPostAdmissionRetries
+                        || generationChurn)) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1264,7 +1297,7 @@ public class HarnessCoordinator {
                 current.retryCount());
         long retryAfter = Math.addExact(clock.millis(), delay);
         store.scheduleTurnRetry(turn.tenantId(), turn.sessionId(),
-                turn.turnId(), owner, retryAfter, exemptFromRetryBudget);
+                turn.turnId(), owner, retryAfter, exempt);
         LOG.warn("Managed Turn coordination will retry tenant={} session={}"
                         + " turn={} retry={} delayMs={} failure={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),

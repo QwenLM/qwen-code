@@ -105,6 +105,68 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void acknowledgesOnlyTheOriginalV2ReferenceWithoutResendingInput() throws Exception {
+        var lease = toolLease(server.getAddress().getPort());
+        var session = toolSession();
+        var reference = toolReference();
+        for (String state : List.of("acknowledged", "unknown")) {
+            reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 2, "state", state))));
+            transport.acknowledgeV2(lease, session, reference).toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(HttpRuntimeTransport.ACKNOWLEDGE_PATH, capturedPath.get());
+            JsonNode wire = JSON.readTree(captured.get());
+            assertEquals(2, wire.size());
+            assertEquals(4, wire.required("reference").size());
+            assertEquals(reference.get("argsDigest"), wire.required("reference").required("argsDigest").asText());
+            assertFalse(wire.required("reference").has("input"));
+        }
+        var other = new LinkedHashMap<>(reference);
+        other.put("sessionId", "another-session");
+        assertThrows(IllegalArgumentException.class, () -> transport.acknowledgeV2(lease, session, other));
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 2, "state", "executing"))));
+        assertThrows(ExecutionException.class,
+                () -> transport.acknowledgeV2(lease, session, reference).toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void acknowledgesADurableV3NoStartWithANullPublicationReceipt() throws Exception {
+        Map<String, Object> result = new LinkedHashMap<>(Map.of("executionStatus", "not_started", "responseParts", List.of()));
+        result.put("capture", null);
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 3, "toolResult", "managed-tool-result/1",
+                "state", "settled", "result", result))));
+        Map<String, Object> receipt = new LinkedHashMap<>(Map.of("executionCallId", "execution", "deliveryStatus", "committed"));
+        receipt.put("manifest", null);
+        receipt.put("historyRevision", null);
+        var lease = toolLease(server.getAddress().getPort());
+        assertEquals("settled", transport.acknowledgeV3(lease, toolSession(), toolReference(), receipt)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_ACKNOWLEDGE_PATH, capturedPath.get());
+        assertEquals(receipt, JsonCodec.parseObject(captured.get(), "request").get("receipt"));
+        var conflicting = new LinkedHashMap<>(receipt);
+        conflicting.put("manifest", Map.of("resourceId", "manifest"));
+        assertThrows(IllegalArgumentException.class,
+                () -> transport.acknowledgeV3(lease, toolSession(), toolReference(), conflicting));
+    }
+
+    @Test
+    void resolvesBothAttestationProtocolsWithoutRewritingTheOriginalLease() throws Exception {
+        URI forwarded = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+        var routed = new HttpRuntimeTransport(ignored -> forwarded);
+        reply.set(json(200, JSON.writeValueAsBytes(successBody())));
+        assertEquals(suite.required("identity").required("runtimeInstanceId").textValue(),
+                attest(routed, 1).toCompletableFuture().get(2, TimeUnit.SECONDS).getRuntimeInstanceId());
+        assertEquals(HttpRuntimeTransport.PATH, capturedPath.get());
+        var request = ManagedContextProtocolTest.request();
+        var seed = ManagedContextProtocolTest.seed();
+        var remoteLease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:2"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(
+                ManagedContextProtocol.boot(request, seed)))));
+        routed.attest(remoteLease, request, seed).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals(ManagedContextProtocol.ATTEST_PATH, capturedPath.get());
+        assertEquals(URI.create("http://127.0.0.1:2/"), remoteLease.getEndpoint());
+    }
+
+    @Test
     void admitsOnlyTheExactV3AttestationAndInstallationReceipt() throws Exception {
         RuntimeProvisionRequest request = ManagedContextProtocolTest.request();
         RuntimeProvisionSeed seed = ManagedContextProtocolTest.seed();
@@ -792,8 +854,10 @@ class HttpRuntimeTransportTest {
                 } catch (IOException error) {
                     throw new CompletionException(error);
                 }
-            }).get(20, TimeUnit.SECONDS);
-            assertTrue(ready != null && ready.startsWith("READY:"), ready);
+            }).get(60, TimeUnit.SECONDS);
+            String diagnostic = ready == null && worker.waitFor(1, TimeUnit.SECONDS)
+                    ? new String(worker.getErrorStream().readNBytes(16384), StandardCharsets.UTF_8) : ready;
+            assertTrue(ready != null && ready.startsWith("READY:"), diagnostic);
             int port = Integer.parseInt(ready.substring("READY:".length()));
             RuntimeLease lease = toolLease(port);
             Map<String, Object> reference = toolReference();

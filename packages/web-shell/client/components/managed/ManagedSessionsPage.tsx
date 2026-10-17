@@ -725,7 +725,7 @@ function ManagedSessionsContent({
             : null
           : navigation}
         <section
-          className={`${shellStyles.chatPane} gap-3`}
+          className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
           data-managed-home={home || undefined}
           aria-label={t('managed.conversation')}
         >
@@ -918,6 +918,7 @@ function ManagedSessionsContent({
                 sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
                 loadingTranscript={detail.loading}
                 isResponding={Boolean(active)}
+                activeTurnStartedAt={active ? summary?.admittedAt : undefined}
                 hasOlderHistory={Boolean(detail.olderCursor)}
                 loadingOlderHistory={detail.loadingOlder}
                 onLoadOlderHistory={detail.loadOlder}

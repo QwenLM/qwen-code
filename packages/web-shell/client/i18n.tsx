@@ -43,6 +43,11 @@ import {
   MANAGED_TASK_MESSAGES_ZH,
 } from './components/managed/managed-task-messages.js';
 
+import {
+  WORKSPACE_REGISTRATION_MESSAGES_EN,
+  WORKSPACE_REGISTRATION_MESSAGES_ZH,
+} from './components/managed/managed-workspace-messages.js';
+
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
@@ -293,14 +298,20 @@ const EN: Messages = {
   'managed.approvalFixed':
     'Approval mode is fixed for this task. Start a new task to choose another mode.',
   'managed.newWorkspaceDescription':
-    'Create an empty workspace for Managed tasks.',
+    'Choose an existing project directory, or name a new empty workspace.',
+  'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
+  'managed.workspaceDirectoryHint':
+    'Choose an existing project on the Linux execution host within this authorized root.',
+  'managed.workspaceChooseDirectory': 'Choose existing directory',
+  'managed.workspaceDirectoryScope':
+    'Choose a directory inside the selected root.',
   'managed.newWorkspaceName': 'Workspace name',
   'managed.newWorkspaceNameInvalid':
     'Use a name of 1–128 characters without control characters.',
   'managed.newWorkspaceCreate': 'Create workspace',
   'managed.newWorkspaceCreating': 'Creating workspace…',
   'managed.newWorkspaceUncertain':
-    'The creation is not yet confirmed. Retry to check the same workspace.',
+    'The creation is not yet confirmed. Retry to check the same workspace, or abandon local confirmation to start again. Abandoning does not delete a workspace that may already exist.',
   'managed.newWorkspaceResume': 'Resume workspace creation',
   'managed.newWorkspaceClose': 'Close',
   'managed.workspaceUnsupported':
@@ -1869,6 +1880,8 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'sideTask.archiveCompleted': 'Archive completed',
+  'sideTask.archiveUnavailable': 'Only completed side tasks can be archived.',
   'webPreview.title': 'Web preview',
   'webPreview.openHint': 'Preview web apps',
   'webPreview.address': 'Development URL',
@@ -4457,6 +4470,7 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4661,13 +4675,20 @@ const ZH: Messages = {
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
   'managed.approvalFixed': '当前任务的审批策略已固定；如需更换，请新建任务。',
-  'managed.newWorkspaceDescription': '为托管任务创建一个空工作区。',
+  'managed.newWorkspaceDescription':
+    '选择已有项目目录，或输入名称创建空工作区。',
+  'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
+  'managed.workspaceDirectoryHint':
+    '选择此授权根目录内、位于 Linux 执行机器上的已有项目。',
+  'managed.workspaceChooseDirectory': '选择已有目录',
+  'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
   'managed.newWorkspaceName': '工作区名称',
   'managed.newWorkspaceNameInvalid':
     '名称需为 1–128 个字符，不能包含控制字符。',
   'managed.newWorkspaceCreate': '创建工作区',
   'managed.newWorkspaceCreating': '正在创建工作区…',
-  'managed.newWorkspaceUncertain': '创建结果尚未确认，重试将查询同一个工作区。',
+  'managed.newWorkspaceUncertain':
+    '创建结果尚未确认。重试将查询同一个工作区，也可放弃本地确认后重新开始。放弃不会删除可能已经创建的工作区。',
   'managed.newWorkspaceResume': '继续确认工作区创建',
   'managed.newWorkspaceClose': '关闭',
   'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
@@ -6209,6 +6230,8 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'sideTask.archiveCompleted': '归档已完成任务',
+  'sideTask.archiveUnavailable': '只能归档已完成的侧边任务。',
   'webPreview.title': '网页预览',
   'webPreview.openHint': '预览网页应用',
   'webPreview.address': '开发地址',
@@ -8587,6 +8610,7 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
