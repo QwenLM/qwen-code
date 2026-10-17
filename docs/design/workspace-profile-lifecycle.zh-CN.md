@@ -63,7 +63,7 @@ worker 已停止不能证明缺失输出已发布。未知输出继续阻塞；�
 | Managed server     | profile 准入、当前 claim 的 writer/record 授权、独立效果/资源校验和最终原子退役。       |
 | Runtime Broker     | 持久 owner 枚举、原 RuntimeSession drain 与 recovery control 的 claim 检查。            |
 
-源代码变更集中在 `packages/cli/src/serve/`、`packages/sdk-java/qwencode/`、`packages/sdk-java/managed-agent-server/` 和 `packages/sdk-java/runtime-broker/`，测试与源码同目录。E2E 计划及执行结果保存在 `.qwen/e2e-tests/workspace-profile-lifecycle.md`。
+源代码变更集中在 `packages/cli/src/serve/`、`packages/sdk-java/qwencode/`、`packages/managed-agent-server/` 和 `packages/managed-agent-server/`，测试与源码同目录。E2E 计划及执行结果保存在 `.qwen/e2e-tests/workspace-profile-lifecycle.md`。
 
 ## 验证与发布
 

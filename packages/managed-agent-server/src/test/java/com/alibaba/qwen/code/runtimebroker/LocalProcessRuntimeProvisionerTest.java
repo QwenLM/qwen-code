@@ -1,0 +1,1233 @@
+package com.alibaba.qwen.code.runtimebroker;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.Test;
+
+class LocalProcessRuntimeProvisionerTest {
+    private static final String DIGEST = "sha256:" + "a".repeat(64);
+
+    @Test
+    void refusesPrivateProfileBeforeSpawningOrAdopting(
+            @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
+        assertPrivateProfileRefused(directory, null);
+    }
+
+    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    @Test
+    void refusesPrivateProfileBeforeDurableRegistration(
+            @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
+        Path root = directory.toRealPath();
+        assertPrivateProfileRefused(root,
+                new LocalRuntimeStore(root.resolve("state"), DurableLocalProcessRuntimeProvisionerTest.HOST));
+    }
+
+    private static void assertPrivateProfileRefused(Path directory, LocalRuntimeStore store) throws Exception {
+        Path marker = directory.resolve("spawned");
+        Path script = directory.resolve("worker.mjs");
+        Files.writeString(script, "import {writeFileSync} from 'node:fs';"
+                + "writeFileSync(process.argv[2], 'spawned');process.exit(1);");
+        List<Path> before;
+        try (var paths = Files.walk(directory)) {
+            before = paths.sorted().toList();
+        }
+        java.util.concurrent.atomic.AtomicInteger resolved = new java.util.concurrent.atomic.AtomicInteger();
+        try (LocalProcessRuntimeProvisioner provisioner = new LocalProcessRuntimeProvisioner(
+                List.of("node", script.toString(), marker.toString()), directory,
+                new HttpRuntimeTransport(), scope -> {
+                    resolved.incrementAndGet();
+                    return "storage";
+                }, store)) {
+            for (String isolation : List.of("session", "workspace")) {
+                RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", directory.toString(),
+                        CsiFilesRetirementProfile.CAPABILITY_DIGEST, isolation);
+                RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
+                        "session".equals(isolation) ? java.util.UUID.randomUUID().toString() : null,
+                        "kubernetes-workspace", "storage");
+                RuntimeProvisionSeed seed = RuntimeProvisionSeed.create("binding", 1);
+                RuntimeResourceHandle handle = new RuntimeResourceHandle("local-process", 1,
+                        java.util.Map.of("provider", "local-process"));
+                RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                        URI.create("http://127.0.0.1:1"), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+                RuntimeBrokerException direct = assertThrows(RuntimeBrokerException.class,
+                        () -> provisioner.createRequest(scope, request.getIsolationKey()));
+                assertEquals(409, direct.getStatusCode());
+                RuntimeBindingRecord binding = new RuntimeBindingRecord("binding", request, seed, 1,
+                        RuntimeBindingRecord.State.READY, lease,
+                        new RuntimeResourceHandle(request.getProvisionerKind(), 1,
+                                java.util.Map.of("provider", request.getProvisionerKind())),
+                        1, false, null, null, 0, 1, null, Instant.now(), Instant.now());
+                RuntimeBrokerException registration = assertThrows(RuntimeBrokerException.class,
+                        () -> provisioner.verifyOperatorRegistration(binding));
+                assertEquals(409, registration.getStatusCode());
+                assertEquals("runtime_provision_failed", registration.getCode());
+                assertFalse(registration.isRetryable());
+                RuntimeBrokerException stop = assertThrows(RuntimeBrokerException.class,
+                        () -> provisioner.attestOperatorStop(binding, java.util.UUID.randomUUID().toString()));
+                assertEquals(409, stop.getStatusCode());
+                assertEquals("runtime_provision_failed", stop.getCode());
+                assertFalse(stop.isRetryable());
+                var operations = List.of(provisioner.provision(request), provisioner.provision(request, seed),
+                        provisioner.ensureResource(request, seed, null),
+                        provisioner.ensureResource(request, seed, handle),
+                        provisioner.reconcile(request, seed, handle, lease),
+                        provisioner.confirm(request, lease), provisioner.release(request, lease));
+                for (var operation : operations) {
+                    ExecutionException error = assertThrows(ExecutionException.class,
+                            () -> operation.toCompletableFuture().get(5, TimeUnit.SECONDS));
+                    RuntimeBrokerException refusal = (RuntimeBrokerException) error.getCause();
+                    assertEquals(409, refusal.getStatusCode());
+                    assertEquals("runtime_provision_failed", refusal.getCode());
+                    assertFalse(refusal.isRetryable());
+                }
+            }
+        }
+        assertEquals(0, resolved.get());
+        assertFalse(Files.exists(marker));
+        try (var paths = Files.walk(directory)) {
+            assertEquals(before, paths.sorted().toList());
+        }
+    }
+
+    @Test
+    void refusesDowngradedAndRewrittenReadyRecordsWithoutLeakingChildren() throws Exception {
+        requireNode();
+        Set<Long> before = childPids();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs").toAbsolutePath();
+        for (String mode : List.of("--ready-v1", "--ready-cr", "--foreign-url")) {
+            try (LocalProcessRuntimeProvisioner provisioner = new LocalProcessRuntimeProvisioner(
+                    List.of("node", script.toString(), mode), Path.of(".").toAbsolutePath(),
+                    new HttpRuntimeTransport())) {
+                ExecutionException failure = org.junit.jupiter.api.Assertions.assertThrows(
+                        ExecutionException.class, () -> provisioner.provision(
+                                ManagedContextProtocolTest.request(), ManagedContextProtocolTest.seed())
+                                .toCompletableFuture().get(10, TimeUnit.SECONDS));
+                assertFalse(((RuntimeBrokerException) failure.getCause()).isRetryable());
+            }
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void managedContextRoundtripUsesFakeWorker() throws Exception {
+        requireNode();
+        verifyContextRoundtrip(List.of("node", Path.of(
+                "src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString()));
+    }
+
+    @Test
+    void managedContextRoundtripUsesRealWorkerWhenBundleIsProvided() throws Exception {
+        String bundle = System.getProperty("qwen.runtime.worker.bundle");
+        assumeTrue(bundle != null, "set qwen.runtime.worker.bundle to the built dist/cli.js");
+        requireNode();
+        assertTrue(Files.isRegularFile(Path.of(bundle)));
+        verifyContextRoundtrip(List.of("node", bundle, "managed-runtime-worker"));
+    }
+
+    private static void verifyContextRoundtrip(List<String> command) throws Exception {
+        Path root = Files.createTempDirectory("qwen-context-中文-").toRealPath();
+        Files.createDirectories(root.resolve("服务/api"));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                root.toString(), DIGEST, "workspace");
+        HttpRuntimeTransport transport = new HttpRuntimeTransport();
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner = new LocalProcessRuntimeProvisioner(
+                command, Path.of("").toAbsolutePath(), transport, ignored -> "storage:a")) {
+            InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
+            try (RuntimeBrokerService service = new RuntimeBrokerService(
+                    ignored -> java.util.concurrent.CompletableFuture.completedFuture(scope),
+                    provisioner, transport, bindings, new InMemoryRuntimeSessionRepository(),
+                    new InMemoryToolExecutionRepository(), "broker-context",
+                    Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+                RuntimeBindingRecord ready = service.warm("harness").toCompletableFuture()
+                        .get(35, TimeUnit.SECONDS);
+                assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
+                assertTrue(ready.getRequest().isManagedContext());
+                assertEquals("storage:a", ready.getRequest().getStorageId());
+                var binding = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                        "tenant-a", "workspace-a", 7, "storage:a", "服务/api", "config:a", 1);
+                RuntimeSessionRecord session = new RuntimeSessionRecord(new RuntimeSession(
+                        "harness", "session-中文", "bootstrap", scope), ready.getBindingId(),
+                        ready.getGeneration(), RuntimeSessionRecord.State.READY, 0, Instant.now());
+                var receipt = transport.installContext(ready, session, "op-1", binding)
+                        .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertEquals(binding.getContextDigest(), receipt.get("contextDigest"));
+                assertEquals("session-中文", receipt.get("sessionId"));
+                assertEquals(receipt, transport.installContext(ready, session, "op-1", binding)
+                        .toCompletableFuture().get(5, TimeUnit.SECONDS));
+                provisioner.confirm(ready.getRequest(), ready.getLease())
+                        .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                try (RuntimeBrokerService restored = new RuntimeBrokerService(
+                        ignored -> java.util.concurrent.CompletableFuture.completedFuture(scope),
+                        provisioner, transport, bindings, new InMemoryRuntimeSessionRepository(),
+                        new InMemoryToolExecutionRepository(), "broker-restored",
+                        Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+                    RuntimeBindingRecord adopted = restored.warm("harness").toCompletableFuture()
+                            .get(10, TimeUnit.SECONDS);
+                    assertEquals("storage:a", adopted.getRequest().getStorageId());
+                    assertTrue(adopted.getAttestationGeneration() >= 2);
+                }
+            }
+        } finally {
+            ProcessHandle.current().children().filter(child -> !before.contains(child.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            try (var paths = Files.walk(root)) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                    Files.deleteIfExists(path);
+                }
+            }
+        }
+        assertNoNewChildren(before);
+    }
+
+    @Test
+    void pinsThePersistedKind() {
+        assertEquals("local-process", LocalProcessRuntimeProvisioner.KIND);
+    }
+
+    @Test
+    void reportsUnknownWhenTheProcessIsNotOwned() throws Exception {
+        HttpRuntimeTransport transport = new HttpRuntimeTransport();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(List.of("node"),
+                        Path.of("").toAbsolutePath(), transport)) {
+            assertEquals(LocalProcessRuntimeProvisioner.KIND,
+                    provisioner.kind());
+            RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a",
+                    "7", "/runtime/workspace", DIGEST, "workspace");
+            RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                    scope, null, provisioner.kind());
+            RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                    "binding-1", 1);
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(LocalProcessRuntimeProvisioner.KIND,
+                    handle.getKind());
+            RuntimeLease missing = new RuntimeLease(
+                    seed.getProvisionalRuntimeId(),
+                    URI.create("http://127.0.0.1:1"), seed.getToken(),
+                    seed.getLeaseId(), seed.getEpoch());
+            RuntimeObservation observation = provisioner
+                    .reconcile(request, seed, handle, missing)
+                    .toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                    observation.getOutcome());
+        }
+    }
+
+    @Test
+    void adoptsAWorkerOnlyAfterAttestationAndRejectsToolRoutes()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        HttpRuntimeTransport transport = new HttpRuntimeTransport();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(), transport)) {
+            InMemoryRuntimeBindingRepository bindings =
+                    new InMemoryRuntimeBindingRepository(
+                            java.time.Clock.systemUTC(), () -> "binding-1");
+            RuntimeBrokerService service = new RuntimeBrokerService(
+                    harnessSessionId -> java.util.concurrent.CompletableFuture
+                            .completedFuture(scope),
+                    provisioner, new AcceptingTransport(), bindings,
+                    new InMemoryRuntimeSessionRepository(),
+                    new InMemoryToolExecutionRepository(
+                            java.time.Clock.systemUTC()),
+                    "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+            try {
+                RuntimeBindingRecord ready = service.warm("harness")
+                        .toCompletableFuture().get(30, TimeUnit.SECONDS);
+                assertEquals(RuntimeBindingRecord.State.READY,
+                        ready.getState());
+                RuntimeLease lease = ready.getLease();
+                ExecutionException failure = org.junit.jupiter.api.Assertions
+                        .assertThrows(ExecutionException.class,
+                                () -> transport.execute(lease,
+                                        new RuntimeSession("harness",
+                                                "runtime", "bootstrap", scope),
+                                        java.util.Map.of(
+                                                "sessionId", "runtime",
+                                                "promptId", "prompt-1",
+                                                "callId", "tool-1",
+                                                "argsDigest", "digest-1",
+                                                "toolName", "read_file",
+                                                "input", java.util.Map.of()))
+                                        .toCompletableFuture()
+                                        .get(10, TimeUnit.SECONDS));
+                Throwable cause = failure.getCause();
+                assertTrue(cause instanceof RuntimeBrokerException);
+                RuntimeBrokerException rejected =
+                        (RuntimeBrokerException) cause;
+                assertEquals(404, rejected.getStatusCode());
+                assertEquals("managed_runtime_incompatible",
+                        rejected.getCode());
+                assertFalse(rejected.isRetryable());
+
+                provisioner.stop(lease);
+                ExecutionException again = org.junit.jupiter.api.Assertions
+                        .assertThrows(ExecutionException.class,
+                                () -> service.warm("harness")
+                                        .toCompletableFuture()
+                                        .get(10, TimeUnit.SECONDS));
+                assertTrue(again.getCause() instanceof RuntimeBrokerException);
+            } finally {
+                service.close();
+            }
+        }
+    }
+
+    @Test
+    void releasingAnOlderGenerationPreservesTheWinningWorker()
+            throws Exception {
+        assertReleasePreservesOtherAttempt(false);
+    }
+
+    @Test
+    void releasingARetriedSeedPreservesTheWinningWorker()
+            throws Exception {
+        assertReleasePreservesOtherAttempt(true);
+    }
+
+    private static void assertReleasePreservesOtherAttempt(boolean sameSeed)
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed firstSeed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        RuntimeProvisionSeed nextSeed = sameSeed ? firstSeed
+                : RuntimeProvisionSeed.create("binding-1", 2);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeLease first = provisioner.provision(request, firstSeed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            RuntimeLease winner = provisioner.provision(request, nextSeed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            provisioner.confirm(request, winner).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            provisioner.release(request, first).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            assertTrue(provisioner.isUsable(winner),
+                    "releasing a losing attempt must preserve the winner");
+            provisioner.confirm(request, winner).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            assertFalse(provisioner.isUsable(first));
+            provisioner.release(request, winner).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            assertNoNewChildren(before);
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void rejectsReusingADeadWorkersLeaseIdentity() throws Exception {
+        assertRejectsReusedWorkerIdentity(false);
+    }
+
+    @Test
+    void rejectsReusingAReleasedWorkersLeaseIdentity() throws Exception {
+        assertRejectsReusedWorkerIdentity(true);
+    }
+
+    private static void assertRejectsReusedWorkerIdentity(boolean release)
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        int port;
+        try (ServerSocket socket = new ServerSocket(0, 0,
+                InetAddress.getByName("127.0.0.1"))) {
+            port = socket.getLocalPort();
+        }
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), "--port=" + port),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeLease first = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            assertEquals(port, first.getEndpoint().getPort());
+            ProcessHandle worker = ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .findFirst().orElseThrow();
+            if (release) {
+                provisioner.release(request, first).toCompletableFuture()
+                        .get(10, TimeUnit.SECONDS);
+            } else {
+                worker.destroyForcibly();
+            }
+            worker.onExit().get(10, TimeUnit.SECONDS);
+            assertFalse(provisioner.isUsable(first));
+            if (release) {
+                provisioner.release(request, first).toCompletableFuture()
+                        .get(10, TimeUnit.SECONDS);
+            }
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner.provision(request, seed)
+                                    .toCompletableFuture()
+                                    .get(30, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof RuntimeBrokerException);
+            RuntimeBrokerException error =
+                    (RuntimeBrokerException) failure.getCause();
+            assertEquals(409, error.getStatusCode());
+            assertEquals("runtime_broker_resource_conflict", error.getCode());
+            assertFalse(error.isRetryable());
+            assertNoNewChildren(before);
+            provisioner.release(request, first).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            assertFalse(provisioner.isUsable(first));
+            assertNoNewChildren(before);
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void rejectsMalformedCapabilityDigestBeforeSpawning() {
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", "sha256:" + "A".repeat(64),
+                "workspace");
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", "-e", "process.exit(0)"),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner
+                                    .provision(new RuntimeProvisionRequest(
+                                            scope, null))
+                                    .toCompletableFuture()
+                                    .get(10, TimeUnit.SECONDS));
+            RuntimeBrokerException error =
+                    (RuntimeBrokerException) failure.getCause();
+            assertEquals(400, error.getStatusCode());
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertFalse(error.isRetryable());
+        }
+    }
+
+    @Test
+    void failsFastWhenReadyRecordExceedsTheLimit() throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), "--big-ready"),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            long started = System.nanoTime();
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner
+                                    .provision(new RuntimeProvisionRequest(
+                                            scope, null))
+                                    .toCompletableFuture()
+                                    .get(35, TimeUnit.SECONDS));
+            long elapsedMillis =
+                    (System.nanoTime() - started) / 1_000_000L;
+            RuntimeBrokerException error =
+                    (RuntimeBrokerException) failure.getCause();
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertEquals("Managed Runtime ready record exceeds the 32 KiB"
+                    + " limit.", error.getMessage());
+            assertTrue(elapsedMillis < 10_000,
+                    "took " + elapsedMillis + " ms");
+        }
+    }
+
+    @Test
+    void reportsClosedBeforeReadyWhenTheWorkerExits() throws Exception {
+        requireNode();
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", "-e",
+                                "setTimeout(() => process.exit(3), 50)"),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner
+                                    .provision(new RuntimeProvisionRequest(
+                                            scope, null))
+                                    .toCompletableFuture()
+                                    .get(10, TimeUnit.SECONDS));
+            RuntimeBrokerException error =
+                    (RuntimeBrokerException) failure.getCause();
+            assertEquals("Managed Runtime worker closed before ready.",
+                    error.getMessage());
+            org.junit.jupiter.api.Assertions.assertNull(error.getCause());
+        }
+    }
+
+    @Test
+    void keepsTheWorkerAliveWhenItPrintsAfterReady() throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        HttpRuntimeTransport transport = new HttpRuntimeTransport();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), "--chatty"),
+                        Path.of("").toAbsolutePath(), transport)) {
+            RuntimeBrokerService service = new RuntimeBrokerService(
+                    harnessSessionId -> java.util.concurrent.CompletableFuture
+                            .completedFuture(scope),
+                    provisioner, new AcceptingTransport(),
+                    new InMemoryRuntimeBindingRepository(),
+                    new InMemoryRuntimeSessionRepository(),
+                    new InMemoryToolExecutionRepository(
+                            java.time.Clock.systemUTC()),
+                    "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+            try {
+                RuntimeBindingRecord ready = service.warm("harness")
+                        .toCompletableFuture().get(30, TimeUnit.SECONDS);
+                assertEquals(RuntimeBindingRecord.State.READY,
+                        ready.getState());
+                RuntimeBindingRecord again = service.warm("harness")
+                        .toCompletableFuture().get(30, TimeUnit.SECONDS);
+                assertEquals(RuntimeBindingRecord.State.READY,
+                        again.getState());
+                assertEquals(ready.getLease().getRuntimeInstanceId(),
+                        again.getLease().getRuntimeInstanceId());
+            } finally {
+                service.close();
+            }
+        }
+    }
+
+    @Test
+    void rejectsANonLoopbackReadyUrlBeforeSendingTheToken()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        Path probe = Files.createTempDirectory("runtime-ready-probe");
+        Path hits = probe.resolve("hits");
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), "--foreign-url",
+                                "--probe=" + hits),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner
+                                    .provision(new RuntimeProvisionRequest(
+                                            scope, null))
+                                    .toCompletableFuture()
+                                    .get(30, TimeUnit.SECONDS));
+            RuntimeBrokerException error =
+                    (RuntimeBrokerException) failure.getCause();
+            assertEquals("Managed Runtime ready record is invalid.",
+                    error.getMessage());
+            assertFalse(Files.exists(hits));
+            assertNoNewChildren(before);
+        } finally {
+            Files.walk(probe).sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (Exception ignored) {
+                            // Best-effort cleanup of the probe directory.
+                        }
+                    });
+        }
+    }
+
+    @Test
+    void rejectsAReadyNumberThatIsNotAnExactIntegerBeforeSendingTheToken()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        Path probe = Files.createTempDirectory("runtime-ready-probe");
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest legacy = new RuntimeProvisionRequest(scope, null);
+        Set<Long> before = childPids();
+        try {
+            // Each literal would read as the expected version 1 or epoch 1.
+            for (String mode : List.of("--ready-version=1.9",
+                    "--ready-epoch=1.5", "--ready-version=1.0000000000000001",
+                    "--ready-epoch=1.0000000000000001D",
+                    "--ready-version=65537S")) {
+                Path hits = probe.resolve("hits-" + mode.hashCode());
+                RuntimeBrokerException error = readyFailure(script, mode, hits,
+                        legacy, RuntimeProvisionSeed.create("binding-1", 1));
+                assertEquals(503, error.getStatusCode(), mode);
+                assertEquals("runtime_provision_failed", error.getCode(), mode);
+                assertTrue(error.isRetryable(), mode);
+                assertEquals("Managed Runtime ready record is invalid.",
+                        error.getMessage(), mode);
+                assertFalse(Files.exists(hits), mode);
+            }
+            // The managed-context fixture expects version 2 and epoch 4.
+            for (String mode : List.of("--ready-version=2.0000000000000001D",
+                    "--ready-epoch=65540S")) {
+                Path hits = probe.resolve("hits-" + mode.hashCode());
+                RuntimeBrokerException error = readyFailure(script, mode, hits,
+                        ManagedContextProtocolTest.request(),
+                        ManagedContextProtocolTest.seed());
+                assertEquals(503, error.getStatusCode(), mode);
+                assertEquals("runtime_provision_failed", error.getCode(), mode);
+                assertFalse(error.isRetryable(), mode);
+                assertFalse(Files.exists(hits), mode);
+            }
+            Path hits = probe.resolve("hits-exact");
+            try (LocalProcessRuntimeProvisioner provisioner =
+                    new LocalProcessRuntimeProvisioner(
+                            List.of("node", script.toString(),
+                                    "--ready-epoch=1.0", "--probe=" + hits),
+                            Path.of("").toAbsolutePath(),
+                            new HttpRuntimeTransport())) {
+                assertEquals(1, provisioner.provision(legacy,
+                        RuntimeProvisionSeed.create("binding-1", 1))
+                        .toCompletableFuture().get(30, TimeUnit.SECONDS)
+                        .getEpoch());
+                assertTrue(Files.exists(hits));
+            }
+            assertNoNewChildren(before);
+        } finally {
+            Files.walk(probe).sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (Exception ignored) {
+                            // Best-effort cleanup of the probe directory.
+                        }
+                    });
+        }
+    }
+
+    private static RuntimeBrokerException readyFailure(Path script,
+            String mode, Path hits, RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed) throws Exception {
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), mode,
+                                "--probe=" + hits),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner.provision(request, seed)
+                                    .toCompletableFuture()
+                                    .get(30, TimeUnit.SECONDS), mode);
+            return (RuntimeBrokerException) failure.getCause();
+        }
+    }
+
+    @Test
+    void fencedProvisioningReapsTheWorker() throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeBrokerService service = new RuntimeBrokerService(
+                    harnessSessionId -> java.util.concurrent.CompletableFuture
+                            .completedFuture(scope),
+                    provisioner, new AcceptingTransport(),
+                    new FencingBindingRepository(),
+                    new InMemoryRuntimeSessionRepository(),
+                    new InMemoryToolExecutionRepository(
+                            java.time.Clock.systemUTC()),
+                    "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+            try {
+                ExecutionException failure = org.junit.jupiter.api.Assertions
+                        .assertThrows(ExecutionException.class,
+                                () -> service.warm("harness")
+                                        .toCompletableFuture()
+                                        .get(30, TimeUnit.SECONDS));
+                Throwable cause = failure.getCause();
+                assertTrue(cause instanceof RuntimeBrokerException);
+                assertEquals("runtime_provision_fenced",
+                        ((RuntimeBrokerException) cause).getCode());
+                // The discarded lease's worker must be reaped by release,
+                // before close() gets a chance to mask a missing release.
+                assertNoNewChildren(before);
+            } finally {
+                service.close();
+            }
+        }
+    }
+
+    @Test
+    void observeReportsReadyForAnOwnedAliveLease() throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        Path probe = Files.createTempDirectory("runtime-ready-probe");
+        Path hits = probe.resolve("hits");
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), "--probe=" + hits),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            // The probe logs one line per HTTP request; provision already
+            // attested, so count only what reconcile adds.
+            long attested = Files.readAllLines(hits).size();
+            RuntimeObservation observed = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    observed.getOutcome());
+            assertEquals(lease.getEndpoint(), observed.getEndpoint());
+            assertEquals(seed.getLeaseId(), observed.getLeaseId());
+            assertEquals(seed.getEpoch(), observed.getEpoch());
+            // READY rests on a fresh attestation, not on the process alone.
+            assertEquals(attested + 1, Files.readAllLines(hits).size());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+            Files.walk(probe).sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (Exception ignored) {
+                            // Best-effort cleanup of the probe directory.
+                        }
+                    });
+        }
+    }
+
+    @Test
+    void observeReportsNotFoundForADeadWorkerAndReapsItsEntry()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            ProcessHandle worker = ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .findFirst().orElseThrow();
+            worker.destroyForcibly();
+            worker.onExit().get(10, TimeUnit.SECONDS);
+            assertFalse(provisioner.isUsable(lease));
+            RuntimeObservation lost = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    lost.getOutcome());
+            assertEquals(RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                    lost.getLossEvidence().fact());
+            assertEquals("owned-process-exit",
+                    lost.getLossEvidence().source());
+            // observe() callers may discard the verdict, so the reaped facts
+            // must keep the repeat read identical — never a one-shot
+            // NOT_FOUND that degrades into UNKNOWN retries.
+            RuntimeObservation repeated = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    repeated.getOutcome());
+            assertEquals(lost.getLossEvidence().evidenceId(),
+                    repeated.getLossEvidence().evidenceId());
+            // The tombstone's only payload is the dead worker's pid: the
+            // repeat read must carry the same hostDomain the live-dead read
+            // built, not a constant.
+            assertEquals(lost.getLossEvidence().hostDomain(),
+                    repeated.getLossEvidence().hostDomain());
+            assertTrue(repeated.getLossEvidence().hostDomain()
+                    .endsWith(":" + worker.pid()));
+            assertFalse(provisioner.isUsable(lease));
+            // Only the reaped branch answers NOT_FOUND to a foreign seed; a
+            // retained dead entry would answer CONFLICT on the seed check
+            // first. This is what pins the migration itself.
+            RuntimeObservation foreignAfterReap = provisioner
+                    .reconcile(request,
+                            RuntimeProvisionSeed.create("binding-1", 2),
+                            handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.NOT_FOUND,
+                    foreignAfterReap.getOutcome());
+            provisioner.stop(lease);
+            RuntimeObservation released = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                    released.getOutcome());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void releaseRacingADeadWorkerReapNeverResurrectsTheTombstone()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            ProcessHandle worker = ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .findFirst().orElseThrow();
+            worker.destroyForcibly();
+            worker.onExit().get(10, TimeUnit.SECONDS);
+            // Park the dead-worker observation between its liveness check and
+            // its reap, so the release provably lands in between: stop()
+            // removes the owned entry and clears the tombstone before the
+            // racing observe() gets to move anything.
+            var owned = ownedEntries(provisioner);
+            List<Object> key = List.of(lease.getRuntimeInstanceId(),
+                    lease.getEndpoint(), lease.getLeaseId(), lease.getEpoch(),
+                    lease.getToken());
+            Object registered = java.util.Objects.requireNonNull(
+                    owned.get(key), "provisioned worker must be owned");
+            BlockingExitProcess parked = new BlockingExitProcess(worker.pid());
+            owned.put(key, ownedProcess(registered, parked, seed));
+            java.util.concurrent.CompletableFuture<RuntimeObservation> racing =
+                    provisioner.reconcile(request, seed, handle, lease)
+                            .toCompletableFuture();
+            assertTrue(parked.livenessCheckStarted.await(10,
+                    TimeUnit.SECONDS));
+            provisioner.release(request, lease).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            parked.finishLivenessCheck.countDown();
+            racing.get(10, TimeUnit.SECONDS);
+            // The release cleared the lease for good: no reaped tombstone may
+            // survive it, so the next read is UNKNOWN, never NOT_FOUND.
+            RuntimeObservation released = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                    released.getOutcome());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
+    void tombstoneRetainsNoLeaseMaterialAcrossTheWholeIdentity() {
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                java.net.URI.create("http://127.0.0.1:43123/"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        // Recreate the fence identity deterministically; the digest must
+        // carry no bearer material, yet stay a function of every
+        // ownership-key component (otherwise distinct leases would
+        // collapse onto one tombstone).
+        java.util.List<Object> key = java.util.List.of(
+                lease.getRuntimeInstanceId(), lease.getEndpoint(),
+                lease.getLeaseId(), lease.getEpoch(), lease.getToken());
+        String first = LocalProcessRuntimeProvisioner.tombstone(key);
+        String second = LocalProcessRuntimeProvisioner.tombstone(key);
+        assertEquals(first, second);
+        assertTrue(first.matches("[0-9a-f]{64}"),
+                "tombstone must be a SHA-256 digest: " + first);
+        // ownershipKey order: runtimeInstanceId, endpoint, leaseId,
+        // epoch, token — each one must feed the digest.
+        Object[] mutatedComponents = {
+            lease.getRuntimeInstanceId() + "-x",
+            java.net.URI.create("http://127.0.0.1:"
+                    + (lease.getEndpoint().getPort() + 1)),
+            lease.getLeaseId() + "-x",
+            lease.getEpoch() + 1,
+            lease.getToken() + "-x",
+        };
+        for (int i = 0; i < mutatedComponents.length; i++) {
+            java.util.List<Object> mutated =
+                    new java.util.ArrayList<>(key);
+            mutated.set(i, mutatedComponents[i]);
+            assertFalse(
+                    first.equals(LocalProcessRuntimeProvisioner
+                            .tombstone(mutated)),
+                    "component " + i + " must feed the digest");
+        }
+    }
+
+    @Test
+    void observeReportsConflictForAForeignSeedOrHandleVersion()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            RuntimeObservation foreignSeed = provisioner
+                    .reconcile(request,
+                            RuntimeProvisionSeed.create("binding-1", 2),
+                            handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                    foreignSeed.getOutcome());
+            RuntimeResourceHandle v2Handle = new RuntimeResourceHandle(
+                    LocalProcessRuntimeProvisioner.KIND, 2,
+                    java.util.Map.of("provider", LocalProcessRuntimeProvisioner.KIND));
+            RuntimeObservation foreignVersion = provisioner
+                    .reconcile(request, seed, v2Handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                    foreignVersion.getOutcome());
+            // A conflicting observation must leave the owner's worker alone.
+            assertTrue(provisioner.isUsable(lease),
+                    "a conflicting observation must leave the owner's worker alone");
+            RuntimeObservation stillReady = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    stillReady.getOutcome());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    private static void assertNoNewChildren(Set<Long> before)
+            throws InterruptedException {
+        long deadline = System.nanoTime()
+                + Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (before.containsAll(childPids())) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError(
+                "worker children still alive: " + childPids());
+    }
+
+    private static Set<Long> childPids() {
+        return ProcessHandle.current().children().map(ProcessHandle::pid)
+                .collect(Collectors.toSet());
+    }
+
+    static void requireNode() {
+        if (commandExists("node")) {
+            return;
+        }
+        if ("github-hosted".equals(System.getenv("RUNNER_ENVIRONMENT"))) {
+            throw new AssertionError(
+                    "node is required on hosted CI runners");
+        }
+        assumeTrue(false, "node is required");
+    }
+
+    private static boolean commandExists(String command) {
+        Process process;
+        try {
+            process = new ProcessBuilder(command, "-v")
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+        } catch (IOException missing) {
+            return false;
+        }
+        // Starting proves the command exists; a busy runner can take
+        // seconds to print the version, which is not a missing command.
+        try {
+            process.waitFor(30, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            process.destroyForcibly();
+        }
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.concurrent.ConcurrentMap<List<Object>, Object> ownedEntries(
+            LocalProcessRuntimeProvisioner provisioner) throws Exception {
+        var field = LocalProcessRuntimeProvisioner.class
+                .getDeclaredField("owned");
+        field.setAccessible(true);
+        return (java.util.concurrent.ConcurrentMap<List<Object>, Object>)
+                field.get(provisioner);
+    }
+
+    private static Object ownedProcess(Object registered, Process process,
+            RuntimeProvisionSeed seed) throws Exception {
+        var constructor = registered.getClass().getDeclaredConstructor(
+                Process.class, LocalRuntimeStore.Registration.class,
+                RuntimeProvisionSeed.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(process, null, seed);
+    }
+
+    /** A dead worker whose liveness check blocks until the test releases it. */
+    private static final class BlockingExitProcess extends Process {
+        private final java.util.concurrent.CountDownLatch
+                livenessCheckStarted = new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.CountDownLatch
+                finishLivenessCheck = new java.util.concurrent.CountDownLatch(1);
+        private final long pid;
+
+        BlockingExitProcess(long pid) {
+            this.pid = pid;
+        }
+
+        @Override
+        public boolean isAlive() {
+            livenessCheckStarted.countDown();
+            try {
+                finishLivenessCheck.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            return false;
+        }
+
+        @Override
+        public long pid() {
+            return pid;
+        }
+
+        @Override
+        public boolean waitFor(long timeout, TimeUnit unit) {
+            return true;
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() {
+        }
+
+        @Override
+        public Process destroyForcibly() {
+            return this;
+        }
+
+        @Override
+        public java.io.OutputStream getOutputStream() {
+            return java.io.OutputStream.nullOutputStream();
+        }
+
+        @Override
+        public java.io.InputStream getInputStream() {
+            return java.io.InputStream.nullInputStream();
+        }
+
+        @Override
+        public java.io.InputStream getErrorStream() {
+            return java.io.InputStream.nullInputStream();
+        }
+    }
+
+    /**
+     * Adopts the worker, then refuses to publish READY. The service must
+     * release that lease. This does not wait for the renewal timer, which
+     * can lose the race on a fast machine.
+     */
+    private static final class FencingBindingRepository
+            extends DelegatingBindingRepository {
+        FencingBindingRepository() {
+            super(new InMemoryRuntimeBindingRepository());
+        }
+
+        @Override
+        public RuntimeBindingRecord compareAndSet(
+                RuntimeBindingRecord expected,
+                RuntimeBindingRecord replacement) {
+            if (replacement.getState()
+                    == RuntimeBindingRecord.State.READY) {
+                return null;
+            }
+            return delegate.compareAndSet(expected, replacement);
+        }
+    }
+
+    private static final class AcceptingTransport implements RuntimeTransport {
+        @Override
+        public java.util.concurrent.CompletionStage<RuntimeAttestation> attest(
+                RuntimeLease lease, RuntimeProvisionRequest request,
+                RuntimeProvisionSeed seed) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    new RuntimeAttestation(lease.getRuntimeInstanceId(),
+                            seed.getGatewayIncarnation(), lease.getLeaseId(),
+                            lease.getEpoch(), request.getScope(),
+                            seed.getProvisionRequestId()));
+        }
+
+        @Override
+        public java.util.concurrent.CompletionStage<Void> acquire(
+                RuntimeLease lease, RuntimeSession session) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    null);
+        }
+
+        @Override
+        public java.util.concurrent.CompletionStage<Object> control(
+                RuntimeLease lease, RuntimeSession session,
+                java.util.Map<String, Object> operation) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    "ok");
+        }
+
+        @Override
+        public java.util.concurrent.CompletionStage<java.util.Map<String, Object>> execute(
+                RuntimeLease lease, RuntimeSession session,
+                java.util.Map<String, Object> reference) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    java.util.Map.of("executionStatus", "success"));
+        }
+
+        @Override
+        public java.util.concurrent.CompletionStage<java.util.Map<String, Object>> cancel(
+                RuntimeLease lease, RuntimeSession session,
+                java.util.Map<String, Object> reference) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    java.util.Map.of("state", "settled"));
+        }
+
+        @Override
+        public java.util.concurrent.CompletionStage<Boolean> release(
+                RuntimeLease lease, RuntimeSession session) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    true);
+        }
+    }
+}

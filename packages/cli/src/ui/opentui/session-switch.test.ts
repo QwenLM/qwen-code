@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
   handleBranchSession,
   handleResumeSession,
@@ -351,6 +352,12 @@ describe('handleBranchSession', () => {
 
   it('forks, persists a title, swaps core then UI, and announces', async () => {
     const { config, calls } = createFakeConfig();
+    const syncSession = vi.fn(async () => {
+      expect(calls.swapCommit).toBe(1);
+    });
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      syncSession,
+    } as unknown as interactiveMods.InteractiveModSession);
     const forkSession = vi.fn(async () => {});
     const renameSession = vi.fn(async () => true);
     const sessionService = {
@@ -379,6 +386,7 @@ describe('handleBranchSession', () => {
     expect(host.loadHistory).toHaveBeenCalled();
     expect(host.resetTranscript).toHaveBeenCalledTimes(1);
     expect(host.setSessionName).toHaveBeenCalled();
+    expect(syncSession).toHaveBeenCalledExactlyOnceWith('resume');
     // The two-line announcement (branch + resume hint).
     const infos = (host.addItem as ReturnType<typeof vi.fn>).mock.calls
       .map((call) => call[0])
@@ -390,6 +398,10 @@ describe('handleBranchSession', () => {
 
   it('removes the fork and reports the failure when the title write fails', async () => {
     const { config, calls } = createFakeConfig();
+    const syncSession = vi.fn();
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      syncSession,
+    } as unknown as interactiveMods.InteractiveModSession);
     const removeSession = vi.fn(async () => true);
     const sessionService = {
       loadSession: async () => emptySession(),
@@ -407,6 +419,7 @@ describe('handleBranchSession', () => {
 
     expect(removeSession).toHaveBeenCalled();
     expect(calls.startNewSession).toHaveLength(0);
+    expect(syncSession).not.toHaveBeenCalled();
     expect(host.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',

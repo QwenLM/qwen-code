@@ -12,7 +12,7 @@ A Workspace-bound Managed Session pins `cwdRelative` and `contextRevision=1` at 
 
 ## Verified current state
 
-Paths are under `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` unless noted.
+Paths are under `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` unless noted.
 
 - **Binding.** `V7__managed_workspace_binding.sql` adds the eight-column binding set (`workspace_id`, `workspace_generation`, `workspace_storage_id`, `cwd_relative`, `context_config_ref`, `context_revision`, `workspace_config_ref`, `workspace_policy_ref`) as one all-null-or-all-not-null unit behind the seven-field `ContextBinding` model, including `cwd_relative` and `context_revision` (hard-coded `1` at `store/ManagedWorkspaceRegistry.java:212`). No `context_state` column exists, and none is needed here: an open cwd operation is the gate.
 - **Operation ledger.** `V17__managed_session_operation.sql`'s `managed_agent_operation` is the durable 202 + Idempotency-Key substrate: per-(tenant, session, kind, actor, key) uniqueness, PENDING/RUNNING/COMPLETED states, lease/claim/retry columns, and a coordinator (`service/SessionLifecycleCoordinator.java`) with `@Scheduled recoverOperations()`. Kinds are bespoke (`CLOSE/ARCHIVE/DELETE/ACTION_RESPONSE` at `store/StoreModels.java:84`); V24 added per-kind columns, which is the template for the cwd columns. `findDeliverableOperations`, `claimOperation` and `retryOperation` are kind-generic; `beginOperation`/`completeOperation` are not (they assert the lifecycle status machine and reject bound Sessions).
@@ -126,13 +126,13 @@ WebShell requests carry `sessionId`, `idempotencyKey`, `cwdRelative`, `expectedC
 - `api/PublicAgentController.java`, `api/WebShellAgentController.java`, `api/ApiModels.java` (route + DTO records).
 - Tests: store admission matrix, coordinator settlement/reclaim, transport probe with H2 and temp mounts, controller tests, `ManagedAgentApiContractTest` and planned-schema pins, the Hosted integration suite's cwd group (H2; MySQL CI lane alongside the existing suite).
 - `packages/web-shell` regenerates `managed-agent-api.ts` from the updated contract (mechanical, same as prior contract bumps).
-- This design pair; `packages/sdk-java/managed-agent-server/README.md` (route behavior and gates).
+- This design pair; `packages/managed-agent-server/README.md` (route behavior and gates).
 
 No change to `packages/cli/src/serve/**`, `packages/core/**`, the worker, the envelope, or the shared fixtures.
 
 ## Validation plan
 
-- **Java**: `mvn test` and `mvn checkstyle:check` in `packages/sdk-java/managed-agent-server` on JDK 21; focused store/coordinator/controller/contract tests.
+- **Java**: `mvn test` and `mvn checkstyle:check` in `packages/managed-agent-server` on JDK 21; focused store/coordinator/controller/contract tests.
 - **Store admission matrix**: every row of the admission table, including replay-before-CAS order, digest conflict, cross-tenant invisibility, unreadable-actor 404 `session_not_found` vs readable non-creator 403 `session_operation_forbidden`, revoked grant, draining/removed registry, generation drift, expected-revision mismatch, busy on the G0 initial Turn or retained Runtime context, and the no-op same-directory change.
 - **Settlement**: probe failure leaves the Session untouched with `failure_code=workspace_unavailable`; commit after external revision bump fails with `context_revision_conflict`; commit with a fresh active Turn or retained Runtime context fails with `session_context_busy`; retry after a transient failure succeeds once; a probe that never stops failing transiently settles terminally when the 8-attempt budget runs out — deliverable rows drain and both admission barriers re-open; a vanished mount root or target classifies terminal (pinned against real deleted directories) while a momentary I/O shape classifies retryable (pinned with a deterministic ENAMETOOLONG probe); reclaim of a dead owner's LEASED row completes exactly once; legacy lifecycle operations and `ACTION_RESPONSE` are untouched (their tests stay green).
 - **Contract**: mapped vs planned drift test, schema pins for the six touched schemas, WebShell twins, event documentation consistency.

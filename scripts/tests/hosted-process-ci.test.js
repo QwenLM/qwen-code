@@ -21,6 +21,81 @@ const windowsRun = [
   `node -e "const r = require('./integration-tests/hosted-process-suite.json'); if (r.numTotalTests === 0 || r.numPassedTests !== r.numTotalTests) { console.error('::error::' + r.numPassedTests + ' of ' + r.numTotalTests + ' Hosted cases passed; Windows must run every case'); process.exit(1); }"`,
 ].join('\n');
 
+// One row per failover arm the Hosted MySQL job runs: step name, npm
+// script, and the runner flags that make the row a different arm.
+const failoverArms = [
+  [
+    'Run in-flight owner failover E2E',
+    'test:e2e:managed-inflight-failover',
+    ['--inflight-failover'],
+  ],
+  [
+    'Run continuation owner failover E2E',
+    'test:e2e:managed-continuation-failover',
+    ['--continuation-failover'],
+  ],
+  [
+    'Run session owner failover E2E',
+    'test:e2e:managed-session-failover',
+    ['--session-failover'],
+  ],
+  [
+    'Run Harness-restart session failover E2E',
+    'test:e2e:managed-harness-restart-failover',
+    ['--session-failover', '--harness-only'],
+  ],
+  [
+    'Run Harness-restart in-flight failover E2E',
+    'test:e2e:managed-harness-restart-inflight-failover',
+    ['--inflight-failover', '--harness-only'],
+  ],
+  [
+    'Run Harness-restart continuation failover E2E',
+    'test:e2e:managed-harness-restart-continuation-failover',
+    ['--continuation-failover', '--harness-only'],
+  ],
+  [
+    'Run frozen former-owner fencing E2E',
+    'test:e2e:managed-continuation-frozen-owner-failover',
+    ['--continuation-failover', '--freeze'],
+  ],
+  [
+    'Run Harness-restart approval Allow recovery E2E',
+    'test:e2e:managed-harness-restart-approval-allow',
+    ['--continuation-failover', '--harness-only', '--g3-verify allow'],
+  ],
+  [
+    'Run Harness-restart approval Deny recovery E2E',
+    'test:e2e:managed-harness-restart-approval-deny',
+    ['--continuation-failover', '--harness-only', '--g3-verify deny'],
+  ],
+  [
+    'Run Harness-restart approval Cancel recovery E2E',
+    'test:e2e:managed-harness-restart-approval-cancel',
+    ['--continuation-failover', '--harness-only', '--g3-verify cancel'],
+  ],
+  [
+    'Run Harness-restart approval expiry recovery E2E',
+    'test:e2e:managed-harness-restart-approval-expiry',
+    ['--continuation-failover', '--harness-only', '--g3-verify expiry'],
+  ],
+  [
+    'Run Harness-restart continuation closeout E2E',
+    'test:e2e:managed-harness-restart-continuation-closeout',
+    ['--continuation-failover', '--harness-only', '--g3-verify continuation'],
+  ],
+  [
+    'Run Harness-restart model-round failover E2E',
+    'test:e2e:managed-harness-restart-model-round-failover',
+    ['--model-round-failover', '--harness-only'],
+  ],
+  [
+    'Run frozen former control-plane fencing E2E',
+    'test:e2e:managed-frozen-control-plane-failover',
+    ['--model-round-failover', '--frozen-control-plane'],
+  ],
+];
+
 describe('Hosted real-process gates', () => {
   it('runs the packaged suite on relevant PRs without credentials or optional prerequisites', () => {
     const job = ci.jobs.integration_no_ak;
@@ -128,25 +203,12 @@ describe('Hosted real-process gates', () => {
     expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
       /^mariadb:/,
     );
-    for (const event of ['pull_request', 'push']) {
-      for (const path of [
-        'packages/sdk-java/**',
-        'packages/cli/src/serve/**',
-        'packages/cli/src/commands/channel/**',
-        'packages/cli/src/commands/channel.ts',
-        'packages/channels/email/**',
-        'packages/channels/base/**',
-        'packages/core/src/managed-runtime/**',
-        'packages/cli/src/config/**',
-        'packages/core/src/config/**',
-        'packages/core/src/core/**',
-        'pnpm-lock.yaml',
-        'scripts/check-failsafe-reports.js',
-        '**/.mvn/**',
-      ]) {
-        expect(java.on[event].paths).toContain(path);
-      }
-    }
+    // Keep daily coverage and run the same suite before Java publication.
+    expect(Object.keys(java.on).sort()).toEqual([
+      'schedule',
+      'workflow_call',
+      'workflow_dispatch',
+    ]);
     const run = job.steps.find(
       (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
     );
@@ -176,7 +238,7 @@ describe('Hosted real-process gates', () => {
     expect(job.steps[relay].shell).toBeUndefined();
     expect(job.steps[relay]['working-directory']).toBeUndefined();
     expect(relay).toBeLessThan(job.steps.indexOf(run));
-    const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
+    const pom = read('packages/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,
       '',
     );
@@ -186,9 +248,6 @@ describe('Hosted real-process gates', () => {
     const selection = /it\.test|includesFile|excludesFile|<test>/;
     expect(read('.github/workflows/sdk-java.yml')).not.toMatch(selection);
     expect(pom).not.toMatch(selection);
-    expect(read('packages/sdk-java/runtime-broker/pom.xml')).not.toMatch(
-      selection,
-    );
     const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
     expect(mariadb).toContain('<id>mysql-integration</id>');
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
@@ -203,6 +262,21 @@ describe('Hosted real-process gates', () => {
     );
     expect(mariadbRun.run).toContain('-Pmysql-integration');
     expect(mariadbRun.run).not.toContain('-Dit.test');
+    // The H2 unit suite runs once, in the MariaDB job: the Hosted job's three
+    // Maven steps would each repeat it, and the MariaDB job must keep it.
+    const profile = (id) =>
+      pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
+    const skipsUnits =
+      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration><skipTests>true<\/skipTests><\/configuration>/;
+    for (const id of [
+      'hosted-harness-mysql',
+      'hosted-harness-gates',
+      'o4-mysql-gates',
+    ]) {
+      expect(profile(id), id).toMatch(skipsUnits);
+    }
+    expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
+    expect(mariadbRun.run).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
     // Those checks read only the command lines, so each job also compares
     // the reports of its run with the source tree, right after its last
     // integration-test step.
@@ -210,12 +284,12 @@ describe('Hosted real-process gates', () => {
       [
         'mysql-integration',
         mariadbRun.name,
-        'non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server',
+        'non-hosted packages/managed-agent-server',
       ],
       [
         'hosted-harness-mysql',
         run.name,
-        'hosted packages/sdk-java/managed-agent-server',
+        'hosted packages/managed-agent-server',
       ],
     ]) {
       const steps = java.jobs[name].steps;
@@ -230,7 +304,7 @@ describe('Hosted real-process gates', () => {
     // test would move to MariaDB, a renamed MariaDB test to the Hosted job.
     const its = readdirSync(
       new URL(
-        '../../packages/sdk-java/managed-agent-server/src/test/java/',
+        '../../packages/managed-agent-server/src/test/java/',
         import.meta.url,
       ),
       { recursive: true },
@@ -243,6 +317,9 @@ describe('Hosted real-process gates', () => {
     expect(its.filter((file) => !/^Hosted.*IT\.java$/.test(file))).toContain(
       'ManagedAgentMySqlIT.java',
     );
+    expect(its.filter((file) => !/^Hosted.*IT\.java$/.test(file))).toContain(
+      'JdbcRuntimeBrokerMySqlIT.java',
+    );
     const upload = job.steps.find(
       (step) => step.name === 'Upload Hosted process reports',
     );
@@ -252,8 +329,65 @@ describe('Hosted real-process gates', () => {
     // module-relative directory precisely so an artifact can carry it; the
     // writer and the upload path must not drift.
     expect(upload.with.path).toContain(
-      'packages/sdk-java/managed-agent-server/target/fg7-cases/',
+      'packages/managed-agent-server/target/fg7-cases/',
     );
+    // FG8 follows the same precedent: its per-case evidence lives in
+    // target/fg8-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg8-cases/',
+    );
+    // FG9's session-relay fault gates keep theirs in target/fg9-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg9-cases/',
+    );
+    // FG10 follows the same precedent: its per-case evidence lives in
+    // target/fg10-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg10-cases/',
+    );
+    // The runner writes the Step 3 gate evidence under .qwen/, a hidden
+    // path that upload-artifact drops silently without the flag.
+    const evidence = job.steps.find(
+      (step) => step.name === 'Upload G3 Step 3 gate evidence',
+    );
+    expect(evidence.if).toBe('always()');
+    expect(evidence.with.path).toBe(
+      '.qwen/investigations/g3-step3-implementation/',
+    );
+    expect(evidence.with['include-hidden-files']).toBe(true);
+    expect(upload.with.path).not.toContain('.qwen/');
+    // The writer side of the same path: the runner's default report
+    // directory must stay under what the step uploads, or the artifact
+    // goes empty with only a warning.
+    expect(read('scripts/run-managed-agent-server-e2e.ts')).toContain(
+      `\`${evidence.with.path}packaged-\${verificationMode}-`,
+    );
+  });
+
+  it('pins the cgroup v2 delegation the FG8 monitor/run gates need', () => {
+    const job = java.jobs['hosted-harness-mysql'];
+    const delegate = job.steps.find(
+      (step) => step.name === 'Delegate a cgroup v2 root for the process gates',
+    );
+    const verify = job.steps.find(
+      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
+    );
+    expect(delegate, 'the cgroup delegation step').toBeDefined();
+    // Without the root the gates refuse admission and burn their full
+    // driver budget before red — so the delegation must land first.
+    expect(job.steps.indexOf(delegate)).toBeLessThan(job.steps.indexOf(verify));
+    expect(verify.env.QWEN_MANAGED_HOOK_CGROUP_ROOT).toBe('/sys/fs/cgroup/fg8');
+    // Create/export coupling: a path rename on only one side fails the gates
+    // as a missing root, never as a red pin.
+    expect(delegate.run).toContain('mkdir -p /sys/fs/cgroup/fg8');
+    expect(delegate.run).toContain('test -f /sys/fs/cgroup/fg8/cgroup.kill');
+    // The Verify shell must be born inside the subtree: a process outside
+    // it cannot migrate into fg8 — the common ancestor's cgroup.procs is
+    // root-owned (kernel delegation containment).
+    expect(verify.run).toContain('sudo tee /sys/fs/cgroup/fg8/cgroup.procs');
+    // The delegation step smoke-tests admission with a real child joining a
+    // unit — cgroup.kill existing alone proves nothing about migration.
+    expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
   });
 
   it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
@@ -262,91 +396,72 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (45 + 9x10 + 20 + 50); the uncapped setup steps
+    // Step ceilings today (85 + 16x10 + 20 + 50); the uncapped setup steps
     // need their own allowance — the job comment estimates it at ~13, so
     // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(205);
+    expect(summed).toBe(315);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(220);
+    expect(job['timeout-minutes']).toBe(330);
   });
 
-  it.each([
-    [
-      'Run in-flight owner failover E2E',
-      'test:e2e:managed-inflight-failover',
-      ['--inflight-failover'],
-    ],
-    [
-      'Run continuation owner failover E2E',
-      'test:e2e:managed-continuation-failover',
-      ['--continuation-failover'],
-    ],
-    [
-      'Run session owner failover E2E',
-      'test:e2e:managed-session-failover',
-      ['--session-failover'],
-    ],
-    [
-      'Run Harness-restart session failover E2E',
-      'test:e2e:managed-harness-restart-failover',
-      ['--session-failover', '--harness-only'],
-    ],
-    [
-      'Run Harness-restart in-flight failover E2E',
-      'test:e2e:managed-harness-restart-inflight-failover',
-      ['--inflight-failover', '--harness-only'],
-    ],
-    [
-      'Run Harness-restart continuation failover E2E',
-      'test:e2e:managed-harness-restart-continuation-failover',
-      ['--continuation-failover', '--harness-only'],
-    ],
-    [
-      'Run frozen former-owner fencing E2E',
-      'test:e2e:managed-continuation-frozen-owner-failover',
-      ['--continuation-failover', '--freeze'],
-    ],
-  ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
-    const job = java.jobs['hosted-harness-mysql'];
-    const install = job.steps.find(
-      (step) => step.name === 'Install MySQL binaries for the failover E2E',
+  it('runs every failover arm with its own runner arguments', () => {
+    const commands = failoverArms.map(([, script]) => pkg.scripts[script]);
+    expect(new Set(commands).size).toBe(failoverArms.length);
+    expect(new Set(failoverArms.map(([name]) => name)).size).toBe(
+      failoverArms.length,
     );
-    const step = job.steps.find((s) => s.name === stepName);
-    expect(step, stepName).toBeDefined();
-    expect(install, 'the MySQL binaries install step').toBeDefined();
-    expect(
-      job.steps.indexOf(step),
-      `${stepName} must run after the MySQL binaries install`,
-    ).toBeGreaterThan(job.steps.indexOf(install));
-    expect(step.run).toContain(`npm run ${script}`);
-    expect(step['timeout-minutes'], stepName).toBe(10);
-    expect(step.if, stepName).toBeUndefined();
-    expect(step['continue-on-error'], stepName).toBeUndefined();
-    // A renamed or deleted npm script would leave the step failing for
-    // the wrong reason; pin that it drives the failover runner — with
-    // the flags that make each row a different arm.
-    expect(pkg.scripts[script], script).toContain(
-      'run-managed-agent-server-e2e',
-    );
-    for (const flag of flags) {
-      expect(pkg.scripts[script], `${script} carries ${flag}`).toContain(flag);
-    }
-    // Each row must also be the only row with its mode flag, or two CI
-    // steps silently run the same arm.
-    for (const flag of [
-      '--session-failover',
-      '--inflight-failover',
-      '--continuation-failover',
-      '--harness-only',
-      '--freeze',
-    ]) {
-      if (!flags.includes(flag)) {
-        expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
+  });
+
+  it.each(failoverArms)(
+    'pins the %s arm into the Hosted MySQL job',
+    (stepName, script, flags) => {
+      const job = java.jobs['hosted-harness-mysql'];
+      const install = job.steps.find(
+        (step) => step.name === 'Install MySQL binaries for the failover E2E',
+      );
+      const step = job.steps.find((s) => s.name === stepName);
+      expect(step, stepName).toBeDefined();
+      expect(install, 'the MySQL binaries install step').toBeDefined();
+      expect(
+        job.steps.indexOf(step),
+        `${stepName} must run after the MySQL binaries install`,
+      ).toBeGreaterThan(job.steps.indexOf(install));
+      expect(step.run).toContain(`npm run ${script}`);
+      expect(step['timeout-minutes'], stepName).toBe(10);
+      expect(step.if, stepName).toBeUndefined();
+      expect(step['continue-on-error'], stepName).toBeUndefined();
+      // A renamed or deleted npm script would leave the step failing for
+      // the wrong reason; pin that it drives the failover runner — with
+      // the flags that make each row a different arm.
+      expect(pkg.scripts[script], script).toContain(
+        'run-managed-agent-server-e2e',
+      );
+      for (const flag of flags) {
+        expect(pkg.scripts[script], `${script} carries ${flag}`).toContain(
           flag,
         );
       }
-    }
-  });
+      // Each row must also be the only row with its mode flag, or two CI
+      // steps silently run the same arm. A valued flag ('--g3-verify allow')
+      // carries the flag name, and its value tells the rows apart.
+      for (const flag of [
+        '--session-failover',
+        '--inflight-failover',
+        '--continuation-failover',
+        '--model-round-failover',
+        '--harness-only',
+        '--freeze',
+        '--frozen-control-plane',
+        '--g3-verify',
+      ]) {
+        if (!flags.some((entry) => entry.split(' ')[0] === flag)) {
+          expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
+            flag,
+          );
+        }
+      }
+    },
+  );
 
   it.each([
     ['Verify Hosted Java, Spring and MySQL processes', 'hosted-harness-mysql'],
@@ -361,7 +476,7 @@ describe('Hosted real-process gates', () => {
       // re-pointed -P flag must not leave the row reading the old profile.
       expect(run.run).toContain(`-P${profile}`);
       const forkSeconds = Number(
-        read('packages/sdk-java/managed-agent-server/pom.xml')
+        read('packages/managed-agent-server/pom.xml')
           .split(`<id>${profile}</id>`)[1]
           .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
       );
@@ -369,7 +484,7 @@ describe('Hosted real-process gates', () => {
       // the main-CI failure analyzer can only file an undiagnosable
       // per-commit issue (#13503 for the Hosted verify step, #13684 for the
       // O4 gates). The ceiling must cover the fork plus the wrapped
-      // compile/surefire/spotbugs/checkstyle work — 600 s is the wrap both
+      // compile/spotbugs/checkstyle work — 600 s is the wrap both
       // steps actually carry, so a step trim or fork bump reddens this row.
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
@@ -377,31 +492,62 @@ describe('Hosted real-process gates', () => {
       // The hosted fork bumps were deliberate (FG7a,b,d–f plus the FG7c
       // crash class, ~150 s of wall clock at 2x headroom; then the L4
       // recovery class's four real-process cuts, ~300 s more the FG7
-      // sizing never covered — #14125's per-commit kill): the relational
-      // check above tolerates anything up to step*60, so the value is
-      // pinned literally here — an unnoticed raise has no other red to
-      // land on.
+      // sizing never covered — #14125's per-commit kill; the FG8
+      // monitor/run letters grew to five letters / twenty-one cases in
+      // #14334, whose lane (run 38848525079 at fee23d2d3c) saw four
+      // letters finish by ~700 s into the fork while the old 1800 s
+      // budget killed the fork before the last letter reported, so the
+      // fork doubles to 3600 in the same diff; the FG9 session/relay
+      // letters, ~170 s measured locally for slice 1 and ~314 s for the
+      // class with slice 2, fit inside that same lane-measured envelope;
+      // and FG9 slice 3's store-failure and crash letters bring the class
+      // to ~557 s, which with FG8c and FG10a inside the healthy allowance
+      // no longer leaves one 600 s ceiling room in 3600, so the fork moves
+      // to 3990 and the Verify step to 80 minutes; the FG10b/FG10f
+      // workflow relay letters add ~82 s, so the fork moves to 4155 and
+      // the Verify step to 85 minutes):
+      // the relational check above tolerates
+      // anything up to step*60, so the value is pinned literally here —
+      // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(1800);
+        expect(forkSeconds).toBe(4155);
       }
     },
   );
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
-  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
-  // the fork itself ~14s, so 650s covers them. A larger ceiling lets
-  // failsafe kill the fork mid-run, and the classes left unrun never report,
-  // failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 650;
+  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, the
+  // FG8 monitor/run letters grew from two letters / seven cases to five
+  // letters / twenty-one cases in #14334 — on that PR's lane (run
+  // 38848525079 at fee23d2d3c) four letters finished by ~700s into the
+  // fork, the fork was still killed at the old 1800s budget before the last
+  // letter reported, and the fork now sits at 3600s for the same 2×
+  // headroom — and the FG9 session/relay letters, six since slice 3,
+  // measure 528–557s for the class locally on JDK 21 + MySQL 8.4 across
+  // three acceptance runs (~950s budgeted at >1.7x the heaviest measured
+  // run, up from slice 2's ~534s; the class ran 310s on lane run
+  // 38957583765 with four letters, as locally) in the same envelope, the
+  // FG8c process-crash letter adds 144s measured locally on JDK 21 +
+  // MySQL 8.4.6 (~290s budgeted at 2x), and the FG10a workflow digest
+  // letter — four cases since #14390 — measures 15.9–16.2s for the letter
+  // locally on macOS JDK 26 + MySQL 8.4.6 across four acceptance runs
+  // (~33s budgeted at 2x), and the FG10b/FG10f workflow relay letters
+  // (HostedWorkflowRelayFaultGatesIT) measure 81.6–81.7s for the class
+  // locally on JDK 21 + MySQL 8.4.6 across three acceptance runs (~165s
+  // budgeted at 2x, as FG10a); with the fork itself ~14s, 3545s (3380s
+  // with FG8c, FG10a and FG9, plus the relay letters' ~165s) covers them.
+  // A larger ceiling lets failsafe kill the fork mid-run, and the classes
+  // left unrun never report, failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 3545;
   const hostedForkSeconds = () =>
     Number(
-      read('packages/sdk-java/managed-agent-server/pom.xml')
+      read('packages/managed-agent-server/pom.xml')
         .split('<id>hosted-harness-mysql</id>')[1]
         .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
   const hostedTestPath = (className) =>
-    'packages/sdk-java/managed-agent-server/src/test/java/' +
+    'packages/managed-agent-server/src/test/java/' +
     `com/alibaba/qwen/code/managedagent/${className}.java`;
   // Java code without its string literals and comments, so neither a
   // commented-out annotation nor a "/*" inside a string skews the counts.
@@ -429,29 +575,93 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the shared fork budget', () => {
-    const source = hostedTestSource('HostedTeamLeadMySqlIT');
-    const cases = [
-      ...source.matchAll(
-        /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
-      ),
-    ].length;
-    const ceilings = ceilingsOf(source);
-    expect(cases).toBeGreaterThan(0);
-    expect(ceilings).toHaveLength(cases);
-    // A regression such as a lost wake Turn leaves no failed row for the
-    // cases to stop on, so every case may stall to its ceiling at once.
-    const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
-    expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
-      hostedForkSeconds(),
+  it('keeps the HostedMonitorRunFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG8 letters are independent fixtures sharing the fork — a stall
+    // in one letter leaves the other running, so the per-ceiling rule (the
+    // same shape the FG7 channel letters are held to) is the honest model.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedMonitorRunFaultGatesIT'),
     );
-    // Awaitility ignores the interrupt a @Timeout sends, so a ceiling holds
-    // only when every wait goes through the helper that fails on it.
-    expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
-    expect(read(hostedTestPath('HostedTeamLeadMySqlIT'))).toContain(
-      'await().failFast("The case\'s @Timeout interrupted it"',
-    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
   });
+
+  it('keeps the HostedSessionRelayFaultGatesIT ceilings inside the shared fork budget', () => {
+    // Like the FG8 monitor/run letters, the FG9 session/relay letters are
+    // independent fixtures sharing the fork — each letter boots its own
+    // Spring application, Harness, and proxies under its own tenant
+    // prefix, so a stall in one letter leaves the others running — and one
+    // letter stalling to its @Timeout must still leave the fork enough
+    // healthy runtime and budget for the sibling letters to finish.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedSessionRelayFaultGatesIT'),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedWorkflowFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG10 letters are independent fixtures sharing the fork, the same
+    // per-ceiling shape the FG8 letters are held to.
+    const ceilings = ceilingsOf(hostedTestSource('HostedWorkflowFaultGatesIT'));
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedWorkflowRelayFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG10b/FG10f letters boot their own Spring, Harness and proxies
+    // per letter, independent fixtures sharing the fork like FG10a's.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedWorkflowRelayFaultGatesIT'),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it.each(['HostedTeamLeadMySqlIT', 'HostedTeamMemberCommandMySqlIT'])(
+    'keeps every %s ceiling together inside the shared fork budget',
+    (className) => {
+      const source = hostedTestSource(className);
+      const cases = [
+        ...source.matchAll(
+          /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
+        ),
+      ].length;
+      const ceilings = ceilingsOf(source);
+      expect(cases).toBeGreaterThan(0);
+      expect(ceilings).toHaveLength(cases);
+      // A regression such as a lost wake Turn or a stalled message relay
+      // leaves no failed row for the cases to stop on, so every case may
+      // stall to its ceiling at once.
+      const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
+      expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+      // Awaitility ignores the interrupt a @Timeout sends, so a ceiling
+      // holds only when every wait goes through the helper that fails on
+      // it.
+      expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
+      expect(read(hostedTestPath(className))).toContain(
+        'await().failFast("The case\'s @Timeout interrupted it"',
+      );
+    },
+  );
 
   // The Hosted*IT classes share one fork, and Spring caches a test context
   // for the rest of it. A Managed Agent context's recovery scans cover
@@ -459,7 +669,7 @@ describe('Hosted real-process gates', () => {
   // claims the work of the classes that run after it. A context inherited
   // from a base class or a meta-annotation is not seen here; none exists.
   it('closes the Spring test context each Hosted IT class declares', () => {
-    const root = 'packages/sdk-java/managed-agent-server/src/test/java/';
+    const root = 'packages/managed-agent-server/src/test/java/';
     const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {
       recursive: true,
     })

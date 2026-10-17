@@ -5,7 +5,7 @@
 ## 状态与来源
 
 这是从 #13526 拆出的可独立评审 feature。当前目标为 main，基线提交
-`31e02ace6135d244a67247c8e8f12c1e6096c89c`；#13996 的私有 Session 与 SQL
+`dac04ed35a5b5b4be08b986a5ef6852cf2b681c4`；#13996 的私有 Session 与 SQL
 权威已以 `3a9bbd7216d67a101e70f8c60e1a92dc0d7a3746` 合入。
 原叠加基线为 `c0d930c066624988126e22aee2ee30417d45d391`。初始纯文本实现取自
 `06a1a868568683211986aa6cfa665309fce0e2e9`，并对照提案当前提交
@@ -16,6 +16,9 @@
 后续通过合并 main 继承 #14177 的 generated-column 校验、首次 writer 加锁及
 baseline witness 修复，保留评审历史。集成候选需要重新验证；之前的绿色报告
 仍只对应各自记录的版本。本次拆分不增加 schema 改动。
+
+最新一次 main 同步还继承独立 Java 模块的位置、普通 Hosted 的挂载归还与
+续租重试终止逻辑，同时保留私有本地停止路径，不授权远端 seal 或 release。
 
 ## 问题与范围
 

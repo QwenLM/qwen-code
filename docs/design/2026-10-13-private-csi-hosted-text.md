@@ -5,7 +5,7 @@
 ## Status and source
 
 This is an independently reviewable feature extraction from #13526. It now targets
-main at `31e02ace6135d244a67247c8e8f12c1e6096c89c`, after the private Session and
+main at `dac04ed35a5b5b4be08b986a5ef6852cf2b681c4`, after the private Session and
 SQL authority in #13996 merged as `3a9bbd7216d67a101e70f8c60e1a92dc0d7a3746`.
 The original stacked baseline was `c0d930c066624988126e22aee2ee30417d45d391`.
 The initial text-only implementation
@@ -18,6 +18,10 @@ A subsequent merge of main inherits #14177's generated-column validation,
 first-writer locking and baseline witness fixes without rewriting review history.
 The integrated candidate requires fresh validation; earlier green reports remain
 bound to their recorded revisions. This extraction adds no schema changes.
+
+The latest main sync also inherits the standalone Java module location,
+ordinary Hosted mount handbacks and renewal retry termination. It retains the
+private local-stop path without authorizing remote sealing or release.
 
 ## Problem and scope
 

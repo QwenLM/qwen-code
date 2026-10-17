@@ -9,6 +9,7 @@ import {
   sandboxAsset,
   type ExecutionSandboxPolicy,
 } from './sandbox-execution.js';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import {
   encodeSandboxWriteRequest,
   MAX_FILE_HEADER_BYTES,
@@ -35,7 +36,9 @@ export async function writeSandboxFile(
   const handle = await executeSandbox(
     policy,
     {
-      executable: process.execPath,
+      // S3 handoff: bwrap/landlock still stage process.execPath, not this
+      // resolver. Allowlist migration is pending; see bun-runtime-boundary.md.
+      executable: getJsInterpreterCommand(import.meta.url).command,
       args: [sandboxAsset('file-worker')],
       cwd: policy.workspace,
       env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
