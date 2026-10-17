@@ -28,10 +28,12 @@ const debugLogger = createDebugLogger('CLI_ERRORS');
  * propagate the exit code without printing or reformatting it again.
  *
  * The non-interactive runner uses this when an upstream API error event
- * arrives mid-stream: it formats with parseAndFormatApiError, reports it,
- * and then throws. Without this marker, handleError would call
+ * arrives mid-stream: text mode writes it to stderr, while structured modes
+ * send it through their output adapter, and then the runner throws. Without
+ * this marker, handleError would call
  * parseAndFormatApiError a second time on the (now formatted) Error.message,
- * yielding "[API Error: [API Error: ...]]" plus a duplicate stderr line.
+ * yielding "[API Error: [API Error: ...]]" and potentially duplicating the
+ * active output channel's report.
  */
 export class AlreadyReportedError extends Error {
   /** Exit code to surface — defaults to 1 for generic upstream failures. */
@@ -146,11 +148,10 @@ export async function handleError(
   config: Config,
   customErrorCode?: string | number,
 ): Promise<never> {
-  // Producers that already reported a formatted message (see
-  // AlreadyReportedError above) should not be reprinted or reformatted here.
-  // In TEXT mode this short-circuits straight to a clean re-throw; in JSON
-  // mode we still emit the structured payload exactly once so machine
-  // consumers don't lose the error.
+  // Producers marked with AlreadyReportedError already emitted the formatted
+  // message on their active output channel, so do not format it again here.
+  // JSON mode still emits its structured stderr exit payload; text and
+  // stream-json rethrow without another user-facing error body.
   if (error instanceof AlreadyReportedError) {
     if (config.getOutputFormat() === OutputFormat.JSON) {
       const formatter = new JsonFormatter();
@@ -289,16 +290,22 @@ export async function handleCancellationError(config: Config): Promise<never> {
  * failure modes surface as the same generic "increase maxSessionTurns" line
  * even though the fix is a permissions / schema change, not a turns bump.
  */
-export async function handleMaxTurnsExceededError(
+export function createMaxTurnsExceededError(
   config: Config,
-): Promise<never> {
+): FatalTurnLimitedError {
   const baseMessage =
     'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
   const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
   const message = jsonSchemaActive
     ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
     : baseMessage;
-  const maxTurnsError = new FatalTurnLimitedError(message);
+  return new FatalTurnLimitedError(message);
+}
+
+export async function handleMaxTurnsExceededError(
+  config: Config,
+): Promise<never> {
+  const maxTurnsError = createMaxTurnsExceededError(config);
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
     const formatter = new JsonFormatter();

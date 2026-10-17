@@ -411,17 +411,18 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   'max-session-turns': {
     type: 'number' as const,
-    description: 'Maximum number of session turns (must be an integer)',
+    description:
+      'Maximum number of session turns (must be an integer). A one-shot run exits with code 53 when exceeded. In stream-json input sessions the counter is cumulative: once exhausted, every later turn fails until a new session is started.',
   },
   'max-wall-time': {
     type: 'string' as const,
     description:
-      'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Aborts the run with exit code 55 when exceeded.',
+      'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Exits a one-shot run with code 55 when exceeded; stream-json input sessions fail only the current turn.',
   },
   'max-tool-calls': {
     type: 'number' as const,
     description:
-      'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
+      'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Exits a one-shot run with code 55 when exceeded; stream-json input sessions fail only the current turn. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
   },
   'max-subagent-depth': {
     type: 'number' as const,
