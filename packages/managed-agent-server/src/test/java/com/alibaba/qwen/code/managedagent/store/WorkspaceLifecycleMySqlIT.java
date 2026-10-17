@@ -40,6 +40,7 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
@@ -338,6 +339,59 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                 WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json, "tenant", fixture.session)))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo("workspace_lifecycle_journal_unverified"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"accepted-settled", "other-settled", "accepted-pending"})
+    void unadmittedCancellationUsesTheFencedJournalSnapshot(String cut) throws Exception {
+        var fixture = fixture();
+        var store = new ManagedSessionStore(fixture.jdbc);
+        fixture.transactions.executeWithoutResult(ignored ->
+                new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+                "ambiguous-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
+        fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
+                "dispatch-owner", Duration.ofMinutes(1)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.markSubmissionAttempted("tenant", fixture.session,
+                turn, "dispatch-owner"));
+        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+                "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
+        String prompt = "other-settled".equals(cut) ? "other-prompt"
+                : fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
+        var request = fixture.promptCommit(prompt, !"accepted-pending".equals(cut));
+        var manager = new DataSourceTransactionManager(source);
+        var definition = new DefaultTransactionDefinition();
+        definition.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        var snapshot = manager.getTransaction(definition);
+        boolean cancelled;
+        try {
+            // Match the plain Turn read that pins the cancellation transaction before its head fence.
+            fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
+            try (var writer = Executors.newSingleThreadExecutor()) {
+                writer.submit(() -> fixture.transactions.executeWithoutResult(ignored -> {
+                    store.commit("tenant", fixture.session, "extension-writer-token-0123456789", request);
+                    store.sealWriter("tenant", fixture.session, "extension-writer-token-0123456789",
+                            new ManagedSessionStoreModels.SealWriterRequest("workspace", "writer-extension", 1));
+                })).get(30, TimeUnit.SECONDS);
+            }
+            assertThat(fixture.jdbc.queryForObject("SELECT MAX(journal_revision) FROM ma_session_journal_tx"
+                    + " WHERE tenant_id = ? AND session_id = ?", Long.class, "tenant", fixture.session)).isEqualTo(1L);
+            cancelled = fixture.store.cancelUnadmittedTurn("tenant", fixture.session, turn, "dispatch-owner");
+            manager.commit(snapshot);
+        } catch (Exception | AssertionError failure) {
+            if (!snapshot.isCompleted()) {
+                manager.rollback(snapshot);
+            }
+            throw failure;
+        }
+        boolean expected = "other-settled".equals(cut);
+        var result = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
+        assertAll(cut,
+                () -> assertThat(cancelled).as("cancellation decision").isEqualTo(expected),
+                () -> assertThat(result.status()).isEqualTo(expected ? "CANCELLED" : "CANCELLING"),
+                () -> assertThat(result.submissionAttempted()).as("submission attempted").isEqualTo(!expected),
+                () -> assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE event_type = 'turn.cancelled'",
+                        Integer.class)).as("durable cancellation events").isEqualTo(expected ? 1 : 0));
     }
 
     /** Commits, from another thread and transaction, a revision that leaves a Turn's input pending. */
