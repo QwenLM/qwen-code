@@ -358,6 +358,9 @@ class SessionRowLockOrderTest {
                 // session-row FOR UPDATE before its delivery-row work.
                 "beginSessionRename", "completeSessionRename",
                 "abandonSessionRename", "claimRename",
+                // D7-2's parked-title settle locks the session row before
+                // its delivery row, as the late reply it races does.
+                "settleParkedRename",
                 // Main's internal child close (#14069) locks the child's
                 // session row before its operation-row work.
                 "beginChildClose",
@@ -378,6 +381,7 @@ class SessionRowLockOrderTest {
                         "completeSessionMutation", "unarchiveWorkspaceSession",
                         "beginSessionRename", "completeSessionRename",
                         "abandonSessionRename", "claimRename",
+                        "settleParkedRename",
                         "replayChildSessionCommand", "requireCsiRequest");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
