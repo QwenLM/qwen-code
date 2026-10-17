@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-child-task-session-link.md) | [简体中文](2026-10-17-managed-child-task-session-link.zh-CN.md)
 
-状态：已在本变更中实现。`child_agent` 或 `workflow` 任务会给出运行它的 child Session：`PublicTask.child_session_id` 与 `WebShellTask.childSessionId`，在契约 `1.55.0` 中提供（main 当前为 `1.54.0`；若其他 PR 先占用 `1.55.0`，合并时改号）。没有新路由、新授权规则、新迁移或新事件类型。
+状态：已在本变更中实现。`child_agent` 或 `workflow` 任务会给出运行它的 child Session：`PublicTask.child_session_id` 与 `WebShellTask.childSessionId`，在契约 `1.55.0` 中提供。没有新路由、新授权规则、新迁移或新事件类型。
 
 这是 [#13746](https://github.com/QwenLM/qwen-code/issues/13746) 的 F2，属于 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H4f 切片，即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。[H4f 设计](2026-10-10-managed-task-cancel.zh-CN.md)（决策 9）为暴露 child 任务的输出留了两条路：把任务链接到其 child Session，或在 `read_output` 之后把 child 的输出作为任务事件转发。本变更选择链接。
 
