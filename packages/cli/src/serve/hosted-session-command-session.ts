@@ -89,17 +89,22 @@ export const SESSION_COMMAND_LEADER_UNANSWERING_TEXT =
  */
 export function sessionCommandEvidenceText(
   state: 'planned' | 'accepting' | 'rejected' | 'cancelled' | 'unknown',
+  kind: SessionCommandKind = 'board_write',
 ): string {
   switch (state) {
     case 'planned':
       return 'The leader did not take the command before the wait ended; it was not sent and nothing happened. Send it again in a fresh turn.';
     case 'accepting':
+      if (kind === 'member_message')
+        return 'The message reached the leader, but its reply did not arrive in time; some recipients may already have it or get it later. Do not send it again; end your turn and say so in your result.';
       return 'The command reached the leader, but its reply did not arrive in time; a write may have taken effect. End your turn and say so in your result; read the board again before repeating the write.';
     case 'rejected':
       return 'The leader rejected the command; it was not run.';
     case 'cancelled':
       return 'The command was cancelled before it ran; it never left.';
     default:
+      if (kind === 'member_message')
+        return "The message's outcome is unknown; some recipients may already have it or get it later. Do not send it again.";
       return "The command's outcome is unknown; the leader may have run it and a write may have taken effect. Read the board again before repeating the write.";
   }
 }

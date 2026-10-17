@@ -70,6 +70,7 @@ export interface ManagedRuntimeProviderContext {
   readonly directory: string;
   readonly workspaceRoot: string;
   readonly preapproved: boolean;
+  readonly filesOnly?: boolean;
   readonly isActive?: () => boolean;
 }
 
@@ -407,7 +408,8 @@ export class ManagedRuntimeProviderWorker {
       context.isActive?.() === false ||
       context.directory !== value.context.directory ||
       context.workspaceRoot !== value.context.workspaceRoot ||
-      context.preapproved !== value.context.preapproved
+      context.preapproved !== value.context.preapproved ||
+      context.filesOnly !== value.context.filesOnly
     ) {
       throw new ManagedToolUnavailableError(
         'Managed context directory is unavailable.',
@@ -450,7 +452,7 @@ export class ManagedRuntimeProviderWorker {
         new ReadFileTool(toolConfig),
         new WriteFileTool(toolConfig),
         new EditTool(toolConfig),
-        shell,
+        ...(context.filesOnly ? [] : [shell]),
       ];
       const policyRevision = randomUUID();
       const runtime = new ManagedToolRuntime(
@@ -628,6 +630,7 @@ export function registerManagedRuntimeProviderRoute(
   identity: ManagedRuntimeRequestIdentity,
   executor: ManagedToolExecutor,
   contextFor: ContextResolver,
+  sshForegroundOnly = false,
 ): void {
   const provider = new ManagedRuntimeProviderWorker(executor, contextFor);
   executor.attachProvider(provider);
@@ -641,6 +644,21 @@ export function registerManagedRuntimeProviderRoute(
     async (req: Request, res: Response) => {
       try {
         const request = parseManagedRuntimeProviderRequest(req.body);
+        if (
+          sshForegroundOnly &&
+          ![
+            'workspace-context',
+            'raw-file-history',
+            'history',
+            'release',
+          ].includes(request.operation.kind)
+        ) {
+          throw new ManagedRuntimeProviderProtocolError(
+            'SSH Runtime provider operation is unsupported.',
+            501,
+            'managed_runtime_provider_unsupported',
+          );
+        }
         const raw: unknown = JSON.parse(
           JSON.stringify(
             await provider.control(request.session, request.operation),

@@ -721,7 +721,126 @@ describe('cancelled prompt identity with automatic tails', () => {
     expect(getLastApiPromptCancellation(history, [input, legacy], 0)).toEqual({
       reason: 'unknown',
       promptId: 'daemon-1',
+      confirmationId: 'terminal',
     });
+  });
+  it.each([
+    'user',
+    'malformed',
+    'duplicate-owner',
+    'duplicate-result',
+    'wrong-daemon',
+    'duplicate-uuid',
+  ])('does not offer legacy confirmation for %s records', (kind) => {
+    const legacy: ChatRecord = {
+      ...terminal,
+      systemPayload: { ...cancelledResult, cancelReason: undefined },
+    };
+    const records = [input, legacy];
+    if (kind === 'user') legacy.systemPayload = cancelledResult;
+    if (kind === 'malformed') {
+      legacy.systemPayload = {
+        ...cancelledResult,
+        cancelReason: undefined,
+        endedAt: undefined,
+      } as unknown as ChatRecord['systemPayload'];
+    }
+    if (kind === 'duplicate-owner')
+      records.unshift({ ...input, uuid: 'duplicate' });
+    if (kind === 'duplicate-result')
+      records.push({ ...legacy, uuid: 'duplicate' });
+    if (kind === 'wrong-daemon') {
+      legacy.systemPayload = {
+        ...cancelledResult,
+        cancelReason: undefined,
+        promptId: 'different-daemon',
+      };
+    }
+    if (kind === 'duplicate-uuid') {
+      records.push({
+        ...legacy,
+        promptId: 'other-client',
+        systemPayload: {
+          promptId: 'daemon-1',
+          state: 'completed',
+          endedAt: 3,
+        },
+      });
+    }
+    const history = buildApiHistoryFromConversation({ messages: [input] });
+    expect(
+      getLastApiPromptCancellation(history, records)?.confirmationId,
+    ).toBeUndefined();
+  });
+  it('does not confirm an old legacy boundary after a later unowned user cancellation', () => {
+    const legacy: ChatRecord = {
+      ...terminal,
+      systemPayload: { ...cancelledResult, cancelReason: undefined },
+    };
+    const history = buildApiHistoryFromConversation({ messages: [input] });
+    const records = [
+      input,
+      legacy,
+      {
+        ...terminal,
+        uuid: 'local-completed',
+        promptId: undefined,
+        systemPayload: {
+          promptId: 'local-command',
+          state: 'completed' as const,
+          endedAt: 3,
+        },
+      },
+    ];
+    expect(getLastApiPromptCancellation(history, records)?.confirmationId).toBe(
+      'terminal',
+    );
+    records.push({
+      ...terminal,
+      uuid: 'later-user-cancel',
+      promptId: undefined,
+      systemPayload: {
+        ...cancelledResult,
+        promptId: 'unowned-new-daemon',
+        endedAt: 4,
+      },
+    });
+    expect(
+      getLastApiPromptCancellation(history, records)?.confirmationId,
+    ).toBeUndefined();
+  });
+
+  it('offers a different confirmation after a new cancelled attempt', () => {
+    const legacy: ChatRecord = {
+      ...terminal,
+      systemPayload: { ...cancelledResult, cancelReason: undefined },
+    };
+    const history = buildApiHistoryFromConversation({ messages: [input] });
+    const records = [input, legacy];
+    expect(getLastApiPromptCancellation(history, records)?.confirmationId).toBe(
+      'terminal',
+    );
+    records.push({
+      ...input,
+      type: 'system',
+      subtype: 'turn_attempt',
+      uuid: 'attempt',
+      daemonPromptId: 'daemon-2',
+      message: undefined,
+    });
+    expect(getLastApiPromptCancellation(history, records)).toBeUndefined();
+    records.push({
+      ...legacy,
+      uuid: 'new-terminal',
+      systemPayload: {
+        ...cancelledResult,
+        cancelReason: undefined,
+        promptId: 'daemon-2',
+      },
+    });
+    expect(getLastApiPromptCancellation(history, records)?.confirmationId).toBe(
+      'new-terminal',
+    );
   });
   it('keeps cancellation through compression with several entries for the same turn', () => {
     const compression: ChatRecord = {
