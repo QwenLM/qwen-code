@@ -177,6 +177,7 @@ function renderSidebar(
             onOpenSessions={() => {}}
             onOpenSplitView={() => {}}
             onNewSession={() => false}
+            onLeaveCurrentStandaloneForDelete={async () => false}
             onLoadSession={vi.fn()}
             onError={() => {}}
             footer={footer}

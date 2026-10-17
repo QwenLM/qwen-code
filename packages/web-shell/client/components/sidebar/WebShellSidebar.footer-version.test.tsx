@@ -156,6 +156,7 @@ function mountAtWidth(width: number): HTMLElement {
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={() => false}
+          onLeaveCurrentStandaloneForDelete={async () => false}
           onLoadSession={vi.fn()}
           onError={() => {}}
         />
