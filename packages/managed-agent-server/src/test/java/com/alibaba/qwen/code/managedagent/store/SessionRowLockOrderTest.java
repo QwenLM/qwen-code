@@ -405,15 +405,20 @@ class SessionRowLockOrderTest {
                         "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
-                        "findTurnSummary", "hasActiveTurn", "hasLiveTurn",
+                        "findTurnSummary", "hasActiveTurn",
+                        // #14387's lifecycle gate counts live Turns under
+                        // its caller's session-row lock. Its recovery-blocked
+                        // verdict can take the session-row lock through the
+                        // cross-file legacy guard before the Turn update, a
+                        // lock this same-file parse cannot see; both pin here
+                        // as Turn-row accessors, not lockers.
+                        "hasLiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
-                        // #14461's recovery verdict is fenced by the live dispatch
-                        // lease, not the session-row lock.
                         "markTurnRecoveryBlocked",
                         "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
