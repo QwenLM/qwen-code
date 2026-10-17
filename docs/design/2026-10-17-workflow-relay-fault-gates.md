@@ -184,8 +184,12 @@ kind-agnostic replay FG9a already pins — so the two relay-step cases
 **hold** the commit's reply past the relay's request timeout instead
 (`qwen.managed-agent.harness.request-timeout` = 3 s for the letter, as
 FG9f): the commit lands upstream, the relay's call times out and the relay
-defers the step, spending an attempt on its creation row (the witness),
-and only then is the hold released, so the step really ran twice. The
+defers the step, and only then is the hold released, so the step really
+ran twice. The witness is the relay's creation row spending one attempt
+beyond the count read as the hold began: the count is cumulative over the
+whole creation (an earlier bind may have deferred already), and while the
+call is held the relay's one scan thread is blocked in it, so nothing else
+of the row can spend that attempt — FG9f's baseline-plus-one. The
 child Turn's own journal commit involves no relay step; it keeps the drop.
 
 | Case                  | Injection                                                                                                                 | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -304,7 +308,10 @@ composes with main's allowance after FG9 slice 3 (#14420): 3380 + 165 ≈
 fork moves 3990→4155 s. The Verify step, which wraps the fork plus its
 600 s, moves 80→85 minutes (345 s of margin; 80 would leave 45). The job
 ceiling moves 325→330 to stay above the summed step ceilings (315) plus
-the uncapped setup steps.
+the uncapped setup steps. The per-letter slack is then 10 s (600 + 3545 =
+4145 against 4155), so slice 2 on the same class re-measures the whole
+class and composes its own cost the same way rather than carrying slice
+1's number forward.
 
 ## Mutation checks
 

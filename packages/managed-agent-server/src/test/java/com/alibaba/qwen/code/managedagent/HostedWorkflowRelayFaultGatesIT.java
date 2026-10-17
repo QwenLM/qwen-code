@@ -63,6 +63,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
@@ -103,6 +105,8 @@ class HostedWorkflowRelayFaultGatesIT {
             + "const answer = await agent(\"FG10_SUB_PROMPT\");\n"
             + "return \"FG10_RESULT \" + answer;";
     private static final String RESULT = "FG10_RESULT " + SUB_ANSWER;
+    /** The command id the store proxy logs beside a commit's operation. */
+    private static final Pattern COMMAND = Pattern.compile(" cmd=(\\S+) ");
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
@@ -349,29 +353,41 @@ class HostedWorkflowRelayFaultGatesIT {
 
     /**
      * The held commit already landed upstream; the relay's call carrying
-     * it times out and the relay defers the step, spending an attempt on
-     * its creation row, before the hold is released. Witnessed in that
-     * order, so the step really ran twice.
+     * it times out and the relay defers the step, spending one more
+     * attempt on its creation row, before the hold is released. The count
+     * is cumulative over the whole creation — an earlier step, such as a
+     * bind that met a binding not yet visible, may have deferred already
+     * — so the witness is one attempt beyond the count read as this hold
+     * began (FG9's `partialTimeout` baseline). While the call is held the
+     * relay's one scan thread is blocked in it, so nothing else of this
+     * row can spend that attempt.
      */
     private void holdPastRelayTimeout(String lead, String rule) {
         waiting().atMost(Duration.ofSeconds(90))
-                .pollInterval(Duration.ofMillis(200)).untilAsserted(() -> {
+                .pollInterval(Duration.ofMillis(50)).untilAsserted(() -> {
                     assertNoModelFailure();
                     assertThat(countOps(storeProxy, "holding " + rule))
                             .isEqualTo(1);
                 });
+        int baseline = creationAttempts(lead);
         waiting().atMost(Duration.ofSeconds(60))
                 .pollInterval(Duration.ofMillis(250)).untilAsserted(() ->
-                        assertThat(jdbc.queryForObject(
-                                "SELECT MAX(attempt_count) FROM ma_operation"
-                                        + " WHERE tenant_id = ? AND"
-                                        + " session_id = ? AND operation_kind"
-                                        + " = 'CHILD_SESSION_START'",
-                                Integer.class, tenant, lead))
-                                .as("the relay timed out and deferred")
-                                .isGreaterThanOrEqualTo(1));
+                        assertThat(creationAttempts(lead))
+                                .as("the relay timed out on the held call"
+                                        + " and deferred it")
+                                .isGreaterThan(baseline));
         storeProxy.release(rule);
         assertThat(countOps(storeProxy, "holding " + rule)).isEqualTo(1);
+    }
+
+    /** The attempts the relay spent on the lead's child creation. */
+    private int creationAttempts(String lead) {
+        Integer attempts = jdbc.queryForObject(
+                "SELECT MAX(attempt_count) FROM ma_operation WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " operation_kind = 'CHILD_SESSION_START'",
+                Integer.class, tenant, lead);
+        return attempts == null ? 0 : attempts;
     }
 
     /** The lead's record settled and its delivery consumed, and the
@@ -469,9 +485,11 @@ class HostedWorkflowRelayFaultGatesIT {
                     && line.contains("/sessions/" + lead + "/")
                     && line.contains(" op=commitChildRunRecord ")
                     && line.contains(" status=2")) {
-                String command = line.replaceAll(".* cmd=(\\S+) .*", "$1");
-                if (!commands.contains(command)) {
-                    commands.add(command);
+                Matcher command = COMMAND.matcher(line);
+                assertThat(command.find()).as("the commit names its command:"
+                        + " %s", line).isTrue();
+                if (!commands.contains(command.group(1))) {
+                    commands.add(command.group(1));
                 }
             }
         }
