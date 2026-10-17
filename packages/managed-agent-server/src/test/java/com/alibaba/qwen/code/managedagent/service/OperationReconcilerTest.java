@@ -161,6 +161,53 @@ class OperationReconcilerTest {
                 anyLong());
     }
 
+    // A kind outside any Session lists its own parked rows and settles with
+    // effects of its own, also when its evidence cannot be read; the Session
+    // store's settle never touches it.
+    @Test
+    void aKindOutsideAnySessionScansAndSettlesThroughItsSource() {
+        ParkedOperation landed = new ParkedOperation(TENANT, null, "wop_1",
+                "WORKSPACE_CREATE");
+        ParkedOperation unreadable = new ParkedOperation(TENANT, null,
+                "wop_2", "WORKSPACE_CREATE");
+        List<String> settled = new java.util.ArrayList<>();
+        AcceptanceEvidence source = new AcceptanceEvidence() {
+            @Override
+            public String kind() {
+                return "WORKSPACE_CREATE";
+            }
+
+            @Override
+            public Optional<AcceptanceVerdict> read(ParkedOperation parked) {
+                if (parked.equals(unreadable)) {
+                    throw new IllegalStateException("node unreachable");
+                }
+                return Optional.of(AcceptanceVerdict.committed());
+            }
+
+            @Override
+            public boolean settle(AgentStateStore ignored,
+                    ParkedOperation parked, AcceptanceVerdict verdict,
+                    long retryAt) {
+                settled.add(parked.operationId() + ":"
+                        + verdict.acceptance() + "@" + retryAt);
+                return true;
+            }
+
+            @Override
+            public List<ParkedOperation> parked(int limit) {
+                return List.of(landed, unreadable);
+            }
+        };
+        new OperationReconciler(store, List.of(source),
+                Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC))
+                .reconcile();
+        assertThat(settled).containsExactly("wop_1:COMMITTED@" + RECHECK_AT,
+                "wop_2:UNKNOWN@" + RECHECK_AT);
+        verify(store, never()).settleParkedOperation(any(), any(),
+                anyLong());
+    }
+
     @Test
     void oneKindHasOneEvidenceSource() {
         TurnInputEvidence input = new TurnInputEvidence(store);
