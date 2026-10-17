@@ -112,10 +112,10 @@
 
 ## 后续工作
 
-| 项               | 范围                                                                                                                        |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `automation_run` | 没有停止请求；归 H6 的 per_run 目标。                                                                                       |
-| channel 投递取消 | #13746 F3：投递不是任务；复用操作模型（[H4f 决策 10](2026-10-10-managed-task-cancel.zh-CN.md)）。                           |
-| child 输出       | #13746 F2：把 child 任务链接到其 child Session。                                                                            |
-| WebShell 面板    | 显示 `workflow`、`background_shell` 与 `monitor` 任务并接受其取消（`ManagedTaskPanel.tsx`、`use-managed-task-cancel.ts`）。 |
-| F 阶段故障分支   | FG8g 在真实栈上覆盖取消应答丢失、finalize 时 Harness 宕机、Java 重启后取消。                                                |
+| 项               | 范围                                                                                                                                                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `automation_run` | 没有停止请求；归 H6 的 per_run 目标。                                                                                                                                                                     |
+| channel 投递取消 | **已在 [#13746 F3](2026-10-17-managed-delivery-task-cancel.zh-CN.md) 交付：** 投递投影为其路由 Session 的任务（`channel_delivery`），在尚无适配器认领时走同一条任务取消；不再需要决策 10 所说的独立路由。 |
+| child 输出       | #13746 F2：把 child 任务链接到其 child Session。                                                                                                                                                          |
+| WebShell 面板    | 显示 `workflow`、`background_shell` 与 `monitor` 任务并接受其取消（`ManagedTaskPanel.tsx`、`use-managed-task-cancel.ts`）。                                                                               |
+| F 阶段故障分支   | FG8g 在真实栈上覆盖取消应答丢失、finalize 时 Harness 宕机、Java 重启后取消。                                                                                                                              |
