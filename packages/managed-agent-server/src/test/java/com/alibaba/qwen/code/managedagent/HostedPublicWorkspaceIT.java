@@ -1307,22 +1307,8 @@ class HostedPublicWorkspaceIT {
             arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
         }
         if (shellLifecycleV2) {
-            arguments.add("--qwen.managed-agent.tool-publication.enabled=true");
-            arguments.add("--qwen.managed-agent.tool-publication.oss-endpoint=https://oss-cn-hangzhou.aliyuncs.com");
-            arguments.add("--qwen.managed-agent.tool-publication.oss-region=cn-hangzhou");
-            arguments.add("--qwen.managed-agent.tool-publication.oss-bucket=private-test-bucket");
-            arguments.add("--qwen.managed-agent.tool-publication.service-base-url=http://127.0.0.1:" + port);
-            arguments.add("--qwen.managed-agent.tool-publication.execution-bytes=1048576");
-            arguments.add("--qwen.managed-agent.tool-publication.session-bytes=1073741824");
-            arguments.add("--qwen.managed-agent.tool-publication.tenant-bytes=1073741824");
-            arguments.add("--qwen.managed-agent.tool-publication.active-captures=4");
-            arguments.add("--qwen.managed-agent.tool-publication.entry-concurrency=4");
-            arguments.add("--qwen.managed-agent.tool-publication.operation-timeout=10s");
-            arguments.add("--qwen.managed-agent.tool-publication.claim-timeout=5s");
-            arguments.add("--qwen.managed-agent.tool-publication.verification-bytes-per-second=1048576");
-            arguments.add("--qwen.managed-agent.tool-publication.max-verification-timeout=20m");
-            arguments.add("--qwen.managed-agent.tool-publication.gc-enabled=true");
-            arguments.add("--qwen.managed-agent.tool-publication.deletion-grace=0s");
+            arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
+                    "private-test-bucket", 1048576));
         }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
@@ -1346,39 +1332,8 @@ class HostedPublicWorkspaceIT {
                     }
                     if (shellLifecycleV2) {
                         publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
-                        var acl = new com.aliyun.oss.model.AccessControlList();
-                        acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
-                        var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class, invocation -> switch (invocation.getMethod().getName()) {
-                            case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
-                            case "getBucketAcl" -> acl;
-                            case "putObject" -> {
-                                var put = (com.aliyun.oss.model.PutObjectRequest) invocation.getArgument(0);
-                                byte[] bytes = put.getInputStream().readAllBytes();
-                                if (publicationObjects.putIfAbsent(put.getKey(), bytes) != null) {
-                                    throw new com.aliyun.oss.OSSException("Object already exists", "FileAlreadyExists",
-                                            "request", "host", put.getBucketName(), put.getKey(), "resource");
-                                }
-                                yield new com.aliyun.oss.model.PutObjectResult();
-                            }
-                            case "getObject" -> {
-                                byte[] bytes = publicationObjects.get(invocation.<String>getArgument(1));
-                                if (bytes == null) {
-                                    throw new com.aliyun.oss.OSSException("Object not found", "NoSuchKey",
-                                            "request", "host", invocation.getArgument(0), invocation.getArgument(1), "resource");
-                                }
-                                var object = new com.aliyun.oss.model.OSSObject();
-                                object.setObjectContent(new java.io.ByteArrayInputStream(bytes));
-                                yield object;
-                            }
-                            case "deleteObject" -> {
-                                publicationObjects.remove(invocation.<String>getArgument(1));
-                                yield null;
-                            }
-                            case "shutdown" -> null;
-                            case "toString" -> "publication-oss-fixture";
-                            default -> throw new AssertionError("Unexpected OSS access in publication fixture: " + invocation.getMethod().getName());
-                        });
-                        context.addBeanFactoryPostProcessor(beanFactory -> beanFactory.registerSingleton("toolPublicationOss", oss));
+                        HostedGateTestSupport.stubPublicationOss(context,
+                                publicationObjects, "publication-oss-fixture");
                     }
                 })
                 .run(arguments.toArray(String[]::new));
