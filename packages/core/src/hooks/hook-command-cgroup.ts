@@ -62,7 +62,24 @@ const child = spawn(executable, JSON.parse(args), {
   stdio: ['inherit', 'inherit', 'inherit'],
 });
 child.on('error', () => process.exit(1));
-child.on('exit', (code) => process.exit(code ?? 1));
+// A command a signal ended must end this launcher by the same signal: the
+// launcher's exit is its supervisor's only evidence, and the nonzero status a
+// plain exit substitutes is one the command never returned. A core-dumping
+// signal would dump this launcher too, and Node.js owns SIGUSR1 and ignores
+// SIGPIPE, so those keep the nonzero fallback. Delivery to self is
+// synchronous on POSIX; the timer only covers a signal that somehow left the
+// process running. Only names Node.js reports on Linux are listed: it calls
+// signal 6 SIGABRT, never SIGIOT, and Linux has no SIGEMT.
+const KEPT = ['SIGABRT', 'SIGBUS', 'SIGFPE', 'SIGILL', 'SIGQUIT', 'SIGSEGV',
+  'SIGSYS', 'SIGTRAP', 'SIGXCPU', 'SIGXFSZ', 'SIGUSR1', 'SIGPIPE'];
+child.on('exit', (code, signal) => {
+  if (signal !== null && !KEPT.includes(signal)) {
+    process.kill(process.pid, signal);
+    setTimeout(() => process.exit(1), 1000);
+    return;
+  }
+  process.exit(code ?? 1);
+});
 `;
 
 export class HookCommandCgroup {

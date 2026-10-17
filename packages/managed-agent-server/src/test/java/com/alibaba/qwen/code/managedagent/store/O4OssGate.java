@@ -1,9 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.config.AliyunToolPublicationStorageAutoConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration;
 import com.aliyun.oss.OSS;
-import com.aliyun.oss.OSSException;
 import com.aliyun.oss.common.auth.DefaultCredentialProvider;
 import com.aliyun.oss.common.auth.DefaultCredentials;
 import org.junit.jupiter.api.BeforeAll;
@@ -62,7 +61,7 @@ public class O4OssGate extends O4MySqlGate {
     private static OSS client() throws Exception {
         secret("OSS_ACCESS_KEY_ID");
         secret("OSS_ACCESS_KEY_SECRET");
-        return new ToolPublicationConfiguration().toolPublicationOss(properties());
+        return new AliyunToolPublicationStorageAutoConfiguration().toolPublicationOss(properties());
     }
     private static ManagedAgentProperties properties() {
         var props = new ManagedAgentProperties();
@@ -75,7 +74,7 @@ public class O4OssGate extends O4MySqlGate {
     private static OSS deniedClient() {
         var credentials = new DefaultCredentials(secret("OSS_DELETE_DENIED_ACCESS_KEY_ID"),
                 secret("OSS_DELETE_DENIED_ACCESS_KEY_SECRET"), System.getenv("OSS_DELETE_DENIED_SESSION_TOKEN"));
-        return ToolPublicationConfiguration.buildOss(properties(), new DefaultCredentialProvider(credentials));
+        return AliyunToolPublicationStorageAutoConfiguration.buildOss(properties(), new DefaultCredentialProvider(credentials));
     }
 
     @Test
@@ -86,7 +85,7 @@ public class O4OssGate extends O4MySqlGate {
                 private boolean first = true;
                 @Override public void putIfAbsent(String key, byte[] bytes) { real.putIfAbsent(key, bytes); }
                 @Override public InputStream open(String key) { return real.open(key); }
-                @Override public void requireUnversioned() { real.requireUnversioned(); }
+                @Override public void validateConfiguration() { real.validateConfiguration(); }
                 @Override public void deleteIfPresent(String key) {
                     real.deleteIfPresent(key);
                     if (first) {
@@ -117,8 +116,10 @@ public class O4OssGate extends O4MySqlGate {
             retention.put(key, scope, "pub-1", objectKey, new byte[] {7}, real);
             addObject("one", objectKey, null);
             retire();
-            assertThatThrownBy(() -> collector(restricted).runOnce()).isInstanceOfSatisfying(OSSException.class,
-                    error -> assertThat(error.getErrorCode()).isEqualTo("AccessDenied"));
+            assertThatThrownBy(() -> collector(restricted).runOnce())
+                    .isInstanceOfSatisfying(ToolPublicationStorageException.class,
+                            error -> assertThat(error.getReason())
+                                    .isEqualTo(ToolPublicationStorageException.Reason.ACCESS_DENIED));
             assertThat(real.client.doesObjectExist(bucket(), objectKey)).isTrue();
             assertThat(held()).isEqualTo(3000);
             assertThat(state()).isEqualTo("DELETING");
@@ -173,7 +174,7 @@ public class O4OssGate extends O4MySqlGate {
             objects.deleteIfPresent(key);
             keys.remove(key);
         }
-        @Override public void requireUnversioned() { objects.requireUnversioned(); }
+        @Override public void validateConfiguration() { objects.validateConfiguration(); }
         @Override public void close() {
             RuntimeException failure = null;
             try {
