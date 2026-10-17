@@ -24,7 +24,10 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { ManagedSessionStoreTransportError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import {
+  HTTP_MANAGED_SESSION_STORE_CONTRACT,
+  ManagedSessionStoreTransportError,
+} from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   HostedSessionMessageSession,
   type HostedSessionLineage,
@@ -307,6 +310,39 @@ it('queues a message to a running child without taking the mount', async () => {
     call({ task_id: taskId, message: 'also check the tests' }),
   );
   expect(messages()).toHaveLength(1);
+});
+
+it('#14062: refuses parent-side encoded overflow without sending a message', async () => {
+  const taskId = await launchChild();
+  messageFitsInline.mockImplementation(
+    (type, parts, model) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          uuid: randomUUID(),
+          parentUuid: randomUUID(),
+          sessionId: sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type,
+          cwd: root,
+          version: 'hosted-harness/1',
+          daemonPromptId: 'prompt',
+          model,
+          message: { role: type === 'assistant' ? 'model' : 'user', parts },
+        }),
+      ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+  );
+  const message = '"'.repeat(20_000);
+  expect(Buffer.byteLength(message)).toBeLessThan(65_536);
+  const responses = await execute(
+    createTurn(),
+    call({ task_id: taskId, message }),
+  );
+  expect(JSON.stringify(responses)).toContain('byte_limit');
+  expect(JSON.stringify(responses)).toContain('shorten the message and retry');
+  expect(messages()).toHaveLength(0);
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
 });
 
 it('continues a completed child and answers the new task id', async () => {
