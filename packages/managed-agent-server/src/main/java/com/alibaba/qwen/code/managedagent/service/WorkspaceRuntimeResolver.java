@@ -25,6 +25,7 @@ final class WorkspaceRuntimeResolver {
     private final SshWorkspaceService ssh;
     private final com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
+    private final String boundSessionIsolationClass;
 
     WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentProperties properties) {
@@ -37,6 +38,7 @@ final class WorkspaceRuntimeResolver {
         this.sessions = sessions;
         this.authority = authority;
         var broker = properties.getRuntimeBroker();
+        this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
         this.residents = new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(broker.getResidentWorkspaces());
         if (WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
                 properties.getHarness().getCapabilityDigest())
@@ -46,8 +48,10 @@ final class WorkspaceRuntimeResolver {
         }
         if (!broker.getWorkspaceMounts().isEmpty()
                 && (!LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())
-                        || !WorkspaceExecutionProfile.admitsIsolationClass(broker.getIsolationClass()))) {
-            throw new IllegalStateException("Workspace execution requires local Session isolation");
+                        || !"session".equals(boundSessionIsolationClass)
+                                && !"workspace".equals(boundSessionIsolationClass))) {
+            throw new IllegalStateException("Workspace execution requires a local-process Broker"
+                    + " with session or workspace bound-Session isolation");
         }
         try {
             for (var configured : broker.getWorkspaceMounts()) {
@@ -117,7 +121,7 @@ final class WorkspaceRuntimeResolver {
         verifyMountIntact(mount);
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                 Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
     }
 
     /**

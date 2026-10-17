@@ -489,6 +489,19 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void boundSessionIsolationSwitchesTheResolvedScope() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        assertThat(resolver(session, root).resolve(session.sessionId()).scope().getIsolationClass())
+                .isEqualTo("session");
+        var properties = properties(List.of(new WorkspaceMount(session.tenantId(),
+                session.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        assertThat(resolver.resolve(session.sessionId()).scope().getIsolationClass()).isEqualTo("workspace");
+    }
+
+    @Test
     void serializesIndependentSqlClientsByStorageAndFencesStaleRelease() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var binding = session.workspace();
