@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -91,6 +92,16 @@ import static org.awaitility.Awaitility.await;
  * reply to the notification's commit (delivered at most once) and cuts
  * the child Session's public and WebShell streams while the subagent is
  * in flight: each resumes with no gap and no duplicate.
+ *
+ * FG10c refuses, at the store, the lead's result revision and the
+ * acceptance that lands the notification, only after the child Turn
+ * completed and the lead's own Turn settled: the latched lead never
+ * advances the record or delivers anything, and after a cold restart the
+ * walk resumes through the same run — the script never runs again. FG10e
+ * cancels the workflow task while its `agent()` request is held, again
+ * with its reply lost, and after settlement: a cancelled record leaves
+ * nothing running under it, a lost reply replays the admitted cancel, and
+ * a settled run refuses it.
  */
 class HostedWorkflowRelayFaultGatesIT {
     private static final String TOKEN = "fg10-fixture";
@@ -107,6 +118,11 @@ class HostedWorkflowRelayFaultGatesIT {
     private static final String RESULT = "FG10_RESULT " + SUB_ANSWER;
     /** The command id the store proxy logs beside a commit's operation. */
     private static final Pattern COMMAND = Pattern.compile(" cmd=(\\S+) ");
+    /** The store client's bounded uncertain-error retry of one commit:
+     * `ManagedSessionStoreHttpClient.appendTransaction`'s commit loop
+     * (`packages/core/src/managed-runtime/http-managed-session-store.ts`,
+     * `for (let attempt = 0; attempt < 3; attempt++)`). */
+    private static final int STORE_ATTEMPTS = 3;
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
@@ -120,6 +136,9 @@ class HostedWorkflowRelayFaultGatesIT {
     private final List<String> slotTenants = new ArrayList<>();
     private final List<Observer> observers = new CopyOnWriteArrayList<>();
     private final AtomicInteger caseSlot = new AtomicInteger();
+    private final List<String> refusals = new ArrayList<>();
+    private volatile CountDownLatch subagentReturned = new CountDownLatch(1);
+    private volatile boolean subagentAbandoned;
 
     @TempDir
     private Path temporary;
@@ -131,6 +150,7 @@ class HostedWorkflowRelayFaultGatesIT {
     private volatile Process harness;
     private volatile JdbcTemplate jdbc;
     private HostedSessionRelayForwardingProxy storeProxy;
+    private HostedSessionRelayForwardingProxy publicProxy;
     private int port;
     private int harnessPort;
     private int brokerPort;
@@ -162,8 +182,15 @@ class HostedWorkflowRelayFaultGatesIT {
                 Thread.currentThread().interrupt();
             }
         }
+        if (jdbc != null && spring != null && spring.isActive()) {
+            dropRefusals();
+            jdbc.execute("DROP TABLE IF EXISTS fg10c_fire");
+        }
         if (storeProxy != null) {
             storeProxy.close();
+        }
+        if (publicProxy != null) {
+            publicProxy.close();
         }
         if (spring != null) {
             spring.close();
@@ -190,6 +217,22 @@ class HostedWorkflowRelayFaultGatesIT {
                 "child-stream-resume"));
     }
 
+    @Test
+    @Timeout(600)
+    void fg10cRefusedRelayCommitsNeverAdvanceAWorkflowOnMySql()
+            throws Exception {
+        runLetter("fg10c", List.of("result-revision-refused",
+                "notification-refused"));
+    }
+
+    @Test
+    @Timeout(600)
+    void fg10eCancelledWorkflowsLeaveNothingRunningOnMySql()
+            throws Exception {
+        runLetter("fg10e", List.of("cancel-subagent-in-flight",
+                "cancel-reply-lost", "cancel-after-settlement"));
+    }
+
     // ---------------------------------------------------------- letters
 
     private void runLetter(String letter, List<String> caseNames)
@@ -206,12 +249,23 @@ class HostedWorkflowRelayFaultGatesIT {
             wakeRounds.set(0);
             subagentHold.set(null);
             subagentHeld = new CountDownLatch(1);
+            subagentReturned = new CountDownLatch(1);
+            subagentAbandoned = false;
             switch (name) {
                 case "dispatch-reply" -> dispatchReply();
                 case "child-message-reply" -> childMessageReply();
                 case "result-reply" -> resultReply();
                 case "notification-reply" -> notificationReply();
                 case "child-stream-resume" -> childStreamResume();
+                case "result-revision-refused" -> refusedAfterChild(
+                        "result-revision-refused", "UPDATE",
+                        "NEW.domain = 'child_run' AND NEW.revision = 4");
+                case "notification-refused" -> refusedAfterChild(
+                        "notification-refused", "INSERT",
+                        "NEW.domain = 'child_acceptance'");
+                case "cancel-subagent-in-flight" -> cancelInFlight(false);
+                case "cancel-reply-lost" -> cancelInFlight(true);
+                case "cancel-after-settlement" -> cancelAfterSettlement();
                 default -> throw new IllegalArgumentException(
                         "unknown case " + letter + "/" + name);
             }
@@ -337,6 +391,159 @@ class HostedWorkflowRelayFaultGatesIT {
                 webShellCut, child);
         assertThat(terminalTurns(publicView)).containsExactly(turn);
         assertThat(terminalTurns(webShellView)).containsExactly(turn);
+        assertOneWorkflowInstance(lead);
+    }
+
+    // ------------------------------------------------ cases: FG10c-1, -2
+
+    /**
+     * One relay write on the lead is refused after the child Turn
+     * completed — the result revision (`result-revision-refused`) or the
+     * acceptance that lands the notification (`notification-refused`). The
+     * subagent is held until the lead's own Turn settled, so the refusal
+     * latches an idle lead (a Turn still open there would keep its
+     * workspace with the dead owner across the restart) and lands after
+     * the child's run, never across it (that is FG10d's ground).
+     */
+    private void refusedAfterChild(String name, String event,
+            String condition) throws Exception {
+        CountDownLatch hold = new CountDownLatch(1);
+        subagentHold.set(hold);
+        String lead;
+        try {
+            lead = launch(name.replace("-", ""));
+            assertThat(subagentHeld.await(90, TimeUnit.SECONDS))
+                    .as("the subagent request reached the model").isTrue();
+            awaitLeadSettled(lead);
+            refuse(name, event, "NEW.session_id = '" + lead + "' AND "
+                    + condition);
+        } finally {
+            hold.countDown();
+            subagentHold.set(null);
+        }
+        awaitRefusals(name);
+        String child = onlyChildSession(lead);
+        assertThat(turnStatus(child, onlyTurn(child)))
+                .as("the child's run completed before the refusal")
+                .isEqualTo("COMPLETED");
+        // Latched, not advanced: nothing delivered, nothing woken.
+        JsonNode record = childRun(lead);
+        if ("result-revision-refused".equals(name)) {
+            assertThat(childRunRevision(lead)).isEqualTo(3L);
+            assertThat(record.path("run").path("state").asText())
+                    .isEqualTo("running");
+        } else {
+            assertThat(record.path("run").path("state").asText())
+                    .isEqualTo("settled");
+            assertThat(record.path("run").path("delivery").path("state")
+                    .asText()).isNotEqualTo("consumed");
+        }
+        assertThat(notifications(lead)).isEmpty();
+        assertThat(wakeRounds.get()).isZero();
+        assertThat(childResultRows())
+                .noneMatch(row -> row.contains("/accepted/"));
+        dropRefusals();
+        restartHarness(lead);
+        awaitConsumed(lead);
+        assertOneWorkflowInstance(lead);
+        assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+    }
+
+    // ------------------------------------------------ cases: FG10e-1, -2
+
+    /** The workflow task is cancelled while its `agent()` request is held;
+     * with {@code replyLost} the cancel's reply is dropped after it
+     * committed and the client re-issues the same cancel. */
+    private void cancelInFlight(boolean replyLost) throws Exception {
+        CountDownLatch hold = new CountDownLatch(1);
+        subagentHold.set(hold);
+        String lead;
+        String child;
+        String taskId;
+        String key;
+        try {
+            lead = launch(replyLost ? "cancelreply" : "cancelflight");
+            assertThat(subagentHeld.await(90, TimeUnit.SECONDS))
+                    .as("the subagent request reached the model").isTrue();
+            child = onlyChildSession(lead);
+            taskId = taskIdOf(lead);
+            key = "fg10e-cancel-" + taskId;
+            if (replyLost) {
+                String path = cancelPath(lead, taskId);
+                publicProxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+                        (method, requested, body) -> "POST".equals(method)
+                                && requested.equals(path),
+                        "cancel-reply-loss"));
+                String base = publicProxy.baseUrl();
+                boolean lost = false;
+                try {
+                    request(base, "POST", path, Map.of(), key, 202);
+                } catch (IOException dropped) {
+                    lost = true;
+                }
+                assertThat(lost).as("the cancel's reply was lost").isTrue();
+                assertThat(countOps(publicProxy, "dropped cancel-reply-loss"))
+                        .isEqualTo(1);
+            }
+            JsonNode admission = request("POST", cancelPath(lead, taskId),
+                    Map.of(), key, 202);
+            assertThat(admission.path("task_id").asText()).isEqualTo(taskId);
+            assertThat(admission.path("replayed").asBoolean())
+                    .as("the re-issued cancel answers the committed one")
+                    .isEqualTo(replyLost);
+            awaitCancelled(lead, child);
+            subagentAbandoned = true;
+        } finally {
+            hold.countDown();
+            subagentHold.set(null);
+        }
+        // The held answer is released into the cancelled run; give it the
+        // chance to land before proving it did not.
+        assertThat(subagentReturned.await(60, TimeUnit.SECONDS))
+                .as("the held subagent request returned").isTrue();
+        waiting().pollDelay(Duration.ofSeconds(3))
+                .atMost(Duration.ofSeconds(10)).until(() -> true);
+        assertNoModelFailure();
+        assertThat(operations(lead, "TASK_CANCEL")).isEqualTo(1);
+        // A task cancel keeps its idempotency key on its admission row.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
+                + " WHERE tenant_id = ? AND operation_kind = 'TASK_CANCEL'"
+                + " AND idempotency_key = ?", Integer.class, tenant, key))
+                .as("one admission under the key").isEqualTo(1);
+        JsonNode record = childRun(lead);
+        assertThat(record.path("run").path("state").asText())
+                .isEqualTo("cancelled");
+        assertThat(record.path("stopReason").asText())
+                .isEqualTo("stop_requested");
+        assertThat(turnStatus(child, onlyTurn(child))).isEqualTo("CANCELLED");
+        assertThat(subagentCalls.get()).as("agent() dispatches").isEqualTo(1);
+        assertThat(childMessagesMentioning(child, SUB_ANSWER))
+                .as("the held answer never reached the cancelled run")
+                .isZero();
+        assertThat(notifications(lead)).isEmpty();
+        assertThat(wakeRounds.get()).isZero();
+        assertThat(childResultRows())
+                .noneMatch(row -> row.contains("/accepted/"));
+        assertThat(request("GET", "/v1/agents/sessions/" + lead + "/tasks/"
+                + taskId, null, null, 200).path("state").asText())
+                .isEqualTo("cancelled");
+    }
+
+    // --------------------------------------------------- case: FG10e-3
+
+    /** A cancel of a workflow task whose run completed and was consumed
+     * is refused and changes nothing. */
+    private void cancelAfterSettlement() throws Exception {
+        String lead = launch("cancelsettled");
+        awaitConsumed(lead);
+        long revision = childRunRevision(lead);
+        String taskId = taskIdOf(lead);
+        JsonNode refused = request("POST", cancelPath(lead, taskId),
+                Map.of(), "fg10e-cancel-late-" + taskId, 409);
+        assertThat(refused.path("error").path("code").asText())
+                .isEqualTo("task_action_unavailable");
+        assertThat(operations(lead, "TASK_CANCEL")).isZero();
+        assertThat(childRunRevision(lead)).isEqualTo(revision);
         assertOneWorkflowInstance(lead);
     }
 
@@ -564,6 +771,130 @@ class HostedWorkflowRelayFaultGatesIT {
         } catch (IOException failure) {
             throw new AssertionError(failure);
         }
+    }
+
+    // ---------------------------------------- refusals, restarts, cancels
+
+    /**
+     * FG10c's fault source, the FG9b shape: a test-only trigger on the
+     * journal's record table, scoped to the case tenant, the lead and one
+     * record shape, refusing every matching write until the case drops it
+     * (a fire-once arm would be healed by the store client's own bounded
+     * retry). Each fire also lands in the MyISAM fg10c_fire table, which
+     * survives the signalled rollback: Spring flattens the SQLException
+     * into a 500, so the fire count is the attribution.
+     */
+    private void refuse(String name, String event, String condition) {
+        jdbc.execute("CREATE TABLE IF NOT EXISTS fg10c_fire (case_name"
+                + " VARCHAR(64) NOT NULL, fired_at TIMESTAMP(6) NOT NULL"
+                + " DEFAULT CURRENT_TIMESTAMP(6)) ENGINE = MyISAM");
+        String trigger = "fg10c_" + UUID.randomUUID().toString()
+                .replace("-", "");
+        refusals.add(trigger);
+        jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE " + event
+                + " ON ma_session_record FOR EACH ROW BEGIN IF"
+                + " NEW.tenant_id = '" + tenant + "' AND " + condition
+                + " THEN INSERT INTO fg10c_fire (case_name) VALUES ('" + name
+                + "'); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'FG10C_"
+                + name.toUpperCase().replace('-', '_') + "'; END IF; END");
+    }
+
+    private void dropRefusals() {
+        for (String trigger : refusals) {
+            jdbc.execute("DROP TRIGGER IF EXISTS " + trigger);
+        }
+        refusals.clear();
+    }
+
+    private int fired(String name) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM fg10c_fire WHERE"
+                + " case_name = ?", Integer.class, name);
+    }
+
+    /** Every attempt of the store client's bounded retry met the
+     * refusal; past it the lead latches its writes and sends no more. */
+    private void awaitRefusals(String name) {
+        waiting().atMost(Duration.ofSeconds(90))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    assertNoModelFailure();
+                    assertThat(fired(name)).isEqualTo(STORE_ATTEMPTS);
+                });
+    }
+
+    /** The lead's own Turn has settled: a Turn still open when its
+     * Session latches keeps the workspace its dead owner held, and the
+     * cold lead then churns instead of executing anything. */
+    private void awaitLeadSettled(String lead) {
+        waiting().atMost(Duration.ofSeconds(60))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    assertNoModelFailure();
+                    assertThat(jdbc.queryForList("SELECT status FROM ma_turn"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                            String.class, tenant, lead))
+                            .containsExactly("COMPLETED");
+                });
+    }
+
+    private long writerGeneration(String session) {
+        Long generation = jdbc.queryForObject(
+                "SELECT writer_generation FROM ma_session_head"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session);
+        return generation == null ? 0 : generation;
+    }
+
+    /** SIGKILLs the packaged Harness (POSIX) and starts a cold one — a new
+     * HOME and QWEN_HOME — on the same port; returns once a new writer
+     * generation holds `session`, the takeover's witness. */
+    private void restartHarness(String session) throws Exception {
+        long generation = writerGeneration(session);
+        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(20, TimeUnit.SECONDS))
+                .as("the killed Harness exited").isTrue();
+        startHarness();
+        waiting().atMost(Duration.ofSeconds(100))
+                .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
+                        assertThat(writerGeneration(session))
+                                .as("a new writer generation holds %s",
+                                        session)
+                                .isGreaterThan(generation));
+    }
+
+    /** The public task id of the lead's workflow run. */
+    private String taskIdOf(String lead) {
+        String runId = jdbc.queryForObject("SELECT CAST(record_id AS CHAR)"
+                + " FROM ma_session_record WHERE tenant_id = ? AND"
+                + " session_id = ? AND domain = 'child_run'", String.class,
+                tenant, lead);
+        return "task_" + ManagedExtensionProjection.recordKey(lead,
+                "child_run", runId);
+    }
+
+    private static String cancelPath(String lead, String taskId) {
+        return "/v1/agents/sessions/" + lead + "/tasks/" + taskId
+                + "/cancel";
+    }
+
+    /** The cancel reached the run: its child Turn ended and the record
+     * settled cancelled. */
+    private void awaitCancelled(String lead, String child) {
+        waiting().atMost(Duration.ofSeconds(90))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    assertNoModelFailure();
+                    assertThat(turnStatus(child, onlyTurn(child)))
+                            .isEqualTo("CANCELLED");
+                    assertThat(childRun(lead).path("run").path("state")
+                            .asText()).isEqualTo("cancelled");
+                });
+    }
+
+    /** The child Session's journal messages carrying `text`. */
+    private long childMessagesMentioning(String child, String text) {
+        return jdbc.queryForList("SELECT CAST(inline_bytes AS CHAR) FROM"
+                + " ma_resource WHERE tenant_id = ? AND session_id = ? AND"
+                + " kind = 'managed-message'", String.class, tenant, child)
+                .stream().filter(body -> body.contains(text)).count();
     }
 
     // ---------------------------------------------------------- streams
@@ -880,11 +1211,15 @@ class HostedWorkflowRelayFaultGatesIT {
         caseSlot.set(0);
         storeProxy = HostedSessionRelayForwardingProxy.start("store",
                 casesRoot.resolve("store-proxy.log"));
+        // FG10e's lost cancel reply: only the client's own request passes it.
+        publicProxy = HostedSessionRelayForwardingProxy.start("public",
+                casesRoot.resolve("public-proxy.log"));
         startSpring(cli, node, caseCount, letter);
         port = spring.getWebServer().getPort();
         brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
                 .getPort();
         storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
+        publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
         startHarness();
     }
 
@@ -1071,8 +1406,14 @@ class HostedWorkflowRelayFaultGatesIT {
 
     private JsonNode request(String method, String path, Object body,
             String key, int expected) throws Exception {
+        return request("http://127.0.0.1:" + port, method, path, body, key,
+                expected);
+    }
+
+    private JsonNode request(String base, String method, String path,
+            Object body, String key, int expected) throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(
-                URI.create("http://127.0.0.1:" + port + path))
+                URI.create(base + path))
                 .timeout(Duration.ofSeconds(15))
                 .header("X-Qwen-Tenant-Id", tenant)
                 .header("Accept", "application/json")
@@ -1148,7 +1489,17 @@ class HostedWorkflowRelayFaultGatesIT {
                         throw new AssertionError("subagent hold never opened");
                     }
                 }
-                reply(exchange, List.of(), SUB_ANSWER);
+                try {
+                    reply(exchange, List.of(), SUB_ANSWER);
+                } catch (IOException gone) {
+                    // A cancelled run aborted its subagent's request: the
+                    // released answer meets a closed connection.
+                    if (!subagentAbandoned) {
+                        throw gone;
+                    }
+                } finally {
+                    subagentReturned.countDown();
+                }
                 return;
             }
             if (text.contains("FG10_LEAD_")) {
