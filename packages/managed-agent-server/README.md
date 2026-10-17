@@ -311,7 +311,7 @@ different Session conflicts. A successful concurrent request can still complete
 the receipt, and a failing sibling cannot overwrite that completed outcome. It
 cannot complete a retired receipt once a later rename has completed either: that
 sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
-The latest title attempt is now a durable delivery with a monotonically increasing per-Session revision. The Harness checks this revision inside its journal commit and uses a stable command identity per attempt, so a late older versioned write cannot undo a newer versioned title and a lost reply can be replayed without another write. A failed same-key request retried after a later rename receives a new revision and can still win. Pending same-key retries keep their original revision. A recovery worker redelivers the latest unfinished title and completes its public receipt; older completion attempts cannot affect the newer delivery. Both inline requests and recovery workers claim before sending; failure cleanup requires the current unexpired owner. Fresh disabled or unsupported Harness requests are refused before admission. Workspace migration also refuses unfinished title delivery even when the public command is FAILED. Close, archive, delete and cwd changes wait for this delivery to settle, including when its public command is FAILED, so sealing cannot strand a title already accepted by the Harness. The Harness must advertise title protocol version 1 before the SDK sends a versioned title. Plain private SDK title writes remain supported and preserve the watermark. See [the concurrency design](../../docs/design/2026-10-08-managed-session-rename-delivery.md). If the command store
+The latest title attempt is now a durable delivery with a monotonically increasing per-Session revision. The Harness checks this revision inside its journal commit and uses a stable command identity per attempt, so a late older versioned write cannot undo a newer versioned title and a lost reply can be replayed without another write. A failed same-key request retried after a later rename receives a new revision and can still win. Pending same-key retries keep their original revision. A recovery worker redelivers the latest unfinished title and completes its public receipt; older completion attempts cannot affect the newer delivery. Both inline requests and recovery workers claim before sending; failure cleanup requires the current unexpired owner. Fresh disabled or unsupported Harness requests are refused before admission. Workspace migration also refuses unfinished title delivery even when the public command is FAILED. Close, archive, delete and cwd changes wait for this delivery to settle, including when its public command is FAILED, so sealing cannot strand a title already accepted by the Harness. A delivery whose submission went unanswered is the exception (D7-2): it parks `recovery_blocked`, is never sent again, and retires its public receipt, so it holds neither later titles nor the lifecycle; the operation reconciler completes it, and shows the title, once the Session journal holds its revision's commit, and fails it once a deleted Session's complete journal lacks it ([design](../../docs/design/2026-10-17-managed-operation-reconciliation.md)). The Harness must advertise title protocol version 1 before the SDK sends a versioned title. Plain private SDK title writes remain supported and preserve the watermark. See [the concurrency design](../../docs/design/2026-10-08-managed-session-rename-delivery.md). If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
 lifecycle change blocks another one. A retry with the same key from the same
@@ -1344,8 +1344,8 @@ npm run test:e2e:managed-continuation-failover
 Both modes require Linux: the replacement owner retires the dead worker's
 Runtime binding through the durable local-Worker reclaim (#12380 W0e), which
 runs on Linux only. The runner enables `durable-local-process` for these modes
-and refuses other platforms with an explicit error; the Hosted MySQL CI job
-runs both.
+and refuses other platforms with an explicit error; the Hosted failover E2E
+CI job runs both.
 
 The in-flight mode holds the first Broker `:start` request after the Harness
 has durably committed its `await_runtime` checkpoint, kills the original
@@ -1356,7 +1356,7 @@ original Prompt without replay, and commit one public terminal event. The
 continuation mode kills the Harness after the first published text chunk and
 requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
-Hosted MySQL CI job.
+Hosted failover E2E CI job.
 
 The G3 arms replace owners without an operator choosing the next one. With
 `--harness-only`, the Spring control plane stays alive and only the Hosted
@@ -1411,9 +1411,10 @@ After the wake, the MySQL general log must show the former Spring's claim
 store's refusal of its stale writer grant. None of these attempts may change
 the Session binding, the Turn row, the public events or the journal, as far as
 the snapshot listed in D11 of the replaceable-Harness design can see. All of
-these arms are steps of the Hosted MySQL CI job, which runs daily or on demand.
-They come after `Verify Hosted Java, Spring and MySQL processes` and the
-earlier failover steps, and run only when every earlier step passes.
+these arms are steps of the Hosted failover E2E CI job (`hosted-failover-e2e`),
+which runs daily or on demand. It builds the CLI and packages the server
+itself, so a failing test in the Hosted MySQL job does not skip the arms, and
+each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
 
