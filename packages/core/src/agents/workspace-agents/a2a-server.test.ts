@@ -74,6 +74,8 @@ class FakeSessions implements A2ASessionPort {
   runAgentId = 'ag_lead';
   /** Fails the call once its post has landed, as a crash would. */
   failAfterPost?: Error;
+  /** Fails a reply lookup once while its transcript is unavailable. */
+  failReplyOnce?: Error;
   /** Posts by `clientMessageId`: a replay answers the run it started. */
   private readonly byClientMessageId = new Map<string, string>();
   private nextRun = 1;
@@ -120,6 +122,11 @@ class FakeSessions implements A2ASessionPort {
   }
 
   async recordedReply(_sessionId: string, runId: string) {
+    if (this.failReplyOnce) {
+      const error = this.failReplyOnce;
+      this.failReplyOnce = undefined;
+      throw error;
+    }
     return this.replies.get(runId);
   }
 
@@ -555,6 +562,42 @@ describe('A2A send', () => {
 });
 
 describe('A2A task state', () => {
+  it('does not persist a terminal result while the transcript is unavailable', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    port.live.set(task.id, {
+      status: 'completed',
+      activityAt: 2_000,
+      recorded: true,
+    });
+    port.failReplyOnce = new A2ASessionError('unavailable', 'EIO');
+
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).rejects.toMatchObject({ kind: 'unavailable' });
+
+    const callerFile = JSON.parse(
+      await fs.readFile(
+        getExternalCallerFilePath(PROJECT_ROOT, caller.callerId),
+        'utf8',
+      ),
+    ) as { tasks: Array<{ taskId: string; result?: unknown }> };
+    expect(
+      callerFile.tasks.find((entry) => entry.taskId === task.id)?.result,
+    ).toBeUndefined();
+
+    port.reply(task.id, 'completed', 'Done after transcript recovery.');
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        answer: 'Done after transcript recovery.',
+        status: { state: 'TASK_STATE_COMPLETED' },
+      },
+    });
+  });
+
   it("returns the agent's reply once and keeps it", async () => {
     const caller = await grant();
     const task = await sent(caller);
