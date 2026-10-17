@@ -16,6 +16,56 @@ function event(
 }
 
 describe('Managed transcript projection', () => {
+  it('retains completed Turn duration when replayed text parts share their Item creation time', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ text: 'check' }] }),
+        event(2, 'assistant_delta', { text: 'Starting' }),
+        event(3, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(4, 'tool_completed', { toolCallId: 'call' }),
+        { ...event(5, 'assistant_delta', { text: 'Finished' }), at: 200 },
+        event(6, 'completed', {}),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0].timestamp).toBe(100);
+    expect(messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'Finished',
+      timestamp: 600,
+      isStreaming: false,
+    });
+  });
+
+  it('keeps the original tool clock through repeated progress and separates commentary', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'assistant_delta', { text: 'Starting' }),
+        event(2, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(3, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(4, 'tool_completed', { toolCallId: 'call' }),
+        event(5, 'assistant_delta', { text: 'Finished' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages.map((message) => message.role)).toEqual([
+      'assistant',
+      'tool_group',
+      'assistant',
+    ]);
+    expect(messages[1]).toMatchObject({
+      tools: [{ startTime: 200, endTime: 400, status: 'completed' }],
+    });
+  });
   it('preserves existing output when a result has no preview or a shorter excerpt', () => {
     const source = { ...result, session_id: 's1', turn_id: 'p1' };
     const output = 'complete output';
@@ -173,6 +223,68 @@ describe('Managed transcript projection', () => {
       { role: 'assistant', content: 'Second', isStreaming: true },
     ]);
     expect(new Set(messages.map((message) => message.id)).size).toBe(4);
+  });
+
+  it('appends a strictly-newer tail while preserving existing event identity', () => {
+    const base = [
+      event(1, 'accepted'),
+      event(2, 'assistant_delta'),
+      event(3, 'assistant_delta'),
+    ];
+    const merged = mergeManagedEvents(base, [
+      event(4, 'assistant_delta'),
+      event(5, 'completed'),
+    ]);
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(
+      merged.slice(0, 3).every((item, index) => item === base[index]),
+    ).toBe(true);
+  });
+
+  it('still reorders and deduplicates an overlapping or disordered tail', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [
+        event(3, 'assistant_delta', { text: 'newer' }),
+        event(2, 'assistant_delta'),
+        event(4, 'completed'),
+      ],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4]);
+    expect(merged[2]?.data).toEqual({ text: 'newer' });
+  });
+
+  it('returns the current events unchanged for an empty incoming page', () => {
+    expect(
+      mergeManagedEvents([event(1, 'accepted'), event(2, 'completed')], []).map(
+        (item) => item.id,
+      ),
+    ).toEqual([1, 2]);
+    expect(mergeManagedEvents([], []).map((item) => item.id)).toEqual([]);
+  });
+
+  it('appends the first stream event onto an empty current list', () => {
+    expect(
+      mergeManagedEvents([], [event(1, 'accepted')]).map((item) => item.id),
+    ).toEqual([1]);
+  });
+
+  it('sorts an incoming page that is newer but internally disordered', () => {
+    expect(
+      mergeManagedEvents(
+        [event(1, 'accepted')],
+        [event(5, 'assistant_delta'), event(3, 'assistant_delta')],
+      ).map((item) => item.id),
+    ).toEqual([1, 3, 5]);
+  });
+
+  it('deduplicates an equal boundary id in favour of the incoming event', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [event(3, 'assistant_delta', { text: 'newer' }), event(4, 'completed')],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 3, 4]);
+    expect(merged[1]?.data).toEqual({ text: 'newer' });
   });
 
   it('keeps approval updates out of the Turn being streamed', () => {

@@ -17,6 +17,7 @@ import {
   assertManagedSessionKey,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  managedSessionEventRefs,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -27,7 +28,16 @@ import {
 } from './managed-session-records.js';
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
+import {
+  HOSTED_RECOVERY_RESOURCE_KINDS,
+  hostedRecoveryReferences,
+  parseHostedRecoveryResource,
+} from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import {
+  MANAGED_TOOL_RESULT_KINDS,
+  parseToolResultManifestBytes,
+} from './managed-tool-result.js';
 import {
   MANAGED_MESSAGE_CHUNKS_KIND,
   managedMessageChunkParts,
@@ -103,6 +113,7 @@ export interface HttpManagedSessionStores {
   readonly publication: HttpToolPublicationOwner;
   readonly toolResultResources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  stopLocal(): Promise<void>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
@@ -124,6 +135,7 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
     readonly status: number,
     readonly remoteCode: string,
     message: string,
+    readonly contentionExhausted?: boolean,
   ) {
     super(message);
     this.name = 'ManagedSessionStoreHttpError';
@@ -154,6 +166,7 @@ export function createHttpManagedSessionStores(
       read: (ref) => client.readResource(ref),
     },
     assertWritable: () => client.assertWritable(),
+    stopLocal: () => client.stopLocal(),
     close: () => client.seal(),
     setLifecycleAuthority: (authority) =>
       client.setLifecycleAuthority(authority),
@@ -174,7 +187,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    head.storageVersion !== 1 ||
+    ![1, 2].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -302,7 +315,16 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     const { revision, ref } = pending.pop()!;
     const key = `${revision}\u0000${ref.resourceId}`;
     const stored = resources.get(ref.resourceId);
-    if (stored === undefined) throw corrupt('snapshot resource is missing.');
+    if (stored === undefined) {
+      // A manifest committed before the closure edge shipped names page
+      // envelopes the Session never staged. Keep such a snapshot
+      // inspectable by dropping the dangling page ref from the walk
+      // without registering it — adding it would fire the enumeration
+      // check below for exactly the snapshots this keeps readable
+      // (#13930 R1-43).
+      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      throw corrupt('snapshot resource is missing.');
+    }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
       throw corrupt('snapshot dependency was not committed at its use.');
     }
@@ -334,6 +356,8 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     appendTransaction: rejectWrite,
     blockRecovery: rejectWrite,
     seal: rejectWrite,
+    // A snapshot-inspection handle has no open writer; nothing can append.
+    writerSealed: true,
     abort: rejectWrite,
   };
   const resourceStore: ManagedSessionResourceStore = {
@@ -394,8 +418,14 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     return this.client.readJournal(options.maxBytes);
   }
 
-  appendTransaction(records: readonly unknown[]): Promise<void> {
-    return this.client.appendTransaction(records);
+  async appendTransaction(records: readonly unknown[]): Promise<void> {
+    try {
+      await this.client.appendTransaction(records);
+    } catch (error) {
+      if (!(error instanceof ManagedSessionCommitRejectedError))
+        this.client.stopWriterRenewal();
+      throw error;
+    }
   }
 
   blockRecovery(request: {
@@ -410,6 +440,10 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
 
   seal(): Promise<void> {
     return this.client.seal();
+  }
+
+  get writerSealed(): boolean {
+    return this.client.writerSealed;
   }
 
   abort(): Promise<void> {
@@ -477,7 +511,9 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     return this.client.readResource(validated);
   }
 
-  commitResources(refs: readonly ManagedSessionDurableRef[]): CommitResource[] {
+  async commitResources(
+    refs: readonly ManagedSessionDurableRef[],
+  ): Promise<CommitResource[]> {
     const closure = new Map<string, ManagedSessionDurableRef>();
     const pending = [...refs];
     while (pending.length > 0) {
@@ -500,6 +536,8 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
         pending.push(...collectNestedResourceRefs(ref, staged.bytes));
+      } else if (isReferenceContainer(ref.kind)) {
+        pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
       }
     }
     return [...closure.values()].map((ref) => {
@@ -528,6 +566,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 }
 
 interface WriterGrant {
+  readonly supportedStorageVersion: number;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
   readonly journalRevision: number;
@@ -587,8 +626,14 @@ class ManagedSessionStoreHttpClient {
   private renewPromise: Promise<void> | undefined;
   private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
+  private renewalStopped = false;
   private sealed = false;
+  private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
+
+  get writerSealed(): boolean {
+    return this.sealed;
+  }
 
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void {
     this.lifecycleAuthority = authority;
@@ -678,7 +723,7 @@ class ManagedSessionStoreHttpClient {
   }
 
   async acquireWriter(): Promise<void> {
-    if (this.grant !== undefined || this.sealed) {
+    if (this.grant !== undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is already opened or sealed.',
       );
@@ -765,6 +810,7 @@ class ManagedSessionStoreHttpClient {
       throw corrupt('journal bytes do not match the durable head.');
     }
     this.grant = {
+      ...this.requireGrant(),
       writerGeneration: head.writerGeneration,
       leaseUntil: this.requireGrant().leaseUntil,
       journalRevision: head.journalRevision,
@@ -790,7 +836,37 @@ class ManagedSessionStoreHttpClient {
         'the transaction does not extend the HTTP journal head.',
       );
     }
-    const commitResources = this.resources.commitResources(descriptor.refs);
+    const commitResources = await this.resources.commitResources(
+      descriptor.refs,
+    );
+    const needsVersionTwo =
+      commitResources.some(
+        (resource) =>
+          HOSTED_RECOVERY_RESOURCE_KINDS.has(resource.kind) ||
+          (resource.kind === 'managed-action-options' &&
+            resource.bytesBase64 &&
+            JSON.parse(
+              Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
+            ).v === 3),
+      ) ||
+      records.some((record) => {
+        const event = (
+          record as {
+            managedSession?: {
+              kind?: string;
+              payload?: Record<string, unknown>;
+            };
+          }
+        ).managedSession;
+        return (
+          event?.kind === 'message.retracted' &&
+          event.payload?.['sourceBootId'] !== undefined
+        );
+      });
+    if (needsVersionTwo && grant.supportedStorageVersion < 2)
+      throw new ManagedSessionRecordError(
+        'Managed Session Store does not support Hosted recovery storage version 2.',
+      );
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -827,14 +903,30 @@ class ManagedSessionStoreHttpClient {
       resources: commitResources,
     };
     let committed: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // One contention budget shared by the whole commit: the guard retries
+    // inside json() and publicationRequest() stop at this deadline and each
+    // guard retry's own timeout shrinks to it, and once guard retries have
+    // spent it the outer loop starts no restart either — so three attempts
+    // cannot each spend a fresh requestTimeoutMs behind one held tenant
+    // guard (#13800).
+    const contentionDeadline = Date.now() + this.requestTimeoutMs;
+    for (let attempt = 0; ; attempt++) {
       try {
         committed =
           publicationId === undefined
-            ? await this.json('/transactions:commit', 'POST', commitBody)
+            ? await this.json(
+                needsVersionTwo
+                  ? '/transactions:commit-v2'
+                  : '/transactions:commit',
+                'POST',
+                commitBody,
+                contentionDeadline,
+              )
             : await this.publicationRequest(
                 `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
                 commitBody,
+                undefined,
+                contentionDeadline,
               );
         break;
       } catch (error) {
@@ -865,8 +957,37 @@ class ManagedSessionStoreHttpClient {
           error instanceof TypeError ||
           (error instanceof DOMException &&
             ['AbortError', 'TimeoutError'].includes(error.name));
-        if (!uncertain || attempt === 2) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        // Activation can retry beyond the usual attempt cap. A guard refusal
+        // must still stop that lane once the shared budget cannot fit another
+        // guard retry, even when the inner call never retried the guard.
+        const contentionSpent =
+          error instanceof ManagedSessionStoreHttpError &&
+          (error.contentionExhausted === true ||
+            (descriptor.operation === 'renewActivation' &&
+              error.status === 503 &&
+              error.remoteCode === 'tenant_guard_contended' &&
+              contentionDeadline - Date.now() <= 250));
+        const exhausted = attempt >= 2;
+        if (
+          !uncertain ||
+          contentionSpent ||
+          (exhausted &&
+            (descriptor.operation !== 'renewActivation' ||
+              this.renewalStopped ||
+              grant.leaseUntil <= Date.now()))
+        )
+          throw error;
+        await new Promise((resolve) =>
+          setTimeout(
+            resolve,
+            exhausted ? Math.min(1000, grant.leaseUntil - Date.now()) : 250,
+          ),
+        );
+        if (
+          exhausted &&
+          (this.renewalStopped || grant.leaseUntil <= Date.now())
+        )
+          throw error;
       }
     }
     const receipt = asRecord(committed, 'commit receipt');
@@ -899,7 +1020,7 @@ class ManagedSessionStoreHttpClient {
       throw corrupt('commit receipt does not match the submitted transaction.');
     }
     this.grant = {
-      ...grant,
+      ...this.requireGrant(),
       journalRevision: revision,
       committedSequence: descriptor.lastSequence,
       lastCommitDigest: descriptor.commitDigest,
@@ -944,6 +1065,7 @@ class ManagedSessionStoreHttpClient {
     path: string,
     body: Record<string, unknown>,
     token?: string,
+    contentionDeadline?: number,
   ): Promise<unknown> {
     await this.ensureWriter();
     if (
@@ -952,40 +1074,55 @@ class ManagedSessionStoreHttpClient {
       )
     )
       throw new ManagedSessionRecordError('Publication owner path is invalid.');
-    const url = `${this.baseUrl}/internal/managed-tool-publications/v1/sessions/${encodeURIComponent(
-      this.sessionKey.sessionId,
-    )}${path}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`;
     const readOnly = path.endsWith('/finished');
-    const response = await this.fetchFn(url, {
-      method: readOnly ? 'GET' : 'POST',
-      headers: {
-        Accept: 'application/json',
-        ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
-        [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
-          this.sessionKey.tenantId,
-        [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
-          this.writerToken,
-        'X-Qwen-Managed-Writer-Id': this.writerId,
-        'X-Qwen-Managed-Writer-Generation': String(
-          this.requireGrant().writerGeneration,
-        ),
-        ...(token ? { 'X-Qwen-Tool-Publication-Token': token } : {}),
+    const method = readOnly ? 'GET' : 'POST';
+    // Same engine as the commit lane: the caller's shared contention
+    // deadline caps each attempt, and a contended 503 earns the guard
+    // retry instead of returning uncapped (#13800 R2-2).
+    return this.withRetry(
+      readOnly,
+      method,
+      path,
+      async (timeoutMs) => {
+        const url = `${this.baseUrl}/internal/managed-tool-publications/v1/sessions/${encodeURIComponent(
+          this.sessionKey.sessionId,
+        )}${path}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`;
+        const response = await this.fetchFn(url, {
+          method,
+          headers: {
+            Accept: 'application/json',
+            'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
+            ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
+            [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
+              this.sessionKey.tenantId,
+            [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
+              this.writerToken,
+            'X-Qwen-Managed-Writer-Id': this.writerId,
+            'X-Qwen-Managed-Writer-Generation': String(
+              this.requireGrant().writerGeneration,
+            ),
+            ...(token ? { 'X-Qwen-Tool-Publication-Token': token } : {}),
+          },
+          ...(readOnly ? {} : { body: JSON.stringify(body) }),
+          redirect: 'error',
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!response.ok) {
+          const error = await readHttpError(response);
+          throw new ManagedSessionStoreHttpError(
+            response.status,
+            error.code,
+            error.message,
+          );
+        }
+        if (response.headers.get('Cache-Control') !== 'no-store')
+          throw corrupt(
+            'Publication response is missing Cache-Control: no-store.',
+          );
+        return readBoundedPublicationJson(response);
       },
-      ...(readOnly ? {} : { body: JSON.stringify(body) }),
-      redirect: 'error',
-      signal: AbortSignal.timeout(this.requestTimeoutMs),
-    });
-    if (!response.ok) {
-      const error = await readHttpError(response);
-      throw new ManagedSessionStoreHttpError(
-        response.status,
-        error.code,
-        error.message,
-      );
-    }
-    if (response.headers.get('Cache-Control') !== 'no-store')
-      throw corrupt('Publication response is missing Cache-Control: no-store.');
-    return readBoundedPublicationJson(response);
+      contentionDeadline,
+    );
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -1123,7 +1260,7 @@ class ManagedSessionStoreHttpClient {
   async seal(): Promise<void> {
     if (this.sealed) return;
     const grant = this.grant;
-    this.stopRenewal();
+    this.stopWriterRenewal();
     if (grant === undefined) {
       this.sealed = true;
       this.resources.clear();
@@ -1149,6 +1286,17 @@ class ManagedSessionStoreHttpClient {
     this.resources.clear();
   }
 
+  async stopLocal(): Promise<void> {
+    this.locallyStopped = true;
+    this.stopRenewal();
+    await this.renewPromise?.catch(() => undefined);
+  }
+
+  stopWriterRenewal(): void {
+    this.renewalStopped = true;
+    this.stopRenewal();
+  }
+
   private async ensureWriter(): Promise<void> {
     const grant = this.requireGrant();
     if (grant.leaseUntil - Date.now() <= this.leaseDurationMs / 3) {
@@ -1157,6 +1305,13 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
+    if (this.locallyStopped) {
+      return Promise.reject(
+        new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is locally stopped.',
+        ),
+      );
+    }
     if (this.renewPromise !== undefined) {
       if (
         this.lifecycleAuthority?.operationId ===
@@ -1183,7 +1338,11 @@ class ManagedSessionStoreHttpClient {
       if (renewed.writerGeneration !== grant.writerGeneration) {
         throw corrupt('writer generation changed during renewal.');
       }
-      this.grant = { ...this.requireGrant(), leaseUntil: renewed.leaseUntil };
+      this.grant = {
+        ...this.requireGrant(),
+        leaseUntil: renewed.leaseUntil,
+        supportedStorageVersion: renewed.supportedStorageVersion,
+      };
       this.scheduleRenewal();
     })();
     this.renewPromise = renewal.finally(() => {
@@ -1192,18 +1351,33 @@ class ManagedSessionStoreHttpClient {
     return this.renewPromise;
   }
 
-  private scheduleRenewal(): void {
+  private scheduleRenewal(retrying = false): void {
     this.stopRenewal();
-    if (this.sealed || this.grant === undefined) return;
+    if (
+      this.renewalStopped ||
+      this.sealed ||
+      this.locallyStopped ||
+      this.grant === undefined ||
+      this.grant.leaseUntil <= Date.now()
+    )
+      return;
     const delay = Math.max(
       250,
       Math.min(
-        Math.floor(this.leaseDurationMs / 2),
+        retrying ? 1000 : Math.floor(this.leaseDurationMs / 2),
         this.grant.leaseUntil - Date.now() - 500,
       ),
     );
     this.renewTimer = setTimeout(() => {
-      void this.renewWriter().catch(() => undefined);
+      void this.renewWriter().catch((error: unknown) => {
+        if (
+          error instanceof ManagedSessionStoreTransportError ||
+          (error instanceof ManagedSessionStoreHttpError &&
+            [500, 502, 503, 504].includes(error.status))
+        ) {
+          this.scheduleRenewal(true);
+        }
+      });
     }, delay);
     this.renewTimer.unref();
   }
@@ -1217,17 +1391,28 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      head.storageVersion !== 1 ||
+      ![1, 2].includes(head.storageVersion) ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
     ) {
-      throw corrupt('restore head is not readable by this v1 writer.');
+      throw corrupt('restore head is not readable by this writer.');
+    }
+    // A head below this writer's committed position is a server-side
+    // regression; re-baselining onto it would silently forget our own
+    // commits, so only an equal-or-ahead head may replace the grant.
+    if (
+      head.journalRevision < grant.journalRevision ||
+      head.committedSequence < grant.committedSequence
+    ) {
+      throw corrupt(
+        `restore head regressed below this writer's committed position (head ${head.journalRevision}/${head.committedSequence} < grant ${grant.journalRevision}/${grant.committedSequence}).`,
+      );
     }
   }
 
   private requireGrant(): WriterGrant {
-    if (this.grant === undefined || this.sealed) {
+    if (this.grant === undefined || this.sealed || this.locallyStopped) {
       throw new ManagedSessionRecordError(
         'the HTTP Managed Session writer is not active.',
       );
@@ -1239,6 +1424,7 @@ class ManagedSessionStoreHttpClient {
     path: string,
     method: 'GET' | 'POST',
     body?: Readonly<Record<string, unknown>>,
+    contentionDeadline?: number,
   ): Promise<unknown> {
     return this.withRetry(
       method === 'GET' || path === '/writers:renew',
@@ -1263,6 +1449,7 @@ class ManagedSessionStoreHttpClient {
           );
         }
       },
+      contentionDeadline,
     );
   }
 
@@ -1273,33 +1460,95 @@ class ManagedSessionStoreHttpClient {
    * history on a cold restore. Those calls retry the whole exchange twice
    * with a short jittered backoff, all inside one `requestTimeoutMs`
    * budget, so a wedged endpoint blocks no longer than before. Commits are
-   * deliberately not retried here; their callers handle the outcome
-   * themselves. A terminal failure names the endpoint and, once a retry
-   * actually ran, the attempt count.
+   * not retried here for transport failures; their callers handle that
+   * outcome themselves. A bounded `tenant_guard_contended` refusal is the
+   * exception: the store rolled the transaction back before writing
+   * anything, so it is a definite non-commit and is retried on any route,
+   * commits included, until the call's budget (or the caller's shared
+   * contention deadline) is spent. A terminal failure names the endpoint
+   * and, once a retry actually ran, the attempt count.
    */
   private async withRetry<T>(
     retryable: boolean,
     method: 'GET' | 'POST',
     path: string,
     run: (timeoutMs: number) => Promise<T>,
+    contentionDeadline?: number,
   ): Promise<T> {
     const deadline = Date.now() + this.requestTimeoutMs;
+    // A caller that retries this helper itself passes one contention
+    // deadline for all of its calls, so their guard retries share a single
+    // budget instead of each restarting a fresh requestTimeoutMs (#13800).
+    const guardDeadline = Math.min(deadline, contentionDeadline ?? deadline);
     let attempt = 0;
+    // Guard retries are counted apart so they never spend the transient
+    // path's three-attempt allowance.
+    let guardRetries = 0;
+    // The latest contention refusal seen: when the shared deadline
+    // aborts a later attempt instead of the store answering again, the
+    // terminal throw keeps the guard's own name instead of renaming it
+    // a transport failure (#13800 R1-7).
+    let contendedRefusal: ManagedSessionStoreHttpError | undefined;
     for (;;) {
       attempt++;
       try {
-        return await run(Math.max(1, deadline - Date.now()));
+        // Guard retries run inside the caller's shared contention deadline:
+        // a slower guard answer aborts there rather than each retry
+        // restarting the full requestTimeoutMs (#13800 P2). A call's first
+        // attempt keeps its own budget, so a restart the caller earned after
+        // a non-contention failure is not issued already expired (#13800
+        // R2-2).
+        const attemptDeadline = guardRetries > 0 ? guardDeadline : deadline;
+        return await run(Math.max(1, attemptDeadline - Date.now()));
       } catch (error) {
+        // A bounded tenant-guard wait is a definite non-commit: the store
+        // rolled the transaction back before writing anything. Keep retrying
+        // it — on any route — for the rest of this request budget instead of
+        // spending the three-attempt cap in ~15 s and latching the Session's
+        // writes behind a contention window it could have outlasted (#13800).
+        const contended =
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 503 &&
+          error.remoteCode === 'tenant_guard_contended';
+        if (contended) contendedRefusal = error;
+        if (contended && guardDeadline - Date.now() > 250) {
+          debugLogger.debug(
+            `Managed Session Store ${method} ${path} attempt ${attempt} found the tenant guard contended; retrying.`,
+          );
+          guardRetries++;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
         const transient =
           error instanceof ManagedSessionStoreTransportError ||
           (error instanceof ManagedSessionStoreHttpError &&
             [500, 502, 503, 504].includes(error.status));
+        // Past its window a contended guard is terminal: a transient retry
+        // there would only time out and rename it a transport failure.
         if (
           !retryable ||
           !transient ||
-          attempt >= 3 ||
+          contended ||
+          attempt - guardRetries >= 3 ||
           Date.now() >= deadline
         ) {
+          if (
+            contendedRefusal !== undefined &&
+            guardDeadline - Date.now() <= 250
+          ) {
+            throw new ManagedSessionStoreHttpError(
+              contendedRefusal.status,
+              contendedRefusal.remoteCode,
+              attempt > 1
+                ? `Managed Session Store ${method} ${path} failed after ${attempt} attempts: ${contendedRefusal.message}`
+                : `Managed Session Store ${method} ${path} failed: ${contendedRefusal.message}`,
+              // Report upward whether guard retries actually consumed
+              // the shared budget (#13800 R2-2): a first attempt that
+              // only collided with the near-deadline instant did not
+              // spend it, and the caller's restart stays allowed.
+              guardRetries > 0 || undefined,
+            );
+          }
           if (transient) {
             const detail =
               attempt > 1
@@ -1320,7 +1569,10 @@ class ManagedSessionStoreHttpClient {
           `Managed Session Store ${method} ${path} attempt ${attempt} failed (${error instanceof Error ? error.message : String(error)}); retrying.`,
         );
         await new Promise((resolve) =>
-          setTimeout(resolve, 200 * attempt + Math.floor(Math.random() * 100)),
+          setTimeout(
+            resolve,
+            200 * (attempt - guardRetries) + Math.floor(Math.random() * 100),
+          ),
         );
       }
     }
@@ -1333,6 +1585,11 @@ class ManagedSessionStoreHttpClient {
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
   ): Promise<Response> {
+    if (this.locallyStopped) {
+      throw new ManagedSessionRecordError(
+        'the HTTP Managed Session writer is locally stopped.',
+      );
+    }
     let response: Response;
     try {
       response = await this.fetchFn(`${this.sessionUrl()}${path}`, {
@@ -1340,6 +1597,7 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
+          'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -1425,7 +1683,13 @@ export function describeTransaction(
       commitDigest: null,
       activationEpoch: currentActivationEpoch,
       latestCheckpointResourceId: null,
-      refs: collectRefs(records),
+      refs: dedupeRefs([
+        header.definitionRef,
+        header.rootSnapshotRef,
+        ...(header.baseTranscriptProof === undefined
+          ? []
+          : [header.baseTranscriptProof]),
+      ]),
     };
   }
   if (records.length < 2) {
@@ -1497,8 +1761,22 @@ export function describeTransaction(
     ),
     activationEpoch,
     latestCheckpointResourceId,
-    refs: collectRefs(records),
+    refs: dedupeRefs(
+      eventRecords.flatMap((event) => managedSessionEventRefs(event)),
+    ),
   };
+}
+
+function dedupeRefs(
+  found: Iterable<ManagedSessionDurableRef>,
+): ManagedSessionDurableRef[] {
+  const refs = new Map<string, ManagedSessionDurableRef>();
+  for (const ref of found) {
+    const existing = refs.get(ref.resourceId);
+    if (existing !== undefined) requireSameRef(existing, ref);
+    else refs.set(ref.resourceId, ref);
+  }
+  return [...refs.values()];
 }
 
 function collectRefs(records: readonly unknown[]): ManagedSessionDurableRef[] {
@@ -1645,6 +1923,13 @@ export function requireStoredTransactionMatches(
 function parseWriterGrant(value: unknown): WriterGrant {
   const record = asRecord(value, 'writer grant');
   return {
+    supportedStorageVersion:
+      record['supportedStorageVersion'] === undefined
+        ? 1
+        : safeCounter(
+            record['supportedStorageVersion'],
+            'supportedStorageVersion',
+          ),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',
@@ -1710,12 +1995,56 @@ export function collectNestedResourceRefs(
   if (ref.kind === MANAGED_MESSAGE_CHUNKS_KIND) {
     return managedMessageChunkParts(ref.kind, bytes);
   }
+  if (ref.kind === 'managed-tool-outcome-chunks') {
+    const manifest = asRecord(
+      JSON.parse(bytes.toString('utf8')),
+      'outcome chunks',
+    );
+    if (Object.keys(manifest).length !== 1 || !('parts' in manifest)) {
+      throw corrupt('outcome chunk manifest fields conflict.');
+    }
+    const parts = asArray(manifest['parts'], 'outcome parts');
+    if (parts.length < 2 || parts.length > 69) {
+      throw corrupt('outcome chunk count exceeds its bounds.');
+    }
+    return parts.map((part) => {
+      const checked = assertManagedSessionDurableRef(
+        part as ManagedSessionJsonValue,
+        'outcome chunk part',
+      );
+      if (checked.kind !== 'managed-tool-outcome-part') {
+        throw corrupt('outcome chunks must reference outcome parts.');
+      }
+      return checked;
+    });
+  }
   if (ref.kind === 'managed-checkpoint') {
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
+  if (ref.kind === 'managed-file_history') {
+    const record = asRecord(
+      parseManagedSessionRecordJson(
+        bytes.toString('utf8'),
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      ),
+      'file history',
+    );
+    // Only `preparation` is walked: a bind/result record's previousRecordRef
+    // belongs to its original journal transaction, while a prepared record
+    // re-admits its predecessor through preparation.intentRef, which SQL's
+    // activation proof reads from this transaction.
+    return record['schemaVersion'] === 2 &&
+      record['profile'] === 'csi-files-retirement/1'
+      ? collectRefs([record['preparation']])
+      : [];
+  }
+  if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
+    return hostedRecoveryReferences(parseHostedRecoveryResource(bytes));
+  }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
@@ -1729,6 +2058,18 @@ export function collectNestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // A result manifest names its page envelopes: they are Session resources
+  // too, staged exactly like the manifest, and a commit that closes over
+  // the manifest but not its pages would leave the Artifact's read chain
+  // 404ing on the page hop (#13856). A body this parse cannot represent
+  // has no pages to close over, exactly like the input branch below.
+  if (ref.kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
+    try {
+      return collectRefs([parseToolResultManifestBytes(bytes)]);
+    } catch {
+      return [];
+    }
   }
   // An input's envelope embeds what it admits — a channel attachment's ref
   // among them. The commit closes over those bytes exactly like an
@@ -1748,6 +2089,23 @@ export function collectNestedResourceRefs(
     }
   }
   return [];
+}
+
+function isReferenceContainer(kind: string): boolean {
+  return (
+    EXTENSION_RECORD_KINDS.has(kind) ||
+    HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
+    [
+      'managed-definition',
+      'managed-checkpoint',
+      'managed-file_history',
+      'managed-action-options',
+      'managed-hook-plan',
+      'managed-hook-message-chunks',
+      MANAGED_MESSAGE_CHUNKS_KIND,
+      'managed-tool-outcome-chunks',
+    ].includes(kind)
+  );
 }
 
 function requireSameRef(

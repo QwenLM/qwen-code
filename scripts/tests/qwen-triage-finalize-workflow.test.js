@@ -27,7 +27,7 @@ describe('qwen-triage-finalize workflow', () => {
     expect(workflow.on.workflow_run.workflows).toEqual([
       'Qwen Code CI',
       'Qwen Autofix',
-      'SDK Java',
+      'Managed Agent gate',
       'SDK Python',
       'Serve A/B',
       'Web-shell Visuals',

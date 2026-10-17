@@ -10,6 +10,7 @@ import {
   runWithHookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
+import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
@@ -1196,10 +1197,11 @@ export interface ConfigParameters {
    */
   customSkillDirs?: readonly string[];
   /**
-   * Tool names hidden from the registry at construction time. Unlike
-   * `permissions.deny` (which keeps the tool registered and rejects
-   * invocation), tools listed here are not registered at all and never
-   * appear in `/tools`, `getAllTools()`, or function-call discovery.
+   * Tool names hidden from the registry at construction time. Tools listed
+   * here are not registered at all and never appear in `/tools`,
+   * `getAllTools()`, or function-call discovery. A `permissions.deny` rule
+   * without a specifier has the same effect on built-in tools; a rule with
+   * a specifier keeps the tool registered and rejects matching calls.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
    * `POST /workspace/tools/:name/enable {enabled:false}`. Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the
@@ -3059,6 +3061,9 @@ export class Config {
   private goalTurnHostGeneration = 0;
   private readonly chatRecordingFailureListeners =
     new Set<ChatRecordingFailureListener>();
+  private readonly requestLifecycleListeners = new Set<
+    (event: RequestLifecycleEvent) => void
+  >();
   private fileCheckpointingEnabled: boolean;
   // Object state is intentionally shared by derived Configs through prototype
   // lookup so every agent contributes to the same session budget.
@@ -8002,6 +8007,7 @@ export class Config {
         await (earlyWriterClose ?? closeWriter());
       }
       this.chatRecordingFailureListeners.clear();
+      this.requestLifecycleListeners.clear();
       if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
@@ -11678,6 +11684,23 @@ export class Config {
     return () => {
       this.chatRecordingFailureListeners.delete(listener);
     };
+  }
+
+  onRequestLifecycle(
+    listener: (event: RequestLifecycleEvent) => void,
+  ): () => void {
+    this.requestLifecycleListeners.add(listener);
+    return () => this.requestLifecycleListeners.delete(listener);
+  }
+
+  notifyRequestLifecycle(event: RequestLifecycleEvent): void {
+    for (const listener of this.requestLifecycleListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        this.debugLogger.warn('Request lifecycle listener failed:', error);
+      }
+    }
   }
 
   private createChatRecordingService(): ChatRecordingService {

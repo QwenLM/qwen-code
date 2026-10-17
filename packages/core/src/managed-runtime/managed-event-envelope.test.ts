@@ -17,18 +17,25 @@ import {
   MANAGED_EVENT_ENVELOPE_FORBIDDEN_FIELDS,
   MANAGED_EVENT_ENVELOPE_FORMAT_VERSION,
   MANAGED_EVENT_ENVELOPE_STREAMS,
+  MANAGED_PUBLIC_EVENT_KIND_MAX_BYTES,
+  MANAGED_PUBLIC_EVENT_KIND_PATTERN,
   isManagedEventEnvelopeRedelivered,
   managedEventEnvelopeFrom,
+  managedEventEnvelopeFromPublicEvent,
   managedEventEnvelopeKey,
   parseManagedEventEnvelope,
+  parseManagedPublicEventRow,
   type ManagedEventEnvelope,
+  type ManagedPublicEventRow,
 } from './managed-event-envelope.js';
 import {
   MANAGED_SESSION_EVENT_KINDS,
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
   managedSessionEventsDigest,
+  managedSessionJsonDigest,
   parseManagedSessionEvent,
+  type ManagedSessionJsonValue,
 } from './managed-session-records.js';
 
 interface Checked {
@@ -58,12 +65,22 @@ interface FixtureSuite {
   readonly fromEventCases: ReadonlyArray<
     Checked & { readonly event: unknown; readonly envelope: unknown }
   >;
+  readonly fromPublicEventCases: ReadonlyArray<
+    Checked & {
+      readonly row: unknown;
+      readonly workspaceId: string;
+      readonly envelope: unknown;
+    }
+  >;
 }
 
 interface SchemaDefinition {
   readonly required?: readonly string[];
   readonly properties?: Record<string, unknown>;
   readonly additionalProperties?: unknown;
+  readonly enum?: unknown;
+  readonly maxLength?: number;
+  readonly pattern?: string;
 }
 
 /**
@@ -387,9 +404,15 @@ describe('Managed event envelope contract', () => {
     expect(fixtures.contractVersion).toBe(1);
     expect(fixtures.formatVersion).toBe(MANAGED_EVENT_ENVELOPE_FORMAT_VERSION);
     expect(fixtures.kinds).toStrictEqual([...MANAGED_SESSION_EVENT_KINDS]);
-    expect(
-      (schema.$defs['envelope'].properties?.['kind'] as { enum: unknown }).enum,
-    ).toStrictEqual([...MANAGED_SESSION_EVENT_KINDS]);
+    expect(schema.$defs['journalKind'].enum).toStrictEqual([
+      ...MANAGED_SESSION_EVENT_KINDS,
+    ]);
+    expect(schema.$defs['publicKind'].maxLength).toBe(
+      MANAGED_PUBLIC_EVENT_KIND_MAX_BYTES,
+    );
+    expect(new RegExp(schema.$defs['publicKind'].pattern ?? '').source).toBe(
+      MANAGED_PUBLIC_EVENT_KIND_PATTERN.source,
+    );
     expect(fixtures.streams).toStrictEqual([...MANAGED_EVENT_ENVELOPE_STREAMS]);
     expect(
       (schema.$defs['envelope'].properties?.['stream'] as { enum: unknown })
@@ -410,6 +433,8 @@ describe('Managed event envelope contract', () => {
     ]);
     expect(fixtures.limits).toStrictEqual({
       maxIdBytes: MANAGED_SESSION_LIMITS.maxIdBytes,
+      maxJsonDepth: MANAGED_SESSION_LIMITS.maxJsonDepth,
+      maxPublicKindBytes: MANAGED_PUBLIC_EVENT_KIND_MAX_BYTES,
       maxTimeMs: MANAGED_SESSION_LIMITS.maxTimeMs,
     });
   });
@@ -419,6 +444,7 @@ describe('Managed event envelope contract', () => {
       fixtures.envelopeCases,
       fixtures.dedupeCases,
       fixtures.fromEventCases,
+      fixtures.fromPublicEventCases,
     ]) {
       const ids = list.map((fixture) => fixture.id);
 
@@ -429,7 +455,12 @@ describe('Managed event envelope contract', () => {
   it('commits one valid envelope for every event kind of the record', () => {
     const validKinds = new Set(
       fixtures.envelopeCases
-        .filter((fixture) => fixture.valid)
+        .filter(
+          (fixture) =>
+            fixture.valid &&
+            (fixture.envelope as ManagedEventEnvelope).stream ===
+              'authoritative_journal',
+        )
         .map(
           (fixture) =>
             (fixture.envelope as ManagedEventEnvelope).kind as string,
@@ -437,6 +468,32 @@ describe('Managed event envelope contract', () => {
     );
 
     expect(validKinds).toEqual(new Set(MANAGED_SESSION_EVENT_KINDS));
+  });
+
+  // The second stream makes the key's `stream` term load-bearing: the same
+  // tenant, Session and sequence on the two streams name two facts.
+  it('pins a valid envelope and a discriminating dedupe row for every stream', () => {
+    const validStreams = new Set(
+      fixtures.envelopeCases
+        .filter((fixture) => fixture.valid)
+        .map((fixture) => (fixture.envelope as ManagedEventEnvelope).stream),
+    );
+    const discriminating = fixtures.dedupeCases.find(
+      (fixture) => fixture.id === 'same-sequence-different-stream',
+    );
+
+    expect(validStreams).toEqual(new Set(MANAGED_EVENT_ENVELOPE_STREAMS));
+    expect(discriminating?.same).toBe(false);
+    expect(discriminating?.parseable).toEqual([true, true]);
+    const [first, second] = [
+      parseManagedEventEnvelope(discriminating?.first),
+      parseManagedEventEnvelope(discriminating?.second),
+    ];
+    expect(first.stream).not.toBe(second.stream);
+    expect({
+      ...managedEventEnvelopeKey(first),
+      stream: second.stream,
+    }).toEqual(managedEventEnvelopeKey(second));
   });
 
   it.each(fixtures.envelopeCases)('parses the $id envelope', (fixture) => {
@@ -542,6 +599,85 @@ describe('Managed event envelope contract', () => {
       expect(isDeepFrozen(derived)).toBe(true);
     },
   );
+
+  // Written from the fixture literals (the digests were recomputed outside
+  // this module), never recomputed from the derived envelope.
+  it.each(fixtures.fromPublicEventCases)(
+    'derives the $id envelope from the committed public row',
+    (fixture) => {
+      const row = parseManagedPublicEventRow(fixture.row);
+      const derived = managedEventEnvelopeFromPublicEvent(
+        row,
+        fixture.workspaceId,
+      );
+
+      expect(derived).toStrictEqual(fixture.envelope);
+      expect(derived.payloadRef.digest).toBe(managedSessionJsonDigest([row]));
+      expect(isDeepFrozen(derived)).toBe(true);
+    },
+  );
+
+  it('refuses a public row an envelope cannot name', () => {
+    const row = fixtures.fromPublicEventCases[0].row as Record<string, unknown>;
+    const variants: ReadonlyArray<readonly [string, unknown]> = [
+      ['extra key', { ...row, itemId: 'item-1' }],
+      [
+        'missing turnId',
+        Object.fromEntries(
+          Object.entries(row).filter(([key]) => key !== 'turnId'),
+        ),
+      ],
+      ['sequence zero', { ...row, sequence: 0 }],
+      ['fractional sequence', { ...row, sequence: 1.5 }],
+      ['terminal not boolean', { ...row, terminal: 'false' }],
+      ['uppercase type', { ...row, type: 'Turn.accepted' }],
+      ['empty turnId', { ...row, turnId: '' }],
+      ['control eventId', { ...row, eventId: 'evt\u0007' }],
+      ['non-finite data', { ...row, data: { ratio: Number.NaN } }],
+      ['negative createdAt', { ...row, createdAt: -1 }],
+    ];
+    const accepted = variants
+      .filter(
+        ([, variant]) =>
+          !throwsContractError(() => parseManagedPublicEventRow(variant)),
+      )
+      .map(([label]) => label);
+
+    expect(accepted).toEqual([]);
+    const parsed: ManagedPublicEventRow = parseManagedPublicEventRow(row);
+    expect(() => managedEventEnvelopeFromPublicEvent(parsed, '')).toThrow(
+      /envelope\.workspaceId must be a non-empty string/,
+    );
+  });
+
+  // The derivation digests `[row]`, so `data` sits two levels down: a chain
+  // of maxJsonDepth - 1 objects is the deepest it accepts. The row parse
+  // must draw the same line, or it would accept a row no envelope can name;
+  // the Java mirror builds the same rows from the same fixture limit.
+  it('refuses data too deep to digest in the parse and the derivation alike', () => {
+    const limits = fixtures.limits as { readonly maxJsonDepth: number };
+    const nested = (objects: number): ManagedSessionJsonValue => {
+      let value: ManagedSessionJsonValue = {};
+      for (let level = 1; level < objects; level++) value = { a: value };
+      return value;
+    };
+    const row = (objects: number) => ({
+      ...(fixtures.fromPublicEventCases[0].row as object),
+      data: nested(objects),
+    });
+    const deepest = row(limits.maxJsonDepth - 1);
+    const tooDeep = row(limits.maxJsonDepth);
+
+    expect(
+      managedEventEnvelopeFromPublicEvent(
+        parseManagedPublicEventRow(deepest),
+        'workspace-1',
+      ).stream,
+    ).toBe('public_event');
+    expect(throwsContractError(() => parseManagedPublicEventRow(tooDeep))).toBe(
+      true,
+    );
+  });
 
   it('agrees with the schema except where the schema cannot state a rule', () => {
     // A case the module accepts and the schema refuses would put the

@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
@@ -2284,12 +2285,13 @@ describe('qwen-triage verify hardening', () => {
     },
   );
 
-  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
+  it.skipIf(!hasGnuRealpath || !arePermissionBitsEnforced())(
     'fails closed when the corrupt workspace cannot be unlinked',
     () => {
       // A swallowed `rm -f` failure would let the mkdir and the wipe run on
-      // a path that is still a symlink. Root bypasses the mode bits, so the
-      // fixture cannot produce the refusal there.
+      // a path that is still a symlink. Root with its DAC capabilities
+      // bypasses the mode bits, so the fixture cannot produce the refusal
+      // there.
       for (const stepName of WIPE_STEPS) {
         const parent = mkdtempSync(join(tmpdir(), 'verify-heal-perm-'));
         const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
@@ -4890,7 +4892,7 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
     expect(flat).toContain('the module list `sdk-java.yml` passes it');
     expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
-      'node scripts/check-flyway-migrations.js packages/sdk-java/',
+      'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode',
     );
 
     // #13352 R5: a `chmod 555` test was red on the clean tree as root and
@@ -5022,6 +5024,75 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'the verdict is `inconclusive`, never `merge-ready`',
     );
+
+    // #13732 before/after re-run on #13174 R9 (issuecomment-6092937757):
+    // neither arm moved the parked Turn off the first Turn, because the axis
+    // rule lived only under the harness section and one arm used the PR's own
+    // tests as its A/B instrument. The axes now sit in the plan the agent
+    // follows, so they are pinned inside Scope selection. A third arm, with
+    // the rule keyed to the central claim, framed the claim as something else
+    // and never applied it, so the trigger is the diff.
+    const scopeSelection = flat.slice(
+      flat.indexOf('## Scope selection'),
+      flat.indexOf('## Method'),
+    );
+    expect(scopeSelection).toContain(
+      'When the diff changes how a Turn is cancelled, parked, taken over',
+    );
+    expect(scopeSelection).toContain(
+      'whether or not that code is the central claim',
+    );
+    expect(scopeSelection).toContain(
+      'it gets its own A/B as a secondary claim',
+    );
+    // A mandated secondary A/B with no budget line would eat the central one
+    // (#13819 review); it takes a harness slot instead.
+    expect(scopeSelection).toContain(
+      'takes one of the harness slots in item 2 rather than time from the central A/B',
+    );
+    // "item 2" is an ordinal, so pin that it still names the harness line.
+    // `^` needs real newlines, hence the raw slice, as in the item-4 pin.
+    const rawScopeSelection = verifySkill.slice(
+      verifySkill.indexOf('## Scope selection'),
+      verifySkill.indexOf('## Method'),
+    );
+    expect(rawScopeSelection).toMatch(
+      /^2\. \*\*One or two wire-oracle harnesses\*\*/m,
+    );
+    // The clause protects the central A/B's reservation, so pin that too.
+    expect(scopeSelection).toContain(
+      '**A/B load-bearing proof of the central claim** (always, ~half the budget)',
+    );
+    expect(scopeSelection).toContain(
+      'The trigger is therefore the diff, not the claim.',
+    );
+    expect(scopeSelection).toContain(
+      'name the scenario axes before choosing the A/B instrument',
+    );
+    expect(scopeSelection).toContain(
+      "even when the instrument is the PR's own test files",
+    );
+    expect(scopeSelection).toContain('parking Turn 2 after Turn 1 completed');
+    expect(scopeSelection).toContain(
+      'The report lists each axis with the settings that ran',
+    );
+    expect(scopeSelection).toContain('`expected 409 to be 200`');
+
+    // The same re-run: both arms blamed a merge-only red on the PR, while
+    // `main` had changed the one file the failing test reads.
+    const targetedGates = flat.slice(
+      flat.indexOf('### Targeted gates'),
+      flat.indexOf('### Match the method to the artifact type'),
+    );
+    expect(targetedGates).toContain(
+      'Attribute a red on the merge before blaming the PR.',
+    );
+    expect(targetedGates).toContain('run the test at `HEAD^2` too');
+    expect(targetedGates).toContain(
+      'diff the files it reads between `HEAD^2` and `HEAD`',
+    );
+    expect(targetedGates).toContain('is a semantic merge conflict');
+    expect(targetedGates).toContain('`expected 112 to be 104`');
 
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
@@ -7395,9 +7466,12 @@ describe('qwen-triage verify Java toolchain', () => {
   }
 
   function moduleCoordinates() {
-    return readdirSync('packages/sdk-java', { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml'))
+    return [
+      'packages/managed-agent-server/pom.xml',
+      ...readdirSync('packages/sdk-java', { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml')),
+    ]
       .filter((pom) => existsSync(pom))
       .map((pom) => {
         const xml = readFileSync(pom, 'utf8').replace(
@@ -7415,9 +7489,13 @@ describe('qwen-triage verify Java toolchain', () => {
     const resolve = stepIn('verify', 'Resolve PR and snapshot metadata');
     const javaLine = resolve
       .split('\n')
-      .find((line) => line.includes("grep -qE '^packages/sdk-java/'"));
-    expect(javaLine).toContain("grep -qE '^packages/sdk-java/' <<<");
-    expect(javaLine).not.toContain('|');
+      .find((line) =>
+        line.includes("grep -qE '^packages/(sdk-java|managed-agent-server)/'"),
+      );
+    expect(javaLine).toContain(
+      "grep -qE '^packages/(sdk-java|managed-agent-server)/' <<<",
+    );
+    expect(javaLine.trimStart().startsWith('if grep -qE ')).toBe(true);
     expect(resolve).toContain('echo "java=true" >> "$GITHUB_OUTPUT"');
     expect(job('tmux-testing')).not.toContain('Install Java toolchain');
   });
@@ -7516,7 +7594,7 @@ describe('qwen-triage verify Java toolchain', () => {
     expect(restore).toContain('0057852bfaa89a56745cba8c7296529d2fc39830');
   });
 
-  it('strips exactly the artifact ids published by packages/sdk-java', () => {
+  it('strips exactly the artifact ids published by the Maven modules', () => {
     const coords = moduleCoordinates();
     expect(coords.length).toBeGreaterThan(0);
     const strip = mavenRepoProducerWorkflow.slice(
@@ -7534,24 +7612,20 @@ describe('qwen-triage verify Java toolchain', () => {
       expect(coord.groupId).toBe('com.alibaba');
     }
     expect(strip).toContain('${repo}/com/alibaba/${artifact}');
-    const qwencode = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/qwencode/pom.xml',
+    const buildAt = mavenRepoProducerWorkflow.indexOf(
+      "      - name: 'Populate verify Maven repo'",
     );
-    const broker = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/runtime-broker/pom.xml',
-    );
-    const server = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/managed-agent-server/pom.xml',
-    );
-    const client = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/client/pom.xml',
-    );
-    expect(qwencode).toBeLessThan(broker);
-    expect(broker).toBeLessThan(server);
+    expect(buildAt).toBeGreaterThan(-1);
+    const build = mavenRepoProducerWorkflow.slice(buildAt);
+    const qwencode = build.indexOf('packages/sdk-java/qwencode/pom.xml');
+    const server = build.indexOf('packages/managed-agent-server/pom.xml');
+    const client = build.indexOf('packages/sdk-java/client/pom.xml');
+    expect(qwencode).toBeGreaterThan(-1);
+    expect(qwencode).toBeLessThan(server);
     expect(server).toBeLessThan(client);
-    expect(
-      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-begin'),
-    ).toBeGreaterThan(client);
+    expect(build.indexOf('# verify-maven-repo-strip-begin')).toBeGreaterThan(
+      client,
+    );
   });
 
   it('installs sibling modules as node, capped, without failing the job', () => {
@@ -7568,7 +7642,7 @@ describe('qwen-triage verify Java toolchain', () => {
     expect(modules).toContain('-u ACTIONS_RUNTIME_TOKEN');
     expect(modules).toContain('-u GITHUB_TOKEN');
     expect(modules).toContain('-Dgpg.skip=true');
-    expect(modules).toContain('-Dspotbugs.skip=true');
+    expect(modules).not.toContain('runtime-broker/pom.xml');
     expect(modules).toContain('java-prepare.log');
     expect(modules).toContain('steps.maven-repo.outputs.cache-hit');
     expect(modules).toContain("GITHUB_TOKEN: ''");
