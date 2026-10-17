@@ -4995,11 +4995,14 @@ export function WebShellSidebar({
                     // A single click on the title opens the same rename entry
                     // point the row's double click uses; without rename
                     // available the click falls through to the row's open
-                    // handler. The search snippet and the container's blank
-                    // space fall through the same way, as does a click that
-                    // finishes a text selection (SessionOverviewPanel's
-                    // guard).
-                    if (!showRename) return;
+                    // handler. A pinned session's duplicate row falls through
+                    // as well: its rename form mounts on the Pinned-section
+                    // copy, so clicking here must open the session instead
+                    // of stealing focus onto that other row. The search
+                    // snippet and the container's blank space fall through
+                    // the same way, as does a click that finishes a text
+                    // selection (SessionOverviewPanel's guard).
+                    if (!showRename || renameFormDisabled) return;
                     if (window.getSelection()?.isCollapsed === false) return;
                     event.stopPropagation();
                     if (standalone) standalone.onRename();

@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import {
+  STANDALONE_SESSIONS_CAPABILITY,
+  type DaemonSessionSummary,
+} from '@qwen-code/sdk/daemon';
 import {
   clickSidebarElement as click,
   flushSidebar,
@@ -21,6 +24,8 @@ const {
   pinned,
   archived,
   updateSessionMetadata,
+  loadStandaloneSession,
+  standaloneNotice,
 } = vi.hoisted(() => {
   const makeSessions = () => {
     const state = {
@@ -73,6 +78,12 @@ const {
       client: {
         // Default no content-search hits; search tests override per test.
         searchWorkspaceSessions: vi.fn().mockResolvedValue({ results: [] }),
+        // Default no standalone recents; the standalone case overrides per
+        // test.
+        listStandaloneSessionsPage: vi.fn().mockResolvedValue({
+          sessions: [],
+          nextCursor: undefined,
+        }),
         workspaceByCwd: vi.fn(() => workspaceClient),
         updateSessionMetadata: workspaceClient.updateSessionMetadata,
       },
@@ -84,6 +95,8 @@ const {
     pinned: makeSessions(),
     archived: makeSessions(),
     updateSessionMetadata: workspaceClient.updateSessionMetadata,
+    loadStandaloneSession: vi.fn().mockResolvedValue(undefined),
+    standaloneNotice: vi.fn(),
   };
 });
 const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
@@ -93,6 +106,7 @@ const loadSession = vi.hoisted(() => vi.fn());
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useConnection: () => connection,
+  useStreamingState: () => 'idle',
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
@@ -198,6 +212,30 @@ function renderSidebar(): void {
   });
 }
 
+function renderStandaloneSidebar(): void {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <WebShellSidebar
+          collapsed={false}
+          onCollapsedChange={() => {}}
+          onOpenSettings={() => {}}
+          onOpenDaemonStatus={() => {}}
+          onOpenScheduledTasks={() => {}}
+          onOpenGoals={() => {}}
+          onOpenSessions={() => {}}
+          onOpenSplitView={() => {}}
+          onNewSession={() => false}
+          onLoadSession={loadSession}
+          onLoadStandaloneSession={loadStandaloneSession}
+          onStandaloneNotice={standaloneNotice}
+          onError={() => {}}
+        />
+      </I18nProvider>,
+    );
+  });
+}
+
 function findTitle(displayName: string): HTMLElement {
   const titles = Array.from(
     container.querySelectorAll('[data-web-shell-session-title]'),
@@ -260,6 +298,16 @@ beforeEach(() => {
   workspaceClient.listWorkspaceSessions.mockResolvedValue([]);
   workspaceClient.updateSessionMetadata.mockReset();
   workspaceClient.updateSessionMetadata.mockResolvedValue({});
+  workspace.client.searchWorkspaceSessions.mockReset();
+  workspace.client.searchWorkspaceSessions.mockResolvedValue({ results: [] });
+  workspace.client.listStandaloneSessionsPage.mockReset();
+  workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+    sessions: [],
+    nextCursor: undefined,
+  });
+  loadStandaloneSession.mockReset();
+  loadStandaloneSession.mockResolvedValue(undefined);
+  standaloneNotice.mockReset();
 });
 
 afterEach(() => {
@@ -341,19 +389,24 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     expect(loadSession).not.toHaveBeenCalled();
   });
 
-  it('still opens rename on a double click of the title', async () => {
+  it('keeps a half-typed draft when the rename form is double clicked', async () => {
     active.sessions = [makeSession('s1', { displayName: 'First session' })];
     active.data = active.sessions;
     renderSidebar();
     await flushSidebar();
 
-    // First click of the pair already mounts the form; the second click
-    // lands on the form input, which keeps the row's open handler out.
+    // First click of the pair mounts the form; the second click lands on
+    // the form input. The form's own onDoubleClick keeps the row handler
+    // out, so the re-entrant startRename that would reset the draft never
+    // runs — the half-typed name must survive the double click.
     await act(async () => {
       click(findTitleLabel('First session'));
     });
     const input = renameInput();
     expect(input).not.toBeNull();
+    await act(async () => {
+      setRenameValue(input as HTMLInputElement, 'Renamed draft');
+    });
     await act(async () => {
       (input as HTMLInputElement).dispatchEvent(
         new MouseEvent('dblclick', { bubbles: true }),
@@ -361,7 +414,7 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     });
 
     expect(renameInput()).not.toBeNull();
-    expect(input?.value).toBe('First session');
+    expect(input?.value).toBe('Renamed draft');
     expect(loadSession).not.toHaveBeenCalled();
   });
 
@@ -374,6 +427,24 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     const row = findRow('First session');
     await act(async () => {
       row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+
+    expect(renameInput()).not.toBeNull();
+    expect(loadSession).not.toHaveBeenCalled();
+  });
+
+  it('opens rename on a double click of the title without a prior single click', async () => {
+    active.sessions = [makeSession('s1', { displayName: 'First session' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    // A plain double click (no single click first) reaches the row's
+    // onDoubleClick handler through the title and mounts the form.
+    await act(async () => {
+      findTitleLabel('First session').dispatchEvent(
+        new MouseEvent('dblclick', { bubbles: true }),
+      );
     });
 
     expect(renameInput()).not.toBeNull();
@@ -420,8 +491,12 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     renderSidebar();
     await flushSidebar();
 
+    // The click lands on the label that carries the handler, so this case
+    // executes the !showRename gate; deleting that gate turns it red
+    // (startRename bails on the same capability check, so neither the form
+    // nor the row open fires).
     await act(async () => {
-      click(findTitle('First session'));
+      click(findTitleLabel('First session'));
     });
 
     expect(loadSession).toHaveBeenCalledWith('s1', '/tmp/project');
@@ -443,6 +518,69 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
 
     expect(loadSession).toHaveBeenCalledWith('s1', '/tmp/project');
     expect(renameInput()).toBeNull();
+  });
+
+  it('opens the session on a single click of a pinned duplicate row title', async () => {
+    // The group section renders only with session organization enabled.
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'workspace_session_metadata'],
+    };
+    workspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'workspace_session_metadata'],
+    };
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    active.sessions = [member];
+    active.data = active.sessions;
+    pinned.sessions = [member];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    // The member renders twice: in the Pinned section and in its group
+    // section. The group row cannot host the rename form (the
+    // Pinned-section copy does), so a single click on its title must open
+    // the session, not swallow the click or mount a rival input on the
+    // other row.
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Pinned member'));
+    expect(groupRow).toBeDefined();
+    const groupLabel = groupRow!.querySelector<HTMLElement>(
+      '[data-web-shell-session-title]',
+    )!.firstElementChild as HTMLElement;
+    await act(async () => {
+      click(groupLabel);
+    });
+    await flushSidebar();
+
+    expect(loadSession).toHaveBeenCalledWith('pinned-member', '/tmp/project');
+    expect(
+      container.querySelectorAll('input[aria-label^="Rename:"]').length,
+    ).toBe(0);
   });
 
   it('opens the session on a single click of the content-search snippet', async () => {
@@ -495,6 +633,46 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
     expect(renameInput()).toBeNull();
   });
 
+  it('renders no snippet for a later search the daemon answers with no hits', async () => {
+    active.sessions = [makeSession('s1', { displayName: 'First session' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    // Ordered after the content-search case on purpose: its
+    // searchWorkspaceSessions override must not leak into this case's
+    // search, which the daemon answers with no hits.
+    const searchToggle = container.querySelector(
+      'button[aria-label="Search sessions"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      click(searchToggle);
+    });
+    const searchBox = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(searchBox).not.toBeNull();
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    await act(async () => {
+      setValue?.call(searchBox as HTMLInputElement, 'qqq');
+      (searchBox as HTMLInputElement).dispatchEvent(
+        new Event('input', { bubbles: true }),
+      );
+    });
+    // useSessionContentSearch debounces the daemon call by 300ms.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelector('[class*="sessionSearchSnippet"]'),
+    ).toBeNull();
+  });
+
   it('keeps the selection and opens the session when a text selection is active', async () => {
     active.sessions = [makeSession('s1', { displayName: 'First session' })];
     active.data = active.sessions;
@@ -516,5 +694,37 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
 
     expect(loadSession).toHaveBeenCalledWith('s1', '/tmp/project');
     expect(renameInput()).toBeNull();
+  });
+
+  it('opens the rename dialog on a single click of a standalone row title', async () => {
+    workspace.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [STANDALONE_SESSIONS_CAPABILITY, 'workspace_session_metadata'],
+    };
+    workspace.client.listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [makeSession('st1', { displayName: 'Standalone chat' })],
+      nextCursor: undefined,
+    });
+    renderStandaloneSidebar();
+    await flushSidebar();
+
+    // Standalone rows never mount the inline form (isEditing is gated on
+    // !standalone); the single title click takes the row's double-click
+    // entry point, which opens the rename dialog instead of the session.
+    await act(async () => {
+      click(findTitleLabel('Standalone chat'));
+    });
+    await flushSidebar();
+
+    expect(loadStandaloneSession).not.toHaveBeenCalled();
+    // The dialog portals outside the sidebar tree; its input carries the
+    // prefilled label and has no aria-label, unlike the inline form's
+    // "Rename: …" input.
+    const dialogInput = Array.from(document.querySelectorAll('input')).find(
+      (input) =>
+        input.value === 'Standalone chat' &&
+        !(input.getAttribute('aria-label') ?? '').startsWith('Rename:'),
+    );
+    expect(dialogInput).toBeDefined();
   });
 });
