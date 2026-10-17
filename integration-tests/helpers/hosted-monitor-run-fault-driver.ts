@@ -1523,7 +1523,7 @@ async function runStoreFailureCase() {
 // holds its slot for up to a minute after its case moves on. On a fast
 // host drain-release found all four slots held and its reservation was
 // refused (the store's "Publication capacity exhausted", which the Harness
-// logs as "The request is invalid."), so the run never started. Under a
+// logged as "The request is invalid."), so the run never started. Under a
 // 10 s lease a capture stops counting within ten seconds of its last
 // renewal. FG8d's one store arm matches a single stop-revision commit, so
 // the extra writer and activation renewals a shorter lease brings never
