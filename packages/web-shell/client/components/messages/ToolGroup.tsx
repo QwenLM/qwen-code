@@ -1618,12 +1618,17 @@ export const ToolLine = memo(function ToolLine({
             )}
           </div>
         )}
-      {tool.toolResult && (
-        <ManagedToolResultSummary
-          result={tool.toolResult}
-          onOpen={onToolResultOpen}
-        />
-      )}
+      {tool.toolResult &&
+        (expanded ||
+          tool.toolResult.execution_status !== 'success' ||
+          tool.toolResult.capture_status === 'partial' ||
+          tool.toolResult.capture_status === 'unavailable' ||
+          tool.toolResult.delivery_status !== 'committed') && (
+          <ManagedToolResultSummary
+            result={tool.toolResult}
+            onOpen={onToolResultOpen}
+          />
+        )}
     </div>
   );
 }, areToolLinePropsEqual);

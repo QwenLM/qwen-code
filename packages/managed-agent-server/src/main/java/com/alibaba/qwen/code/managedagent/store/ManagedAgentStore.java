@@ -43,6 +43,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -392,21 +393,23 @@ public class ManagedAgentStore implements AgentStateStore {
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        boolean sshWorkspace = isSshWorkspace(workspace.binding());
+        if (sshWorkspace) {
+            requireSshToolProfile(pin.toolProfile());
+        }
         boolean resident = residentWorkspaces.find(workspace.binding()) != null;
         if (resident) {
             if (!workspaceFilesEnabled) {
                 throw workspaceExecutionUnavailable();
             }
             residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
-        } else {
+        } else if (!sshWorkspace) {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
         }
-        // Admission already proved the agent is qwen-code or a compiled
-        // definition, so only the deployment mounts gate execution here.
         if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
@@ -905,6 +908,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String approvalMode, String toolProfile) {
     }
 
+    private boolean isSshWorkspace(ContextBinding binding) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
+                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+    }
+
+    private static void requireSshToolProfile(String profile) {
+        if (!WorkspaceToolProfiles.FILES.equals(profile) && !WorkspaceToolProfiles.SHELL.equals(profile)) {
+            throw workspaceExecutionUnavailable();
+        }
+    }
+
     @Override
     @Transactional
     public WebShellSessionOptions workspaceSessionOptions(
@@ -1122,6 +1136,9 @@ public class ManagedAgentStore implements AgentStateStore {
             throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (isSshWorkspace(session.workspace())) {
+                requireSshToolProfile(session.toolProfile());
+            }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
@@ -1150,12 +1167,15 @@ public class ManagedAgentStore implements AgentStateStore {
         String turnId = publicId("turn");
         insertTurn(tenantId, sessionId, turnId,
                 UUID.randomUUID().toString(), input, payloadDigest, now);
+        byte[] actorKey = commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, "COMPLETED", null,
-                commandActorKey(tenantId, actorId), now);
+                sessionId, turnId, "COMPLETED", null, actorKey, now);
+        String operationId = insertTurnCommandOperation(tenantId, sessionId,
+                turnId, OperationKind.SUBMIT_INPUT, operation, idempotencyKey,
+                requestDigest, actorKey, session.status(), now);
         appendEvent(tenantId, sessionId, turnId, "turn.accepted",
                 acceptedData(turnId, input), false, null, now);
-        return new Admission(sessionId, turnId, false, true);
+        return new Admission(sessionId, turnId, false, true, operationId);
     }
 
     @Transactional
@@ -1171,15 +1191,18 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
-        if (requireLegacySessionForUpdate(tenantId, sessionId).workspace() != null
-                && !workspaceFilesEnabled) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() != null && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         long now = clock.millis();
+        byte[] actorKey = commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, "COMPLETED", null,
-                commandActorKey(tenantId, actorId), now);
+                sessionId, turnId, "COMPLETED", null, actorKey, now);
+        String operationId = insertTurnCommandOperation(tenantId, sessionId,
+                turnId, OperationKind.CANCEL, operation, idempotencyKey,
+                requestDigest, actorKey, session.status(), now);
         boolean commandEffect = ACTIVE_TURN_STATES.contains(turn.status())
                 && !"CANCELLING".equals(turn.status());
         if (commandEffect) {
@@ -1196,7 +1219,13 @@ public class ManagedAgentStore implements AgentStateStore {
                         false, null, now);
             }
         }
-        return new Admission(sessionId, turnId, false, commandEffect);
+        if (!commandEffect) {
+            // A Turn that already ended settles the cancel now; one already
+            // cancelling carries this cancel with the earlier one.
+            settleTurnCommands(tenantId, sessionId, turnId, now);
+        }
+        return new Admission(sessionId, turnId, false, commandEffect,
+                operationId);
     }
 
     @Override
@@ -1857,6 +1886,150 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private static final String SESSION_OPERATION_KINDS =
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL')";
+    // D7-1: a Turn input or cancel command targets its Turn, never the
+    // Session, so no Session barrier above counts it: the Turn row is its
+    // barrier, and the Turn dispatcher, which holds the only lease that may
+    // act on the Turn, is its only deliverer.
+    private static final String TURN_COMMAND_KINDS = "('SUBMIT_INPUT', 'CANCEL')";
+
+    private String insertTurnCommandOperation(String tenantId,
+            String sessionId, String turnId, OperationKind kind,
+            String command, String idempotencyKey, String requestDigest,
+            byte[] actorKey, String sessionStatus, long now) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String target = turnOperationTarget(turnId);
+        String operationId = publicId("op");
+        String operationKey = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
+                scope, target, operationId);
+        jdbc.update(
+                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                    + " target_kind, target_key, target_id, phase, request_json,"
+                    + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
+                    + " actor_key, idempotency_key, request_digest, state, admission_stage,"
+                    + " delivery_state, session_status_before, available_at, gmt_create,"
+                    + " gmt_modified) VALUES (?, ?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?)",
+                operationKey,
+                scope,
+                scope,
+                target,
+                turnId,
+                writeJson(Map.of("schemaVersion", 1, "kind", kind.name(),
+                        "sessionId", sessionId, "turnId", turnId)),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                        idempotencyKey),
+                tenantId,
+                sessionId,
+                operationId,
+                kind.name(),
+                actorKey,
+                idempotencyKey,
+                requestDigest,
+                sessionStatus,
+                now,
+                now,
+                now);
+        ManagedReceipts.linkCommandOperation(jdbc, tenantId, command,
+                idempotencyKey, operationKey);
+        return operationId;
+    }
+
+    private static String turnOperationTarget(String turnId) {
+        return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(turnId);
+    }
+
+    /**
+     * Settles the open input and cancel operations of a Turn from the Turn's
+     * own committed facts, in the transaction that commits them. Input is
+     * accepted once the Turn holds a Harness event epoch, the fact its
+     * dispatcher records when a Harness admits the Turn; until then a
+     * cancelled or failed Turn ends the input undelivered. A cancel
+     * completes when the Turn is cancelled — by the Harness, or by Java
+     * before any Harness admitted it — and fails turn_already_settled when
+     * the Turn ended otherwise. A Turn that has not ended leaves its cancels
+     * pending, so cancels of one Turn coalesce.
+     */
+    private void settleTurnCommands(String tenantId, String sessionId,
+            String turnId, long now) {
+        // Current reads only: every caller holds the Session row, but its
+        // snapshot may predate that lock and miss a cancel committed since.
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
+        boolean admitted = turn.harnessEventEpoch() != null;
+        if (admitted) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "COMPLETED", "HARNESS_CONFIRMED",
+                    null, now);
+        } else if ("CANCELLED".equals(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "CANCELLED", "JAVA_DURABLE",
+                    null, now);
+        } else if ("FAILED".equals(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "FAILED", "JAVA_DURABLE",
+                    turn.errorCode(), now);
+        }
+        if ("CANCELLED".equals(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.CANCEL, "COMPLETED",
+                    admitted ? "HARNESS_CONFIRMED" : "JAVA_DURABLE", null, now);
+        } else if (!ACTIVE_TURN_STATES.contains(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
+                    "turn_already_settled", now);
+        }
+    }
+
+    // Only a completed operation is delivered and carries a receipt; a
+    // failed or cancelled one stays java_durable and blocked, so it is never
+    // delivered again.
+    private void settleTurnCommand(String tenantId, String sessionId,
+            String turnId, OperationKind kind, String state,
+            String admissionStage, String failureCode, long now) {
+        boolean completed = "COMPLETED".equals(state);
+        // The identity index confines this locking scan to the Turn's own
+        // operations. Left to the optimizer, a long settled history steers it
+        // to a (kind, state) index whose range holds every Session's pending
+        // rows, and two Sessions' settles then deadlock. H2 skips the hint.
+        for (String operationKey : jdbc.queryForList("SELECT operation_key"
+                        + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
+                        + " WHERE scope_key = ? AND"
+                        + " operation_kind = ? AND target_key = ? AND state ="
+                        + " 'PENDING' FOR UPDATE", String.class,
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                kind.name(), turnOperationTarget(turnId))) {
+            jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"
+                            + " admission_stage = ?, delivery_state = ?,"
+                            + " receipt_id = ?, failure_code = ?,"
+                            + " gmt_modified = ?, completed_at = ? WHERE"
+                            + " operation_key = ? AND state = 'PENDING'",
+                    state, state, admissionStage,
+                    completed ? "CONFIRMED" : "BLOCKED",
+                    completed ? publicId("rcpt") : null, failureCode, now,
+                    now, operationKey);
+        }
+    }
+
+    private Optional<OperationRecord> findTurnCommandOperation(
+            String tenantId, String sessionId, String operationId) {
+        return jdbc
+                .query(
+                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
+                                + TURN_COMMAND_KINDS
+                                + " AND operation_id = ?",
+                        (result, row) -> {
+                            if (!tenantId.equals(result.getString("tenant_id"))
+                                    || !sessionId.equals(result.getString("session_id"))) {
+                                throw new IllegalStateException(
+                                        "Session operation identity does not match its index key");
+                            }
+                            return operationMapper.mapRow(result, row);
+                        },
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        operationId)
+                .stream()
+                .findFirst();
+    }
 
     private static String sessionOperationTarget(String sessionId) {
         return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(sessionId);
@@ -2855,7 +3028,9 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId) {
-        return findSessionOperation(tenantId, sessionId, operationId, false);
+        return findSessionOperation(tenantId, sessionId, operationId, false)
+                .or(() -> findTurnCommandOperation(tenantId, sessionId,
+                        operationId));
     }
 
     @Override
@@ -2866,9 +3041,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 new ArrayList<>(
                         jdbc.query(
                                 // Every blocked lifecycle shape is
-                                // re-driven: only CLOSE and DELETE are ever
-                                // delivered (an archive completes at
-                                // admission), and both publish their waits.
+                                // re-driven. CLOSE, DELETE and CWD_CHANGE
+                                // are the delivered kinds (an archive
+                                // completes at admission): CLOSE and DELETE
+                                // publish their writer-live and stale-boot
+                                // waits, and a cwd change stays bounded by
+                                // its own attempt budget in the coordinator
+                                // (review round 2, R2-15).
                                 "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
                                     + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE',"
                                     + " 'CWD_CHANGE') AND state IN ('PENDING', 'RUNNING',"
@@ -3286,17 +3465,24 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest) {
-        CommandRecord command = findCommand(tenantId, operation,
-                idempotencyKey).orElseThrow(() -> new ApiException(
-                        HttpStatus.CONFLICT, "idempotency_conflict",
-                        "The idempotency key is already in use."));
+        ManagedReceipts.Receipt command = ManagedReceipts.command(jdbc,
+                tenantId, operation, idempotencyKey, false);
+        if (command == null) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict",
+                    "The idempotency key is already in use.");
+        }
         if (!command.requestDigest().equals(requestDigest)) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "idempotency_conflict",
                     "The idempotency key was reused with different content.");
         }
+        String operationId = command.resultOperationKey() == null ? null
+                : jdbc.queryForObject("SELECT operation_id FROM ma_operation"
+                                + " WHERE operation_key = ?", String.class,
+                        command.resultOperationKey());
         return new Admission(command.sessionId(), command.turnId(), true,
-                false);
+                false, operationId);
     }
 
     public Optional<CommandRecord> findCommand(String tenantId,
@@ -3790,10 +3976,8 @@ public class ManagedAgentStore implements AgentStateStore {
             // as VARCHAR, and a command it recompiles after binding (any
             // new session or SET in between) refuses VARBINARY rows against
             // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
-            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
-                    .identity(turn.sessionId()));
-            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
-                    .identity(turn.turnId()));
+            arguments.add(ManagedSchemaKeys.identity(turn.sessionId()));
+            arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest
@@ -4336,6 +4520,7 @@ public class ManagedAgentStore implements AgentStateStore {
             appendEvent(tenantId, sessionId, turnId, "turn.started",
                     Map.of("turnId", turnId), false, null, now);
         }
+        settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
     @Transactional
@@ -4396,6 +4581,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Hosted Harness recovery epoch changed");
         }
+        settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
     @Transactional
@@ -4754,6 +4940,9 @@ public class ManagedAgentStore implements AgentStateStore {
         List<EventRecord> committed = appendEvents(tenantId, sessionId,
                 turnId, eventEpoch, lastSourceId, session.lastSequence(),
                 projected, now);
+        if (terminal != null) {
+            settleTurnCommands(tenantId, sessionId, turnId, now);
+        }
         publishAfterCommit(committed);
     }
 
@@ -4877,6 +5066,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         appendEvent(tenantId, sessionId, turnId, "turn.cancelled",
                 Map.of("turnId", turnId), true, null, now);
+        settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
     @Transactional
@@ -4906,6 +5096,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         appendEvent(tenantId, sessionId, turnId, "turn.failed",
                 Map.of("code", code, "message", message), true, null, now);
+        settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
     @Transactional
@@ -5654,7 +5845,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "CLOSING";
             case ARCHIVE -> "ARCHIVING";
             case DELETE -> "DELETING";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
@@ -5664,7 +5855,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.close.requested";
             case ARCHIVE -> "session.archive.requested";
             case DELETE -> "session.delete.requested";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
@@ -5674,7 +5865,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.closed";
             case ARCHIVE -> "session.archived";
             case DELETE -> "session.deleted";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }

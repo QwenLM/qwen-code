@@ -85,6 +85,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
     ],
+    [
+      /github\.event_name == 'pull_request'/,
+      String(eventName === 'pull_request'),
+    ],
     [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
@@ -757,6 +761,68 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       );
     });
   }
+
+  it('release-managed-agent-reference.yml build: only trusted PR dry runs reach the pool', () => {
+    const doc = parse(
+      readFileSync(
+        join(workflowsDir, 'release-managed-agent-reference.yml'),
+        'utf8',
+      ),
+    );
+    const runsOn = String(doc.jobs.build['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+    assert.deepEqual(route('pull_request', true, 'NONE'), ECS_LABELS);
+    for (const assoc of TRUSTED) {
+      assert.deepEqual(route('pull_request', false, assoc), ECS_LABELS, assoc);
+    }
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      assert.deepEqual(route('pull_request', false, assoc), HOSTED_LABELS);
+    }
+    // The dispatch build produces the published assets.
+    assert.deepEqual(route('workflow_dispatch', true, ''), HOSTED_LABELS);
+    assert.deepEqual(route('pull_request', true, 'OWNER', true), HOSTED_LABELS);
+    assert.equal(doc.jobs.publish['runs-on'], 'ubuntu-latest');
+  });
+
+  it('release-managed-agent-reference.yml build is safe on a shared pool host', () => {
+    const text = readFileSync(
+      join(workflowsDir, 'release-managed-agent-reference.yml'),
+      'utf8',
+    );
+    const build = parse(text).jobs.build;
+    // A service container cannot take a command, so it always reserves native
+    // AIO contexts and can exhaust the pool host's fs.aio-max-nr (#14416).
+    assert.equal(build.services, undefined);
+    const start = build.steps.find(
+      (s) => s.name === 'Start MySQL without native AIO',
+    );
+    assert.match(start.run, /--publish '127\.0\.0\.1::3306'/);
+    assert.match(start.run, /type=tmpfs,destination=\/var\/lib\/mysql/);
+    assert.match(start.run, /--innodb-use-native-aio=0/);
+    assert.match(start.run, /MYSQL_PORT=.*GITHUB_ENV/);
+    const remove = build.steps.find(
+      (s) => s.name === 'Remove the MySQL container',
+    );
+    assert.match(remove.if, /always\(\)/);
+    const run = (name) => build.steps.find((s) => s.name === name).run;
+    assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
+    assert.match(
+      run('Build Java components'),
+      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
+    );
+    assert.match(
+      run('Assemble reference distribution'),
+      /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
+    );
+    const boot = run('Verify and boot the exact archive');
+    assert.match(boot, /SERVER_PORT="\$\{server_port\}"/);
+    assert.doesNotMatch(boot, /:8080|:3306\//);
+    const setupNode = build.steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-node'),
+    );
+    assert.equal(setupNode.if, "${{ runner.environment == 'github-hosted' }}");
+  });
 
   it('tui-parity keeps setup-node and the pnpm cache off the pool', () => {
     // nodejs.org may be unreachable through the pool's egress proxy, and the

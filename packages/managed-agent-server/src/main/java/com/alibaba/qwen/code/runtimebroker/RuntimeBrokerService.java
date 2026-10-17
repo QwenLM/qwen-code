@@ -295,6 +295,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return provisioner.supportsDrainedStop();
     }
 
+    public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        return provisioner.supportsDrainedStop(binding);
+    }
+
     public void requestHarnessDrain(String tenantId, String harnessSessionId) {
         requireOpen();
         bindingRepository.requestHarnessDrain(tenantId, harnessSessionId);
@@ -465,7 +469,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     ? CompletableFuture.completedFuture(null)
                     : failed(conflict("workspace_close_identity_unverified", "Released binding has no original stop proof"));
         }
-        if (!saved.getRequest().isManagedContext() || !provisioner.supportsDrainedStop()
+        if (!saved.getRequest().isManagedContext() || !provisioner.supportsDrainedStop(saved)
                 || saved.getState() == RuntimeBindingRecord.State.OPERATOR_RECOVERY
                 || saved.getState() == RuntimeBindingRecord.State.FAILED) {
             return failed(conflict("workspace_close_identity_unverified", "Original worker needs recovery"));
@@ -526,7 +530,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                     }
                     var receipt = renewal.current.get().getDrainReceipt();
-                    return receipt == null ? provisioner.stopDrained(draining)
+                    return receipt == null ? stopAcknowledgedRuntime(draining)
                             : CompletableFuture.completedFuture(receipt);
                 }).thenAccept(receipt -> {
                     if (authority != null) {
@@ -572,6 +576,98 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
                 : drainSessions(binding, renewal, authority, batch.getLast().getRuntimeSessionId()));
+    }
+
+    private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        var batch = executionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
+        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
+        for (var execution : batch) {
+            work = work.thenCompose(ignored -> acknowledgePersistedTools(binding, execution));
+        }
+        return work.thenCompose(ignored -> batch.size() < 100 ? CompletableFuture.completedFuture(null)
+                : acknowledgeDrainedTools(binding, batch.getLast().getExecutionCallId()));
+    }
+
+    private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
+            return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
+        }
+        return safeStage(() -> provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), binding.getLease())).handle((observation, error) -> {
+                    if (error != null) {
+                        Throwable cause = unwrap(error);
+                        if (cause instanceof RuntimeBrokerException failure && failure.getCode().contains("conflict")) {
+                            return RuntimeBrokerService.<RuntimeDrainReceipt>failed(failure);
+                        }
+                        return safeStage(() -> provisioner.stopDrained(binding));
+                    }
+                    if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.READY) {
+                        return safeStage(() -> provisioner.stopDrained(binding));
+                    }
+                    RuntimeLease lease = binding.getLease();
+                    if (!binding.getResourceHandle().equals(observation.getHandle())
+                            || !lease.getRuntimeInstanceId().equals(observation.getRuntimeInstanceId())
+                            || !lease.getLeaseId().equals(observation.getLeaseId()) || lease.getEpoch() != observation.getEpoch()
+                            || !lease.getEndpoint().equals(observation.getEndpoint())) {
+                        return RuntimeBrokerService.<RuntimeDrainReceipt>failed(conflict("workspace_close_identity_unverified",
+                                "Original SSH worker identity changed"));
+                    }
+                    return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
+                }).thenCompose(stage -> stage);
+    }
+
+    private CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                || !execution.isSettled() || execution.getResult() == null
+                || ProviderRuntimeProtocol.isReference(execution.getReference())) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Map<String, Object> noStart = sshNoStartReceipt(binding, execution);
+        if (noStart == null && (execution.getResult().containsKey("capture")
+                || Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
+                || "deferred_v3".equals(execution.getReference().get("dispatchMode")))) {
+            return CompletableFuture.completedFuture(null);
+        }
+        RuntimeSessionRecord session = sessionRepository.findById(binding.getRequest().getScope(),
+                execution.getRuntimeSessionId());
+        if (binding.getLease() == null || session == null || !execution.belongsTo(session)
+                || !binding.getBindingId().equals(execution.getBindingId())
+                || binding.getGeneration() != execution.getRuntimeGeneration()
+                || !binding.getRequest().getIsolationKey().equals(execution.getHarnessSessionId())) {
+            return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
+        }
+        if (noStart != null) {
+            CompletionStage<Map<String, Object>> acknowledgement = "deferred_v3".equals(execution.getReference().get("dispatchMode"))
+                    ? transport.acknowledgeV3(binding.getLease(), session.getSession(), execution.getReference(), noStart)
+                    : transport.acknowledge(binding.getLease(), session.getSession(), execution.getReference(), noStart);
+            return acknowledgement.thenAccept(answer -> {
+                if (answer == null || !Set.of("settled", "unknown").contains(answer.get("state"))) {
+                    throw conflict("runtime_execution_conflict", "Original Runtime did not confirm the no-start acknowledgement");
+                }
+            });
+        }
+        return transport.acknowledgeV2(binding.getLease(), session.getSession(), execution.getReference());
+    }
+
+    private static Map<String, Object> sshNoStartReceipt(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
+        if (!SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
+                || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
+                || execution.getResult() == null || !execution.getResult().containsKey("capture")
+                || execution.getResult().get("capture") != null
+                || !(Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
+                        || "deferred_v3".equals(execution.getReference().get("dispatchMode")))
+                || ProviderRuntimeProtocol.isReference(execution.getReference())) {
+            return null;
+        }
+        Map<String, Object> receipt = new LinkedHashMap<>();
+        receipt.put("executionCallId", execution.getExecutionCallId());
+        receipt.put("manifest", null);
+        receipt.put("deliveryStatus", "committed");
+        receipt.put("historyRevision", null);
+        return BrokerValues.immutableMap(receipt);
     }
 
     private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
@@ -1436,6 +1532,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         || !record.getExecutionCallId().equals(savedReceipt.get("executionCallId"))) {
                     throw conflict("runtime_execution_conflict", "Only the original settled Tool v3 result can be acknowledged");
                 }
+                Map<String, Object> noStart = sshNoStartReceipt(context.binding(), record);
+                if (noStart != null && !sameReceipt(noStart, savedReceipt)) {
+                    throw conflict("runtime_execution_conflict", "Session receipt conflicts with the durable no-start result");
+                }
                 context.beginControl();
             } finally {
                 context.unlock();
@@ -1470,7 +1570,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (!execution.isSettled()
                                 || !execution.getBindingId().equals(context.binding().getBindingId())
                                 || execution.getRuntimeGeneration() != context.binding().getGeneration()
-                                || publicationVerifier == null) {
+                                || publicationVerifier == null && sshNoStartReceipt(context.binding(), execution) == null) {
                             throw conflict("runtime_execution_conflict", "Original Tool v3 execution is unavailable");
                         }
                         context.beginControl();
@@ -1503,7 +1603,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             .whenComplete((ignored, error) -> context.endControl());
                     }
                     return mapFailure(safeStage(() -> {
-                        Map<String, Object> saved = publicationVerifier.receipt(original);
+                        Map<String, Object> saved = sshNoStartReceipt(context.binding(), original);
+                        if (saved == null) {
+                            saved = publicationVerifier.receipt(original);
+                        }
                         if (saved == null || !sameReceipt(saved, receipt)) {
                             throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
                         }
@@ -2495,6 +2598,56 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     ToolExecutionRecord invocation = requireExecution(context, invocationId);
                     ToolExecutionRecord process = requireExecution(context, invocationId + ":process");
                     return observeProcessRow(context, invocation, process);
+                });
+    }
+
+    /**
+     * H4f: the public task cancel's stop of one background Shell or
+     * Monitor watch, named by the call that started it inside the Harness
+     * Session that owns the task. It runs the drain sweep's status → stop
+     * → status for that one hold row, so only the worker's exit evidence
+     * settles the row, and the worker answers a stop only after the
+     * stop-marked finalize that settles the task's record has returned.
+     * It runs unfenced, like a client Monitor control: the hold row itself
+     * keeps the Runtime Session from releasing while the process may run,
+     * so a racing close's drain is never refused busy because of it.
+     */
+    public CompletionStage<ToolExecutionRecord> stopBackgroundProcess(
+            String tenantId, String harnessSessionId,
+            String executionCallId) {
+        requireOpen();
+        String invocationId = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        ToolExecutionRecord row = executionRepository.findByExecutionCallId(
+                invocationId + ":process");
+        if (row == null || !row.getHarnessSessionId().equals(harnessSessionId)) {
+            return failed(notFound("runtime_execution_not_found",
+                    "The background process was not found"));
+        }
+        return requireReadySession(harnessSessionId, row.getRuntimeSessionId())
+                .thenCompose(context -> {
+                    if (!context.session().getScope().getTenantId()
+                            .equals(tenantId)) {
+                        throw notFound("runtime_execution_not_found",
+                                "The background process was not found");
+                    }
+                    ToolExecutionRecord invocation = requireExecution(context,
+                            invocationId);
+                    ToolExecutionRecord process = requireExecution(context,
+                            row.getExecutionCallId());
+                    return observeScannedProcessRow(context, invocation,
+                            process)
+                            .thenCompose(current -> current.isTerminal()
+                                    ? CompletableFuture.completedFuture(
+                                            current)
+                                    : controlProcessRow(context, invocation,
+                                            current, stopKind(current),
+                                            false))
+                            .thenCompose(current -> current.isTerminal()
+                                    ? CompletableFuture.completedFuture(
+                                            current)
+                                    : observeScannedProcessRow(context,
+                                            invocation, current));
                 });
     }
 
@@ -3982,7 +4135,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         RuntimeBindingRecord record = bindingRepository.findById(bindingId);
         if (record == null || record.getGeneration() != expectedGeneration
-                || !provisioner.kind().equals(record.getRequest().getProvisionerKind())) {
+                || !provisioner.supportsKind(record.getRequest().getProvisionerKind())) {
             return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
         }
         // Close owns retirement after journal settlement. Observing its retired
@@ -4401,6 +4554,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         markUnknown(executing);
                     }
                     return null;
+                }).thenCompose(ignored -> {
+                    if (!SshRuntimeProvisioner.KIND.equals(context.binding().getRequest().getProvisionerKind())) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    ToolExecutionRecord settled = executionRepository.findByExecutionCallId(executing.getExecutionCallId());
+                    return settled != null && settled.sameIdentity(executing)
+                            ? acknowledgePersistedTools(context.binding(), settled).exceptionally(error -> null)
+                            : CompletableFuture.completedFuture(null);
                 }).whenComplete((ignored, error) -> renewal.close());
     }
 

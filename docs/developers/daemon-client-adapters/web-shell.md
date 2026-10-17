@@ -61,6 +61,16 @@ last event id on `DaemonSessionClient`, and reconnects the stream by default.
 Callers can disable that with `autoReconnect={false}` for tests or custom
 connection management.
 
+### Removing composer attachments
+
+In the desktop Web Shell composer, when the text body is empty and the caret
+is at its start with no selection, Backspace or Delete first removes a
+removable context tag using that key's existing order. If no removable context
+tag remains, it removes the last file attachment, or the last pasted image
+when there are no files. File and image attachments are retained while the
+text body is non-empty. Attachments can also be removed using their individual
+remove buttons.
+
 ## Browser Deployment Shapes
 
 ### Same-Origin Local POC
