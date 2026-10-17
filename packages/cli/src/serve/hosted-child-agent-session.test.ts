@@ -914,6 +914,49 @@ describe('hosted child agent session (H4b)', () => {
     });
   });
 
+  // #14387: a recovery-blocked run is parked — evidence of an unwitnessed
+  // execution, never live work — so it holds no launch-admission slot:
+  // a full scope of blocked children must not refuse the next launch.
+  it('does not count a recovery-blocked run against the scope concurrency cap', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      // Four children each dispatch, then block on a lost generation.
+      for (let i = 1; i <= MANAGED_CHILD_LIMITS.maxActivePerScope; i++) {
+        await children.admit(
+          launchParams({
+            childRunId: `run-${i}`,
+            executionCallId: `call-${i}`,
+          }),
+        );
+        await children.dispatchStarted(`run-${i}`, {
+          dispatchId: `dispatch-${i}`,
+          runtime: BINDING,
+        });
+        await children.settleRecoveryBlocked(`run-${i}`, {
+          reason: 'runtime_lost',
+        });
+      }
+      // The parked runs are evidence, not live work — the scope's slots
+      // are all free.
+      expect(children.activeChildRunsOf('scope-main')).toHaveLength(0);
+      // ...so the next launch is admitted, past the count the blocked
+      // runs would have held without the exclusion.
+      await children.admit(
+        launchParams({
+          childRunId: 'run-next',
+          executionCallId: 'call-next',
+        }),
+      );
+      expect(
+        children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
+      ).toEqual(['run-next']);
+    });
+  });
+
   it('refuses consumption steps the acceptance never reached', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {

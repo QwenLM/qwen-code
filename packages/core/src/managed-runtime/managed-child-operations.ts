@@ -583,6 +583,37 @@ export function childCancelBody(
   });
 }
 
+/**
+ * #14387: the recovery-blocked settlement — the Harness generation running
+ * this child was lost and its execution's outcome stays unwitnessed (the
+ * workflow kind's in-process work leaves no witness on a new generation).
+ * The run is blocked, never ended: no stop reason, the delivery is not
+ * cancelled, and the execution stays provably unknown so a later revision
+ * could still settle the run if evidence ever arrived.
+ */
+export function childRecoveryBlockedBody(
+  previous: ChildSessionRun,
+  params: {
+    readonly reason: ChildSessionRun['run']['reason'];
+    readonly childSessionId?: string;
+  },
+): ChildSessionRun {
+  return Object.freeze({
+    ...previous,
+    childSessionId: adoptChildSessionId(
+      previous,
+      params.childSessionId,
+      'recovery_blocked',
+    ),
+    run: Object.freeze({
+      ...previous.run,
+      state: 'recovery_blocked',
+      reason: params.reason,
+      execution: 'outcome_unknown',
+    }),
+  });
+}
+
 /** One delivery step on an ended run: accepting → accepted → consumed, or
  * a pre-acceptance step into unknown (the relay's retry vocabulary). */
 export function childDeliveryBody(
