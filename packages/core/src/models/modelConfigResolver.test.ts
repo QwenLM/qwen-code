@@ -608,6 +608,34 @@ describe('modelConfigResolver', () => {
     });
   });
 
+  describe('model-specific auto-compaction threshold', () => {
+    it('resolves the provider override and records its source', () => {
+      const result = resolve({
+        settings: { generationConfig: { autoCompactThreshold: 0.9 } },
+        modelProvider: provider({ autoCompactThreshold: 0.25 }),
+        env: PROVIDER_ENV,
+      });
+
+      expect(result.config.autoCompactThreshold).toBe(0.25);
+      expect(result.sources['autoCompactThreshold']).toEqual({
+        kind: 'modelProviders',
+        authType: AuthType.USE_OPENAI,
+        modelId: 'model',
+        detail: 'generationConfig.autoCompactThreshold',
+      });
+    });
+
+    it('preserves an explicit setting for a raw model', () => {
+      const result = envOnly('custom-model', { autoCompactThreshold: 0.4 });
+
+      expect(result.config.autoCompactThreshold).toBe(0.4);
+      expect(result.sources['autoCompactThreshold']).toEqual({
+        kind: 'settings',
+        settingsPath: 'model.generationConfig.autoCompactThreshold',
+      });
+    });
+  });
+
   describe('enableRequestMetadata reaches the provider through configuration', () => {
     // The DashScope provider reads enableRequestMetadata off the resolved
     // ContentGeneratorConfig. If the field is missing from

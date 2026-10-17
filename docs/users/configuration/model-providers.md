@@ -740,6 +740,54 @@ The configuration resolution follows a strict layering model with one crucial ru
 | 3        | `settings.model.generationConfig`             | Only used for **Runtime Models** (when no provider model is selected)                                    |
 | 4        | Content-generator defaults                    | Provider-specific defaults (e.g., OpenAI vs Gemini) - only for Runtime Models                            |
 
+### Per-model auto-compaction threshold
+
+Set `generationConfig.autoCompactThreshold` to a ratio greater than `0` and at
+most `1` to choose an earlier compaction point for an individual model:
+
+```json
+{
+  "context": {
+    "autoCompactThreshold": 0.85
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "large-context-model",
+        "envKey": "OPENAI_API_KEY",
+        "generationConfig": {
+          "contextWindowSize": 1000000,
+          "autoCompactThreshold": 0.25
+        }
+      },
+      {
+        "id": "smaller-context-model",
+        "envKey": "OPENAI_API_KEY",
+        "generationConfig": {
+          "contextWindowSize": 262144
+        }
+      }
+    ]
+  }
+}
+```
+
+The large model compacts at approximately 250,000 tokens. The smaller model
+uses the global `0.85` ratio, approximately 222,822 tokens. The existing safety
+ceiling can trigger compaction earlier when necessary to leave room for the
+summary.
+
+A valid override on the model actually serving the conversation takes
+precedence over `context.autoCompactThreshold`, including when a child agent
+uses a different model. A missing or invalid model override falls back to the
+global value; if that is also missing or invalid, the default is `0.85`.
+Switching to another model without an override restores the global/default
+behavior.
+
+Keep `contextWindowSize` equal to the model's real capacity. Reducing it to
+force earlier compaction also reduces the available output budget; use
+`autoCompactThreshold` to change compaction timing independently.
+
 ### Dynamic values in `customHeaders`
 
 A `customHeaders` value may contain the placeholder `${session_id}`, which is
