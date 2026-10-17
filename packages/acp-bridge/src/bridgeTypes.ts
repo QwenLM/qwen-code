@@ -1308,6 +1308,12 @@ export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
   cancelReason?: 'user';
+  /**
+   * Attempt to close without interrupting known active work. A negotiated
+   * child confirms atomically; refusal, uncertainty, or unsafe local state
+   * leaves the session live.
+   */
+  closeIfUnheld?: boolean;
   /** Refuse the close unless the owning runtime confirms the session is idle. */
   requireIdle?: boolean;
   /** Override the default `'client_close'` reason in the `session_closed` event. */
@@ -2261,8 +2267,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): SessionReplaySnapshot | undefined;
 
   /**
-   * Explicitly close a live session. Force-closes even when other clients
-   * are attached. Throws `SessionNotFoundError` for unknown ids.
+   * Explicitly close a live session. Force-closes even when other clients are
+   * attached unless `closeIfUnheld` requests a conditional close. Throws
+   * `SessionNotFoundError` for unknown ids.
    */
   closeSession(
     sessionId: string,
