@@ -25,12 +25,39 @@ import {
   failureSignature,
   renderIssueBody,
   renderIssueTitle,
+  renderFailureComment,
   runCli,
   shortenForTitle,
   testKey,
 } from './main-failure-signature.mjs';
 
 const ESC = '\u001B';
+
+test('reports failed jobs, steps and tests directly on a PR', () => {
+  const comment = renderFailureComment({
+    analysis: { tests: [{ id: 'com.example.HostedExtensionsIT.closes' }] },
+    occurrence: {
+      sha: 'abc123456789abcdef',
+      runId: '39042781121',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/39042781121',
+    },
+    jobs: [
+      {
+        name: 'SDK Java (full) / Hosted processes',
+        conclusion: 'failure',
+        html_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/39042781121/job/123',
+        steps: [{ name: 'Verify Hosted processes', conclusion: 'failure' }],
+      },
+      { name: 'Windows', conclusion: 'success', steps: [] },
+    ],
+  });
+  assert.match(comment, /qwen-managed-agent-ci-failure:39042781121/);
+  assert.match(comment, /Hosted processes.*\/job\/123/);
+  assert.match(comment, /Verify Hosted processes/);
+  assert.match(comment, /com\.example\.HostedExtensionsIT\.closes/);
+  assert.doesNotMatch(comment, /Windows/);
+});
 
 // Verbatim shape of the lines Actions stored for E2E run 3354 (timestamp
 // prefix + SGR escapes + the failure printed once inline and twice in the

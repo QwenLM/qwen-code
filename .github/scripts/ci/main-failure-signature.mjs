@@ -401,6 +401,38 @@ function cappedTestLines(tests) {
   return lines;
 }
 
+export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
+  const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  return [
+    `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
+    '### Java CI failed',
+    '',
+    `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
+    '',
+    ...jobs
+      .filter((job) => job.conclusion === 'failure')
+      .map((job) => {
+        const steps = (job.steps ?? [])
+          .filter((step) => step.conclusion === 'failure')
+          .map((step) => code(step.name));
+        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+      }),
+    '',
+    ...(analysis.tests.length
+      ? [
+          '**Failing tests**',
+          '',
+          ...analysis.tests
+            .slice(0, MAX_BODY_TESTS)
+            .map((test) => `- ${code(test.id)}`),
+        ]
+      : [
+          'No test identifier was available; the failed jobs above link directly to the logs.',
+        ]),
+    '',
+  ].join('\n');
+}
+
 /**
  * Build the issue body: the create path when `existingBody` is empty, otherwise
  * a merge that keeps the existing prose (an agent's or a human's notes live
@@ -431,7 +463,7 @@ export function renderIssueBody({
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
-      `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
+      `A \`${analysis.workflow}\` run failed.`,
       // The failing tests name what broke; the failed jobs name which lane
       // broke — a guard's diagnosis (the colliding files) lives only in its
       // job log.
@@ -545,6 +577,21 @@ function readFailedJobs(path) {
 export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
+
+  if (command === 'comment') {
+    process.stdout.write(
+      renderFailureComment({
+        analysis: JSON.parse(readFileSync(options.analysis, 'utf8')),
+        occurrence: {
+          sha: options.sha,
+          runId: options['run-id'],
+          runUrl: options['run-url'],
+        },
+        jobs: JSON.parse(readFileSync(options['jobs-json'], 'utf8')).jobs,
+      }),
+    );
+    return;
+  }
 
   if (command === 'analyze') {
     const logTexts = positional.map((file) => readFileSync(file, 'utf8'));
