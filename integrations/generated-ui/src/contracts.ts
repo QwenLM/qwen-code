@@ -83,10 +83,16 @@ function checkResultBudget(value: unknown): void {
   }
 }
 
-function summaryText(input: ShowInput): string {
-  return `${input.title}\n${input.summary}`.replace(/\p{Cc}/gu, (character) =>
+// Same class as the CLI's inert-text rule: terminal control characters,
+// invisible formatting (bidi overrides, zero-width), and U+2028/U+2029.
+function sweep(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (character) =>
     character === '\n' || character === '\t' ? character : '',
   );
+}
+
+function summaryText(input: ShowInput): string {
+  return sweep(`${input.title}\n${input.summary}`);
 }
 
 export function createShowResult(input: unknown): CallToolResult {
@@ -94,10 +100,17 @@ export function createShowResult(input: unknown): CallToolResult {
   if (!parsed.success) {
     throw new Error('Invalid generated view document.');
   }
+  // Sanitize once so the readable fallback, structuredContent and the hashed
+  // snapshot all carry the same inert title/summary.
+  const data: ShowInput = {
+    ...parsed.data,
+    title: sweep(parsed.data.title),
+    summary: sweep(parsed.data.summary),
+  };
   const document: GeneratedDocument = {
     schemaVersion: 1,
-    documentId: hashDocument(parsed.data),
-    ...parsed.data,
+    documentId: hashDocument(data),
+    ...data,
   };
   const result: CallToolResult = {
     content: [{ type: 'text', text: summaryText(document) }],
@@ -127,6 +140,8 @@ export function parseToolResult(value: unknown): GeneratedDocument {
     summary.documentId !== document.documentId ||
     summary.title !== document.title ||
     summary.summary !== document.summary ||
+    sweep(document.title) !== document.title ||
+    sweep(document.summary) !== document.summary ||
     result.content[0].text !== summaryText(document)
   ) {
     throw new Error('Generated view snapshot does not match its identity.');

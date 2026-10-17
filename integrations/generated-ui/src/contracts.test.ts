@@ -80,7 +80,50 @@ describe('immutable generated view contract', () => {
     const text = result.content[0];
     if (text.type !== 'text') throw new Error('Expected a text summary.');
     expect(text.text).toBe('Title[2J\nLine one\nLine two\tvalue');
-    expect(parseToolResult(result)).toMatchObject(candidate);
+    expect(parseToolResult(result)).toMatchObject({
+      ...candidate,
+      title: 'Title[2J',
+      summary: 'Line one\nLine two\tvalue',
+    });
+  });
+
+  it('keeps invisible formatting characters out of every public channel', () => {
+    const result = createShowResult({
+      ...input,
+      title: 'Rate\u202edeliah',
+      summary: 'Line\u2028one\u200bvalue',
+    });
+    const text = result.content[0];
+    if (text.type !== 'text') throw new Error('Expected a text summary.');
+    expect(text.text).toBe('Ratedeliah\nLineonevalue');
+    expect(JSON.stringify(result.structuredContent)).not.toMatch(
+      /[\p{Cf}\p{Zl}\p{Zp}]/u,
+    );
+    const document = parseToolResult(result);
+    expect(document.title).toBe('Ratedeliah');
+    expect(document.summary).toBe('Lineonevalue');
+  });
+
+  it('rejects a stored snapshot whose title or summary was not swept', () => {
+    const raw = { ...input, title: 'Rate\u202edeliah' };
+    const document = {
+      schemaVersion: 1 as const,
+      documentId: hashDocument(raw),
+      ...raw,
+    };
+    const forged = {
+      content: [
+        { type: 'text' as const, text: `${raw.title}\n${raw.summary}` },
+      ],
+      structuredContent: {
+        schemaVersion: 1 as const,
+        documentId: document.documentId,
+        title: raw.title,
+        summary: raw.summary,
+      },
+      _meta: { [META_KEY]: document },
+    };
+    expect(() => parseToolResult(forged)).toThrow('identity');
   });
 
   it.each(['title', 'summary', 'html', 'css', 'javascript'] as const)(
