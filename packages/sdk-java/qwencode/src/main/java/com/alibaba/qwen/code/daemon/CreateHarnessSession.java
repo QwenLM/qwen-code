@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.daemon;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /** Input for creating a Hosted Harness session with a caller-owned UUID. */
 public final class CreateHarnessSession {
@@ -12,9 +14,13 @@ public final class CreateHarnessSession {
     private final Long approvalTimeoutMs;
     private final Long captureBytes;
     private final Map<String, Object> agentDefinition;
+    private final List<Map<String, Object>> mcpServers;
+    private final Map<String, Object> hookCatalog;
     private final Map<String, Object> lineage;
     private final boolean suppressChildAgents;
     private final boolean childWorkspaces;
+    private final boolean foregroundOnly;
+    private final boolean childSnapshots;
 
     private CreateHarnessSession(Builder builder) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
@@ -25,9 +31,13 @@ public final class CreateHarnessSession {
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.captureBytes = builder.captureBytes;
         this.agentDefinition = builder.agentDefinition;
+        this.mcpServers = builder.mcpServers;
+        this.hookCatalog = builder.hookCatalog;
         this.lineage = builder.lineage;
         this.suppressChildAgents = builder.suppressChildAgents;
         this.childWorkspaces = builder.childWorkspaces;
+        this.foregroundOnly = builder.foregroundOnly;
+        this.childSnapshots = builder.childWorkspaces && builder.childSnapshots;
     }
 
     public static Builder builder() {
@@ -63,11 +73,23 @@ public final class CreateHarnessSession {
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
         }
+        if (mcpServers != null) {
+            result.put("mcpServers", mcpServers);
+        }
+        if (hookCatalog != null) {
+            result.put("hookCatalog", hookCatalog);
+        }
         if (lineage != null) {
             result.put("lineage", lineage);
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
+        }
+        if (foregroundOnly) {
+            result.put("foregroundOnly", true);
+        }
+        if (childSnapshots) {
+            result.put("childSnapshots", true);
         }
         return result;
     }
@@ -80,9 +102,19 @@ public final class CreateHarnessSession {
         private Long approvalTimeoutMs;
         private Long captureBytes;
         private Map<String, Object> agentDefinition;
+        private List<Map<String, Object>> mcpServers;
+        private Map<String, Object> hookCatalog;
         private Map<String, Object> lineage;
         private boolean suppressChildAgents;
         private boolean childWorkspaces;
+        private boolean foregroundOnly;
+        private boolean childSnapshots;
+
+        /** Restricts the saved Session to files and foreground Shell on an SSH Runtime. */
+        public Builder foregroundOnly(boolean value) {
+            this.foregroundOnly = value;
+            return this;
+        }
 
         /**
          * #13753 I2: whether this control plane serves child Workspaces, so
@@ -95,8 +127,29 @@ public final class CreateHarnessSession {
             return this;
         }
 
+        /**
+         * #13753 I3: whether this control plane also serves read-only
+         * snapshot children, so the Hosted Agent tool admits {@code
+         * isolation: "snapshot"}. Sent only beside {@link #childWorkspaces};
+         * like it, it describes the host and is never persisted.
+         */
+        public Builder childSnapshots(boolean value) {
+            this.childSnapshots = value;
+            return this;
+        }
+
         public Builder agentDefinition(Map<String, Object> value) {
             this.agentDefinition = Map.copyOf(value);
+            return this;
+        }
+
+        public Builder mcpServers(List<Map<String, Object>> value) {
+            this.mcpServers = value.stream().map(Map::copyOf).collect(Collectors.toUnmodifiableList());
+            return this;
+        }
+
+        public Builder hookCatalog(Map<String, Object> value) {
+            this.hookCatalog = Map.copyOf(value);
             return this;
         }
 

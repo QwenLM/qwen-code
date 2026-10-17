@@ -1,13 +1,16 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class AesGcmSecretProtectorTest {
@@ -84,6 +87,55 @@ class AesGcmSecretProtectorTest {
                 protectedSecret));
     }
 
+    @Test
+    void encryptsWithTheActiveKeyAndDecryptsPreviousKeys() {
+        AesGcmSecretProtector previous = new AesGcmSecretProtector("key-1",
+                key(1));
+        ProtectedSecret existing = previous.protect("binding-1",
+                "existing-secret".getBytes(StandardCharsets.UTF_8));
+        AesGcmSecretProtector rotated = AesGcmSecretProtector.fromBase64(
+                "key-2", encodedKey(2), Map.of("key-1", encodedKey(1)));
+
+        ProtectedSecret current = rotated.protect("binding-2",
+                "current-secret".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals("key-2", current.getKeyId());
+        assertArrayEquals("existing-secret".getBytes(StandardCharsets.UTF_8),
+                rotated.unprotect("binding-1", existing));
+        assertArrayEquals("current-secret".getBytes(StandardCharsets.UTF_8),
+                rotated.unprotect("binding-2", current));
+        IllegalStateException unavailable = assertThrows(
+                IllegalStateException.class,
+                () -> previous.unprotect("binding-2", current));
+
+        assertTrue(unavailable.getMessage()
+                .contains("Runtime credential key is unavailable"));
+    }
+
+    @Test
+    void rejectsDuplicateActiveAndPreviousKeyIds() {
+        assertThrows(IllegalArgumentException.class,
+                () -> AesGcmSecretProtector.fromBase64("key-1",
+                        encodedKey(1), Map.of("key-1", encodedKey(2))));
+    }
+
+    @Test
+    void rejectsInvalidPreviousKeyMaterial() {
+        IllegalArgumentException malformed = assertThrows(
+                IllegalArgumentException.class,
+                () -> AesGcmSecretProtector.fromBase64("key-2",
+                        encodedKey(2), Map.of("key-1", "not-base64")));
+        IllegalArgumentException shortKey = assertThrows(
+                IllegalArgumentException.class,
+                () -> AesGcmSecretProtector.fromBase64("key-2",
+                        encodedKey(2), Map.of("key-1",
+                                Base64.getEncoder().encodeToString(
+                                        new byte[31]))));
+
+        assertTrue(malformed.getMessage().contains("key-1"));
+        assertTrue(shortKey.getMessage().contains("key-1"));
+    }
+
     private static boolean containsSubsequence(byte[] envelope,
             byte[] plaintext) {
         for (int start = 0; start + plaintext.length <= envelope.length;
@@ -100,5 +152,9 @@ class AesGcmSecretProtectorTest {
         byte[] key = new byte[32];
         Arrays.fill(key, (byte) value);
         return key;
+    }
+
+    private static String encodedKey(int value) {
+        return Base64.getEncoder().encodeToString(key(value));
     }
 }

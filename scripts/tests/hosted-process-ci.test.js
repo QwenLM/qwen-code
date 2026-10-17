@@ -321,6 +321,15 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg8-cases/',
     );
+    // FG9's session-relay fault gates keep theirs in target/fg9-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg9-cases/',
+    );
+    // FG10 follows the same precedent: its per-case evidence lives in
+    // target/fg10-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg10-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag.
     const evidence = job.steps.find(
@@ -372,12 +381,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (45 + 16x10 + 20 + 50); the uncapped setup steps
+    // Step ceilings today (80 + 16x10 + 20 + 50); the uncapped setup steps
     // need their own allowance — the job comment estimates it at ~13, so
     // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(275);
+    expect(summed).toBe(310);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(290);
+    expect(job['timeout-minutes']).toBe(325);
   });
 
   it('runs every failover arm with its own runner arguments', () => {
@@ -469,24 +478,48 @@ describe('Hosted real-process gates', () => {
       // crash class, ~150 s of wall clock at 2x headroom; then the L4
       // recovery class's four real-process cuts, ~300 s more the FG7
       // sizing never covered — #14125's per-commit kill; the FG8
-      // monitor/run letters, ~310 s measured on the lane with real
-      // background processes and >16 MiB captures): the relational check
-      // above tolerates anything up to step*60, so the value is pinned
-      // literally here — an unnoticed raise has no other red to land on.
+      // monitor/run letters grew to five letters / twenty-one cases in
+      // #14334, whose lane (run 38848525079 at fee23d2d3c) saw four
+      // letters finish by ~700 s into the fork while the old 1800 s
+      // budget killed the fork before the last letter reported, so the
+      // fork doubles to 3600 in the same diff; the FG9 session/relay
+      // letters, ~170 s measured locally for slice 1 and ~314 s for the
+      // class with slice 2, fit inside that same lane-measured envelope;
+      // and FG9 slice 3's store-failure and crash letters bring the class
+      // to ~557 s, which with FG8c and FG10a inside the healthy allowance
+      // no longer leaves one 600 s ceiling room in 3600, so the fork moves
+      // to 3990 and the Verify step to 80 minutes):
+      // the relational check above tolerates
+      // anything up to step*60, so the value is pinned literally here —
+      // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(1800);
+        expect(forkSeconds).toBe(3990);
       }
     },
   );
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
-  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
-  // the FG8 monitor/run letters add ~310s measured on the lane (~450s with
-  // CI headroom); with the fork itself ~14s, 1100s covers them. A larger
-  // ceiling lets failsafe kill the fork mid-run, and the classes left
-  // unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 1100;
+  // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, the
+  // FG8 monitor/run letters grew from two letters / seven cases to five
+  // letters / twenty-one cases in #14334 — on that PR's lane (run
+  // 38848525079 at fee23d2d3c) four letters finished by ~700s into the
+  // fork, the fork was still killed at the old 1800s budget before the last
+  // letter reported, and the fork now sits at 3600s for the same 2×
+  // headroom — and the FG9 session/relay letters, six since slice 3,
+  // measure 528–557s for the class locally on JDK 21 + MySQL 8.4 across
+  // three acceptance runs (~950s budgeted at >1.7x the heaviest measured
+  // run, up from slice 2's ~534s; the class ran 310s on lane run
+  // 38957583765 with four letters, as locally) in the same envelope, the
+  // FG8c process-crash letter adds 144s measured locally on JDK 21 +
+  // MySQL 8.4.6 (~290s budgeted at 2x), and the FG10a workflow digest
+  // letter — four cases since #14390 — measures 15.9–16.2s for the letter
+  // locally on macOS JDK 26 + MySQL 8.4.6 across four acceptance runs
+  // (~33s budgeted at 2x); with the fork itself ~14s, 3380s (2963s with
+  // FG8c, FG10a and slice 2's FG9, plus slice 3's ~416s) covers them. A
+  // larger ceiling lets failsafe kill the fork mid-run, and the classes
+  // left unrun never report, failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 3380;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -537,29 +570,64 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps every HostedTeamLeadMySqlIT ceiling together inside the shared fork budget', () => {
-    const source = hostedTestSource('HostedTeamLeadMySqlIT');
-    const cases = [
-      ...source.matchAll(
-        /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
-      ),
-    ].length;
-    const ceilings = ceilingsOf(source);
-    expect(cases).toBeGreaterThan(0);
-    expect(ceilings).toHaveLength(cases);
-    // A regression such as a lost wake Turn leaves no failed row for the
-    // cases to stop on, so every case may stall to its ceiling at once.
-    const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
-    expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
-      hostedForkSeconds(),
+  it('keeps the HostedSessionRelayFaultGatesIT ceilings inside the shared fork budget', () => {
+    // Like the FG8 monitor/run letters, the FG9 session/relay letters are
+    // independent fixtures sharing the fork — each letter boots its own
+    // Spring application, Harness, and proxies under its own tenant
+    // prefix, so a stall in one letter leaves the others running — and one
+    // letter stalling to its @Timeout must still leave the fork enough
+    // healthy runtime and budget for the sibling letters to finish.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedSessionRelayFaultGatesIT'),
     );
-    // Awaitility ignores the interrupt a @Timeout sends, so a ceiling holds
-    // only when every wait goes through the helper that fails on it.
-    expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
-    expect(read(hostedTestPath('HostedTeamLeadMySqlIT'))).toContain(
-      'await().failFast("The case\'s @Timeout interrupted it"',
-    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
   });
+
+  it('keeps the HostedWorkflowFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG10 letters are independent fixtures sharing the fork, the same
+    // per-ceiling shape the FG8 letters are held to.
+    const ceilings = ceilingsOf(hostedTestSource('HostedWorkflowFaultGatesIT'));
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it.each(['HostedTeamLeadMySqlIT', 'HostedTeamMemberCommandMySqlIT'])(
+    'keeps every %s ceiling together inside the shared fork budget',
+    (className) => {
+      const source = hostedTestSource(className);
+      const cases = [
+        ...source.matchAll(
+          /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
+        ),
+      ].length;
+      const ceilings = ceilingsOf(source);
+      expect(cases).toBeGreaterThan(0);
+      expect(ceilings).toHaveLength(cases);
+      // A regression such as a lost wake Turn or a stalled message relay
+      // leaves no failed row for the cases to stop on, so every case may
+      // stall to its ceiling at once.
+      const total = ceilings.reduce((sum, ceiling) => sum + ceiling, 0);
+      expect(total + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+      // Awaitility ignores the interrupt a @Timeout sends, so a ceiling
+      // holds only when every wait goes through the helper that fails on
+      // it.
+      expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
+      expect(read(hostedTestPath(className))).toContain(
+        'await().failFast("The case\'s @Timeout interrupted it"',
+      );
+    },
+  );
 
   // The Hosted*IT classes share one fork, and Spring caches a test context
   // for the rest of it. A Managed Agent context's recovery scans cover

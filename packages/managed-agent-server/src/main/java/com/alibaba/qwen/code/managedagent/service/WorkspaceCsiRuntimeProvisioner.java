@@ -547,9 +547,10 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             var spec = map(actual.get("spec"));
             require(Set.of("restartPolicy", "automountServiceAccountToken", "enableServiceLinks", "nodeSelector",
                     "securityContext", "containers", "volumes", "nodeName", "serviceAccountName", "serviceAccount",
-                    "schedulerName", "priority", "preemptionPolicy", "dnsPolicy", "terminationGracePeriodSeconds",
+                    "schedulerName", "priority", "preemptionPolicy", "dnsPolicy", "dnsConfig", "terminationGracePeriodSeconds",
                     "tolerations", "hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace",
                     "initContainers", "ephemeralContainers", "imagePullSecrets", "priorityClassName").containsAll(spec.keySet()));
+            checkDnsConfig(spec.get("dnsConfig"));
             require(map(map(expected.get("spec")).get("securityContext")).keySet()
                     .containsAll(map(spec.get("securityContext")).keySet()));
             require(empty(spec.get("initContainers")) && empty(spec.get("ephemeralContainers"))
@@ -573,6 +574,34 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     && !Boolean.TRUE.equals(security.get("privileged")) && empty(map(security.get("capabilities")).get("add"))
                     && (security.get("procMount") == null || "Default".equals(security.get("procMount")))
                     && (security.get("seccompProfile") == null || same(security.get("seccompProfile"), Map.of("type", "RuntimeDefault"))));
+        }
+    }
+
+    private static void checkDnsConfig(Object value) {
+        if (value == null) {
+            return;
+        }
+        var dns = map(value);
+        require(Set.of("nameservers", "searches", "options").containsAll(dns.keySet()));
+        for (String field : List.of("nameservers", "searches")) {
+            if (dns.containsKey(field)) {
+                var entries = list(dns.get(field));
+                require(entries.size() <= (field.equals("nameservers") ? 3 : 32));
+                require(entries.stream().allMatch(entry -> entry instanceof String text && text.matches("[!-~]{1,253}")));
+                if (field.equals("searches")) {
+                    require(entries.stream().mapToInt(entry -> ((String) entry).length() + 1).sum() <= 2048);
+                }
+            }
+        }
+        if (dns.containsKey("options")) {
+            var options = list(dns.get("options"));
+            require(options.size() <= 32);
+            for (Object entry : options) {
+                var option = map(entry);
+                require(Set.of("name", "value").containsAll(option.keySet()));
+                require(option.get("name") instanceof String name && name.matches("[!-~]{1,253}"));
+                require(!option.containsKey("value") || option.get("value") instanceof String text && text.matches("[!-~]{0,253}"));
+            }
         }
     }
 
