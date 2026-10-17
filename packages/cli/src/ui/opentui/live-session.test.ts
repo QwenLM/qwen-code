@@ -45,6 +45,11 @@ const visionMocks = vi.hoisted(() => ({
   run: vi.fn(),
 }));
 
+const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock('../../services/interactive-mod-session.js', () => ({
+  getInteractiveModSession: modMocks.get,
+}));
+
 // The round-trip tests also replace the tool scheduler with a stub that
 // completes the pending calls immediately.
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -370,6 +375,7 @@ describe('livePromptEvents', () => {
     atMocks.hang = null;
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
+    modMocks.get.mockReset();
   });
 
   it('seeds prompt ids past claims in the resumed transcript', () => {
@@ -413,6 +419,27 @@ describe('livePromptEvents', () => {
     ]);
 
     expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks model sends on Mod failure even when the native client is initialized', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({ isInitialized: () => true }),
+    } as unknown as Config;
+    const initializeMods = vi
+      .fn()
+      .mockRejectedValue(new Error('Unsupported terminal tool.call'));
+    modMocks.get.mockReturnValue({ initialize: initializeMods });
+
+    await expect(ensureConfigInitialized(config)).rejects.toThrow(
+      'terminal tool.call',
+    );
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'terminal tool.call',
+    );
+    expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(initializeMods).toHaveBeenCalledOnce();
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -481,6 +508,62 @@ describe('livePromptEvents', () => {
       'auth exploded',
     );
   });
+
+  it('rejects pending Mod readiness when host initialization fails', async () => {
+    const error = new Error('Transcript restore failed');
+    let rejectReady!: (reason: unknown) => void;
+    const ready = new Promise<void>((_, reject) => {
+      rejectReady = reject;
+    });
+    const failed = vi.fn();
+    void ready.catch(failed);
+    const failStartup = vi.fn(rejectReady);
+    const initializeMods = vi.fn();
+    modMocks.get.mockReturnValue({
+      ready,
+      failStartup,
+      initialize: initializeMods,
+    });
+    const config = {
+      initialize: vi.fn().mockRejectedValue(error),
+      getGeminiClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    await expect(ensureConfigInitialized(config)).rejects.toBe(error);
+    expect(failed).toHaveBeenCalledExactlyOnceWith(error);
+    await expect(ready).rejects.toBe(error);
+    await expect(ensureConfigInitialized(config)).rejects.toBe(error);
+    expect(failStartup).toHaveBeenCalledExactlyOnceWith(error);
+    expect(initializeMods).not.toHaveBeenCalled();
+    expect(config.initialize).toHaveBeenCalledOnce();
+  });
+
+  it.each(['already initialized', 'client ready'])(
+    'still initializes Mods after a recoverable host re-entry: %s',
+    async (state) => {
+      const initializeMods = vi.fn().mockResolvedValue(undefined);
+      const failStartup = vi.fn();
+      modMocks.get.mockReturnValue({ initialize: initializeMods, failStartup });
+      const config = {
+        initialize: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(
+              state === 'already initialized'
+                ? 'Config was already initialized'
+                : 'Background recovery failed',
+            ),
+          ),
+        getGeminiClient: () => ({
+          isInitialized: () => state === 'client ready',
+        }),
+      } as unknown as Config;
+
+      await expect(ensureConfigInitialized(config)).resolves.toBeUndefined();
+      expect(initializeMods).toHaveBeenCalledOnce();
+      expect(failStartup).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps surfacing the real initialization failure on later submits', async () => {
     // Core never retries a settled initialization, so the rejected shared
