@@ -319,6 +319,7 @@ class LocalManagedHookModelScope {
                 inputCheckpointRef,
                 state: 'output_committed',
                 usageRef,
+                ...(recoveryRef ? { recoveryRef } : {}),
               },
             },
             {
