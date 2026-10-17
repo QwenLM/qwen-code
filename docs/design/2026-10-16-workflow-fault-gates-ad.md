@@ -200,30 +200,32 @@ the Harness mid-workflow (a subagent in flight) and a restart, the child's
 unsettled workflow Turn was re-driven by the recovery — the script re-ran
 and re-dispatched its subagent (the post-kill model request carried the
 subagent's system prompt). That is exactly the "never re-executed on
-reopen" violation this letter exists to pin. Whether the recovery's
-re-drive of an unsettled workflow Turn is a production gap to fix or a
-behavior to accept is a call outside this test-only slice, so FG10d lands
-with the follow-up issue that carries the finding (#14387); this section
-stays as its design. FG10a alone ships here.
+reopen" violation this letter exists to pin. The finding landed as a
+production bug (#14387) and was fixed in #14461: the recovery parks the
+Turn `hosted_workflow_recovery_blocked` — never re-driven, never settled —
+and the relay settles the record `recovery_blocked` over `outcome_unknown`.
+FG10d lands after it, asserting that shape; this section stays as its
+design. FG10a alone ships here.
 
 POSIX-only. The driver owns the Harness child process and SIGKILLs it.
 The in-flight witness is the fake model server's request log: an `agent()`
 dispatch is one POST, so "subagent in flight" is a received request whose
 response the server has not yet released.
 
-A timing fact the ledger has to respect: the relay's give-up path is
-`MAX_ATTEMPTS = 64` behind an exponential backoff (`1 s << attempts`,
-capped at 300 s — `ChildResultRelay.java` `defer`), so the terminal
-`unknown` classification sits many minutes past any case budget. What the
-gate pins is therefore the observable invariant over a bounded window
-after the kill — the record never settles `failed`, `cancelled` or
-`settled` while the relay keeps deferring against the dead Harness — plus
-the cold-load refusal, which is the durable half of the property.
+The mechanism the gate observes: the coordinator's recovery sweep marks the
+unsettled workflow Turn `hosted_workflow_recovery_blocked` — never
+re-driven, never settled — and the relay reads the mark off the Turn line
+and settles the record `recovery_blocked` over `outcome_unknown`,
+classifying the ledger `unknown` within its own scan cadence (#14387). What
+the gate pins is therefore the observable invariant inside the case budget:
+the record settles `recovery_blocked` — never `failed`, `cancelled` or
+`settled` — plus the cold-load refusal, which is the durable half of the
+property.
 
-| Case                                         | Injection                                                                                                                                                                                          | Expect                                                                                                                                                                                                                                                                                                                                                       |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kill-mid-workflow-subagents-in-flight`      | SIGKILL the Harness while a subagent request is held open at the fake model server                                                                                                                 | Across a post-kill observation window the record stays `running` — never `failed`, `cancelled` or `settled`; a restarted Harness's cold load of the child session answers 409 `hosted_turn_recovery_required` with zero new model calls and zero re-execution; the record's `definitionDigest` still equals the original script's sha256 (never re-resolved) |
-| `kill-after-last-subagent-before-settlement` | The store proxy holds the child's `settleTurn` commit and SIGKILLs the Harness **before forwarding it** — the kill precedes the commit deliberately, the deterministic pre-settlement interleaving | The settlement never landed: the record stays `running` across the window, the dropped commit is witnessed in the proxy log, cold load refuses as above; never `failed`/`cancelled`, never re-executed on reopen                                                                                                                                             |
+| Case                                         | Injection                                                                                                                                                                                          | Expect                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kill-mid-workflow-subagents-in-flight`      | SIGKILL the Harness while a subagent request is held open at the fake model server                                                                                                                 | Across a post-kill observation window the record settles `recovery_blocked` over `outcome_unknown` — never `failed`, `cancelled` or `settled`; a restarted Harness's cold load of the child session answers 409 `hosted_turn_recovery_required` with zero new model calls and zero re-execution; the record's `definitionDigest` still equals the original script's sha256 (never re-resolved) |
+| `kill-after-last-subagent-before-settlement` | The store proxy holds the child's `settleTurn` commit and SIGKILLs the Harness **before forwarding it** — the kill precedes the commit deliberately, the deterministic pre-settlement interleaving | The settlement never landed: the record settles `recovery_blocked` over `outcome_unknown`, the dropped commit is witnessed in the proxy log, cold load refuses as above; never `failed`/`cancelled`, never re-executed on reopen                                                                                                                                                               |
 
 ## Fixture design
 
