@@ -396,8 +396,13 @@
                                  (~363 s budgeted at 2×): the healthy sum
                                  becomes 3743 s, so the fork moves to
                                  4353 s and the Verify step to 90
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>4353</forkedProcessTimeoutInSeconds>
+                                 minutes. The FG13c Hook owner-restart
+                                 cells (three cases, issue #14449) are
+                                 budgeted at 300 s inside the same
+                                 envelope: the healthy sum becomes
+                                 4043 s, so the fork moves to 4653 s
+                                 and the Verify step to 95 minutes. -->
+                            <forkedProcessTimeoutInSeconds>4653</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
