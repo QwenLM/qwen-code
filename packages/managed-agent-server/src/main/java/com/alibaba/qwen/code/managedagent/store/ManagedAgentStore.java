@@ -43,6 +43,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -392,21 +393,23 @@ public class ManagedAgentStore implements AgentStateStore {
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        boolean sshWorkspace = isSshWorkspace(workspace.binding());
+        if (sshWorkspace) {
+            requireSshToolProfile(pin.toolProfile());
+        }
         boolean resident = residentWorkspaces.find(workspace.binding()) != null;
         if (resident) {
             if (!workspaceFilesEnabled) {
                 throw workspaceExecutionUnavailable();
             }
             residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
-        } else {
+        } else if (!sshWorkspace) {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
         }
-        // Admission already proved the agent is qwen-code or a compiled
-        // definition, so only the deployment mounts gate execution here.
         if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
@@ -905,6 +908,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String approvalMode, String toolProfile) {
     }
 
+    private boolean isSshWorkspace(ContextBinding binding) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
+                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+    }
+
+    private static void requireSshToolProfile(String profile) {
+        if (!WorkspaceToolProfiles.FILES.equals(profile) && !WorkspaceToolProfiles.SHELL.equals(profile)) {
+            throw workspaceExecutionUnavailable();
+        }
+    }
+
     @Override
     @Transactional
     public WebShellSessionOptions workspaceSessionOptions(
@@ -1122,6 +1136,9 @@ public class ManagedAgentStore implements AgentStateStore {
             throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (isSshWorkspace(session.workspace())) {
+                requireSshToolProfile(session.toolProfile());
+            }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
@@ -2866,9 +2883,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 new ArrayList<>(
                         jdbc.query(
                                 // Every blocked lifecycle shape is
-                                // re-driven: only CLOSE and DELETE are ever
-                                // delivered (an archive completes at
-                                // admission), and both publish their waits.
+                                // re-driven. CLOSE, DELETE and CWD_CHANGE
+                                // are the delivered kinds (an archive
+                                // completes at admission): CLOSE and DELETE
+                                // publish their writer-live and stale-boot
+                                // waits, and a cwd change stays bounded by
+                                // its own attempt budget in the coordinator
+                                // (review round 2, R2-15).
                                 "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
                                     + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE',"
                                     + " 'CWD_CHANGE') AND state IN ('PENDING', 'RUNNING',"
@@ -3790,10 +3811,8 @@ public class ManagedAgentStore implements AgentStateStore {
             // as VARCHAR, and a command it recompiles after binding (any
             // new session or SET in between) refuses VARBINARY rows against
             // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
-            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
-                    .identity(turn.sessionId()));
-            arguments.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
-                    .identity(turn.turnId()));
+            arguments.add(ManagedSchemaKeys.identity(turn.sessionId()));
+            arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest
