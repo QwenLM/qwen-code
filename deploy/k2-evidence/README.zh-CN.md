@@ -147,7 +147,9 @@ python3 deploy/k2-evidence/render-pre-exec.py \
 
 两个镜像 layout 必须包含选定 OCI manifest、configuration 和有序 layer 的准确 blob。`image-catalog.py` 核对压缩摘要/大小和未压缩 diff ID，处理 whiteout，在不解压落地或执行内容的前提下解析原 ELF 入口与 loader。version 2 artifact manifest 绑定两个镜像 digest 和完整 `worker-catalog.json` / `sandbox-catalog.json` 字节。当前支持子集要求显式目录父项与 metadata 不变的同 layer hardlink；跨 layer 链接、外部 blob、未知文件类型/xattr、架构不符和缺失 loader 都在创建输出前拒绝。具体上限见出生设计。这是离线输入产物，不是完整 AppArmor bundle 或已安装的保护证据。
 
-`shim.json` 对应拟安装的 `/etc/qwen-k2/shim.json`；`runtime-handler.toml` 是经审阅 containerd CRI runtime 配置的 fragment，明确使用 `runtime_path` 与 `io.containerd.qwen-k2.v1` runtime type。既有 RuntimeClass name/handler 仍为 `qwen-k2-runc-v1`。source 配置还必须加入生成的 `sandboxImageSha256`。tmpfiles fragment 提供固定私有目录。工具不会安装或 apply 这些文件。
+`shim.json` 对应拟安装的 `/etc/qwen-k2/shim.json`。`runtime-handler.toml` fragment 保留 `qwen-k2-runc-v1` RuntimeClass/handler 和准确 custom `runtime_path`，改用 `io.containerd.runc.v2` 以产生准确 runc options protobuf。它显式选择 overlayfs、podsandbox、FIFO，保留 AppArmor，关闭 SELinux/CDI/CRIU/restore-via-create，并让网络 namespace 保持在 CRI state 目录之外。安装 fragment 前须审阅这些全局 CRI 设置。source 配置还必须加入生成的 `sandboxImageSha256`；tmpfiles 提供固定私有目录。工具不安装或 apply。详见[options 接线](../../docs/design/2026-10-17-k2-cri-options-wiring.zh-CN.md)。
+
+gateway 通过持续持有的原 containerd 连接读取实际 CRI Status 配置，启动服务前和每次 control 操作两侧核对固定 handler、三个 options、选定安全设置及固定 root/state/socket 路径。观察失败或不可用后永久拒绝。既有 source 调用及已启动 worker 的轮询消费此边界；sandbox-only 间隔没有增加周期检查。这是采样配置校验，不证明 NRI 已关闭、独占 CSI 接线、安装 provenance 或无间断 containment。详见[实际运行时配置](../../docs/design/2026-10-17-k2-effective-runtime-config.zh-CN.md)。
 
 安装前必须资格化实际 daemon 的 handler/bootstrap 兼容性、私有 ext4 消费输入挂载、immutable 安装文件及 ancestor、初始 namespaces、完整已加载并 locked 的 AppArmor bundle 和 actor/admission 边界。当前 service units 和历史 profiles 不继承本次改变后候选的资格。运行时目录必须允许正常 PID/log/rootfs/cleanup 写入，不能将整个消费 bundle 设为 immutable。用 exact reviewed source/shim 配置执行 `node-config`，生成 Java 必需的出生期待值；解析成功仍不代表安装资格或物理释放。详见[出生设计](../../docs/design/2026-10-16-k2-pre-exec-birth.zh-CN.md)。
 

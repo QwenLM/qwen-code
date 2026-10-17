@@ -191,7 +191,7 @@ func (g *runtimeReadGateway) verifyMetadata(ctx context.Context, original *gatew
 		return errors.New("original container metadata is unavailable")
 	}
 	c := reply.Container
-	if c.ID != observed.ContainerID || c.Runtime == nil || c.Runtime.Name != "io.containerd.qwen-k2.v1" || c.Spec == nil ||
+	if c.ID != observed.ContainerID || c.Runtime == nil || c.Runtime.Name != "io.containerd.runc.v2" || c.Spec == nil ||
 		c.Spec.TypeUrl != "types.containerd.io/opencontainers/runtime-spec/1/Spec" || len(c.Spec.Value) == 0 ||
 		c.Image == "" || c.Snapshotter == "" || c.SnapshotKey == "" || c.CreatedAt == nil || c.CreatedAt.CheckValid() != nil ||
 		c.Labels["io.kubernetes.pod.uid"] != original.task.PodUID || c.Labels["io.kubernetes.pod.namespace"] != original.task.Namespace ||

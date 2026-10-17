@@ -18,8 +18,11 @@ Start before accepting publication and subsequent stop evidence.
 
 ## Actual task boundary
 
-Use a dedicated `io.containerd.qwen-k2.v1` shim. Its task service wraps the real
-containerd runc task service. It accepts only the original Kubernetes init task;
+Use a dedicated shim manager named `io.containerd.qwen-k2.v1`. Its task service wraps the real
+containerd runc task service. The CRI handler selects builtin `io.containerd.runc.v2`
+options and the fixed custom shim path; real metadata readers expect the same
+builtin name. That name alone proves no custom shim identity: retain original
+creator, executable, configuration and birth-input checks. See [options wiring](2026-10-17-k2-cri-options-wiring.md). It accepts only the original Kubernetes init task;
 exec, checkpoint, update, pause, resume and terminal operations are refused.
 Create reserves the original ID, protects its inputs, obtains a durable source
 association, delegates the exact request with only Bundle relocated, then binds
@@ -39,6 +42,12 @@ The SDK module's minimum Go and dependency versions enter this module's lock
 files. Both Linux architecture builds must include the new shim command and
 the existing gateway/source command; build success establishes compilation
 only.
+
+[Effective CRI configuration](2026-10-17-k2-effective-runtime-config.md) connects
+fixed handler/options, selected security settings and layout checks to Status
+on the original gateway connection. Startup and both control boundaries consume
+it, as does started-worker polling indirectly; sandbox-only intervals gain no
+periodic check, and NRI or installation qualification is not established.
 
 ## Consumed inputs and creator channel
 

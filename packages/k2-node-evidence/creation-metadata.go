@@ -43,7 +43,7 @@ func (g *runtimeReadGateway) creation(parent context.Context, arm, id string) (c
 		return creationMetadata{}, errors.New("actual original container metadata is unavailable")
 	}
 	c := proto.Clone(reply.Container).(*containers.Container)
-	if c.ID != id || c.Runtime == nil || c.Runtime.Name != "io.containerd.qwen-k2.v1" || c.Runtime.Options == nil || c.Spec == nil || c.Spec.TypeUrl != "types.containerd.io/opencontainers/runtime-spec/1/Spec" || len(c.Spec.Value) == 0 || c.Snapshotter == "" || c.SnapshotKey == "" || c.CreatedAt == nil || c.CreatedAt.CheckValid() != nil || c.Labels["io.kubernetes.pod.uid"] != registered.PodUID || c.Labels["io.kubernetes.pod.name"] != registered.PodName || c.Labels["io.kubernetes.pod.namespace"] != registered.Namespace || proto.Size(c) > 32<<10 {
+	if c.ID != id || c.Runtime == nil || c.Runtime.Name != "io.containerd.runc.v2" || c.Runtime.Options == nil || c.Spec == nil || c.Spec.TypeUrl != "types.containerd.io/opencontainers/runtime-spec/1/Spec" || len(c.Spec.Value) == 0 || c.Snapshotter == "" || c.SnapshotKey == "" || c.CreatedAt == nil || c.CreatedAt.CheckValid() != nil || c.Labels["io.kubernetes.pod.uid"] != registered.PodUID || c.Labels["io.kubernetes.pod.name"] != registered.PodName || c.Labels["io.kubernetes.pod.namespace"] != registered.Namespace || proto.Size(c) > 32<<10 {
 		return creationMetadata{}, errors.New("actual original creation metadata differs")
 	}
 	role := c.Labels["io.cri-containerd.kind"]

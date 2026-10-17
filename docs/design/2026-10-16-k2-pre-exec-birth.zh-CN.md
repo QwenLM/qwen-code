@@ -13,8 +13,10 @@
 
 ## 真实任务边界
 
-使用专用 `io.containerd.qwen-k2.v1` shim，其任务服务包装 containerd 的真实 runc
-任务服务。仅接受原始 Kubernetes init 任务；拒绝 exec、checkpoint、update、pause、
+使用专用 shim manager `io.containerd.qwen-k2.v1`，其任务服务包装 containerd 的真实 runc
+任务服务。CRI handler 选择 builtin `io.containerd.runc.v2` options 类型及固定 custom shim
+路径；真实 metadata 读端要求相同 builtin 名称。该名称本身不证明执行了专用 shim，仍保留
+原 creator、executable、配置及出生输入检查。详见[options 接线](2026-10-17-k2-cri-options-wiring.zh-CN.md)。仅接受原始 Kubernetes init 任务；拒绝 exec、checkpoint、update、pause、
 resume 和终端操作。Create 先保留原始 ID、保护输入、取得持久化来源关联，随后仅重定位
 Bundle 并委派完全相同的请求，最后绑定真实返回的 PID。Start 必须匹配同一 owner/PID
 并取得来源许可，再委派正常 Start、报告真实结果。失败或结果不明的转换不能提供释放证据。
@@ -27,6 +29,10 @@ Shutdown。native Create 结果不明时仍拒绝 shutdown。manager 的紧急�
 shim 使用固定版本的 containerd SDK API，不另写任务引擎。SDK 模块要求的最低 Go
 和依赖版本进入本模块锁文件。两个 Linux 架构都必须编译新 shim 命令及原 gateway/source
 命令；构建成功仅证明编译通过。
+
+[实际 CRI 配置](2026-10-17-k2-effective-runtime-config.zh-CN.md) 将固定 handler、options、
+选定安全开关和布局检查接入原 gateway 连接的 Status。启动及 control 两侧消费，
+已启动 worker 轮询间接消费；sandbox-only 间隔没有周期检查，也不证明 NRI 或安装资格。
 
 ## 实际消费输入与创建者通道
 

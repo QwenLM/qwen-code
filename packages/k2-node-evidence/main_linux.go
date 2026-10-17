@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/birth"
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/cristate"
 	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/roleboundary"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	containers "github.com/containerd/containerd/api/services/containers/v1"
@@ -192,9 +193,16 @@ func runGateway(ctx context.Context, path string) error {
 		return errors.New("gateway incarnation unavailable")
 	}
 	gateway := &runtimeReadGateway{tasks: tasks.NewTasksClient(conn), containers: containers.NewContainersClient(conn), content: content.NewContentClient(conn), images: images.NewImagesClient(conn), snapshots: snapshots.NewSnapshotsClient(conn), cri: cri.NewRuntimeServiceClient(conn), lifetime: ctx, connection: conn, coordinator: cfg.CoordinatorPrincipal, source: cfg.SourcePrincipal, identity: &gatewayIdentity{Version: "qwen-k2-runtime-identity/2", Incarnation: hex.EncodeToString(incarnation[:]), BootID: boot, Peer: process.identity, Artifacts: observed}}
+	if cfg.RuntimeSocket != shimConfiguration.ContainerdGRPC {
+		return errors.New("original gateway and shim runtime endpoints differ")
+	}
+	effective, err := cristate.Open(ctx, gateway.cri)
+	if err != nil {
+		return err
+	}
 	err = serveControl(ctx, cfg.listenerConfig, tlsConfig, roleboundary.Handler(func() error {
 		current, err := bootID()
-		if err != nil || current != boot || process.verify() != nil || files.verify() != nil || shimConfiguration.Verify() != nil || security.verify() != nil {
+		if err != nil || current != boot || process.verify() != nil || files.verify() != nil || shimConfiguration.Verify() != nil || security.verify() != nil || effective.Verify() != nil {
 			return errors.New("original gateway installation or runtime incarnation changed")
 		}
 		return nil

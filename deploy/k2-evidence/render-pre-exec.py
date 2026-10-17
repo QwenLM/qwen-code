@@ -92,9 +92,19 @@ def render(source, shim, runc, worker_layout, worker_image, sandbox_layout, sand
         "containerdTtrpc": "/run/containerd/containerd.sock.ttrpc",
         "creationContract": base64.b64encode(raw).decode("ascii"),
     }
-    runtime = '''[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.qwen-k2-runc-v1]
-  runtime_type = "io.containerd.qwen-k2.v1"
+    runtime = '''[plugins."io.containerd.cri.v1.runtime"]
+  disable_apparmor = false
+  enable_selinux = false
+  enable_cdi = false
+  enable_criu = false
+  enable_experimental_restore_via_create = false
+  netns_mounts_under_state_dir = false
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.qwen-k2-runc-v1]
+  runtime_type = "io.containerd.runc.v2"
   runtime_path = "/opt/qwen-k2/bin/containerd-shim-qwen-k2-v1"
+  snapshotter = "overlayfs"
+  sandboxer = "podsandbox"
+  io_type = "fifo"
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.qwen-k2-runc-v1.options]
     BinaryName = "/opt/qwen-k2/bin/runc"
     Root = "/run/qwen-k2/runc"
