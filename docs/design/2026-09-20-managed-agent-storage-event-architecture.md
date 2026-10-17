@@ -26,7 +26,7 @@ The current implementation slice introduces `AgentStateStore`, bounded Harness e
 
 Integration base: branch `feature/managed-agents-p0-p8`, commit `fc32ab0c9502a0b44020ef1a66c88e9b3a2a1484`. The P0/P1 slice described above is committed on the same branch after that base. Paths below refer to this branch snapshot.
 
-The Java service source root is `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/`.
+The Java service source root is `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/`.
 
 | Location                                                                                            | Current behavior and design implication                                                                                                                                    |
 | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -37,7 +37,7 @@ The Java service source root is `packages/sdk-java/managed-agent-server/src/main
 | `service/ManagedAgentService.java`                                                                  | Transcript reads the latest materialized Snapshot, retained control events, and the event tail after `coveredSequence`, with legacy event paging before a Snapshot exists. |
 | `harness/HarnessConnector.java`                                                                     | Existing connector interface can be reused; includes submission, SSE, cancellation, and boot generation information.                                                       |
 | `src/main/resources/db/migration/V1__managed_agent_core.sql` and `V2__managed_agent_projection.sql` | V1 contains Session, Turn, Command, and Event. V2 adds Item, Item Part, Snapshot, and projection progress; the batch journal/Outbox is not implemented.                    |
-| `packages/sdk-java/runtime-broker/`                                                                 | Already has three Repository interfaces; the Embedded Broker default constructor still uses in-memory implementations.                                                     |
+| `packages/managed-agent-server/`                                                                    | Already has three Repository interfaces; the Embedded Broker default constructor still uses in-memory implementations.                                                     |
 | `packages/core/src/managed-runtime/managed-session-assembly.ts`                                     | Directly assembles local Session authority, resource storage, and writer leases; not yet a replaceable remote persistence implementation.                                  |
 
 The latest code uses the same Session UUID for the public Java Session, Harness, JSONL, and Broker. `harnessSessionId` is only a protocol alias; do not introduce another identity mapping. Tenant isolation still uses `(tenantId, sessionId)`; `turnId` and the stable `promptId` have separate purposes.

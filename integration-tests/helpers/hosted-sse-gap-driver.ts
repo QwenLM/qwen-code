@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { SseObserver, projectEvents } from './hosted-sse-observer.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -77,109 +78,6 @@ async function evidence(phase: string, body = {}) {
   return JSON.parse(text);
 }
 
-type Frame = { id: number; event: string; data: Record<string, unknown> };
-class Observer {
-  frames: Frame[] = [];
-  controller = new AbortController();
-  task?: Promise<void>;
-  failure?: unknown;
-
-  async start(surface: 'public' | 'web', after?: number) {
-    const response = await fetch(
-      new URL(
-        surface === 'public'
-          ? `/v1/agents/sessions/${sessionId}/events?stream=true&after=0`
-          : '/api/agent/web-shell/v1/events/stream',
-        config.storeUrl,
-      ),
-      {
-        method: surface === 'public' ? 'GET' : 'POST',
-        headers: {
-          ...headers,
-          Accept: 'text/event-stream',
-          ...(surface === 'public' && after !== undefined
-            ? { 'Last-Event-ID': String(after) }
-            : {}),
-        },
-        ...(surface === 'web'
-          ? { body: JSON.stringify({ sessionId, afterSequence: after ?? 0 }) }
-          : {}),
-        signal: AbortSignal.any([
-          this.controller.signal,
-          AbortSignal.timeout(45_000),
-        ]),
-      },
-    );
-    assert.equal(response.status, 200);
-    assert.match(
-      response.headers.get('content-type') ?? '',
-      /text\/event-stream/,
-    );
-    const reader = response
-      .body!.pipeThrough(new TextDecoderStream())
-      .getReader();
-    this.task = (async () => {
-      let pending = '';
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          pending += value;
-          let end: number;
-          while ((end = pending.indexOf('\n\n')) >= 0) {
-            const block = pending.slice(0, end);
-            pending = pending.slice(end + 2);
-            const lines = block.split('\n');
-            const data = lines
-              .filter((line) => line.startsWith('data:'))
-              .map((line) => line.slice(5).trimStart())
-              .join('\n');
-            if (!data) continue;
-            const id = lines
-              .find((line) => line.startsWith('id:'))
-              ?.slice(3)
-              .trim();
-            assert.match(id ?? '', /^\d+$/);
-            const frame = {
-              id: Number(id),
-              event:
-                lines
-                  .find((line) => line.startsWith('event:'))
-                  ?.slice(6)
-                  .trim() ?? '',
-              data: JSON.parse(data) as Record<string, unknown>,
-            };
-            assert.equal(
-              frame.id,
-              frame.data['sequence'],
-              'SSE id must equal payload sequence',
-            );
-            assert.equal(frame.event, frame.data['type']);
-            this.frames.push(frame);
-          }
-        }
-      } catch (cause) {
-        if (!this.controller.signal.aborted) this.failure = cause;
-      } finally {
-        reader.releaseLock();
-      }
-    })();
-  }
-
-  async through(sequence: number) {
-    await waitUntil(() => {
-      if (this.failure) throw this.failure;
-      return this.frames.some((frame) => frame.id >= sequence);
-    }, 10_000);
-  }
-
-  async close() {
-    this.controller.abort();
-    await this.task;
-    if (this.failure) throw this.failure;
-  }
-}
-
 const proxy = createServer(async (req, res) => {
   try {
     const chunks: Buffer[] = [];
@@ -231,11 +129,17 @@ const model = await startFakeOpenAIServer(() => {
       }
     : { content: 'FG6e tool finished once.' };
 });
+const observerOpts = {
+  sessionId,
+  storeUrl: config.storeUrl,
+  tenantId: config.tenantId,
+  timeoutMs: 45_000,
+};
 const observers = [
-  new Observer(),
-  new Observer(),
-  new Observer(),
-  new Observer(),
+  new SseObserver({ ...observerOpts, surface: 'public' }),
+  new SseObserver({ ...observerOpts, surface: 'web' }),
+  new SseObserver({ ...observerOpts, surface: 'public' }),
+  new SseObserver({ ...observerOpts, surface: 'web' }),
 ];
 const [publicBefore, webBefore, publicAfter, webAfter] = observers;
 
@@ -268,7 +172,7 @@ try {
     bootId: cli.bootId,
     promptId,
   });
-  await Promise.all([publicBefore.start('public'), webBefore.start('web')]);
+  await Promise.all([publicBefore.start(), webBefore.start()]);
   await Promise.all([publicBefore.through(1), webBefore.through(1)]);
   const prompt = [{ type: 'text', text: 'Perform the edit once.' }];
   await privateJson(
@@ -310,8 +214,8 @@ try {
   assert.equal(await readFile(proof, 'utf8'), 'xx');
   assert.equal(modelCalls, 2);
   await Promise.all([
-    publicAfter.start('public', publicBefore.frames.at(-1)!.id),
-    webAfter.start('web', webBefore.frames.at(-1)!.id),
+    publicAfter.start(publicBefore.frames.at(-1)!.id),
+    webAfter.start(webBefore.frames.at(-1)!.id),
   ]);
   await Promise.all([publicAfter.through(2), webAfter.through(2)]);
   assert.deepEqual(
@@ -334,37 +238,7 @@ try {
     ['public', publicFrames],
     ['web', webFrames],
   ] as const) {
-    const expected = ledger.map((row) => {
-      const fields: Record<string, unknown> = {
-        schema_version: row['schema_version'],
-        projection_version: row['projection_version'],
-        sequence: row['sequence_id'],
-        event_id: row['event_id'],
-        session_id: row['session_id'],
-        turn_id: row['turn_id'],
-        item_id: row['item_id'],
-        content_part_id: row['content_part_id'],
-        type: row['event_type'],
-        created_at:
-          surface === 'public'
-            ? Math.floor(Number(row['created_at']) / 1000)
-            : row['created_at'],
-        data: JSON.parse(String(row['data_json'])),
-        terminal: Boolean(row['terminal']),
-      };
-      return Object.fromEntries(
-        Object.entries(fields)
-          .filter(([, value]) => value !== null)
-          .map(([key, value]) => [
-            surface === 'web'
-              ? key.replace(/_([a-z])/g, (_, letter: string) =>
-                  letter.toUpperCase(),
-                )
-              : key,
-            value,
-          ]),
-      );
-    });
+    const expected = projectEvents(ledger, surface);
     assert.deepEqual(
       frames.map((frame) => frame.id),
       [1, 2, 3],
