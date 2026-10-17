@@ -196,11 +196,9 @@ async function main() {
     copyRuntimeAssets(packageRoot, outDir, args.runtime);
     copyNativeAddon(packageRoot, target);
     copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
-    // getPty() returns null under Bun without touching node-pty, so only the
-    // node runtime needs the PTY packages.
-    if (args.runtime === 'node') {
-      copyNodePtyAddon(packageRoot, target, args.nativeModulesDir);
-    }
+    // Both runtimes need the PTY packages: under Bun, getPty() loads the
+    // qwen-bun-pty backend, which drives the same native addon directly.
+    copyNodePtyAddon(packageRoot, target, args.nativeModulesDir);
     if (args.runtime === 'bun') {
       copyOpenTuiAddon(packageRoot, target, args.opentuiModulesDir);
     }
@@ -341,10 +339,10 @@ Options:
   --node-archive PATH     Downloaded Node.js runtime archive.
   --native-modules-dir DIR
                           Staged native node_modules directory holding
-                          @teddyzhu/clipboard* packages and, for --runtime
-                          node, @lydell/node-pty* packages. Missing clipboard
-                          packages are fatal when this is supplied; missing
-                          node-pty packages warn unless
+                          @teddyzhu/clipboard* and @lydell/node-pty*
+                          packages (both runtimes need the PTY packages).
+                          Missing clipboard packages are fatal when this is
+                          supplied; missing node-pty packages warn unless
                           QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1.
   --opentui-modules-dir DIR
                           Staged node_modules directory holding @opentui

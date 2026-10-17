@@ -1,0 +1,210 @@
+# Bun PTY 后端：`qwen-bun-pty`
+
+[English](bun-pty-backend.md) | [简体中文](bun-pty-backend.zh-CN.md)
+
+状态：已在 MYWO-8 S2 实现。建立在 S1 的运行时边界之上
+（[bun-runtime-boundary.zh-CN.md](bun-runtime-boundary.zh-CN.md)）。
+读者：Desktop / Web Terminal 维护者、S3（运行时兼容）、S4/S5（打包验收）。
+
+## 问题
+
+`getPty()` 在 Bun 运行时下禁用 PTY，原因是 `@lydell/node-pty`
+"在 Desktop 的运行时下挂起"。机制现已定位：
+
+- wrapper 通过 `tty.ReadStream` 读取 pty master fd 的输出；
+- pty master fd 以**非阻塞**模式打开，无数据可读时返回 `EAGAIN`；
+- Node 的 `tty.ReadStream`（libuv）把 `EAGAIN` 当作"暂无数据"，流保持
+  打开；**Bun 则把它当作 `error` 事件并销毁流**；
+- 销毁流会关闭 master fd。子进程继续运行，但 `onData` 永远不会触发，
+  `resize` 以 `EBADF` 失败——从外部看就是挂起。
+
+在 Bun 1.3.14 与 1.4.0 上均以 shell round-trip 复现（fd 时间线：spawn 时
+`fstat` 正常 → 首次读取 `EAGAIN` → 流报错/关闭 → 后续 `fstat`/`resize`
+报 `EBADF`）。两个版本行为一致，因此不能靠"等 Bun 修复"解决。
+
+## 设计
+
+新增后端 `packages/core/src/utils/bun-pty.ts`，仅在 Bun 下启用：
+
+- `getPty()` 保留 `isBunRuntime()` 作为切换点。Bun 且 POSIX 时改为导入
+  `bun-pty.ts`，返回 `{ name: 'qwen-bun-pty' }`。Windows 下仍保持门控
+  （ConPTY 在 Bun 下未验证），并给出如实的 `loadError`。**Node 路径与
+  之前逐字节一致**（`@lydell/node-pty` → `node-pty` 回退，原样保留），
+  Node 行为之上没有新增代码。
+- 后端**直接驱动同一份锁定的原生 addon**：
+  `require('@lydell/node-pty-<platform>-<arch>')` → `pty.fork` /
+  `pty.resize` / `pty.process`。不 fork `@lydell/node-pty`、不新增原生
+  产物、不扩大 ABI 面。
+- 输出由**主线程异步 `fs.read` 调用**泵取 master fd。原生 fork 返回的 fd
+  本就是非阻塞模式，无数据可读时返回 `EAGAIN`，由一个较短（4 ms）的定时
+  器重试；一次返回了数据的读取会直接链入下一次读取。**任一时刻至多一个
+  在途读取**：in-flight 守卫阻止 `resume()` 在上一次读取尚未返回时链入
+  第二次读取——每次读取共用同一块 64 KiB 缓冲，交叠读取会让一个回调读到
+  另一次读取的字节（输出重复/错位）。全程不构造
+  `tty.ReadStream`，因此不存在被运行时误读成关闭的 `EAGAIN`。`EIO`
+  （子进程退出、slave 关闭）与 `EBADF`（master 被外部关闭）都会正常结束
+  泵。早期的 worker-threads/阻塞读方案已被放弃：worker 触碰 master fd
+  会让 Bun 宿主在子进程退出后无法收尾（drain）。
+- **退出检测依托泵。**探针证据：在 pty 上留下未排空输出的子进程，其
+  原生 exit 回调只在 master fd 有读取活动时前后触发；而没有待输出内容的
+  子进程即使在零读取下也会触发回调（Node 与 Bun 一致）。因此"持续读取"
+  正是让"有产出的子进程"的退出可被观察到的条件——泵从构造函数起运行，
+  且不会因 `pause()` 而停止（见下）。
+- 写入走异步 `fs.write` 队列并带 `EAGAIN` 重试，对应 wrapper 的
+  `CustomWriteStream`（字符串写入使用配置的编码）。
+- 退出时序：原生 `onexit(code, signal)` 回调可能早于最后一段输出。后端
+  把 exit 事件挂起，等泵结束（先冲出 `StringDecoder` 尾巴）再触发，并以
+  500 ms 兜底——对应 wrapper 的 200 ms socket-destroy 兜底。每一条生命
+  终点路径（泵看到 `EIO`/`EBADF`、500 ms 兜底触发、原生回调晚于泵结束）
+  都执行同一套收尾：decoder 冲刷、重试定时器清理、master fd 关闭，然后
+  恰好一次 `onExit`。兜底定时器刻意不 `unref`——exit 的投递不能依赖一个
+  运行时随时可以丢弃的定时器。
+- POSIX `IPty` 契约逐一镜像，包括消费者依赖的细节：`pid`、`cols`/`rows`、
+  `process` 标题（含 darwin 的 `kernel_task`/`spawn_helper` 回退）、
+  `onData`/`onExit`（IEvent 风格的可 dispose 订阅）、`write`、`resize`
+  （校验 + 像素尺寸）、`clear()` no-op、`kill(signal || 'SIGHUP')`
+  （吞掉异常）、`pause`/`resume`（有界保持，见下）、`handleFlowControl`
+  与 XOFF/XON 拦截（ShellExecutionService 传 `handleFlowControl: true`）、
+  以及 EventEmitter 的 `error` 事件（有监听器才投递，否则记日志）。
+- 与 wrapper 的 env 行为对齐：`options.env === process.env` 时套用同一份
+  清理列表（`TMUX`、`TMUX_PANE`、`STY`、`WINDOW`、`WINDOWID`、`TERMCAP`、
+  `COLUMNS`、`LINES`）；`PWD` 置为解析后的 cwd，`TERM` 置为
+  `options.name || env.TERM || 'xterm'`。
+
+## 暂停期间仍持续读取；保持区是有界的
+
+`pause()` 不能让泵停下来，否则"有产出的子进程"会失去退出检测（见上文
+"退出检测依托泵"一条）：探针证据——子进程退出且输出未排空后，3 秒内
+master fd 零读取，原生 exit 回调从未触发（Node 与 Bun 一致）。没有该
+回调，addon 也不会回收主进程（它仍响应 `kill(pid, 0)`，`ps` 中处于
+exiting 状态），因此任何活性探测都无法替代读取。`onExit` 永不投递，
+master fd 保持打开，宿主无法收尾——修复前已在 Bun 1.3.14 复现（pause →
+子进程退出 → 无 exit 事件、fd 打开、自然收尾探针超时）；XOFF 后取消的
+FD 残留报告同源于此，因为 `handleFlowControl: true` 下 XOFF 就是一次
+`pause()`。
+
+因此 `pause()` 改为持有输出而不是停止读取——**并置于硬预算之内**
+（这是评审对早先无界保持的决策）：
+
+- **单 pty `pausedHoldBytes`**（默认 4 MiB）与**进程级
+  `totalPausedHoldBytes`**（默认 32 MiB），按数据字节记账；
+- 保持区把读取到的 chunk **拷入固定 64 KiB 块**，因此无论子进程怎么写，
+  每 Buffer 的对象开销都以"一个未填满的块"为界——pty 读块大小随生产者
+  剧烈变化（`awk` 洪流约 0.5 KB 一次读，`yes` 约 40 B，滴读 1 B），
+  逐 chunk 保留会让微小读取把对象开销放大到字节预算之外；
+- 另有**块数上限**作为队列的结构性边界。
+
+预算之内的语义是逐字节精确的：保持的输出由 `resume()` 按序冲出，并有
+字节/逐行对照的回归钉住（2 万行洪流中 500 次无间隔 pause/resume 风暴；
+约 1.7 MB 洪流全程在暂停中产生——两者都逐字节复原，且暂停中洪流后退
+出的子进程，其 exit 照常上报）。自然生命终点处保持区被丢弃、暂停中的
+decoder 尾巴被跳过，与 wrapper 对齐：onExit 仍恰好一次、fd 被释放，
+退出后 resume 不会重放任何内容。
+
+触及上限**绝不是静默丢弃，也绝不会自动恢复**：该 pty 被显式终止——
+按真实归属杀死子进程树（进程组 + pid，先 SIGTERM，500 ms 宽限后
+SIGKILL），关闭 master fd，终结所有排空路径（重试定时器、挂起的 exit、
+保持区、写队列）。失败之后 `write` 与 `resize` 均为 no-op（与其上层的
+registry 守卫一致），在途读取迟到的字节既不投递也不重新计入（已释放
+的）保持预算，`resume()` 重放会在第一个终止本 pty 的数据监听器处停止。
+随后在 `error` 事件上恰好投递一次结构化
+`PtyLimitError`，带稳定 `code`（`QWEN_PTY_OUTPUT_LIMIT`、
+`QWEN_PTY_WRITE_LIMIT` 或 `QWEN_PTY_ACTIVE_LIMIT`）、`limitKind`、
+`limit`、已接收字节数，以及是否丢弃了未投递数据。`onExit` 仍只为真实
+原生退出保留：超限终止之后才到达的原生回调只会被记录
+（`pty.stats.nativeExitRecord`）——绝不作为第二个终态事件投递，也绝不
+被伪造成交互退出码。
+
+同一策略也约束**写队列**：排队待写的输入超过单 pty 1 MiB 或进程级
+8 MiB 时，以 `QWEN_PTY_WRITE_LIMIT` 终止该 pty，而不是确认一个并不存在
+的背压。**活跃 pty 数量**同样有上限（默认 8）：超限的 `spawn` 同步抛出
+`QWEN_PTY_ACTIVE_LIMIT`。`getPtyBudgetStats()` 与 `pty.stats` 暴露
+保持/排队/准入计数，供探针与测试使用；生产代码不修改
+`processPtyBudget`，测试调整后会恢复。
+
+"放慢读取"（超过高水位后每个定时周期只读一次）作为背压机制已被探针
+否决：每个周期只能推进约 1 KiB（部分读取时 pty 每次至多给出一个小块），
+洪流要暂停数分钟，而且它最终仍无法在"不丢字节"的前提下给内存设界。早先
+草稿曾把该探针解读为"内核层面的字节流破坏"，该说法已**撤回**——把
+termios 输出处理（ONLCR）计入后，连续排空与滴读两条臂在 Node 和 Bun 上
+产出逐字节一致，并未定位到任何破坏机制。选择有界保持的决定性理由很简单：
+它是唯一既能给内存设界、又能在预算内保持字节精确、且超限时给出"响亮的"
+结构化失败的方案。
+
+### 失败在消费者侧的接线
+
+- **ShellExecutionService（前台 PTY 路径）**：`QWEN_PTY_OUTPUT_LIMIT` /
+  `QWEN_PTY_WRITE_LIMIT` 的 error 事件会把执行收敛为 `error` 有值、
+  `exitCode`/`signal` 为 `null` 的结果——一次可见的失败，不伪造原生
+  退出码，工具结果绝不会是 `success`。Node 后端从不产生这些 code，
+  Node 行为不变；自然退出路径仍只由 `onExit` 收敛。被活跃 pty 上限
+  拒绝的 spawn 走既有的 spawn 失败路径（显式错误结果）。
+- **Web Terminal（`web-terminal-registry` + `serve` 路由）**：registry
+  订阅后端 `error` 事件，把会话标记为 failed，并释放 PTY（不再向已被
+  杀死的进程树重复发信号）。路由转发显式 `{type: 'error'}` 控制帧
+  （客户端以红色渲染），以 4001 关闭 socket（客户端视为不可重试），
+  `readSnapshot` 携带 `failed`/`failureMessage`；failed 会话上的
+  write/resize 会被拒绝。
+- **意外 PTY 错误**保持既有行为（前台 throw；registry 监听器中原样
+  re-throw）——与本次改动之前一致。
+
+探针钉住的参考行为（Node wrapper，pause → 子进程以 code 7 退出）：经
+socket-destroy 兜底在子进程死后约 200 ms 恰好触发一次 `onExit`，此后
+fd 报 `EBADF`，尾部输出不投递。对"在预算之内、暂停中死亡"的子进程，
+后端现仍在两个运行时上对齐该契约，只是没有那 200 ms 延迟（泵能直接
+看到 `EIO`）。
+
+## 明确不在本次范围
+
+- **Windows 下的 Bun** — 门控保留并给出如实原因；需先在 Bun 下验证
+  ConPTY（`useConptyDll`）。
+- **`packages/cli/src/agent-view/pty-host.ts`** — agent view 本次仍保留
+  自身 Bun 门控；接入 `qwen-bun-pty` 是一个小型后续项，不属于 S2 交付物。
+- **发布冒烟** — `packages/desktop/scripts/smoke-runtime.js` 通过打包的 Node 验证
+  PTY round-trip；Bun 一侧的 PTY 冒烟属于 S5 在真实产物上的验收工作。
+
+## 打包
+
+`scripts/create-standalone-package.js` 之前只为 `node` flavor 暂存
+node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一并
+暂存——`lib/node_modules/@lydell/node-pty(-<platform>-<arch>)`——因为
+`bun-pty.ts` 在运行时通过 `createRequire(import.meta.url)` 解析同一个
+平台包；`esbuild.config.js` 的 externals 已把所有 node-pty specifier
+留在 bundle 外，且由于同一步骤现在对两种 flavor 都执行，
+`QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1` 的发布硬失败自动继承。
+
+## 验证
+
+- `packages/core/src/utils/bun-pty.test.ts` — vitest/Node 下的行为套件
+  （后端是主线程异步代码，与运行时无关）：输出流、写入、`resize` 后
+  子进程的 `stty size`、kill→`onExit` 带 signal、进程回收、pause/resume、
+  流控拦截、`encoding: null`、进程标题、`clear()`，以及暂停生命周期
+  回归：子进程在暂停中退出时 exit 恰好一次且 fd 被释放、暂停中 3 MB
+  洪流下退出检测仍存活（为其显式调大保持上限）、2 万行洪流中 500 次
+  无间隔 pause/resume 风暴后字节/逐行对照完全一致、约 1.7 MB 洪流全程
+  暂停保持后 resume 逐字节复原、XOFF 流控暂停后 `kill()` 释放 fd。
+  资源上限套件钉住 Plan A 契约：暂停洪流超过单 pty 上限时以恰好一次
+  `QWEN_PTY_OUTPUT_LIMIT` 终止（断言全部结构化字段）、无 `onExit`、
+  master fd 关闭、子进程树消失、resume 无重放、进程账本归零；预算内
+  洪流经 pause/resume 后逐字节一致；进程级上限只终止溢出的那个 pty、
+  第一个保持原样；写队列上限以 `QWEN_PTY_WRITE_LIMIT` 终止（不伪造
+  背压确认）；活跃 pty 上限以 `QWEN_PTY_ACTIVE_LIMIT` 拒绝下一次
+  `spawn`，关闭后槽位释放；预算计数可经 `getPtyBudgetStats()` 观察。
+- `packages/core/src/utils/bun-pty.node-bun.test.ts` — 跨运行时一侧
+  （S1 harness 模式）：fixture 导入真实的 `getPty.ts`，在真实 `bun`
+  二进制（BUN_TEST_BIN）下断言 `qwen-bun-pty` 后端可加载并完成
+  spawn/输出/resize/kill round-trip；第二个 fixture 驱动暂停退出
+  生命周期（pause → 子进程退出 → `onExit` 恰好一次、fd 释放、宿主自然
+  退出），并在 **Node 与 Bun 两个运行时**下运行；第三个 fixture 在
+  5000 行洪流中做 300 次无间隔 pause/resume，断言两个运行时下字节流
+  均逐字节且逐行完整；第四个 fixture 在真实 Bun 运行时下驱动有界保持
+  超限（恰好一次 `QWEN_PTY_OUTPUT_LIMIT`、无 `onExit`、fd 释放、
+  子进程树消失、无重放、宿主自然收尾）。无 `bun` 时与 S1 套件一样
+  跳过。
+- `packages/core/src/utils/getPty.test.ts` — Bun 分支从"返回 null 并报
+  disabled 原因"翻转为"加载 `qwen-bun-pty` 且不 spawn"；Bun 下的
+  Windows 保持如实门控；可失败分支的按调用 `loadError` 契约（#11881）
+  继续被钉住。
+- Bun 1.3.14 证据运行：后端探针（原生 addon 加载、fd 保持健康、resize
+  正常）与真实产品路径（Bun 下运行 CLI `serve`、创建 Web Terminal、
+  shell 工具 PTY round-trip）——记录在 MYWO-8 S2 交付评论中。

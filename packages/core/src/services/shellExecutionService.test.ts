@@ -961,6 +961,25 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('converges a qwen-bun-pty resource-limit error into a failed result with no fabricated exit code', async () => {
+      const limitError = Object.assign(new Error('resource limit reached'), {
+        code: 'QWEN_PTY_OUTPUT_LIMIT',
+      });
+      const { result } = await simulateExecution(
+        'yes | head -c 100000000',
+        () => {
+          // The qwen-bun-pty backend has already killed the tree and closed
+          // the fd when it emits this; no onExit follows.
+          expect(() => mockPtyProcess.emit('error', limitError)).not.toThrow();
+        },
+      );
+
+      expect(result.error).toBe(limitError);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.aborted).toBe(false);
+    });
+
     it('should ignore ioctl EBADF message-only resize race errors', async () => {
       mockPtyProcess.resize.mockImplementationOnce(() => {
         throw new Error('ioctl(2) failed, EBADF');

@@ -238,13 +238,18 @@ export function createTerminalWsHandler(
       }
 
       let cleaned = false;
-      const detach: { output?: () => void; exit?: () => void } = {};
+      const detach: {
+        output?: () => void;
+        exit?: () => void;
+        failure?: () => void;
+      } = {};
       const cleanup = () => {
         if (cleaned) return;
         cleaned = true;
         stopHeartbeat();
         detach.output?.();
         detach.exit?.();
+        detach.failure?.();
         ws.off('message', onMessage);
       };
       const finishExited = (
@@ -324,11 +329,27 @@ export function createTerminalWsHandler(
       detach.exit = registry.addExitListener(terminalId, (event) =>
         finishExited(event.exitCode),
       );
+      // A backend-side resource failure is the terminal state: surface the
+      // explicit error frame and close — never a fabricated exit frame.
+      detach.failure = registry.addFailureListener(terminalId, (message) => {
+        sendControl(ws, { type: 'error', message });
+        cleanup();
+        ws.close(4001, 'Terminal failed');
+      });
       snapshot = registry.readSnapshot(terminalId);
       if (!snapshot || snapshot.workspaceCwd !== workspace.workspaceCwd) {
         cleanup();
         sendControl(ws, { type: 'error', message: 'Session unavailable' });
         ws.close(4002, 'Session unavailable');
+        return;
+      }
+      if (snapshot.failed) {
+        cleanup();
+        sendControl(ws, {
+          type: 'error',
+          message: snapshot.failureMessage ?? 'Terminal failed',
+        });
+        ws.close(4001, 'Terminal failed');
         return;
       }
 

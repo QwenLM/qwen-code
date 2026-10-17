@@ -48,19 +48,19 @@ or compatibility.
 
 ### JS interpreter identity (how to run an arbitrary JS child)
 
-| Site                                                                  | Use                                                                                                                             | Wired to `getJsInterpreterCommand` in this change           |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                                       | yes                                                         |
-| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                                       | yes                                                         |
-| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                                    | yes                                                         |
-| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit                  | not yet (S3) — Linux only (cgroup v2 platform guard)        |
-| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it | not yet (S3) — Linux only (bubblewrap)                      |
-| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it                                      | not yet (S3) — Linux only (landlock LSM)                    |
-| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY gate (PTY disabled under Bun today — **S2 replaces this branch with a real backend**)                 | detection via `isBunRuntime()`                              |
-| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled mem0 MCP child; identity check `server.command !== process.execPath`                                                    | not yet; must migrate with its identity check together (S3) |
-| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                                           | launcher-shaped, see above                                  |
-| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | helper child spawn                                                                                                              | not yet (S3 sweep)                                          |
-| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                                         | intentionally not; host-tool identity                       |
+| Site                                                                  | Use                                                                                                                                                                        | Wired to `getJsInterpreterCommand` in this change           |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                                                                                  | yes                                                         |
+| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                                                                                  | yes                                                         |
+| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                                                                               | yes                                                         |
+| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit                                                             | not yet (S3) — Linux only (cgroup v2 platform guard)        |
+| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it                                            | not yet (S3) — Linux only (bubblewrap)                      |
+| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it                                                                                 | not yet (S3) — Linux only (landlock LSM)                    |
+| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY backend selection (under Bun on POSIX, PTY loads the `qwen-bun-pty` backend — see [bun-pty-backend.md](bun-pty-backend.md); Windows stays gated) | detection via `isBunRuntime()`                              |
+| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled mem0 MCP child; identity check `server.command !== process.execPath`                                                                                               | not yet; must migrate with its identity check together (S3) |
+| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                                                                                      | launcher-shaped, see above                                  |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | helper child spawn                                                                                                                                                         | not yet (S3 sweep)                                          |
+| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                                                                                    | intentionally not; host-tool identity                       |
 
 Rows marked `not yet` are owned by the **S3 migration sweep** (V8/GC/TLS/env
 compatibility stage), which uses this table as its checklist. The
@@ -222,8 +222,11 @@ and standalone artifacts require separate packaging acceptance.
 This fixture does not probe `process.execve`, native PTY loading, fd-3 status
 pipes or process-group signaling. `process.execve` feature detection at
 relaunch sites and Bun gating in `getPty` are source mechanisms, not results
-from this matrix. Native PTY and process-tree behavior need their own real
-process and artifact evidence.
+from this matrix. The PTY row's evidence is S2's own fixture —
+`packages/core/src/utils/bun-pty.node-bun.test.ts`, which spawns the
+`qwen-bun-pty` backend through `getPty()` under the real Bun runtime (and
+skips when no Bun binary exists); native PTY and process-tree behavior need
+their own real process and artifact evidence either way.
 
 ## Validation plan
 
@@ -232,6 +235,9 @@ process and artifact evidence.
 - `packages/core/src/utils/runtime-boundary.node-bun.test.ts` — the
   same-fixture coverage described above; the Bun leg skips when no Bun
   binary exists. A skipped leg is not a compatibility pass.
+- `packages/core/src/utils/bun-pty.node-bun.test.ts` — the PTY row: spawns,
+  output, resize, kill, and the bounded-hold limits through `getPty()` under
+  real Bun; skips when no Bun binary exists.
 - S2/S3 consume the inventory tables as their migration checklist; S5 reruns
   the matrix on the real archives per the MYWO-8 acceptance protocol.
 
