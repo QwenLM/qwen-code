@@ -38,13 +38,13 @@ Each character of a word records how it was written: unquoted, inside double quo
 
 ### Redirections
 
-A word is split at its unquoted `<` and `>` characters, except `<(` and `>(`, which start a process substitution. A run of digits or `&` before the first operator is its fd. Each piece is matched against one pattern covering `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `<<`, `<<-` and `<<<`. When the target is not glued to the operator, the next word is the target. Shell syntax glued to the end of the word in front is dropped, as for any word, so `cat .env&>f` and `(cat .env)>f` read `.env`.
+A word is split at its unquoted `<` and `>` characters, except `<(` and `>(`, which start a process substitution. A run of digits or `&` before the first operator is its fd. Each piece is matched against one pattern covering `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `<<`, `<<-` and `<<<`. When the target is not glued to the operator, it is the next word, which is split the same way: its part before any operator is the target and the rest are further redirections, so `printf X > a>p.txt` writes `a` and then `p.txt`. Shell syntax glued to the end of the word in front is dropped, as for any word, so `cat .env&>f` and `(cat .env)>f` read `.env`.
 
 - `<` and `<&` read, `<>` reads and writes, the others write.
 - `>&N`, `>&-` and `N<&M-` duplicate or close fds and touch no file.
 - Heredocs and here-strings carry data, not file names.
 - `/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`, `/dev/fd/N` and the `/dev/tcp` and `/dev/udp` sockets are not files.
-- A `[[ … ]]` test compares. `[[` opens one only as the command word, possibly after `!`, `if`, `while` and similar reserved words, and only when a `]]` follows; anywhere else it is an argument and hides nothing.
+- A `[[ … ]]` test compares. `[[` opens one only as the command word, possibly after `!`, `if`, `while` and similar reserved words, and only when a `]]` follows, alone or with a redirection glued after it (`]]>out`); anywhere else it is an argument and hides nothing.
 - A command that is a whole `(( … ))` is arithmetic. Without the closing `))`, as in `((cat .env); true)`, bash reads nested subshells, which are analysed as usual.
 
 A process substitution word (`<(cmd)`) is a pipe, so it is not a path argument either.

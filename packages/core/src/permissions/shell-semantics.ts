@@ -441,12 +441,26 @@ const TEST_COMMAND_PREFIXES: ReadonlySet<string> = new Set([
  * command word and only when a `]]` closes it; elsewhere it is an argument.
  */
 function opensTest(words: readonly ShellWord[], i: number): boolean {
-  const isBare = (word: ShellWord, text: string) =>
-    word.text === text && word.quoting.every((how) => how === 'none');
+  const { text, quoting } = words[i]!;
   return (
-    isBare(words[i]!, '[[') &&
+    text === '[[' &&
+    quoting.every((how) => how === 'none') &&
     words.slice(0, i).every((word) => TEST_COMMAND_PREFIXES.has(word.text)) &&
-    words.slice(i + 1).some((word) => isBare(word, ']]'))
+    words.slice(i + 1).some(closesTest)
+  );
+}
+
+/**
+ * Whether `word` closes a `[[ … ]]` test: an unquoted `]]`, alone or with a
+ * redirection glued after it (`]]>out`), since bash ends a word at `<` / `>`.
+ */
+function closesTest({ text, quoting }: ShellWord): boolean {
+  const bare = (k: number) => quoting[k] === 'none';
+  return (
+    text.startsWith(']]') &&
+    bare(0) &&
+    bare(1) &&
+    (text.length === 2 || ((text[2] === '<' || text[2] === '>') && bare(2)))
   );
 }
 
@@ -471,9 +485,12 @@ function extractRedirects(
     const word = words[i]!;
     if (!inTest && opensTest(words, i)) inTest = true;
     if (inTest) {
-      rest.push(word.text);
-      if (word.text === ']]') inTest = false;
-      continue;
+      if (closesTest(word)) inTest = false;
+      // `]]>out` ends the test and redirects; split it below.
+      if (inTest || word.text === ']]') {
+        rest.push(word.text);
+        continue;
+      }
     }
 
     const split = splitWordRedirects(word);
@@ -482,14 +499,20 @@ function extractRedirects(
       continue;
     }
     if (split.before) rest.push(split.before);
-    for (const [idx, redirect] of split.redirects.entries()) {
-      const match = REDIRECT_RE.exec(redirect);
+    let redirects = split.redirects;
+    while (redirects.length > 0) {
+      const [redirect, ...later] = redirects;
+      redirects = later;
+      const match = REDIRECT_RE.exec(redirect!);
       if (!match) continue;
       let target = match[3]!;
-      const isLast = idx === split.redirects.length - 1;
-      if (!target && isLast && i + 1 < words.length) {
-        target = words[i + 1]!.text;
+      // A target written apart from its operator is the next word, which bash
+      // also splits at its own `<` / `>`: `> a>p.txt` writes `a`, then `p.txt`.
+      if (!target && later.length === 0 && i + 1 < words.length) {
         i++;
+        const next = splitWordRedirects(words[i]!);
+        target = next ? (next.before ?? '') : words[i]!.text;
+        redirects = next?.redirects ?? [];
       }
       if (target) ops.push(...redirectOps(match[2]!, target, cwd));
     }

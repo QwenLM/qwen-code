@@ -12,7 +12,7 @@ Verify that a `Bash(...)` allow rule cannot run a file access past a `Read`, `Ed
 ## Writes past an Edit deny
 
 1. Set `.qwen/settings.json` to `{"permissions": {"allow": ["Bash(printf *)"], "deny": ["Edit(protected.txt)"]}}`.
-2. Ask the agent to run each command: `printf X 3>protected.txt`, `printf X >| protected.txt`, `printf X>protected.txt`, `printf X <>protected.txt`.
+2. Ask the agent to run each command: `printf X 3>protected.txt`, `printf X >| protected.txt`, `printf X>protected.txt`, `printf X <>protected.txt`, `printf X > a>protected.txt`.
 3. Each command is denied with a message that names `Edit(protected.txt)`, and `protected.txt` is not created. On the merge base each one runs and creates the file.
 
 ## Reads past a Read deny

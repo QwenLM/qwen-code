@@ -3467,6 +3467,8 @@ describe('PermissionManager — shell redirection forms (#10196)', () => {
     'echo $(printf X > p.txt)',
     'echo `echo a #b` > p.txt',
     'echo ${x:-a #b} > p.txt',
+    'printf X > a>p.txt',
+    'echo a> b> p.txt',
   ])('denies %s under Edit(p.txt)', async (command) => {
     const pm = repoPm({ permissionsDeny: ['Edit(p.txt)'] });
     expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');

@@ -680,6 +680,32 @@ describe('redirect grammar', () => {
       'echo x >& out.txt',
       [write(`${CWD}/out.txt`)],
     ],
+    // bash splits a spaced target at its own unquoted `<` / `>` too.
+    [
+      'a spaced target splits at its own `>`',
+      'printf X > a>p.txt',
+      [write(`${CWD}/a`), write(`${CWD}/p.txt`)],
+    ],
+    [
+      'each spaced target splits at its own `>`',
+      'echo a> b> c',
+      [write(`${CWD}/b`), write(`${CWD}/c`)],
+    ],
+    [
+      'a spaced target splits at its own `<`',
+      'echo x > a<in.txt',
+      [write(`${CWD}/a`), read(`${CWD}/in.txt`)],
+    ],
+    [
+      'a spaced target splits at a glued `&>`',
+      'echo x > a&>f',
+      [write(`${CWD}/a`), write(`${CWD}/f`)],
+    ],
+    [
+      'a quoted `>` in a spaced target is part of the name',
+      'echo x > a">"b',
+      [write(`${CWD}/a>b`)],
+    ],
     ['no write inside a comment', 'echo hi # > foo', []],
     [
       'a `#` inside a word is not a comment',
@@ -706,6 +732,11 @@ describe('redirect grammar', () => {
     ],
     ['`[[` without `]]` hides no redirect', '[[ x >f', [write(`${CWD}/f`)]],
     ['no write for `[[ a > b ]]`', '[[ a > b ]]', []],
+    [
+      '`]]` glued to a redirect ends the test',
+      '[[ a > b ]]>out',
+      [write(`${CWD}/out`)],
+    ],
     ['no write for `(( a > b ))`', '(( a > b ))', []],
     [
       'arithmetic keeps its `>`',
@@ -757,6 +788,16 @@ describe('prefix commands and substitutions', () => {
       '`[[ … ]]` after `if` compares',
       'if [[ a > b ]]; then echo hi > f; fi',
       [write('/repo/f')],
+    ],
+    [
+      '`[[ … ]]` after `if` ends at a glued `]]>`',
+      'if [[ a > b ]]>out; then :; fi',
+      [write('/repo/out')],
+    ],
+    [
+      '`[[ … ]]` after `if` ends at a spaced `]] >`',
+      'if [[ a > b ]] >out; then :; fi',
+      [write('/repo/out')],
     ],
     [
       'nested subshells are not arithmetic',
