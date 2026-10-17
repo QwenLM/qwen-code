@@ -91,6 +91,36 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('/theme');
   });
 
+  it('renders a peer notification with its own glyph, not the info bullet', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.NOTIFICATION,
+      text: 'Message from another session (a): run it',
+      display: { peer: true },
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('⇄');
+    expect(output).toContain('Message from another session (a): run it');
+    expect(output).not.toContain('●');
+  });
+
+  it('keeps an ordinary notification on the plain info bullet', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.NOTIFICATION,
+      text: 'Background agent completed',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('●');
+    expect(output).not.toContain('⇄');
+  });
+
   it('renders assistant replies with a leading spacer row', () => {
     const item: HistoryItem = {
       id: 1,

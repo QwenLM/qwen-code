@@ -66,6 +66,13 @@ export interface SendMessageParams {
   message: string;
   /** Optional 5-10 word summary for UI display (team mode). */
   summary?: string;
+  /**
+   * Delivery urgency to a cross-session peer: `"now"` asks the receiver to
+   * steer its running turn, `"next"` waits for that turn to end. Honoured only
+   * under the receiver's `agents.crossSessionMidTurn`, and only for a `to`
+   * recipient.
+   */
+  priority?: 'now' | 'next';
 }
 
 class SendMessageInvocation extends BaseToolInvocation<
@@ -134,6 +141,10 @@ class SendMessageInvocation extends BaseToolInvocation<
       target: to,
       message: this.params.message,
       approvalMode,
+      // Carried on the frame; the receiver decides whether it acts on it.
+      ...(this.params.priority === undefined
+        ? {}
+        : { priority: this.params.priority }),
       // Addresses this tool would keep in-process must never be handed
       // back to the model as a peer address, bare.
       isReserved: (address) => isInProcessRecipient(address, teamFile),
@@ -594,6 +605,12 @@ export class SendMessageTool extends BaseDeclarativeTool<
           summary: {
             type: 'string',
             description: 'Optional 5-10 word summary for UI display.',
+          },
+          priority: {
+            type: 'string',
+            description:
+              'Delivery urgency to another Qwen Code session. "now" asks the receiver to steer its running turn at the next tool-round boundary; "next" (default) delivers when its turn ends. Steering needs the receiver\'s agents.crossSessionMidTurn on, and even then the receiver holds the grant: a per-window budget, its own queued user input, and an active Goal turn can each leave the message for the turn boundary. Ignored for teammates and background tasks.',
+            enum: ['now', 'next'],
           },
         },
         required: ['message'],

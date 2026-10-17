@@ -136,6 +136,37 @@ export default tseslint.config(
     },
   },
   {
+    // `peerMessaging/mid-turn-constants.ts` exists only to be importable from
+    // the settings schema without dragging the peer runtime in with it: the
+    // constants are read at schema-definition time, and importing them through
+    // `peer-messaging.ts` reaches core at import time, which breaks the CLI
+    // suites that partially mock core — at collection, with an error naming a
+    // mock rather than this file. So this module imports nothing at all.
+    files: ['packages/cli/src/peerMessaging/mid-turn-constants.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                '*',
+                './*',
+                './**',
+                '../*',
+                '../**',
+                '@qwen-code/qwen-code-core',
+                '@qwen-code/qwen-code-core/**',
+              ],
+              message:
+                'mid-turn-constants.ts must import nothing: it is read by the settings schema at definition time, and any value import reaching the peer runtime or core breaks partially-mocking CLI suites at collection. Keep the constants here, or move the unreadable-value reader into this leaf beside them.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // `utils/` is the leaf layer that every other directory imports, so it
     // must not import back up into a domain directory. Type-only imports are
     // exempt: they are erased at compile time and cannot create a runtime
