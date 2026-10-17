@@ -24,9 +24,8 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
-  escapeShellArg,
   getShellConfiguration,
-  type ShellType,
+  resolveCommandPath,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
@@ -43,6 +42,50 @@ import {
 } from './hook-command-cgroup.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+// PowerShell probe: pwsh preferred, powershell (5.1) fallback. Hits are
+// cached per-process; a miss is re-probed on the next call.
+let cachedPowerShell: string | undefined;
+export function __resetPowerShellCacheForTests(): void {
+  cachedPowerShell = undefined;
+}
+
+// Both finders search the probe cwd before PATH: `where.exe` consults it
+// directly, and `command -v` reaches it through an empty or `.` PATH
+// component. Probe from a directory non-admin actors cannot write -- never the
+// session's own cwd -- so a planted `pwsh` cannot answer the lookup.
+function neutralProbeCwd(): string {
+  return process.platform === 'win32'
+    ? `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32`
+    : tmpdir();
+}
+
+export function resolvePowerShellExecutable(): string {
+  if (cachedPowerShell !== undefined) {
+    return cachedPowerShell;
+  }
+  let probeError: Error | undefined;
+  const probeCwd = neutralProbeCwd();
+  for (const name of ['pwsh', 'powershell']) {
+    // Spawn the absolute hit, never a bare name.
+    const { path, error } = resolveCommandPath(name, { cwd: probeCwd });
+    if (error) probeError ??= error;
+    // resolveCommandPath already reduces its output to the first hit.
+    const resolved = path?.trim();
+    if (resolved) {
+      cachedPowerShell = resolved;
+      debugLogger.debug(`PowerShell probe: ${name} resolved to ${resolved}`);
+      return resolved;
+    }
+    debugLogger.debug(
+      `PowerShell probe: ${name} ${error ? 'lookup failed' : 'not found'}`,
+    );
+  }
+  throw new Error(
+    'Could not resolve a PowerShell executable (looked for pwsh, powershell)' +
+      (probeError ? `: ${probeError.message}` : ''),
+  );
+}
 
 /**
  * Maximum length for stdout/stderr output (1MB)
@@ -838,18 +881,18 @@ export class HookRunner {
   ): ShellConfiguration {
     const globalConfig = getShellConfiguration();
 
+    // Shared by the explicit-shell and cmd-fallback branches so both stay in
+    // sync; the closure defers the PATH probe until powershell is needed.
+    const powershellConfig = (): ShellConfiguration => ({
+      shell: 'powershell',
+      executable: resolvePowerShellExecutable(),
+      argsPrefix: ['-NoProfile', '-Command'],
+    });
+
     // If hook specifies a shell, use it
     if (hookConfig.shell) {
-      const shellType: ShellType =
-        hookConfig.shell === 'powershell' ? 'powershell' : 'bash';
-
-      // Return configuration for the specified shell type
-      if (shellType === 'powershell') {
-        return {
-          shell: 'powershell',
-          executable: 'powershell',
-          argsPrefix: ['-Command'],
-        };
+      if (hookConfig.shell === 'powershell') {
+        return powershellConfig();
       }
 
       // For bash, use global config's executable path or fallback
@@ -861,7 +904,11 @@ export class HookRunner {
       };
     }
 
-    // Use global configuration
+    // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
+    // quoted path fails; powershell strips them natively.
+    if (globalConfig.shell === 'cmd') {
+      return powershellConfig();
+    }
     return globalConfig;
   }
 
@@ -1206,11 +1253,31 @@ export class HookRunner {
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
-      const command = this.expandCommand(
-        hookConfig.command,
-        input,
-        shellConfig.shell,
-      );
+      // LASTEXITCODE is pre-set to $null so the author's own `-ne 0` check
+      // stays fail-closed (StrictMode throws on undefined).
+      const strictPrefix =
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; ";
+      // Win32 5.1 defaults the console to the OEM code page; force UTF-8 so the
+      // JSON we read back survives non-ASCII.
+      const utf8Prefix =
+        process.platform === 'win32'
+          ? '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
+          : '';
+      // The body is wrapped so an error leaves as a caught exception instead of
+      // aborting ahead of the author's own `exit`: unwrapped, `Stop` turns a
+      // failing statement into exit 1, which reads as allow, and a gate that
+      // reports its reason and then exits 2 never reaches that exit. An `exit`
+      // inside `try` is not caught, so author intent still wins, and `-Command`
+      // folds a native command's code into 1, which this promotes back while the
+      // body's last command is still the failing one. Both splice points are
+      // newline-delimited: a body whose last line is a `#` comment would
+      // otherwise comment out the closing brace and the whole `-Command` would
+      // fail to parse, which exits 1 and reads as allow.
+      const command =
+        shellConfig.shell === 'powershell'
+          ? `${utf8Prefix}${strictPrefix}try {\n${hookConfig.command}\n} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }\n` +
+            '$__s = $?\nif ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }'
+          : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
@@ -1694,35 +1761,6 @@ export class HookRunner {
         });
       });
     });
-  }
-
-  /**
-   * Resolve project directory variables in a command string before launch.
-   *
-   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
-   * always exported in the hook's environment. Bash expands exported
-   * variables itself, so a bash command is passed through unchanged: a text
-   * substitution would put shell quotes inside a double-quoted
-   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
-   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
-   * for those shells each variable is replaced with the quoted project
-   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
-   * left for the shell to read.
-   */
-  private expandCommand(
-    command: string,
-    input: HookInput,
-    shellType: ShellType,
-  ): string {
-    if (shellType === 'bash') {
-      return command;
-    }
-    debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    const escapedCwd = escapeShellArg(input.cwd, shellType);
-    return command
-      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
-      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
   }
 
   /**
