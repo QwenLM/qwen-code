@@ -26,6 +26,7 @@ import (
 	containers "github.com/containerd/containerd/api/services/containers/v1"
 	content "github.com/containerd/containerd/api/services/content/v1"
 	images "github.com/containerd/containerd/api/services/images/v1"
+	introspection "github.com/containerd/containerd/api/services/introspection/v1"
 	snapshots "github.com/containerd/containerd/api/services/snapshots/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	"google.golang.org/grpc"
@@ -196,7 +197,7 @@ func runGateway(ctx context.Context, path string) error {
 	if cfg.RuntimeSocket != shimConfiguration.ContainerdGRPC {
 		return errors.New("original gateway and shim runtime endpoints differ")
 	}
-	effective, err := cristate.Open(ctx, gateway.cri)
+	effective, err := cristate.Open(ctx, gateway.cri, introspection.NewIntrospectionClient(conn), installed.SnapshotRoot())
 	if err != nil {
 		return err
 	}

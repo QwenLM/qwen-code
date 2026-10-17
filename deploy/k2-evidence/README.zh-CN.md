@@ -151,6 +151,8 @@ python3 deploy/k2-evidence/render-pre-exec.py \
 
 gateway 通过持续持有的原 containerd 连接读取实际 CRI Status 配置，启动服务前和每次 control 操作两侧核对固定 handler、三个 options、选定安全设置及固定 root/state/socket 路径。观察失败或不可用后永久拒绝。既有 source 调用及已启动 worker 的轮询消费此边界；sandbox-only 间隔没有增加周期检查。这是采样配置校验，不证明 NRI 已关闭、独占 CSI 接线、安装 provenance 或无间断 containment。详见[实际运行时配置](../../docs/design/2026-10-17-k2-effective-runtime-config.zh-CN.md)。
 
+生效配置 guard 还通过原连接，以无 options 的 PluginInfo 读取准确 builtin overlay plugin。唯一 root export 必须与独立校验的 target snapshot 目录匹配，含 proxy address export 时拒绝。这是采样 metadata 校验，不证明文件系统对象或挂载身份。详见[snapshotter 根目录](../../docs/design/2026-10-18-k2-snapshotter-root.zh-CN.md)。
+
 安装前必须资格化实际 daemon 的 handler/bootstrap 兼容性、私有 ext4 消费输入挂载、immutable 安装文件及 ancestor、初始 namespaces、完整已加载并 locked 的 AppArmor bundle 和 actor/admission 边界。当前 service units 和历史 profiles 不继承本次改变后候选的资格。运行时目录必须允许正常 PID/log/rootfs/cleanup 写入，不能将整个消费 bundle 设为 immutable。用 exact reviewed source/shim 配置执行 `node-config`，生成 Java 必需的出生期待值；解析成功仍不代表安装资格或物理释放。详见[出生设计](../../docs/design/2026-10-16-k2-pre-exec-birth.zh-CN.md)。
 
 ## 离线五角色策略候选

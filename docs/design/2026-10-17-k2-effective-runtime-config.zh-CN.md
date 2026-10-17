@@ -31,6 +31,8 @@ CRI root/state 目录与当前支持通道的字面路径比较。这属于固�
 Snapshot 读取并证明 namespace/root 身份。离线 fragment 提供这些设置及显式 snapshotter，不安装它们，
 也不修改现有 daemon。
 
+[Snapshotter 根目录检查](2026-10-18-k2-snapshotter-root.zh-CN.md)另通过同一连接消费独立校验的 target snapshot 目录和准确 builtin overlay PluginInfo。仅接受 root export，排除固定上游 proxy producer。两次查询共用五秒期限，plugin 响应上限为32 KiB；这不证明挂载或文件系统对象身份。
+
 生产检查器使用一个 mutex，首次失败后永久拒绝。Status 设置五秒期限和1 MiB gRPC
 接收上限。服务启动前检查一次，再由既有 gateway control wrapper 在操作两侧消费。
 Source 身份、ARM、birth、CSI 和已启动 worker 的后台轮询通过原 gateway 连接消费该

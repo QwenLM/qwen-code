@@ -9,7 +9,11 @@ import (
 	"testing"
 	"time"
 
+	introspection "github.com/containerd/containerd/api/services/introspection/v1"
+	rpc "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
@@ -265,22 +269,159 @@ type statusClient struct {
 	response *cri.StatusResponse
 	err      error
 	calls    int
+	deadline time.Time
 }
 
 func (c *statusClient) Status(ctx context.Context, request *cri.StatusRequest, _ ...grpc.CallOption) (*cri.StatusResponse, error) {
 	c.calls++
 	deadline, ok := ctx.Deadline()
+	c.deadline = deadline
 	if !request.Verbose || !ok || time.Until(deadline) > 5*time.Second {
 		return nil, errors.New("a bounded verbose request is required")
 	}
 	return c.response, c.err
 }
 
+const testSnapshotRoot = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots"
+
+func pluginReply() *introspection.PluginInfoResponse {
+	return &introspection.PluginInfoResponse{Plugin: &introspection.Plugin{
+		Type: "io.containerd.snapshotter.v1", ID: "overlayfs",
+		Exports: map[string]string{"root": "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"},
+	}}
+}
+
+type pluginClient struct {
+	introspection.IntrospectionClient
+	response *introspection.PluginInfoResponse
+	err      error
+	calls    int
+	status   *statusClient
+}
+
+func (c *pluginClient) PluginInfo(ctx context.Context, request *introspection.PluginInfoRequest, options ...grpc.CallOption) (*introspection.PluginInfoResponse, error) {
+	c.calls++
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > 5*time.Second || c.status != nil && !deadline.Equal(c.status.deadline) || request.Type != "io.containerd.snapshotter.v1" || request.ID != "overlayfs" || request.Options != nil || len(options) != 1 {
+		return nil, errors.New("the exact bounded original plugin query is required")
+	}
+	limit, ok := options[0].(grpc.MaxRecvMsgSizeCallOption)
+	if !ok || limit.MaxRecvMsgSize != 32<<10 {
+		return nil, errors.New("a 32 KiB receive bound is required")
+	}
+	return c.response, c.err
+}
+
+func TestOriginalSnapshotterMetadata(t *testing.T) {
+	root := "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"
+	if err := checkSnapshotter(pluginReply(), root); err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*introspection.PluginInfoResponse){
+		"missing-plugin":   func(r *introspection.PluginInfoResponse) { r.Plugin = nil },
+		"wrong-type":       func(r *introspection.PluginInfoResponse) { r.Plugin.Type = "io.containerd.other.v1" },
+		"wrong-id":         func(r *introspection.PluginInfoResponse) { r.Plugin.ID = "native" },
+		"failed-init":      func(r *introspection.PluginInfoResponse) { r.Plugin.InitErr = &rpc.Status{Code: 2} },
+		"empty-init-error": func(r *introspection.PluginInfoResponse) { r.Plugin.InitErr = &rpc.Status{} },
+		"missing-exports":  func(r *introspection.PluginInfoResponse) { r.Plugin.Exports = nil },
+		"missing-root":     func(r *introspection.PluginInfoResponse) { delete(r.Plugin.Exports, "root") },
+		"empty-root":       func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["root"] = "" },
+		"root-override":    func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["root"] = "/srv/overlay" },
+		"snapshots-child":  func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["root"] += "/snapshots" },
+		"unclean-root": func(r *introspection.PluginInfoResponse) {
+			r.Plugin.Exports["root"] += "/../io.containerd.snapshotter.v1.overlayfs"
+		},
+		"trailing-root": func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["root"] += "/" },
+		"root-case": func(r *introspection.PluginInfoResponse) {
+			r.Plugin.Exports["Root"] = r.Plugin.Exports["root"]
+			delete(r.Plugin.Exports, "root")
+		},
+		"case-alias":     func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["Root"] = r.Plugin.Exports["root"] },
+		"proxy":          func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["address"] = "/run/external.sock" },
+		"empty-proxy":    func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["address"] = "" },
+		"extra-export":   func(r *introspection.PluginInfoResponse) { r.Plugin.Exports["extra"] = "" },
+		"extra-response": func(r *introspection.PluginInfoResponse) { r.Extra = &anypb.Any{} },
+		"large-response": func(r *introspection.PluginInfoResponse) {
+			r.Plugin.Capabilities = []string{strings.Repeat("x", 32<<10)}
+		},
+	}
+	if checkSnapshotter(nil, root) == nil {
+		t.Fatal("nil plugin response accepted")
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			r := pluginReply()
+			mutate(r)
+			if checkSnapshotter(r, root) == nil {
+				t.Fatal("unsupported snapshotter metadata accepted")
+			}
+		})
+	}
+	r := pluginReply()
+	r.Plugin.Capabilities = []string{strings.Repeat("x", 32<<10)}
+	excess := proto.Size(r) - (32 << 10)
+	r.Plugin.Capabilities[0] = r.Plugin.Capabilities[0][:len(r.Plugin.Capabilities[0])-excess]
+	if proto.Size(r) != 32<<10 || checkSnapshotter(r, root) != nil {
+		t.Fatal("exactly bounded metadata refused")
+	}
+}
+
+func TestSnapshotterClientFailureIsPermanent(t *testing.T) {
+	for _, failure := range []string{"rpc", "changed-root", "nil-response"} {
+		t.Run(failure, func(t *testing.T) {
+			client := &statusClient{response: status(t, config())}
+			plugins := &pluginClient{response: pluginReply(), status: client}
+			guard, err := Open(context.Background(), client, plugins, testSnapshotRoot)
+			if err != nil || client.calls != 1 || plugins.calls != 1 {
+				t.Fatal("original bounded queries failed", err)
+			}
+			switch failure {
+			case "rpc":
+				plugins.err = errors.New("original plugin metadata unavailable")
+			case "changed-root":
+				plugins.response.Plugin.Exports["root"] = "/srv/other"
+			case "nil-response":
+				plugins.response = nil
+			}
+			if guard.Verify() == nil || client.calls != 2 || plugins.calls != 2 {
+				t.Fatal("failed plugin observation accepted")
+			}
+			plugins.err, plugins.response = nil, pluginReply()
+			if guard.Verify() == nil || client.calls != 2 || plugins.calls != 2 {
+				t.Fatal("failed plugin guard reacquired a baseline")
+			}
+		})
+	}
+}
+
+func TestInvalidSnapshotterInputsBeforeRPC(t *testing.T) {
+	client := &statusClient{response: status(t, config())}
+	plugins := &pluginClient{response: pluginReply()}
+	for _, root := range []string{"", "/srv/overlay/snapshots", testSnapshotRoot + "/"} {
+		if guard, err := Open(context.Background(), client, plugins, root); guard != nil || err == nil {
+			t.Fatal("unsupported expected root accepted")
+		}
+	}
+	if g, err := Open(nil, client, plugins, testSnapshotRoot); g != nil || err == nil {
+		t.Fatal("nil lifetime accepted")
+	}
+	if g, err := Open(context.Background(), nil, plugins, testSnapshotRoot); g != nil || err == nil {
+		t.Fatal("nil CRI client accepted")
+	}
+	if g, err := Open(context.Background(), client, nil, testSnapshotRoot); g != nil || err == nil {
+		t.Fatal("nil plugin client accepted")
+	}
+	if client.calls != 0 || plugins.calls != 0 {
+		t.Fatal("invalid inputs made an RPC")
+	}
+}
+
 func TestOriginalClientFailureIsPermanent(t *testing.T) {
 	client := &statusClient{response: status(t, config())}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	guard, err := Open(ctx, client)
+	plugins := &pluginClient{response: pluginReply()}
+	guard, err := Open(ctx, client, plugins, testSnapshotRoot)
 	if err != nil || client.calls != 1 || guard.Verify() != nil || client.calls != 2 {
 		t.Fatalf("initial/ongoing verification failed: calls=%d err=%v", client.calls, err)
 	}
@@ -293,7 +434,7 @@ func TestOriginalClientFailureIsPermanent(t *testing.T) {
 		t.Fatal("failed client reacquired a baseline")
 	}
 	client = &statusClient{response: status(t, config())}
-	guard, err = Open(ctx, client)
+	guard, err = Open(ctx, client, plugins, testSnapshotRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,11 +442,11 @@ func TestOriginalClientFailureIsPermanent(t *testing.T) {
 	if guard.Verify() == nil || client.calls != 1 {
 		t.Fatal("cancelled lifetime still called the client")
 	}
-	if g, err := Open(context.Background(), &statusClient{}); g != nil || err == nil {
+	if g, err := Open(context.Background(), &statusClient{}, plugins, testSnapshotRoot); g != nil || err == nil {
 		t.Fatal("invalid initial status accepted")
 	}
 	client = &statusClient{response: status(t, config())}
-	guard, err = Open(context.Background(), client)
+	guard, err = Open(context.Background(), client, plugins, testSnapshotRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -52,7 +52,7 @@ func fixture(t *testing.T) (fstest.MapFS, fstest.MapFS, fstest.MapFS) {
 		a.Catalogues[name] = pin{len(raw), birth.SHA256(raw)}
 	}
 	pre["artifact-manifest.json"] = file(encode(a))
-	target := target{Format: "qwen-k2-profile-target/2", Architecture: "amd64", Hosts: map[string]HostExecutable{}, Paths: map[string]string{"source": "/etc/qwen-k2/source.json", "gateway": "/etc/qwen-k2/gateway.json"}, HugepageSizes: []string{}}
+	target := target{Format: "qwen-k2-profile-target/2", Architecture: "amd64", SnapshotRoot: "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots", Hosts: map[string]HostExecutable{}, Paths: map[string]string{"source": "/etc/qwen-k2/source.json", "gateway": "/etc/qwen-k2/gateway.json"}, HugepageSizes: []string{}}
 	for _, name := range []string{"runtime", "kubelet", "registrar", "plugin", "systemd"} {
 		sha := source[name+"Digest"]
 		if name == "systemd" {
@@ -194,7 +194,7 @@ func TestRepinningDoesNotRepairDependencyOrFinalConfigurationChanges(t *testing.
 }
 
 func TestRepinnedTargetAndUnitMustKeepRoleLinkage(t *testing.T) {
-	for _, which := range []string{"architecture", "targetPath", "runtimeDigest", "emptyLabel", "unconfinedLabel", "reservedLabel", "invalidLabel", "duplicateLabel", "relativeHostPath", "uncleanHostPath", "nulHostPath", "longHostPath", "unitRole", "unitConfig"} {
+	for _, which := range []string{"architecture", "targetPath", "runtimeDigest", "emptyLabel", "unconfinedLabel", "reservedLabel", "invalidLabel", "duplicateLabel", "relativeHostPath", "uncleanHostPath", "nulHostPath", "longHostPath", "emptySnapshotRoot", "missingSnapshotRoot", "nullSnapshotRoot", "alternateSnapshotRoot", "uncleanSnapshotRoot", "trailingSnapshotRoot", "unitRole", "unitConfig"} {
 		t.Run(which, func(t *testing.T) {
 			pre, p, c := fixture(t)
 			files := assemble(t, pre, p, c)
@@ -214,6 +214,16 @@ func TestRepinnedTargetAndUnitMustKeepRoleLinkage(t *testing.T) {
 			case "relativeHostPath", "uncleanHostPath", "nulHostPath", "longHostPath":
 				path := map[string]string{"relativeHostPath": "usr/bin/runtime", "uncleanHostPath": "/usr/../bin/runtime", "nulHostPath": "/usr/bin/run\x00time", "longHostPath": "/" + strings.Repeat("a", 2048)}[which]
 				target["hostExecutables"].(map[string]any)["runtime"].(map[string]any)["path"] = path
+			case "missingSnapshotRoot":
+				delete(target, "snapshotRoot")
+			case "nullSnapshotRoot":
+				target["snapshotRoot"] = nil
+			case "emptySnapshotRoot", "alternateSnapshotRoot", "uncleanSnapshotRoot", "trailingSnapshotRoot":
+				target["snapshotRoot"] = map[string]string{
+					"emptySnapshotRoot": "", "alternateSnapshotRoot": "/srv/containerd/snapshots",
+					"uncleanSnapshotRoot":  "/var/lib/containerd/../containerd/io.containerd.snapshotter.v1.overlayfs/snapshots",
+					"trailingSnapshotRoot": "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/",
+				}[which]
 			default:
 				name = "qwen-k2-node-source.service"
 				old, replacement := " source ", " gateway "
@@ -265,6 +275,9 @@ func TestHostRolesAreExplicitIndependentValuesFromValidatedBytes(t *testing.T) {
 		}
 	}
 	files["target.json"][0] ^= 1
+	if snapshot.SnapshotRoot() != "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots" || new(Snapshot).SnapshotRoot() != "" {
+		t.Fatal("snapshot root was not retained from independently validated bytes")
+	}
 	actual, err := snapshot.Host("runtime")
 	if err != nil || actual.Label != "host-runtime" {
 		t.Fatal("caller byte mutation replaced the retained target value")

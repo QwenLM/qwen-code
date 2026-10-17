@@ -38,6 +38,8 @@ identities read from the installed Snapshot.
 The offline fragment supplies these settings and explicit snapshotter; it
 does not install them or change an existing daemon.
 
+[Snapshotter root checks](2026-10-18-k2-snapshotter-root.md) additionally consume the independently validated target snapshot directory and exact builtin overlay PluginInfo through the same connection. Only the root export is accepted, excluding the pinned proxy producer. The two queries share one five-second deadline; the plugin response has a 32 KiB limit. This does not establish mount or filesystem object identity.
+
 The production checker has one mutex and permanently refuses after its first
 failure. Status has a five-second deadline and a 1 MiB gRPC receive bound.
 Check once before serving, then consume it on both sides of the existing

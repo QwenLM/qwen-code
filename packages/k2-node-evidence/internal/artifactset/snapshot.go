@@ -19,6 +19,7 @@ import (
 
 const Directory = "/etc/qwen-k2/artifacts"
 const MaxTotal = 64 << 20
+const snapshotRoot = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots"
 
 type pin struct {
 	Bytes int    `json:"bytes"`
@@ -156,6 +157,7 @@ type Snapshot struct {
 	packedSHA       string
 	packedBytes     int
 	architecture    string
+	snapshotRoot    string
 	paths           map[string]string
 	inputs          map[string][]byte
 	hosts           map[string]HostExecutable
@@ -164,6 +166,7 @@ type Snapshot struct {
 func (s *Snapshot) PackedSHA256() string { return s.packedSHA }
 func (s *Snapshot) PackedBytes() int     { return s.packedBytes }
 func (s *Snapshot) Architecture() string { return s.architecture }
+func (s *Snapshot) SnapshotRoot() string { return s.snapshotRoot }
 
 func (s *Snapshot) Host(name string) (HostExecutable, error) {
 	if s != nil {
@@ -181,7 +184,7 @@ func validHost(v HostExecutable) bool {
 }
 
 func (s *Snapshot) Match(role, configurationPath string, configuration, shim, unit []byte) error {
-	if s == nil || !birth.Hash(s.installationSHA) || !birth.Hash(s.packedSHA) || s.packedBytes < 1 || s.packedBytes > 8<<20 || s.architecture != "amd64" && s.architecture != "arm64" || len(s.inputs) != 5 || len(s.paths) != 2 || role != "source" && role != "gateway" || s.paths[role] != configurationPath {
+	if s == nil || !birth.Hash(s.installationSHA) || !birth.Hash(s.packedSHA) || s.packedBytes < 1 || s.packedBytes > 8<<20 || s.architecture != "amd64" && s.architecture != "arm64" || s.snapshotRoot != snapshotRoot || len(s.inputs) != 5 || len(s.paths) != 2 || role != "source" && role != "gateway" || s.paths[role] != configurationPath {
 		return errors.New("actual role configuration path differs from the artifact")
 	}
 	name, unitName := roleInputs(role)
@@ -264,7 +267,7 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 	if err != nil || gatewayErr != nil || replaceErr != nil || source["sandboxImageSha256"] != a.SandboxSHA || source["runtimeDigest"] != gateway["runtimeDigest"] || !bytes.Equal(final, files["source-config.installed.json"]) {
 		return nil, errors.New("final role configuration derivation differs")
 	}
-	if t.Format != "qwen-k2-profile-target/2" || t.Architecture != architecture || !reflect.DeepEqual(t.Paths, p.Paths) || len(t.Hosts) != 5 {
+	if t.Format != "qwen-k2-profile-target/2" || t.Architecture != architecture || t.SnapshotRoot != snapshotRoot || !reflect.DeepEqual(t.Paths, p.Paths) || len(t.Hosts) != 5 {
 		return nil, errors.New("original target and artifact identities differ")
 	}
 	labels := make(map[string]bool)
@@ -303,7 +306,7 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 			return nil, errors.New("original service argv and configuration paths differ")
 		}
 	}
-	s := &Snapshot{installationSHA: birth.SHA256(files["installation.json"]), packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, paths: p.Paths, inputs: make(map[string][]byte), hosts: t.Hosts}
+	s := &Snapshot{installationSHA: birth.SHA256(files["installation.json"]), packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, snapshotRoot: t.SnapshotRoot, paths: p.Paths, inputs: make(map[string][]byte), hosts: t.Hosts}
 	for _, name := range []string{"source-config.installed.json", "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service"} {
 		s.inputs[name] = bytes.Clone(files[name])
 	}

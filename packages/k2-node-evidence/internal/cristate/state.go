@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	introspection "github.com/containerd/containerd/api/services/introspection/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -20,19 +22,22 @@ import (
 
 const maxStatusBytes = 1 << 20
 const handlerName = "qwen-k2-runc-v1"
+const maxPluginBytes = 32 << 10
 
 type Guard struct {
 	mu       sync.Mutex
 	client   cri.RuntimeServiceClient
+	plugins  introspection.IntrospectionClient
+	root     string
 	lifetime context.Context
 	failed   bool
 }
 
-func Open(ctx context.Context, client cri.RuntimeServiceClient) (*Guard, error) {
-	if ctx == nil || client == nil {
-		return nil, errors.New("original CRI client and lifetime are required")
+func Open(ctx context.Context, client cri.RuntimeServiceClient, plugins introspection.IntrospectionClient, snapshotRoot string) (*Guard, error) {
+	if ctx == nil || client == nil || plugins == nil || snapshotRoot != "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots" {
+		return nil, errors.New("original runtime clients, validated snapshot root and lifetime are required")
 	}
-	g := &Guard{client: client, lifetime: ctx}
+	g := &Guard{client: client, plugins: plugins, root: path.Dir(snapshotRoot), lifetime: ctx}
 	if err := g.Verify(); err != nil {
 		return nil, err
 	}
@@ -52,6 +57,23 @@ func (g *Guard) Verify() error {
 	if err != nil || Check(status) != nil || ctx.Err() != nil {
 		g.failed = true
 		return errors.New("original effective CRI configuration differs or was lost")
+	}
+	plugin, err := g.plugins.PluginInfo(ctx, &introspection.PluginInfoRequest{Type: "io.containerd.snapshotter.v1", ID: "overlayfs"}, grpc.MaxCallRecvMsgSize(maxPluginBytes))
+	if err != nil || checkSnapshotter(plugin, g.root) != nil || ctx.Err() != nil {
+		g.failed = true
+		return errors.New("original effective snapshotter root differs or was lost")
+	}
+	return nil
+}
+
+func checkSnapshotter(reply *introspection.PluginInfoResponse, root string) error {
+	if reply == nil || proto.Size(reply) > maxPluginBytes || reply.Plugin == nil || reply.Extra != nil {
+		return errors.New("bounded original snapshotter metadata is required")
+	}
+	p := reply.Plugin
+	// Pinned upstream proxy plugins always export address, even when empty.
+	if p.Type != "io.containerd.snapshotter.v1" || p.ID != "overlayfs" || p.InitErr != nil || len(p.Exports) != 1 || p.Exports["root"] != root {
+		return errors.New("original builtin snapshotter root differs")
 	}
 	return nil
 }
