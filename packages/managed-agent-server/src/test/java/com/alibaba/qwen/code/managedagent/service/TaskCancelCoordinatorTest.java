@@ -607,6 +607,32 @@ class TaskCancelCoordinatorTest {
                 anyLong());
     }
 
+    // A Broker stop that never settles is abandoned at the attempt
+    // deadline like any send: the interrupt reaches the wait on the stage,
+    // so the send's thread is given back instead of held until it settles.
+    @Test
+    void anAbandonedBackgroundStopGivesItsThreadBack() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            coordinator = new TaskCancelCoordinator(store, records, harness,
+                    broker, executor,
+                    Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                    new ManagedAgentProperties(), Duration.ofMillis(200));
+            target.set(shellRun("running", false, null));
+            when(broker.stopBackgroundProcess(TENANT, SESSION, "shell-1"))
+                    .thenReturn(new java.util.concurrent.CompletableFuture<>());
+            coordinator.dispatch(TENANT, SESSION, OPERATION);
+            verify(store, timeout(10_000)).retryOperation(eq(TENANT),
+                    eq(SESSION), eq(OPERATION), anyString(), eq(1L),
+                    anyLong());
+            assertThat(awaitLog("Abandoned task cancel send failed")
+                    .getFormattedMessage()).contains("operation=op_1",
+                            "The background process stop was interrupted");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     // #13746 F3: a pending delivery takes its cancel through its route
     // Session's channel operation route; its cancelRequested flag is the
     // request the outcome is read from.
