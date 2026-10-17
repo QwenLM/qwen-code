@@ -2202,6 +2202,55 @@ describe('createTranscriptReplayMachine', () => {
     ).toBeUndefined();
   });
 
+  it('attributes a background or cancelled subagent that really ran', () => {
+    // `background` (AgentTool detaches after spawn) and `cancelled` are
+    // resolved statuses whose display carries the validated
+    // `subagentConfig.name`, not the raw request string, so rejecting them
+    // would unattribute a subagent that genuinely ran. The name is a single
+    // valid segment: only the status guard can reject this fixture.
+    for (const status of ['background', 'cancelled'] as const) {
+      const machine = createTranscriptReplayMachine();
+      const result = updates(
+        machine,
+        record('agent-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'agent-1',
+            status: 'success',
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              status,
+            },
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'agent-1',
+                  name: 'agent',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        _meta: {
+          agent: {
+            agentName: '/root/researcher',
+            depth: 1,
+            kind: 'subagent',
+          },
+        },
+      });
+    }
+  });
+
   it('leaves a spawn unattributed when the persisted name is not one segment', () => {
     // A replayed transcript is read back from disk, so the persisted name is
     // only as trustworthy as whichever version wrote it. Admitting a `/` here

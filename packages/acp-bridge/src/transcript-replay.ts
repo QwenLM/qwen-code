@@ -2717,7 +2717,9 @@ function agentIdentityFromTaskExecution(
   if (
     typeof status === 'string' &&
     status !== 'completed' &&
-    status !== 'running'
+    status !== 'running' &&
+    status !== 'background' &&
+    status !== 'cancelled'
   ) {
     return undefined;
   }

@@ -1627,6 +1627,99 @@ describe('Session', () => {
       expect(manager.listenerCount('message_sent')).toBe(0);
     });
 
+    it('projects a failed teammate tool call as a failure the client can render', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.emit('teammate_activity', {
+        agentId: 'a1',
+        name: 'researcher',
+        toolName: 'write_file',
+        phase: 'result',
+        success: false,
+        description: 'EACCES',
+        timestamp: 1,
+      });
+
+      const frames = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([notification]) => notification.update)
+          .filter(
+            (update) =>
+              (update._meta?.['source'] as string | undefined) ===
+              'teammate_activity',
+          );
+      await vi.waitFor(() => expect(frames()).toHaveLength(1));
+      // `SystemMessage.tsx` switches `backgroundTask.status` on exactly
+      // `completed` / `failed` / `cancelled`; a raw `result` phase renders the
+      // neutral row and `description` is the only carrier of the error text.
+      expect(frames()[0]).toMatchObject({
+        content: {
+          type: 'text',
+          text: 'researcher finished write_file: EACCES',
+        },
+        _meta: {
+          backgroundTask: { kind: 'peer', status: 'failed' },
+        },
+      });
+
+      session.dispose();
+    });
+
+    it('holds an undrained teammate report so a reversible close cannot drop it', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const releaseCloseGate = session.beginClose();
+
+      // `TeamManager.pollLeaderInbox()` marks the report read before invoking
+      // this callback, so the notification queue below is its only carrier.
+      manager.leaderCallback?.(
+        '<task-notification>researcher done</task-notification>',
+        'teammate researcher reported',
+        ['researcher'],
+      );
+
+      expect(
+        session
+          .collectActiveWorkHolds()
+          .some(
+            (hold) =>
+              hold.category === 'notification' &&
+              hold.id.startsWith('teammate-message-'),
+          ),
+      ).toBe(true);
+
+      releaseCloseGate();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      session.dispose();
+    });
+
     it('routes a teammate tool approval to the client instead of emitting into a void', async () => {
       const manager = makeFakeTeamManager();
       session.dispose();

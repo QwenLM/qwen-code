@@ -4587,7 +4587,13 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent' || item.kind === 'workflow') {
+      // `peer` names no registry entry the model could re-read, so an
+      // undrained teammate report held only here would be lost, not deferred.
+      if (
+        item.kind === 'agent' ||
+        item.kind === 'workflow' ||
+        item.kind === 'peer'
+      ) {
         notificationIds.add(item.taskId);
       }
     }
@@ -11615,9 +11621,14 @@ export class Session implements SessionContext {
     message?: string;
   }): void {
     if (this.disposed || this.closing) return;
+    // The Web Shell system row switches `backgroundTask.status` on exactly
+    // `completed` / `failed` / `cancelled` and renders anything else with a
+    // neutral icon, so a failed tool result must not stay a raw phase string.
+    const toolFailed =
+      activity.phase === 'result' && activity.success === false;
     const text =
       activity.kind === 'tool'
-        ? `${activity.name} ${activity.phase === 'result' ? 'finished' : 'started'} ${activity.toolName ?? 'a tool'}${activity.description && activity.phase === 'call' ? `: ${activity.description}` : ''}`
+        ? `${activity.name} ${activity.phase === 'result' ? 'finished' : 'started'} ${activity.toolName ?? 'a tool'}${activity.description && (activity.phase === 'call' || toolFailed) ? `: ${activity.description}` : ''}`
         : `${activity.from} → ${activity.to}: ${activity.message ?? ''}`;
     // Inter-agent messages carry OpenAI's Responses multi-agent semantics —
     // `agent_message` items identify direction with `author` and `recipient`,
@@ -11636,7 +11647,11 @@ export class Session implements SessionContext {
         modelText: text,
         taskId: `teammate-activity-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
         status:
-          activity.kind === 'tool' ? (activity.phase ?? 'call') : 'message',
+          activity.kind === 'tool'
+            ? toolFailed
+              ? 'failed'
+              : (activity.phase ?? 'call')
+            : 'message',
         kind: 'peer',
         agent: {
           agentName: agentName(recipient),
