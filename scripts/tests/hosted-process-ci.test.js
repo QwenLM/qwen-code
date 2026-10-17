@@ -500,11 +500,13 @@ describe('Hosted real-process gates', () => {
   // headroom — and the FG9 session/relay letters, four since slice 2,
   // measure 308–314s for the class locally on JDK 21 + MySQL 8.4 across
   // three acceptance runs (~534s budgeted at >1.7x the heaviest measured
-  // run, up from slice 1's ~300s) in the same envelope; with the fork
-  // itself ~14s, 2640s covers them. A larger ceiling lets failsafe kill
-  // the fork mid-run, and the classes left unrun never report, failing
-  // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 2640;
+  // run, up from slice 1's ~300s) in the same envelope, and the FG8c
+  // process-crash letter adds 144s measured locally on JDK 21 + MySQL
+  // 8.4.6 (~290s budgeted at 2x); with the fork itself ~14s, 2930s covers
+  // them. A larger ceiling lets failsafe kill the fork mid-run, and the
+  // classes left unrun never report, failing the gate undiagnosably
+  // (#13780).
+  const hostedForkHealthySeconds = 2930;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
