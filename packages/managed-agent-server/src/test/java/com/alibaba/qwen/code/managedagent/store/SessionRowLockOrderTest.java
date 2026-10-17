@@ -405,13 +405,16 @@ class SessionRowLockOrderTest {
                         "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
-                        "findTurnSummary", "hasActiveTurn",
+                        "findTurnSummary", "hasActiveTurn", "hasLiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
+                        // #14461's recovery verdict is fenced by the live dispatch
+                        // lease, not the session-row lock.
+                        "markTurnRecoveryBlocked",
                         "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
