@@ -25,10 +25,12 @@ public final class ManagedSchema {
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
             "/db/managed-schema/V7__ssh_workspace_registration.sql";
+    public static final String TURN_COMMAND_OPERATIONS =
+            "/db/managed-schema/V8__turn_command_operations.sql";
     private static final List<Migration> EXTENSIONS = List.of(new Migration(2, PRIVATE_AUTHORITY),
             new Migration(3, SESSION_LIST), new Migration(4, WORKSPACE_CREATION),
             new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
-            new Migration(7, SSH_WORKSPACE));
+            new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {
