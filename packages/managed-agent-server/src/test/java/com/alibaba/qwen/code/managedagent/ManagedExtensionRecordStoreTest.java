@@ -143,6 +143,9 @@ class ManagedExtensionRecordStoreTest {
         assertThat(row.projection().runtimeState()).isEqualTo("ready");
         assertThat(row.projection().startedAt()).isEqualTo(2_000L);
         assertThat(row.projection().settledAt()).isNull();
+        // H4f-c: a live background Shell takes a public cancel.
+        assertThat(ManagedExtensionProjection.taskActions(row.kind(),
+                row.projection().state())).containsExactly("cancel");
         // A revision naming a resource outside the transaction's closure is
         // refused, and nothing of it persists.
         String other = UUID.randomUUID().toString();
