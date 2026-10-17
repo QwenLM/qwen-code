@@ -90,7 +90,7 @@ class HostedHookFaultGatesIT {
         boot("15000", "default");
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        submit(session, "FG13_HARNESS_KILL");
+        String firstTurn = submit(session, "FG13_HARNESS_KILL");
         waitFor(() -> {
             assertThat(events("hook.call")).hasSize(1);
             assertThat(events("hook.child")).hasSize(1);
@@ -113,14 +113,14 @@ class HostedHookFaultGatesIT {
         waitFor(() -> assertThat(running(child)).isFalse());
         assertThat(worker(session)).isEqualTo(worker);
         assertThat(generation(session)).isEqualTo(generation);
-        // The DELETE drains the Hook through the replacement Harness and
-        // settles the record from the original worker's receipt; it is the
-        // explicit reconciliation path the issue names.
-        JsonNode delete = api("DELETE", "/v1/agents/sessions/" + session, null, "delete", 202);
-        String operation = delete.path("id").asText();
+        // The active Turn refuses prompts and DELETEs; cancel it, then a
+        // fresh prompt's admission runs reconcileUnsettled and settles the
+        // Hook from the original worker's receipt.
+        api("POST", "/v1/agents/sessions/" + session + "/events",
+                Map.of("type", "agent.session.cancel", "turn_id", firstTurn), "cancel", 202);
+        waitFor(() -> assertThat(turnStatus(session, firstTurn)).isIn("CANCELLED", "FAILED", "COMPLETED"));
+        submit(session, "FG13_RECONCILE");
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
-        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
-                null, null, 200).path("status").asText()).isEqualTo("completed"));
         assertThat(hookExecution(session).path("resultRef").isNull()).isFalse();
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).hasSize(1);
@@ -313,6 +313,11 @@ class HostedHookFaultGatesIT {
     private void submitRefused(String session, String prompt) throws Exception {
         api("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message",
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 409);
+    }
+
+    private String turnStatus(String session, String turn) {
+        return jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ?"
+                + " AND session_id = ? AND turn_id = ?", String.class, tenant, session, turn);
     }
 
     private JsonNode hookExecution(String session) {
