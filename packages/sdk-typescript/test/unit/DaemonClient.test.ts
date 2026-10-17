@@ -7146,7 +7146,10 @@ describe('DaemonClient', () => {
       for await (const event of client.generateSessionContent(
         's/1',
         'Translate this',
-        { clientId: 'client-1' },
+        {
+          clientId: 'client-1',
+          skipOutputLanguagePreference: true,
+        },
       )) {
         events.push(event);
       }
@@ -7187,6 +7190,7 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
         prompt: 'Translate this',
+        skipOutputLanguagePreference: true,
       });
     });
 
@@ -7212,6 +7216,26 @@ describe('DaemonClient', () => {
           message: 'Generation failed',
         },
       ]);
+    });
+
+    it('omits optional language flags from default session generation requests', async () => {
+      const frames = [
+        'event: started\ndata: {"v":1,"type":"started","requestId":"r-1","model":"fast","modelSource":"fast"}\n\n',
+        'event: done\ndata: {"v":1,"type":"done","requestId":"r-1","model":"fast","modelSource":"fast"}\n\n',
+      ].join('');
+      const { fetch, calls } = recordingFetch(() => sseResponse(frames));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      for await (const _event of client.generateSessionContent(
+        's-1',
+        'Explain this',
+      )) {
+        // Drain the stream to let the request finish.
+      }
+
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        prompt: 'Explain this',
+      });
     });
   });
 
@@ -10393,7 +10417,7 @@ describe('DaemonClient', () => {
     });
 
     it('streams stateless workspace generation with the session envelope', async () => {
-      const { fetch } = recordingFetch(() =>
+      const { fetch, calls } = recordingFetch(() =>
         sseResponse(
           `data: ${JSON.stringify({ v: 1, type: 'started', requestId: 'request-1', model: 'qwen-plus', modelSource: 'fast' })}\n\n` +
             `data: ${JSON.stringify({ v: 1, type: 'delta', requestId: 'request-1', seq: 0, text: 'hello' })}\n\n` +
@@ -10403,7 +10427,10 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const events = [];
 
-      for await (const event of client.generateWorkspaceContent('say hello')) {
+      for await (const event of client.generateWorkspaceContent('say hello', {
+        skipOutputLanguagePreference: true,
+        outputLanguageFallback: 'English',
+      })) {
         events.push(event);
       }
 
@@ -10430,6 +10457,28 @@ describe('DaemonClient', () => {
           modelSource: 'fast',
         },
       ]);
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        prompt: 'say hello',
+        skipOutputLanguagePreference: true,
+        outputLanguageFallback: 'English',
+      });
+    });
+
+    it('omits optional language flags from default workspace generation requests', async () => {
+      const frames = [
+        'data: {"v":1,"type":"started","requestId":"request-1","model":"fast","modelSource":"fast"}\n\n',
+        'data: {"v":1,"type":"done","requestId":"request-1","model":"fast","modelSource":"fast"}\n\n',
+      ].join('');
+      const { fetch, calls } = recordingFetch(() => sseResponse(frames));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      for await (const _event of client.generateWorkspaceContent('say hello')) {
+        // Drain the stream to let the request finish.
+      }
+
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        prompt: 'say hello',
+      });
     });
 
     it('keeps structured workspace agent generation compatible', async () => {

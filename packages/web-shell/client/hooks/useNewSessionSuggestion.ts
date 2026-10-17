@@ -320,6 +320,7 @@ export function useNewSessionSuggestion({
           try {
             for await (const event of currentGenerateContent(prompt, {
               signal: controller.signal,
+              skipOutputLanguagePreference: true,
             })) {
               if (abortRef.current !== controller) return;
               if (event.type === 'delta') {

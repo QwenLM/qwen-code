@@ -255,6 +255,7 @@ in the internal [session lifecycle notes](./daemon/08-session-lifecycle.md#conte
 | [`GET /file`](./qwen-serve-protocol.md#get-file) · [`GET /file/bytes`](./qwen-serve-protocol.md#get-filebytes)                                         | Read a file, or a byte range                                                                                                        |
 | [`GET /stat`](./qwen-serve-protocol.md#get-stat) · [`GET /list`](./qwen-serve-protocol.md#get-list) · [`GET /glob`](./qwen-serve-protocol.md#get-glob) | Path metadata, directory listing, glob                                                                                              |
 | [`GET /workspace/tools`](./qwen-serve-protocol.md#get-workspacetools)                                                                                  | Tools reported by the live ACP child; without one, the response has `acpChannelLive: false`, `tools: []`, and a `not_started` error |
+| [`POST /workspace/generate`](./qwen-serve-protocol.md#post-workspacegenerate)                                                                          | Request-scoped, tool-free generation against the primary workspace runtime                                                          |
 
 ## Minimal flow
 
