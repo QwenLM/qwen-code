@@ -406,16 +406,60 @@ function VirtualizedList<T>(
   const prevTotalHeight = useRef(totalHeight);
   const prevScrollTop = useRef(actualScrollTop);
   const prevContainerHeight = useRef(scrollableContainerHeight);
+  // Set by the re-anchor branch when it clamps a scrolled-away viewport to
+  // the new bottom, holding the anchor the clamp installed. While the
+  // current anchor still sits where the clamp parked it, that position is
+  // content-driven, so the re-stick gate must not read it as the user
+  // having scrolled to the bottom. Any scroll moves the anchor, and the
+  // mismatch clears the mark. The mark deliberately carries no item key:
+  // pending items re-key on commit and the banner key is constant, so a
+  // key comparison cleared (or kept) the mark for the wrong reasons while
+  // the user still sat at the parked position (#9305 review R18-1).
+  // Dataset swaps (/clear, /resume) never reach the mark because
+  // MainContent keys the list by session and remounts it. `allowFollow`
+  // records whether the park landed in a live multi-item conversation,
+  // where growth may re-engage follow from a live-bottom park; a
+  // banner-only remnant must stay released (#9305 reviews R6-2, R17-1).
+  const reAnchorClampMark = useRef<{
+    index: number;
+    offset: number;
+    allowFollow: boolean;
+  } | null>(null);
 
   useLayoutEffect(() => {
     const contentPreviouslyFit =
       prevTotalHeight.current <= prevContainerHeight.current;
+    const prevMaxScroll = prevTotalHeight.current - prevContainerHeight.current;
+    // The -1 tolerance must not span the whole scroll range: a viewport
+    // parked at the TOP of a one-row range would otherwise read as "at the
+    // bottom pixels" and yank the first growth to END (#9305 review R11-4).
     const wasScrolledToBottomPixels =
-      prevScrollTop.current >=
-      prevTotalHeight.current - prevContainerHeight.current - 1;
+      prevMaxScroll > 1 && prevScrollTop.current >= prevMaxScroll - 1;
     const wasAtBottom = contentPreviouslyFit || wasScrolledToBottomPixels;
 
-    if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
+    // Fitting alone is not a bottom signal for re-sticking: a top-anchored
+    // mount (initialScrollIndex 0, e.g. the banner-only VP session) fits
+    // too, and flipping sticking there would let `bottomAlignGap`
+    // bottom-align content the host anchored to the top (#9300). Re-stick
+    // only from a real bottom position: previously overflowing with the
+    // viewport at the bottom pixels. A position installed by the re-anchor
+    // clamp is not a user-driven bottom either (#9305): suppress the flip
+    // while the anchor still matches the clamp mark.
+    const clampMark = reAnchorClampMark.current;
+    const clampParked =
+      clampMark !== null &&
+      data[clampMark.index] !== undefined &&
+      scrollAnchor.index === clampMark.index &&
+      scrollAnchor.offset === clampMark.offset;
+    if (clampMark !== null && !clampParked) {
+      reAnchorClampMark.current = null;
+    }
+    if (
+      !clampParked &&
+      !contentPreviouslyFit &&
+      wasScrolledToBottomPixels &&
+      actualScrollTop >= prevScrollTop.current
+    ) {
       if (!isStickingToBottom) {
         setIsStickingToBottom(true);
       }
@@ -429,8 +473,34 @@ function VirtualizedList<T>(
 
     if (
       shouldAutoScroll &&
-      ((listGrew && (isStickingToBottom || wasAtBottom)) ||
-        (isStickingToBottom && containerChanged))
+      // The clamp-parked position is content-driven, not the user being at
+      // the bottom, so growth must not auto-follow from it (#9305 review
+      // R6-2) — except a parked state that previously fit crossing into
+      // overflow by any shape: length growth, in-place height growth, or a
+      // container shrink. While the content fit, the user could see
+      // everything, so follow must come back once it overflows instead of
+      // content rendering below the fold (#9305 reviews R11-6, R14-1). A
+      // park at the live bottom of a multi-item remnant re-engages on
+      // growth too: it IS the bottom of a live conversation, and the mark
+      // would otherwise suppress follow forever (#9305 review R18-1).
+      // Banner-only remnants never cross back: there is no conversation to
+      // follow (#9305 review R17-1).
+      ((listGrew && (isStickingToBottom || (wasAtBottom && !clampParked))) ||
+        (clampParked &&
+          contentPreviouslyFit &&
+          data.length > 1 &&
+          totalHeight > scrollableContainerHeight) ||
+        (clampMark !== null &&
+          clampParked &&
+          clampMark.allowFollow &&
+          wasScrolledToBottomPixels &&
+          totalHeight > prevTotalHeight.current) ||
+        // A shrink landing in the same render must reach the drop/re-anchor
+        // branch below, not be preempted here on the stale render-time
+        // sticking flag (#9305 review R11-1).
+        (isStickingToBottom &&
+          containerChanged &&
+          data.length >= prevDataLength.current))
     ) {
       const newIndex = data.length > 0 ? data.length - 1 : 0;
       if (
@@ -450,12 +520,51 @@ function VirtualizedList<T>(
         actualScrollTop > totalHeight - scrollableContainerHeight) &&
       data.length > 0
     ) {
+      const droppingSticking = data.length <= 1 && isStickingToBottom;
+      if (droppingSticking) {
+        // Collapse to the host's non-end-anchored state (MainContent mounts
+        // banner-only data with initialScrollIndex 0, e.g. after /clear):
+        // the followed conversation is gone, so drop the carried sticking
+        // instead of bottom-aligning the remnant under a blank viewport.
+        setIsStickingToBottom(false);
+      }
       const newScrollTop = Math.max(0, totalHeight - scrollableContainerHeight);
       const newAnchor = getAnchorForScrollTop(newScrollTop, offsets);
       if (
         scrollAnchor.index !== newAnchor.index ||
         scrollAnchor.offset !== newAnchor.offset
       ) {
+        // Install the mark on the drop render too: isStickingToBottom is the
+        // stale render-time flag (the drop only queued its update), and
+        // without the mark the next effect trigger re-sticks from the parked
+        // position before the release is visible here (#9305 review R6-1).
+        // While the remnant overflows, always install it — a scroll can move
+        // the anchor off the mark and end the suppression. A fitting remnant
+        // keeps it only through the released arm and only when real content
+        // remains: that park must not re-stick on the next trigger (#9305
+        // review R5-3). A fitting banner-only remnant gets no mark on either
+        // arm: while content fits, nothing can move the anchor off a mark,
+        // so one installed at rest reads as clampParked forever and kills
+        // growth auto-follow, defending nothing — the re-stick gate is
+        // already blocked by `!contentPreviouslyFit` (#9305 reviews R8-1,
+        // R10-1). An out-of-range carried anchor with a multi-item remnant
+        // is a truncation below the anchor (dataset swaps remount the list
+        // by session key, #9305 review R18-1): the park lands on content
+        // the user never scrolled, and a mark there would keep follow dead;
+        // the banner-only collapse keeps its mark (#9305 review R17-2).
+        const swapEntry = scrollAnchor.index >= data.length && data.length > 1;
+        const markItem = data[newAnchor.index];
+        if (
+          markItem !== undefined &&
+          ((newScrollTop > 0 && !swapEntry) ||
+            (newScrollTop === 0 && !isStickingToBottom && data.length > 1))
+        ) {
+          reAnchorClampMark.current = {
+            index: newAnchor.index,
+            offset: newAnchor.offset,
+            allowFollow: data.length > 1,
+          };
+        }
         setScrollAnchor(newAnchor);
       }
     } else if (data.length === 0) {
@@ -469,7 +578,7 @@ function VirtualizedList<T>(
     prevScrollTop.current = actualScrollTop;
     prevContainerHeight.current = scrollableContainerHeight;
   }, [
-    data.length,
+    data,
     totalHeight,
     actualScrollTop,
     scrollableContainerHeight,
@@ -542,6 +651,17 @@ function VirtualizedList<T>(
     Math.max(0, isStickingToBottom ? maxScroll : actualScrollTop),
     maxScroll,
   );
+
+  // Bottom-align short content while stuck to the bottom (#9300): when the
+  // whole conversation fits in the viewport, push it down so the latest
+  // message sits directly above the composer and any blank space is at the
+  // TOP (standard chat-TUI behavior), instead of top-aligning and leaving a
+  // gap between the last message and the composer. Zero whenever content
+  // overflows (maxScroll > 0) or the user has scrolled away from the bottom.
+  const bottomAlignGap =
+    isStickingToBottom && maxScroll === 0
+      ? Math.max(0, scrollableContainerHeight - totalHeight)
+      : 0;
 
   // The render window must cover what the viewport actually paints, so
   // it is computed from clampedScrollTop, not the anchor-based
@@ -733,11 +853,18 @@ function VirtualizedList<T>(
     ref,
     () => ({
       scrollBy: (delta: number) => {
+        const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+        if (maxScroll === 0) {
+          // Nothing to scroll: the attempt is positionally a no-op and must
+          // not flip sticking either way. Engaging it would bottom-align a
+          // top-anchored list whose content fits; releasing it would drop a
+          // stuck conversation's auto-follow.
+          return;
+        }
         if (delta < 0) {
           setIsStickingToBottom(false);
         }
         const currentScrollTop = getScrollTop();
-        const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
         const actualCurrent = Math.min(currentScrollTop, maxScroll);
         const newScrollTop = Math.max(0, actualCurrent + delta);
         // Reaching the bottom must use the same live-recomputing end anchor as
@@ -761,6 +888,11 @@ function VirtualizedList<T>(
       },
       scrollTo: (offset: number) => {
         const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+        if (maxScroll === 0) {
+          // Same no-op rule as scrollBy: a scroll attempt on fitting content
+          // must not flip sticking either way.
+          return;
+        }
         if (offset >= maxScroll || offset === SCROLL_TO_ITEM_END) {
           setIsStickingToBottom(true);
           setPendingScrollTop(Number.MAX_SAFE_INTEGER);
@@ -778,6 +910,12 @@ function VirtualizedList<T>(
         }
       },
       scrollToEnd: () => {
+        const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+        if (maxScroll === 0) {
+          // Same no-op rule as scrollBy/scrollTo: a scroll attempt on
+          // fitting content must not flip sticking either way.
+          return;
+        }
         setIsStickingToBottom(true);
         setPendingScrollTop(Number.MAX_SAFE_INTEGER);
         if (data.length > 0) {
@@ -940,20 +1078,23 @@ function VirtualizedList<T>(
   ]);
 
   // The host passes `containerHeight` as the *maximum* viewport height (the
-  // room available between the header and the composer). Pinning the root box
-  // to that height unconditionally left a tall empty gap below short content
-  // and pushed the composer far down the screen — the legacy <Static> path
-  // instead grows with its content. Collapse to `totalHeight` whenever the
-  // content fits so the composer sits right beneath the conversation. A
-  // caller can request one full-height measurement pass while content changes
-  // shape under a stable item key; otherwise a stale cached total can clip
-  // the new content before it is measured. The root collapses again after the
-  // measurement so short content does not leave a gap above the composer.
+  // room available between the header and the composer). While the list is
+  // not bottom-aligned, collapse to `totalHeight` whenever the content fits:
+  // pinning the root box to the full height unconditionally would leave a
+  // tall empty gap below short content and push the composer far down the
+  // screen, while the legacy <Static> path grows with its content. While a
+  // bottom-stuck conversation has room to spare (#9300), keep the full
+  // `containerHeight` instead so `bottomAlignGap` can push it down: the
+  // blank rows render ABOVE the content and the latest message sits right
+  // above the composer. A caller can request one full-height measurement
+  // pass while content changes shape under a stable item key; otherwise a
+  // stale cached total can clip the new content before it is measured. The
+  // collapse/bottom-align rule above applies again after the measurement.
   // `scrollableContainerHeight` (the scroll math) still uses the full
   // `containerHeight`, so scrolling is unaffected.
   const rootHeight =
     props.containerHeight !== undefined
-      ? fullHeightMeasurementPending
+      ? fullHeightMeasurementPending || bottomAlignGap > 0
         ? props.containerHeight
         : Math.min(props.containerHeight, totalHeight)
       : '100%';
@@ -973,6 +1114,7 @@ function VirtualizedList<T>(
           flexDirection="column"
           marginTop={-clampedScrollTop}
         >
+          <Box height={bottomAlignGap} flexShrink={0} />
           <Box height={topSpacerHeight} flexShrink={0} />
           {renderedItems}
           <Box height={bottomSpacerHeight} flexShrink={0} />
