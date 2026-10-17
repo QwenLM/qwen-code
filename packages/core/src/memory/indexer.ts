@@ -39,10 +39,12 @@ import {
 } from './index-budget.js';
 
 const MAX_INDEX_FIELD_CHARS = 120;
-// The description is the only optional part of an entry, so it absorbs all the
-// shortening. A hook that would have to be CUT below this length is not worth
-// the bytes it costs, so the entry is then emitted without one — but a hook
-// that fits whole in the leftover room is kept however small that room is.
+// The description and the title are both optional parts of an entry, so the
+// shortening is split between them: the title is capped by the line budget and
+// the description absorbs what is left. A hook that would have to be CUT below
+// this length is not worth the bytes it costs, so the entry is then emitted
+// without one — but a hook that fits whole in the leftover room is kept however
+// small that room is.
 const MIN_INDEX_HOOK_CHARS = 24;
 const INDEX_HOOK_SEPARATOR = ' — ';
 // Chars the `- [](…)` wrapper spends around the title and the link target, i.e.

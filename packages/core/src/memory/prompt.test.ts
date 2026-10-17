@@ -253,14 +253,22 @@ describe('managed auto-memory prompt helpers', () => {
       // a literal: it only has to push the retained body just past
       // MAX_INDEX_CHARS, and how many characters that takes moves whenever an
       // unrelated constant changes a line's length (issue #13910 retuned a
-      // literal here twice). The smallest run whose index exceeds the cap is
-      // used, keeping the overshoot thin — the assertions below depend on the
-      // writer still retaining all 14 long entries.
-      const perRunChars = indexLengthFor(1) - indexLengthFor(0);
-      const tailRun =
-        perRunChars > 0
-          ? Math.ceil((25_000 + 1 - indexLengthFor(0)) / perRunChars)
-          : 0;
+      // literal here twice). Search upward for the smallest run whose index
+      // exceeds the cap instead of extrapolating a two-point slope: the
+      // rendered length is not monotonic in the run (the writer starts dropping
+      // retained entries as the body grows), so a slope taken at 0 and 1 both
+      // overshoots past the retention cliff and goes negative — a RangeError
+      // out of ' '.repeat — whenever the run-0 index already sits over the cap.
+      const tailRun = (() => {
+        // 250 is the largest run whose last path part still fits the 255-char
+        // segment limit asserted below.
+        for (let run = 0; run <= 250; run++) {
+          if (indexLengthFor(run) > 25_000) {
+            return run;
+          }
+        }
+        return 250;
+      })();
       const longDocs = longDocsFor(tailRun);
       for (const longDoc of longDocs) {
         for (const part of longDoc.relativePath.split('/')) {
