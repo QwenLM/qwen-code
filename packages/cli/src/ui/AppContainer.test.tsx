@@ -6782,16 +6782,24 @@ describe('AppContainer State Management', () => {
           await ready;
           if (fails) throw new Error('tool.call is unsupported');
         });
+        const session = {
+          initialize,
+          subscribe: (listener: (text: string) => void) => {
+            emit = listener;
+            return () => {};
+          },
+          setPresentation: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession;
+        // Scope the mock to this test's own Config: mount effects from
+        // earlier tests can still be in flight (they run the real
+        // config.initialize()), and an unscoped mockReturnValue lets those
+        // stale effects call this test's initialize(), inflating the
+        // exact-once assertion below.
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
-          .mockReturnValue({
-            initialize,
-            subscribe: (listener: (text: string) => void) => {
-              emit = listener;
-              return () => {};
-            },
-            setPresentation: vi.fn(),
-          } as unknown as interactiveMods.InteractiveModSession);
+          .mockImplementation((config) =>
+            config === mockConfig ? session : undefined,
+          );
         try {
           render(
             <AppContainer
