@@ -258,6 +258,8 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(reference.jobs.build.env).toEqual({
       MAVEN_VERSION: parsed.env.MAVEN_VERSION,
       MAVEN_SHA512: parsed.env.MAVEN_SHA512,
+      MYSQL_CONTAINER:
+        'qwen-code-reference-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
     });
     expect(bodies[0]).toContain('sha512sum --check');
     expect(bodies[0]).toContain('>> "${GITHUB_PATH}"');
