@@ -112,10 +112,10 @@ Checked at `3bddf6e0bb` (contract `1.51.0`):
 
 ## Follow-up work
 
-| Item                    | Scope                                                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `automation_run`        | Carries no stop request. H6's per_run target owns it.                                                                                  |
-| Channel delivery cancel | #13746 F3: a delivery is not a task. Reuse the operation model ([H4f decision 10](2026-10-10-managed-task-cancel.md)).                 |
-| Child output            | #13746 F2: link a child task to its child Session.                                                                                     |
-| WebShell panel          | Show `workflow`, `background_shell` and `monitor` tasks and admit their cancel (`ManagedTaskPanel.tsx`, `use-managed-task-cancel.ts`). |
-| Stage F fault arms      | FG8g real-stack arms for a lost cancel reply, a Harness down at finalize and a cancel after a Java restart.                            |
+| Item                    | Scope                                                                                                                                                                                                                                                         |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `automation_run`        | Carries no stop request. H6's per_run target owns it.                                                                                                                                                                                                         |
+| Channel delivery cancel | **Delivered in [#13746 F3](2026-10-17-managed-delivery-task-cancel.md):** a delivery projects as a task of its route Session (`channel_delivery`) and takes the same task cancel while no adapter has claimed it; decision 10's separate route is not needed. |
+| Child output            | #13746 F2: link a child task to its child Session.                                                                                                                                                                                                            |
+| WebShell panel          | Show `workflow`, `background_shell` and `monitor` tasks and admit their cancel (`ManagedTaskPanel.tsx`, `use-managed-task-cancel.ts`).                                                                                                                        |
+| Stage F fault arms      | FG8g real-stack arms for a lost cancel reply, a Harness down at finalize and a cancel after a Java restart.                                                                                                                                                   |
