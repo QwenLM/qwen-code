@@ -49,9 +49,9 @@ class OperationReconcilerTest {
     private static final long RECHECK_AT =
             1_000 + OperationReconciler.RECHECK.toMillis();
     private static final ParkedOperation PARKED_CANCEL = new ParkedOperation(
-            TENANT, SESSION, CANCEL, OperationKind.TASK_CANCEL);
+            TENANT, SESSION, CANCEL, "TASK_CANCEL");
     private static final ParkedOperation PARKED_INPUT = new ParkedOperation(
-            TENANT, SESSION, INPUT, OperationKind.SUBMIT_INPUT);
+            TENANT, SESSION, INPUT, "SUBMIT_INPUT");
 
     private AgentStateStore store;
     private ManagedExtensionRecordStore records;

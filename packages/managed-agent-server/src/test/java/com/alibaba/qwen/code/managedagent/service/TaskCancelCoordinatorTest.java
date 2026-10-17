@@ -686,7 +686,7 @@ class TaskCancelCoordinatorTest {
 
         // Parked, only the reconciler (D7-2) reads it, from the record.
         ParkedOperation parked = new ParkedOperation(TENANT, SESSION,
-                OPERATION, OperationKind.TASK_CANCEL);
+                OPERATION, "TASK_CANCEL");
         when(store.findParkedOperations(
                 org.mockito.ArgumentMatchers.anyInt()))
                 .thenReturn(List.of(parked));

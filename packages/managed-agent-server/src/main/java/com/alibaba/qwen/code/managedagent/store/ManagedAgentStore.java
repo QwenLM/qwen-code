@@ -2794,7 +2794,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     + " s.csi_guard = FALSE) ORDER BY available_at LIMIT ?",
                 (result, row) -> new ParkedOperation(result.getString("tenant_id"),
                         result.getString("session_id"), result.getString("operation_id"),
-                        OperationKind.valueOf(result.getString("operation_kind"))),
+                        result.getString("operation_kind")),
                 lifecycleDatabaseTime(), limit);
     }
 
@@ -2835,7 +2835,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " attempt_count = attempt_count + 1";
             }
         };
-        arguments.addAll(List.of(parked.kind().name(), parked.operationId(),
+        arguments.addAll(List.of(parked.kind(), parked.operationId(),
                 parked.tenantId(), parked.sessionId()));
         // Only a still-parked row: a reconciliation never rewrites an
         // outcome already recorded, and no claim holds a parked row.
