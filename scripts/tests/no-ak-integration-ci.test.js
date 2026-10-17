@@ -890,7 +890,9 @@ describe('no-AK integration CI wiring', () => {
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
+    expect(webShellJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''[\"ubuntu-latest\"]'') }}'",
+    );
     const hostedInstall = getWorkflowStep(
       webShellJob,
       'Install Playwright Chromium and WebKit (hosted)',

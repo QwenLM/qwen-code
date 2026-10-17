@@ -102,8 +102,12 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
-it('keeps browser gates hosted independently of the shared Linux runner', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
+it('routes browser gates like the shared Linux test lane, at the hosted worker count', () => {
+  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe(ci.jobs.test['runs-on']);
+  const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Run web-shell browser smoke',
+  );
+  expect(smoke.run).toMatch(/ -- --workers=2$/);
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 60-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded.
