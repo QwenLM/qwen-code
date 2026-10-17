@@ -125,4 +125,4 @@
 ## 后续工作
 
 - **D7-2：** 在多种证据来源（此处为 Turn 行，`TASK_CANCEL` 为任务记录）之上的统一对账规则，包括 Turn 命令 operation 是否需要 `recovery_blocked`。
-- **D7-3：** 可选 profile。它返回 `Admission.operationId` 及准入阶段与投递状态，声明 `durable_operations`，并保持 `harness_confirmed` 为默认。它还要决定 `PublicTurn` 是否显示其输入 operation。
+- **D7-3：** 可选 profile，已在 [managed java_durable 准入](2026-10-17-managed-java-durable-admission.zh-CN.md) 中落地。请求该 profile 的 Turn 输入与取消准入会返回其 operation 及准入阶段与投递状态，Session 声明 `durable_operations`，`harness_confirmed` 仍为默认。`PublicTurn` 的 operation 字段保持 planned。
