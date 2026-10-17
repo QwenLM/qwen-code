@@ -340,7 +340,10 @@ export function SubAgentPanel({
           }}
         >
           <StatusIcon status={displayStatus} />
-          <span className={chromeStyles.lineName}>
+          <span
+            className={chromeStyles.lineName}
+            {...(tool.agentPath ? { title: tool.agentPath } : {})}
+          >
             {localizeAgentTypeName(agentType, t)}:
           </span>
           {description && (

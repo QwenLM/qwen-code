@@ -469,6 +469,64 @@ describe('status event while an assistant block is streaming', () => {
   });
 });
 
+describe('teammate_activity status events', () => {
+  const activity = (text: string, agentName?: string): DaemonUiEvent => ({
+    type: 'status',
+    source: 'teammate_activity',
+    text,
+    ...(agentName
+      ? { agent: { agentName, depth: 1, kind: 'teammate' as const } }
+      : {}),
+    clearActiveText: false,
+  });
+
+  it('keeps one row per teammate so activity cannot evict conversation', () => {
+    const events: DaemonUiEvent[] = [
+      { type: 'user.text.delta', text: 'question' },
+      { type: 'assistant.text.delta', text: 'answer' },
+      { type: 'assistant.done' },
+    ];
+    for (let i = 0; i < 40; i += 1) {
+      events.push(activity(`read_file #${i}`, `/root/qa-${i % 2}`));
+    }
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1, maxBlocks: 10 }),
+      events,
+      { now: 1, maxBlocks: 10 },
+    );
+
+    const rows = state.blocks.filter(
+      (block) =>
+        block.kind === 'status' && block.source === 'teammate_activity',
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.map((block) => ('text' in block ? block.text : ''))).toEqual([
+      'read_file #38',
+      'read_file #39',
+    ]);
+    // One block per event would spend the window on rows a reload never
+    // contains, and `trimTranscriptState` evicts from the front.
+    expect(state.blocks.map((block) => block.kind).slice(0, 2)).toEqual([
+      'user',
+      'assistant',
+    ]);
+  });
+
+  it('appends a separate row when the activity carries no identity', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [activity('first'), activity('second')],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'status',
+    ]);
+  });
+});
+
 describe('status event while a thought block is streaming', () => {
   it('keeps the thought block active when clearActiveText is false', () => {
     const state = reduceDaemonTranscriptEvents(

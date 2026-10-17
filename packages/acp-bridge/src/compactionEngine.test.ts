@@ -250,6 +250,23 @@ function withIdentity(
   return event;
 }
 
+/**
+ * The meta SubAgentTracker stamps on every streamed subagent delta: the two
+ * merge keys plus the identity the projection adds.
+ */
+function withAgentStamp(
+  event: BridgeEvent,
+  agent: unknown = { agentName: '/root/explore', depth: 1, kind: 'subagent' },
+): BridgeEvent {
+  const update = (event.data as { update: Record<string, unknown> }).update;
+  update['_meta'] = {
+    parentToolCallId: 'tool-a',
+    subagentType: 'explore',
+    agent,
+  };
+  return event;
+}
+
 describe('TurnBoundaryCompactionEngine', () => {
   it('preserves independent lifecycle transitions without constructing compacted tool cards', () => {
     const engine = new TurnBoundaryCompactionEngine();
@@ -945,6 +962,28 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal).toHaveLength(1);
       expect(extractTexts(snap.liveJournal)).toEqual(['firstsecond']);
       expect(snap.liveJournal.map((event) => event.id)).toEqual([2]);
+    });
+
+    it('merges consecutive subagent chunks carrying the agent identity stamp', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withAgentStamp(makeTextChunk(1, 'first')));
+      engine.ingest(withAgentStamp(makeTextChunk(2, 'second')));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(1);
+      expect(extractTexts(snap.liveJournal)).toEqual(['firstsecond']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([2]);
+    });
+
+    it('keeps chunks discrete when the agent stamp is not a record', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withAgentStamp(makeTextChunk(1, 'first'), 'explore'));
+      engine.ingest(withAgentStamp(makeTextChunk(2, 'second'), 'explore'));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(2);
+      expect(extractTexts(snap.liveJournal)).toEqual(['first', 'second']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([1, 2]);
     });
 
     it.each([

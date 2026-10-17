@@ -845,6 +845,20 @@ function takeUserMidTurnMessages(
  * sandbox-aware variant.
  */
 export class BridgeClient implements Client {
+  private readonly teammatePermissions = new WeakMap<
+    BridgeClientSessionEntry,
+    { retiredThrough: number; pending: Map<string, number> }
+  >();
+
+  private teammatePermissionState(entry: BridgeClientSessionEntry) {
+    let state = this.teammatePermissions.get(entry);
+    if (!state) {
+      state = { retiredThrough: 0, pending: new Map<string, number>() };
+      this.teammatePermissions.set(entry, state);
+    }
+    return state;
+  }
+
   constructor(
     /**
      * Look up the `SessionEntry` for an ACP call. Stage 1.5 multi-
@@ -871,7 +885,7 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'request' | 'cancelForPrompt'
+      'request' | 'cancelForPrompt' | 'vote'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -1021,9 +1035,23 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
 
-    const explicitBackgroundTurn = parseBackgroundNotificationTurn(
-      params._meta?.['backgroundTurn'],
-    );
+    // Teammates outlive the leader turn that happens to be running.
+    const sessionOwned = params._meta?.['permissionScope'] === 'session';
+    const bindingId = params._meta?.['teammateBindingId'];
+    const teammateState = this.teammatePermissionState(entry);
+    if (
+      bindingId !== undefined &&
+      (!sessionOwned ||
+        !this.ownsSession(params.sessionId) ||
+        typeof bindingId !== 'number' ||
+        !Number.isSafeInteger(bindingId) ||
+        bindingId <= teammateState.retiredThrough)
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const explicitBackgroundTurn = sessionOwned
+      ? undefined
+      : parseBackgroundNotificationTurn(params._meta?.['backgroundTurn']);
     if (
       explicitBackgroundTurn &&
       entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
@@ -1043,16 +1071,20 @@ export class BridgeClient implements Client {
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn = appClientId
-      ? undefined
-      : (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn));
-    const permissionPromptId = appClientId
-      ? undefined
-      : (backgroundTurn?.turnId ?? entry.activePromptId);
+    const backgroundTurn =
+      appClientId || sessionOwned
+        ? undefined
+        : (explicitBackgroundTurn ??
+          (entry.promptActive ? undefined : entry.backgroundTurn));
+    const permissionPromptId =
+      appClientId || sessionOwned
+        ? undefined
+        : (backgroundTurn?.turnId ?? entry.activePromptId);
     const permissionOriginator =
       appClientId ??
-      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+      (backgroundTurn || sessionOwned
+        ? undefined
+        : entry.activePromptOriginatorClientId);
     // Reserve model permission capacity within the existing session cap.
     if (
       appClientId &&
@@ -1137,6 +1169,9 @@ export class BridgeClient implements Client {
     }
     entry.pendingPermissionIds.add(requestId);
     if (interaction) entry.pendingInteractions.set(requestId, interaction);
+    if (typeof bindingId === 'number') {
+      teammateState.pending.set(requestId, bindingId);
+    }
     try {
       const record: PermissionRequestRecord = {
         requestId,
@@ -1146,12 +1181,28 @@ export class BridgeClient implements Client {
         allowedOptionIds,
         issuedAtMs: Date.now(),
       };
-      const resolution = await this.mediator.request(
+      const resolution = this.mediator.request(
         record,
         this.permissionTimeoutMs,
       );
-      return resolutionToAcpResponse(resolution);
+      // Publication can synchronously retire the binding before registration.
+      if (
+        typeof bindingId === 'number' &&
+        bindingId <= teammateState.retiredThrough &&
+        teammateState.pending.delete(requestId)
+      ) {
+        this.mediator.vote({
+          sessionId: entry.sessionId,
+          requestId,
+          optionId: CANCEL_VOTE_SENTINEL,
+          clientId: undefined,
+          receivedAtMs: Date.now(),
+          fromLoopback: true,
+        });
+      }
+      return resolutionToAcpResponse(await resolution);
     } finally {
+      teammateState.pending.delete(requestId);
       entry.pendingPermissionIds.delete(requestId);
       entry.pendingInteractions.delete(requestId);
     }
@@ -2739,6 +2790,38 @@ export class BridgeClient implements Client {
         });
       } catch {
         /* bus already closed */
+      }
+      return;
+    }
+    if (method === 'qwen/notify/session/teammate-binding-ended') {
+      const sessionId = params['sessionId'];
+      const bindingId = params['bindingId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        typeof bindingId !== 'number' ||
+        !Number.isSafeInteger(bindingId) ||
+        bindingId <= 0
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      const state = this.teammatePermissionState(entry);
+      // The child assigns increasing epochs; a high-water mark fences late RPCs.
+      state.retiredThrough = Math.max(state.retiredThrough, bindingId);
+      for (const [requestId, requestBindingId] of state.pending) {
+        if (requestBindingId > state.retiredThrough) continue;
+        state.pending.delete(requestId);
+        this.mediator.vote({
+          sessionId,
+          requestId,
+          optionId: CANCEL_VOTE_SENTINEL,
+          clientId: undefined,
+          receivedAtMs: Date.now(),
+          fromLoopback: true,
+        });
       }
       return;
     }

@@ -69,6 +69,16 @@
   margin-top: calc((1.5em - 14px) / 2);
 }
 
+.teammateChip {
+  flex-shrink: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border, #4b4b4b);
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted-foreground, #9aa0a6);
+}
+
 .message pre {
   display: inline;
   margin: 0;

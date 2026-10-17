@@ -12,7 +12,12 @@ import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent, FakeAgentScript } from './fake-agent.js';
 import { createTask, listTasks, updateTask, getTask } from '../tasks.js';
-import { sendStructuredMessage, readInbox, getInboxPath } from '../mailbox.js';
+import {
+  sendStructuredMessage,
+  writeMessage,
+  readInbox,
+  getInboxPath,
+} from '../mailbox.js';
 import { formatAgentId } from '../teamHelpers.js';
 import { runWithTeammateIdentity } from '../identity.js';
 import { TeamEventType } from '../team-events.js';
@@ -299,20 +304,40 @@ describe('TeamCoordinationHarness', () => {
       );
     });
 
-    it('sends message from leader to teammate', async () => {
-      const h = await createHarness();
-      const worker = await h.spawnTeammate('worker');
+    it.each([
+      ['LEADER', 'leader'],
+      ['Code Reviewer', 'code-reviewer'],
+      [undefined, 'unknown'],
+      ['not-in-roster', 'unknown'],
+    ] as const)(
+      'delivers to QA Tester with canonical sender %s → %s',
+      async (from, canonicalFrom) => {
+        const h = await createHarness();
+        await h.spawnTeammate('Code Reviewer');
+        const worker = await h.spawnTeammate('QA Tester', {
+          onMessage: () => 'stay_running',
+        });
+        const sent = vi.fn();
+        h.teamManager.getEventEmitter().on(TeamEventType.MESSAGE_SENT, sent);
 
-      await h.teamManager.sendMessage('worker', 'do the thing', 'leader');
+        await h.teamManager.sendMessage('QA Tester', 'do the thing', from);
 
-      await h.waitForMessages('worker', 1);
-      expect(worker.getReceivedMessages()).toHaveLength(1);
-      expectTeamMessage(
-        worker.getReceivedMessages()[0],
-        'leader',
-        'do the thing',
-      );
-    });
+        await h.waitForMessages('qa-tester', 1);
+        expect(worker.getReceivedMessages()).toHaveLength(1);
+        expectTeamMessage(
+          worker.getReceivedMessages()[0],
+          canonicalFrom,
+          'do the thing',
+        );
+        expect(sent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            from: canonicalFrom,
+            to: 'qa-tester',
+            message: 'do the thing',
+          }),
+        );
+      },
+    );
 
     it('sends message to busy agent (queued, delivered on idle)', async () => {
       const h = await createHarness();
@@ -1636,10 +1661,50 @@ describe('TeamCoordinationHarness', () => {
       h.teamManager.setLeaderMessageCallback((modelText, display) =>
         captured.push({ modelText, display }),
       );
-      await h.teamManager.sendMessage('leader', text, 'worker', summary);
+      await h.teamManager.sendMessage('leader', text, 'Worker', summary);
       await h.teamManager.drainLeaderInbox();
       return captured;
     }
+
+    it.each([
+      { from: ['QA Tester', 'qa-tester'], expected: ['qa-tester'] },
+      {
+        from: ['QA Tester', 'Code Reviewer'],
+        expected: ['qa-tester', 'code-reviewer'],
+      },
+      { from: ['QA Tester', ''], expected: undefined },
+      { from: ['QA Tester', 'unknown'], expected: undefined },
+      { from: ['QA Tester', 'leader'], expected: undefined },
+      { from: ['QA Tester', 'not-in-roster'], expected: undefined },
+    ])(
+      'attributes the complete leader batch from $from',
+      async ({ from, expected }) => {
+        const h = await createHarness();
+        await h.spawnTeammate('QA Tester');
+        await h.spawnTeammate('Code Reviewer');
+        h.teamManager.stopLeaderInboxPolling();
+        const callback = vi.fn();
+        h.teamManager.setLeaderMessageCallback(callback);
+        for (const [index, sender] of from.entries()) {
+          await writeMessage(h.teamName, 'leader', {
+            from: sender,
+            text: `report ${index}`,
+            timestamp: new Date().toISOString(),
+            read: false,
+          });
+        }
+
+        await h.teamManager.drainLeaderInbox();
+
+        expect(callback).toHaveBeenCalledOnce();
+        expect(callback).toHaveBeenCalledWith(
+          expect.stringContaining('report 0'),
+          expect.any(String),
+          expected,
+        );
+        expect(callback.mock.calls[0][0]).toContain('report 1');
+      },
+    );
 
     it('concurrent reads do not double-deliver the same messages', async () => {
       // Regression: pollLeaderInbox and getLeaderMessages both await

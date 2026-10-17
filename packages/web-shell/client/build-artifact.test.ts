@@ -523,12 +523,17 @@ describe('build artifact — transcript entry (#11031)', () => {
     // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
+    // Teammate activity notices add attributed tool and inter-agent message
+    // bubbles to this entry on top of that copy. Merged with main 52ae53b0
+    // the two sides together measure 1,338,274 UTF-16 units, past both the
+    // 1,338,000 ceiling main carries and the 1,338,500 this branch carried,
+    // so the bound moves to 1,340,000 and retains 1,726 units of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_338_000);
+    expect(js.length).toBeLessThan(1_340_000);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
