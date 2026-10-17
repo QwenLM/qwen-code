@@ -3590,12 +3590,16 @@ class HostedHarnessClientTest {
                                     + "\",\"hasActivePrompt\":false}");
                 });
         AtomicBoolean failNextSend = new AtomicBoolean();
+        Thread caller = Thread.currentThread();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(0,
                 Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
                 new SynchronousQueue<>()) {
             @Override
             public void execute(Runnable command) {
-                if (failNextSend.getAndSet(false)) {
+                // Only the caller's dispatch: a selector-thread task trailing
+                // the previous response must not take the injected fault.
+                if (Thread.currentThread() == caller
+                        && failNextSend.getAndSet(false)) {
                     throw new SecurityException("synthetic send failure");
                 }
                 super.execute(command);
@@ -4846,12 +4850,16 @@ class HostedHarnessClientTest {
                                     + EVENT_EPOCH + "\"}");
                 });
         AtomicBoolean failNextSend = new AtomicBoolean();
+        Thread caller = Thread.currentThread();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(0,
                 Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
                 new SynchronousQueue<>()) {
             @Override
             public void execute(Runnable command) {
-                if (failNextSend.getAndSet(false)) {
+                // Only the caller's dispatch: a selector-thread task trailing
+                // the previous response must not take the injected fault.
+                if (Thread.currentThread() == caller
+                        && failNextSend.getAndSet(false)) {
                     throw new OutOfMemoryError("synthetic send failure");
                 }
                 super.execute(command);
@@ -7015,12 +7023,16 @@ class HostedHarnessClientTest {
                     sendSessionJson(exchange, 503, "{\"error\":\"x\"}");
                 });
         AtomicBoolean failNextSend = new AtomicBoolean();
+        Thread caller = Thread.currentThread();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(0,
                 Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
                 new SynchronousQueue<>()) {
             @Override
             public void execute(Runnable command) {
-                if (failNextSend.getAndSet(false)) {
+                // Only the caller's dispatch: a selector-thread task trailing
+                // the previous response must not take the injected fault.
+                if (Thread.currentThread() == caller
+                        && failNextSend.getAndSet(false)) {
                     throw new SecurityException("synthetic send failure");
                 }
                 super.execute(command);
