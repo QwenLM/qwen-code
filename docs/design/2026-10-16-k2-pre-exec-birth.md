@@ -116,6 +116,47 @@ offline image input path for a future generated policy. It does not provide the
 complete five-role policy, its compilation/loading, actual actor exclusions or
 the installation authority required below.
 
+## Installed artifact byte closure
+
+The next runtime prerequisite is a fixed `/etc/qwen-k2/artifacts` snapshot.
+An offline assembler consumes the original artifact/profile candidates and a
+successful compilation record, checking every referenced file before creating
+a new private output. It copies only the closed public metadata set, feature
+bytes and packed policy. It never opens configuration-referenced TLS or client credential files,
+executes a parser, loads policy or installs files. The snapshot and its manifest remain
+data, not an installation certificate or a release grant.
+
+Preserve the exact compilation-time profile candidate and source configuration.
+To avoid a hash cycle, derive the deployed source configuration by replacing
+only its top-level `workerPolicySha256` JSON value token with the packed digest;
+preserve every other original byte. Do not regenerate the compilation candidate
+after that replacement. The gateway configuration remains byte-identical.
+
+Both real service startup paths must open and retain the fixed snapshot with
+the existing immutable ext4/name/descriptor checks. Keep the private immutable
+root and protected ancestor identities, and open fixed child names through the
+retained directory FD with no symlinks or mount crossings. Separate artifact limits
+allow 16 MiB catalogues/profile source and an 8 MiB packed bundle without
+widening the existing 32 KiB birth/configuration bound. Compare the actual own
+configuration, own fixed systemd unit and protected shim configuration with the
+snapshot, and preserve the existing protected executable checks. Retain all
+objects until service shutdown and verify them at the existing control, CSI,
+gateway, birth and background-observation boundaries. Missing or changed bytes
+refuse startup or the original operation.
+
+The source additionally compares the installed packed hash and byte count with its actual
+kernel policy measurement. The gateway keeps its own confinement check; it
+does not acquire the source's kernel exporter permissions. Neither role reads
+the other role's live configuration or private key. Snapshot configuration
+copies contain only the closed configuration's paths and identities.
+
+This step binds actual retained runtime inputs to the generated artifact graph.
+It does not prove the effective daemon handler, loaded unit configuration,
+external actor exclusion, reciprocal host policy, exclusive CSI wiring or a
+gap-free installed lifecycle. It does not add an installation authority, change
+source/6, grant final release or relax the reuse fence. A later producer and
+consumer must bind those actual live facts into the durable source protocol.
+
 ## Source and release dependency
 
 The offline profile stage consumes the exact version-2 artifact manifest, both

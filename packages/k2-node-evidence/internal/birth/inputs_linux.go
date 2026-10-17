@@ -49,15 +49,19 @@ func directory(path string, ext4 bool) (*os.File, error) {
 }
 
 func object(f *os.File, executable bool) (Object, error) {
+	limit := int64(MaxInputs)
+	if executable {
+		limit = 128 << 20
+	}
+	return boundedObject(f, executable, limit)
+}
+
+func boundedObject(f *os.File, executable bool, limit int64) (Object, error) {
 	fd := int(f.Fd())
 	var st unix.Stat_t
 	var fs unix.Statfs_t
 	var sx unix.Statx_t
 	flags, err := unix.IoctlGetInt(fd, unix.FS_IOC_GETFLAGS)
-	limit := int64(MaxInputs)
-	if executable {
-		limit = 128 << 20
-	}
 	if err != nil || flags&immutableFlag == 0 || unix.Fstat(fd, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || st.Uid != 0 || st.Gid != 0 || st.Mode&0222 != 0 || st.Size <= 0 || st.Size > limit || unix.Fstatfs(fd, &fs) != nil || fs.Type != unix.EXT4_SUPER_MAGIC || unix.Statx(fd, "", unix.AT_EMPTY_PATH, unix.STATX_MNT_ID, &sx) != nil || sx.Mask&unix.STATX_MNT_ID == 0 || sx.Mnt_id == 0 {
 		return Object{}, errors.New("actual birth input is not an immutable bounded ext4 object")
 	}

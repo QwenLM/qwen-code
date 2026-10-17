@@ -81,6 +81,18 @@ version-2 artifact manifest 绑定两份原始镜像 digest、完整清单字节
 候选输出独占且私有，所有输入校验先于目录创建。这接通了后续策略生成所需的离线镜像
 输入路径；完整五角色策略、编译/加载、实际 actor 排除和下述安装权威仍待实现。
 
+## 安装工件字节闭包
+
+下一运行时前提是固定的 `/etc/qwen-k2/artifacts` 快照。离线组装器消费原工件/策略候选及成功编译记录，在创建新的私有输出前核对全部引用文件；仅复制闭集公开元数据、feature 字节和 packed policy，不打开配置引用的 TLS 或客户端凭据文件，不执行 parser、加载策略或安装文件。快照及清单仍是数据，不是安装证书或释放权限。
+
+保留编译时准确的策略候选和 source 配置。为避免哈希循环，部署 source 配置只将其顶层 `workerPolicySha256` 的 JSON value token 替换为 packed 摘要，其余原字节全部不变；替换后不能重新生成编译候选。gateway 配置保持完整字节不变。
+
+两个真实服务启动入口均须打开并持有固定快照，沿用 immutable ext4、名字及 descriptor 检查；持有私有不可变根及受保护祖先身份，经目录 FD 打开固定子名字，禁止符号链接和跨 mount。独立工件上限允许16 MiB目录/策略源码及8 MiB packed bundle，不扩大既有32 KiB出生/配置上限。将实际自身配置、固定自身 systemd unit、受保护 shim 配置与快照比较，保留既有受保护程序检查。对象持有到服务结束，并在既有 control、CSI、gateway、出生和后台观察边界持续复核；缺失或改变时拒绝启动或原操作。
+
+source 还须将安装 packed hash、长度与实际 kernel policy 测量比较；gateway 保留自身 confinement 检查，不取得 source 的 kernel exporter 权限。两个角色均不读取另一个角色的真实配置或私钥，快照配置副本只含闭合配置中的路径和身份。
+
+此步将真实保留运行时输入与生成工件图关联，不证明 daemon 有效 handler、实际加载 unit 配置、外部 actor 排除、宿主反向策略、CSI 独占接线或无间隙生命周期；不创建安装 authority，不改变 source/6，不授予最终释放或放宽复用门。后续 producer/consumer 仍须将真实 live facts 绑定到持久来源协议。
+
 ## 来源与释放依赖
 
 离线策略阶段消费准确的第2版工件清单、两份镜像目录及 shim 配置，以及已审目标事实、原私有 Runtime 请求和两份实际服务配置。生成器输出单一五角色策略源码及服务 unit，unit 的 argv 使用同一配置路径。权限语法由生成器拥有，不接受调用者规则、include 或 AppArmor 模式。配置及密钥路径不能落入可写的 inputs、journal、socket 或 worker 根，不同角色私钥不能别名；宿主 peer 哈希必须与实际 source/gateway 配置一致。

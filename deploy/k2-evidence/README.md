@@ -219,7 +219,7 @@ The output contains one `qwen-k2-profiles` source, the two adjusted units, origi
 
 Mount rules distinguish outer snapshot mounts from inner OCI mounts and split initial mounting, propagation, bind remount, post-pivot read-only finalization and masked paths. Read-only remounts admit only the finite combinations of the supported retained security flags. Image parent symlinks are resolved before rendering mount/boot paths; new mountpoint directories may be absent in the image, while normal image catalogue resolution still requires existing parents. Resolved names outside the literal-path subset refuse. These rules do not establish mount source types, inherited VFS flags, namespace membership or actual disconnected names; those require the reviewed target and native acceptance. The source remains unable to write cgroup controllers. The shim's root-controller/statistics additions are read-only, and its normal state temporary files stay inside the original CID state directory.
 
-This stage never runs a parser, loads or locks policy, executes an image or installs a service. Its manifest records the remaining semantic boundaries, including numeric proc self-only checks, the SDK's parent/child OOM relationship, disconnected object naming and external host profiles/CSI isolation. Those depend on the actual kernel and pinned trusted implementation. Profile source and its hashes cannot establish them. `workerPolicySha256` must eventually contain the actual packed bundle hash: after compilation, supply the final configuration and regenerate this candidate, confirming the profile source is unchanged. No provisional hash is installation evidence. Actual normal lifecycle, complete actor exclusion and final physical-release authority remain pending.
+This stage never runs a parser, loads or locks policy, executes an image or installs a service. Its manifest records the remaining semantic boundaries, including numeric proc self-only checks, the SDK's parent/child OOM relationship, disconnected object naming and external host profiles/CSI isolation. Those depend on the actual kernel and pinned trusted implementation. Profile source and its hashes cannot establish them. `workerPolicySha256` must eventually contain the actual packed bundle hash. Preserve this compilation-time candidate and its original configuration bytes; the assembly stage below derives a separate deployed configuration without regenerating the compiled candidate. No provisional hash is installation evidence. Actual normal lifecycle, complete actor exclusion and final physical-release authority remain pending.
 
 ## Explicit policy compilation stage
 
@@ -237,3 +237,25 @@ python3 deploy/k2-evidence/compile-profiles.py \
 ```
 
 The compiler copies the exact parser/source/features into a private new directory, uses an empty explicit parser configuration and both explicit feature arguments, disables kernel loading and caches, and records the actual argv. Warnings about unenforced rules are errors. The attempt, stderr and partial output survive failure or timeout; successful output is bounded to the source reader's 8 MiB limit and gets its own byte count/hash. Parser dependencies, target feature correctness and toolchain provenance still require independent qualification. Compilation does not load or lock the policy and cannot certify its semantics or installation. Current ordinary tests exercise only preparation, layout rejection and argv construction, with parser execution blocked; no real or fake parser has been run for this candidate.
+
+## Installed artifact byte assembly
+
+Build `./cmd/k2-assemble-artifacts` from `packages/k2-node-evidence`, then use the assembler with the original three stage directories and their reviewed pins:
+
+```sh
+k2-assemble-artifacts \
+  --pre-exec /absolute/output/new-pre-exec-candidate \
+  --profiles /absolute/output/new-profile-candidate \
+  --compilation /absolute/output/new-policy-compilation \
+  --profile-candidate-sha256 REVIEWED_PROFILE_CANDIDATE_SHA256 \
+  --compile-record-sha256 REVIEWED_COMPILE_RECORD_SHA256 \
+  --output /absolute/output/new-installed-artifacts
+```
+
+This offline command reads a fixed set of metadata files; it never opens configuration-referenced TLS or client credential files or executes the recorded compiler command. It checks the original dependency pins, successful compilation record, unchanged saved compiler inputs and exact packed size/hash before creating output. It preserves the original profile candidate and source configuration, derives `source-config.installed.json` by replacing only the top-level `workerPolicySha256` JSON value token, and keeps every other original byte. The gateway configuration stays byte-identical. `installation.json` pins the other 17 output files, including the original `compile.json` renamed to `profile-compile.json`.
+
+An approved installation must place these 18 files under the fixed `/etc/qwen-k2/artifacts` root. Both that directory and `/etc/qwen-k2` must be root-owned, private and immutable on the supported ext4 filesystem; the files must satisfy the existing root-owned, immutable, read-only, single-link checks. Install the derived source configuration at its original declared source path, the unchanged gateway configuration at its declared gateway path, the exact shim configuration at `/etc/qwen-k2/shim.json`, and each own unit at its fixed `/etc/systemd/system` path. TLS credentials are separately installed role-private inputs. The assembler performs none of these installation actions.
+
+Both actual service entry points retain the artifact directory and its protected ancestors, open only fixed child names through the retained directory FD without symlinks or mount crossings, and compare their own configuration/unit and the shim configuration against the snapshot. Existing request guards recheck retained objects; the source additionally compares the packed hash and byte count with the actual loaded kernel policy. The gateway gains no source-only policy-exporter permission and neither role opens the other role's live configuration or private key. Catalogues and profile source have separate 16 MiB bounds, packed policy 8 MiB and the full snapshot 64 MiB; the existing 32 KiB birth/configuration bound remains unchanged.
+
+The manifest proves byte consistency only. It does not certify effective systemd settings, a loaded policy's semantics, runtime handler selection, actor exclusion, CSI ownership or installation provenance. Current validation uses explicitly synthetic compilation data and portable byte tests, plus compile-only Linux outputs; the assembler CLI, actual protected-object behavior and live installation remain unverified. Source protocol version 6, physical-release authority and reuse restrictions are unchanged.

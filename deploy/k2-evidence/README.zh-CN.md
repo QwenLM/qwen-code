@@ -195,7 +195,7 @@ python3 deploy/k2-evidence/render-profiles.py \
 
 挂载规则区分外层 snapshot 与内层 OCI mount，并拆分初挂、propagation、bind remount、切根后的只读 finalize 及 masked paths。只读 remount 仅覆盖支持的继承安全 flags 的有限组合。镜像父链接先解析，再生成 mount/boot 路径；新 mountpoint 的父目录可尚未存在于镜像，普通镜像目录解析仍要求父项存在，解析结果超出 literal path 子集则拒绝。规则不能证明 source 类型、继承的 VFS flags、namespace 归属或实际 disconnected 名字，仍需已审目标和原生验收。source 仍不能写 cgroup controller；shim 新增 root-controller/statistics 权限只读，正常状态临时文件限定在原 CID 状态目录。
 
-此阶段不会运行 parser、加载或锁定策略、执行镜像或安装服务。清单记录仍待验证的语义边界，包括数字 proc 的仅自身修改检查、SDK parent/child OOM 关系、disconnected 对象命名及外部宿主策略/CSI 隔离；这些依赖实际内核和固定可信实现，策略源码及摘要不能证明。`workerPolicySha256` 最终必须使用实际 packed bundle hash；编译后以最终配置重新生成候选，并确认策略源码不变，临时摘要不能成为安装证据。真实正常生命周期、完整 actor 排除及最终物理释放权限仍待完成。
+此阶段不会运行 parser、加载或锁定策略、执行镜像或安装服务。清单记录仍待验证的语义边界，包括数字 proc 的仅自身修改检查、SDK parent/child OOM 关系、disconnected 对象命名及外部宿主策略/CSI 隔离；这些依赖实际内核和固定可信实现，策略源码及摘要不能证明。`workerPolicySha256` 最终必须使用实际 packed bundle hash。保留编译时的原候选及配置字节，后述组装阶段派生单独的部署配置，不重新生成已编译候选；临时摘要不能成为安装证据。真实正常生命周期、完整 actor 排除及最终物理释放权限仍待完成。
 
 ## 显式策略编译阶段
 
@@ -213,3 +213,25 @@ python3 deploy/k2-evidence/compile-profiles.py \
 ```
 
 工具将准确 parser/source/features 复制到新的私有目录，使用显式空 parser 配置及两份显式 features 参数，关闭 kernel load 和 cache，记录实际 argv；未强制规则警告按错误处理。失败或超时保留 attempt、stderr 和部分输出，成功输出受 source reader 的8 MiB上限约束并记录长度及摘要。Parser 依赖、目标 feature 正确性及工具链来源仍需独立资格化；编译不会加载或锁定策略，也不能认证语义或安装。当前普通测试仅执行准备、布局拒绝和 argv 构造，并阻止 parser 执行；本候选未运行任何真实或模拟 parser。
+
+## 安装工件字节组装
+
+在 `packages/k2-node-evidence` 构建 `./cmd/k2-assemble-artifacts`，然后向组装器提供上述三个阶段的原目录与已审摘要：
+
+```sh
+k2-assemble-artifacts \
+  --pre-exec /absolute/output/new-pre-exec-candidate \
+  --profiles /absolute/output/new-profile-candidate \
+  --compilation /absolute/output/new-policy-compilation \
+  --profile-candidate-sha256 REVIEWED_PROFILE_CANDIDATE_SHA256 \
+  --compile-record-sha256 REVIEWED_COMPILE_RECORD_SHA256 \
+  --output /absolute/output/new-installed-artifacts
+```
+
+此离线命令只读取固定元数据文件，不打开配置引用的 TLS 或客户端凭据文件，不执行记录中的编译命令。在创建输出前核对原依赖摘要、成功编译记录、未变的已保存编译输入，以及 packed 长度和摘要。保留原策略候选及 source 配置，仅替换顶层 `workerPolicySha256` 的 JSON value token，派生 `source-config.installed.json`，其余所有原字节不变；gateway 配置保持逐字节相同。`installation.json` 绑定其余17份输出，包括将原 `compile.json` 更名保存的 `profile-compile.json`。
+
+获准安装时应将这18份文件置于固定 `/etc/qwen-k2/artifacts` 根。该目录与 `/etc/qwen-k2` 均须在支持的 ext4 上由 root 拥有、私有且不可变；文件须满足既有 root 所有、不可变、只读和单链接检查。派生 source 配置安装在原声明的 source 路径，未变 gateway 配置在声明的 gateway 路径，准确 shim 配置在 `/etc/qwen-k2/shim.json`，自身 unit 在固定 `/etc/systemd/system` 路径。TLS 凭据是另行安装的角色私有输入。组装器不执行这些安装动作。
+
+两个真实服务入口持有工件目录及受保护祖先，经目录 FD 只打开固定子名字，禁止符号链接及跨 mount，并将自身配置/unit、shim 配置与快照比较。既有请求守卫持续复核原持有对象；source 还将 packed 摘要及长度与内核实际加载策略比较。gateway 不取得 source 专用策略 exporter 权限，两个角色都不打开另一角色的真实配置或私钥。目录清单与策略源码单独限制16 MiB，packed 策略8 MiB，完整快照64 MiB，既有出生/配置32 KiB上限不变。
+
+清单只证明字节一致性，不认证 systemd 有效设置、加载策略语义、runtime handler 选择、actor 排除、CSI 独占或安装 provenance。目前验证使用明确合成的编译数据和可移植字节测试，以及仅编译的 Linux 输出；组装器 CLI、真实受保护对象行为和现场安装尚未验收。source 第6版协议、物理释放权限和复用限制保持不变。

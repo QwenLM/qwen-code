@@ -13,7 +13,8 @@ import (
 )
 
 type roleFiles struct {
-	files map[string]*birth.ProtectedFile
+	files       map[string]*birth.ProtectedFile
+	directories []*birth.ProtectedDirectory
 }
 
 func loadRoleConfiguration(path string, target any) (*roleFiles, error) {
@@ -62,8 +63,18 @@ func (p *roleFiles) private(paths ...string) error {
 }
 
 func (p *roleFiles) verify() error {
+	for _, directory := range p.directories {
+		if err := directory.Verify(); err != nil {
+			return err
+		}
+	}
 	for _, f := range p.files {
 		if err := f.Verify(); err != nil {
+			return err
+		}
+	}
+	for _, directory := range p.directories {
+		if err := directory.Verify(); err != nil {
 			return err
 		}
 	}
@@ -74,6 +85,9 @@ func (p *roleFiles) close() error {
 	var err error
 	for _, f := range p.files {
 		err = errors.Join(err, f.Close())
+	}
+	for _, directory := range p.directories {
+		err = errors.Join(err, directory.Close())
 	}
 	return err
 }

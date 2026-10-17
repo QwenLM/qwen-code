@@ -287,6 +287,10 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
     entries = {role: [] for role in ROLES}
     for role in ("source", "gateway"):
         entries[role] = service + [file_literal(path) + " r," for path in role_files[role]] + ["signal (send,receive) peer=qwen-k2-" + role + "-v1,", "signal (receive) set=(term,int,kill) peer=" + peer("systemd") + ","]
+        artifact_names = "installation.json,artifact-manifest.json,shim.json,profile-candidate.json,profile-compile.json,source-config.json,source-config.installed.json,gateway-config.json,target.json,runtime.json,creation-contract.json,qwen-k2-node-source.service,qwen-k2-runtime-gateway.service,features,qwen-k2-profiles,worker-catalog.json,sandbox-catalog.json,packed.bin"
+        entries[role] += ['"/etc/" r,', '"/etc/qwen-k2/{,artifacts/}" r,', '"/etc/qwen-k2/artifacts/{' + artifact_names + '}" r,']
+        unit = "qwen-k2-node-source.service" if role == "source" else "qwen-k2-runtime-gateway.service"
+        entries[role] += ['"/etc/systemd/system/' + unit + '" r,']
     src = entries["source"]
     for root in ("/sys/kernel/security/apparmor/policy", facts["apparmorExportRoot"]):
         src += [quoted(root + suffix) + " r," for suffix in ("/", "/revision", "/profiles/", "/profiles/*/", "/profiles/*/{name,mode,raw_data,raw_abi,raw_sha256}", "/raw_data/", "/raw_data/[0-9]*/", "/raw_data/[0-9]*/{raw_data,abi,revision,sha256}")]

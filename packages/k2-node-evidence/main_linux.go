@@ -152,6 +152,9 @@ func runGateway(ctx context.Context, path string) error {
 		return err
 	}
 	defer shimConfiguration.Close()
+	if _, err := loadInstalledArtifacts("gateway", path, files); err != nil {
+		return err
+	}
 	self, err := os.Executable()
 	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil || gatewayConfinement() != nil {
 		return errors.New("actual gateway executable or confinement differs from the protected installation")
@@ -209,15 +212,22 @@ func runSource(ctx context.Context, path string) error {
 		return err
 	}
 	defer shimConfiguration.Close()
+	installed, err := loadInstalledArtifacts("source", path, files)
+	if err != nil {
+		return err
+	}
 	self, err := os.Executable()
 	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil || birth.VerifyExecutable(shimConfiguration.ShimPath, shimConfiguration.ShimSHA256) != nil {
 		return errors.New("actual source and shim executables differ from the protected handler configuration")
 	}
-	policy, err := openFixedWorkerPolicy(cfg.WorkerPolicySHA256)
+	policy, err := openFixedWorkerPolicy(installed.PackedSHA256())
 	if err != nil {
 		return err
 	}
 	defer policy.close()
+	if policy.value.RawBytes != uint64(installed.PackedBytes()) {
+		return errors.New("actual loaded policy length differs from installed artifacts")
+	}
 	conn, plugin, err := connectBackend(cfg.PluginSocket, cfg.PluginDigest)
 	if err != nil {
 		return err
