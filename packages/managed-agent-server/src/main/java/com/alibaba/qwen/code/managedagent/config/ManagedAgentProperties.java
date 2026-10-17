@@ -40,6 +40,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
     private final EventTransport eventTransport = new EventTransport();
+    private final JavaDurableAdmission javaDurableAdmission =
+            new JavaDurableAdmission();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
@@ -73,6 +75,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public EventTransport getEventTransport() {
         return eventTransport;
+    }
+
+    public JavaDurableAdmission getJavaDurableAdmission() {
+        return javaDurableAdmission;
     }
 
     public SessionStore getSessionStore() {
@@ -208,6 +214,17 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
+        }
+        String boundSessionIsolation = runtimeBroker.getBoundSessionIsolationClass();
+        if (!"session".equals(boundSessionIsolation) && !"workspace".equals(boundSessionIsolation)) {
+            throw new IllegalStateException("Bound-Session isolation must be session or workspace");
+        }
+        if ("workspace".equals(boundSessionIsolation)
+                && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !runtimeBroker.isDurableLocalProcess()
+                        || runtimeBroker.isChildWorkspacesEnabled())) {
+            throw new IllegalStateException("Workspace-isolated bound Sessions require a durable"
+                    + " local-process Broker and cannot combine with child Workspaces");
         }
         if (!runtimeBroker.getWorkspaceCreationRoot().isBlank()
                 && (!harness.isWorkspaceFilesEnabled()
@@ -974,6 +991,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String residentKubernetesCaFile = "";
         private String workspaceCreationRoot = "";
         private String isolationClass = "session";
+        private String boundSessionIsolationClass = "session";
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
         private boolean trustedLocalRebootRecovery = true;
@@ -981,6 +999,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
+        private Map<String, String> previousCredentialKeys =
+                new LinkedHashMap<>();
         private String nodeExecutable = "";
         private String workerEntry = "";
         private String staticEndpoint = "";
@@ -1109,6 +1129,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public String getIsolationClass() {
             return isolationClass;
+        }
+
+        public String getBoundSessionIsolationClass() {
+            return boundSessionIsolationClass;
+        }
+
+        public void setBoundSessionIsolationClass(String boundSessionIsolationClass) {
+            this.boundSessionIsolationClass = boundSessionIsolationClass;
         }
 
         public List<WorkspaceMount> getWorkspaceMounts() {
@@ -1260,6 +1288,15 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCredentialKey(String credentialKey) {
             this.credentialKey = credentialKey;
+        }
+
+        public Map<String, String> getPreviousCredentialKeys() {
+            return previousCredentialKeys;
+        }
+
+        public void setPreviousCredentialKeys(
+                Map<String, String> previousCredentialKeys) {
+            this.previousCredentialKeys = previousCredentialKeys;
         }
 
         public String getNodeExecutable() {
@@ -1424,6 +1461,26 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setClaimLease(Duration claimLease) {
             this.claimLease = claimLease;
+        }
+    }
+
+    /**
+     * D7-3 of #14122: the opt-in java_durable admission profile. Default off;
+     * a flag-off deployment creates no profile bean (see
+     * JavaDurableAdmissionConfiguration), so every admission answers as
+     * before. On, a Turn input or cancel admission that asks for
+     * java_durable is answered with its durable operation, and
+     * harness_confirmed stays the default for every other admission.
+     */
+    public static class JavaDurableAdmission {
+        private boolean enabled;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
         }
     }
 

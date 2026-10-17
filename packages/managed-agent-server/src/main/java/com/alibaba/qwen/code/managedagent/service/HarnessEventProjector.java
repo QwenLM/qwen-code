@@ -35,17 +35,25 @@ public class HarnessEventProjector {
             String code = sourceCode != null
                     && SAFE_ERROR_CODE.matcher(sourceCode).matches()
                             ? sourceCode : "hosted_harness_error";
-            String message = "The Hosted Harness Turn failed.";
+            String message = switch (code) {
+                case "hosted_turn_limit_exceeded" ->
+                        "The Hosted Harness Turn reached its configured model round limit.";
+                case "hosted_turn_deadline_exceeded" ->
+                        "The Hosted Harness Turn exceeded its deadline.";
+                default -> "The Hosted Harness Turn failed.";
+            };
             return new ProjectedEvent("turn.failed", Map.of(
                     "code", code, "message", message),
                     true, "FAILED", code, message);
         }
-        if (!"session_update".equals(event.type())) {
-            return null;
-        }
         Map<String, Object> data = object(event.data());
         Map<String, Object> update = object(data.get("update"));
         String kind = string(update.get("sessionUpdate"));
+        if (!"session_update".equals(event.type())
+                && !("managed_journal_event".equals(event.type())
+                        && "tool_call_update".equals(kind))) {
+            return null;
+        }
         if ("agent_message_chunk".equals(kind)) {
             return textEvent("item.output_text.delta", "output_text",
                     update, turnId);

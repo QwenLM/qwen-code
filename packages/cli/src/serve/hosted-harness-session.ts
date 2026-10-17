@@ -135,7 +135,11 @@ import {
   readHostedAgentInstructions,
   type HostedAgentDefinition,
 } from './hosted-agent-definition.js';
-import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import {
+  HostedModelRoundLimitError,
+  runHostedHarnessTextTurn,
+} from './hosted-harness-model.js';
+import { hostedToolProgress } from './hosted-tool-progress.js';
 import {
   HostedSkillCatalog,
   readHostedSkills,
@@ -1149,6 +1153,8 @@ export async function settleCrashedWakeTurnAftermath(params: {
                 cwd,
                 promptId: turnId,
                 unobserved: carried,
+                broker,
+                shell: session.shell,
               });
               // A settle that could not verify the park journaled nothing:
               // the release and the terminal record must not build on it —
@@ -2643,6 +2649,16 @@ async function eventEnvelope(
 }> {
   const sessionId =
     session.managed.authority.sessionHeader.sessionKey.sessionId;
+  const progress = await hostedToolProgress(session.managed, event);
+  if (progress && event.kind !== 'message.committed') {
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'session_update',
+      promptId: progress.promptId,
+      data: { sessionId, update: progress.update },
+    };
+  }
   if (event.kind === 'message.delta') {
     const text = event.payload['text'];
     const turnId = event.payload['turnId'];
@@ -2725,7 +2741,11 @@ async function eventEnvelope(
           ...(message.daemonPromptId
             ? { promptId: message.daemonPromptId }
             : {}),
-          data: { sessionId, record: message },
+          data: {
+            sessionId,
+            record: message,
+            ...(progress ? { update: progress.update } : {}),
+          },
         };
       }
       return {
@@ -2767,6 +2787,7 @@ async function eventEnvelope(
       event.payload['stopReason'] === 'model_unavailable';
     const storeUnavailable =
       event.payload['stopReason'] === 'managed_session_store_unavailable';
+    const roundLimit = event.payload['stopReason'] === 'model_round_limit';
     return {
       v: 1,
       id: event.sequence,
@@ -2781,10 +2802,14 @@ async function eventEnvelope(
             ? 'model_unavailable'
             : storeUnavailable
               ? 'managed_session_store_unavailable'
-              : 'hosted_turn_failed',
+              : roundLimit
+                ? 'hosted_turn_limit_exceeded'
+                : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
-          : 'Hosted Harness turn failed.',
+          : roundLimit
+            ? 'The Hosted Harness Turn reached its configured model round limit.'
+            : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -3319,6 +3344,11 @@ async function executeHostedTurn(
             stopReason = 'model_unavailable';
           if (
             stopReason === 'error' &&
+            cause instanceof HostedModelRoundLimitError
+          )
+            stopReason = 'model_round_limit';
+          if (
+            stopReason === 'error' &&
             cause instanceof WorkflowStartCancelledError
           ) {
             // A registry-side cancel while the workflow start is held
@@ -3439,7 +3469,7 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): void {
+): { owns: (id: string) => boolean } {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
   // daemon owns them and stops them at shutdown.
@@ -4884,6 +4914,7 @@ export function registerHostedHarnessSessionRoutes(
                     promptId: turn.turnId,
                     brokerOptions,
                     toolProfile: session.toolProfile !== undefined,
+                    shell: session.shell,
                     carryUnobservedInto: carried,
                     children: session.childAgents,
                     consume: (childRunId) =>
@@ -9014,6 +9045,7 @@ export function registerHostedHarnessSessionRoutes(
       // their journal entry must stay honest (no stop was observed), on the
       // first settle and on a compensating retry alike.
       let unobserved: ReadonlySet<string> | undefined;
+      let broker: HostedWorkspaceBroker | undefined;
       try {
         // The phase-shape invariants decide the two settlement shapes
         // outright (R1-51): the agent wait's park names outstanding runs
@@ -9021,7 +9053,6 @@ export function registerHostedHarnessSessionRoutes(
         // the round pairs off — while no group means the Runtime park.
         const agentWait = cancelRunnable.checkpoint.agentWait;
         const commandWait = cancelRunnable.checkpoint.commandWait;
-        let broker: HostedWorkspaceBroker | undefined;
         if (commandWait !== null) {
           // H4e-b3's own mirror of the agent-wait cancellation: the
           // outstanding command runs answer by what their journal
@@ -9127,6 +9158,8 @@ export function registerHostedHarnessSessionRoutes(
               cwd: session.cwd,
               promptId,
               unobserved,
+              broker,
+              shell: session.shell,
             });
             if (settleOutcome === 'not-runnable')
               throw new Error(
@@ -9196,12 +9229,13 @@ export function registerHostedHarnessSessionRoutes(
         // runtime_session_busy while an execution is active. An agent wait
         // never held one — its recovery acquires nothing (acquiredRuntime
         // false), so there is no lease to hand back here.
+        const releaseBroker = broker;
         const handedBack =
-          broker === undefined ||
+          releaseBroker === undefined ||
           (session.mcp &&
-            broker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
+            releaseBroker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
             ? false
-            : await broker.release().then(
+            : await releaseBroker.release().then(
                 () => true,
                 (cause: unknown) => {
                   if (releaseIsSatisfied(cause)) return true;
@@ -9209,7 +9243,7 @@ export function registerHostedHarnessSessionRoutes(
                   // not refuse an answered cancellation. Leave the lease
                   // owed; later replays and the session close retry it.
                   writeStderrLineSafe(
-                    `qwen serve: Hosted Harness release of recovered Runtime ${broker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
+                    `qwen serve: Hosted Harness release of recovered Runtime ${releaseBroker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
                   );
                   return false;
                 },
@@ -9255,6 +9289,8 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             promptId,
             unobserved,
+            broker,
+            shell: session.shell,
           }).then(
             // A noop is completion here — the identity already moved past
             // this settle — but a not-runnable read proves nothing, so it
@@ -10395,4 +10431,10 @@ export function registerHostedHarnessSessionRoutes(
   app.delete('/session/:id', (req, res) => {
     void close(req, res, true);
   });
+  return {
+    owns: (id) =>
+      [...sessions.keys(), ...opening].some(
+        (candidate) => candidate.toLowerCase() === id.toLowerCase(),
+      ),
+  };
 }

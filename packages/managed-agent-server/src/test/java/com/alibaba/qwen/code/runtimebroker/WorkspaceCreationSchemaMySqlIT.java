@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -53,7 +54,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(7, ManagedSchema.schemaVersion(source));
+            assertEquals(9, ManagedSchema.schemaVersion(source));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_session"))
                     .usingRecursiveComparison().isEqualTo(session);
             assertThat(jdbc.queryForMap("SELECT * FROM ma_turn"))
@@ -62,6 +63,37 @@ class WorkspaceCreationSchemaMySqlIT {
                     + " WHERE installed_rank <= ? ORDER BY installed_rank", lastInstalledRank));
             assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM flyway_schema_history"
                     + " WHERE version='7' AND success=TRUE", Integer.class));
+        }
+    }
+
+    @Test
+    void addsTurnCommandKindsOverACatalogAlreadyHoldingEveryEarlierKind() {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            var source = database.source();
+            Flyway.configure()
+                    .dataSource(source)
+                    .locations(ManagedSchema.FLYWAY_LOCATION)
+                    .target("7")
+                    .load()
+                    .migrate();
+            var jdbc = new JdbcTemplate(source);
+            operation(jdbc, "existing", "WORKSPACE_CREATE");
+            var existing = jdbc.queryForMap("SELECT * FROM ma_operation");
+
+            Flyway.configure()
+                    .dataSource(source)
+                    .locations(ManagedSchema.FLYWAY_LOCATION)
+                    .load()
+                    .migrate();
+
+            ManagedSchema.validate(source);
+            assertEquals(9, ManagedSchema.schemaVersion(source));
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
+                    .usingRecursiveComparison().isEqualTo(existing);
+            operation(jdbc, "created", "WORKSPACE_CREATE");
+            operation(jdbc, "input", "SUBMIT_INPUT");
+            operation(jdbc, "cancel", "CANCEL");
+            assertThrows(DataAccessException.class, () -> operation(jdbc, "unknown", "INPUT"));
         }
     }
 
@@ -89,7 +121,7 @@ class WorkspaceCreationSchemaMySqlIT {
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
-            assertEquals(7, ManagedSchema.schemaVersion(source));
+            assertEquals(9, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement();
                     var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
@@ -98,6 +130,7 @@ class WorkspaceCreationSchemaMySqlIT {
                         "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
                 statement.execute("ALTER TABLE ma_request_receipt ADD "
                         + baselineCheck(baseline, "ck_ma_request_namespace"));
+                statement.execute("DROP INDEX ix_ma_runtime_session_harness ON ma_runtime_session");
                 statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
                 statement.execute("ALTER TABLE ma_operation ADD "
                         + baselineCheck(baseline, "ck_ma_operation_kind"));
@@ -130,7 +163,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(7, ManagedSchema.schemaVersion(source));
+            assertEquals(9, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(
@@ -209,5 +242,12 @@ class WorkspaceCreationSchemaMySqlIT {
             statement.setString(4, ManagedSchemaKeys.key(key));
             statement.executeUpdate();
         }
+    }
+
+    private static void operation(JdbcTemplate jdbc, String key, String kind) {
+        jdbc.update("INSERT INTO ma_operation (operation_key,scope_key,operation_id,operation_kind,"
+                + "tenant_id,target_kind,target_key,request_digest,request_json,state,phase,"
+                + "gmt_create,gmt_modified) VALUES (?,'scope',?,?,'tenant','TURN','target',"
+                + "'digest','{}','PENDING','ADMITTED',1,1)", ManagedSchemaKeys.key(key), key, kind);
     }
 }

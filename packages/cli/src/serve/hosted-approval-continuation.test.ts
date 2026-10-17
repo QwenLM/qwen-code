@@ -29,13 +29,15 @@ afterEach(() => vi.restoreAllMocks());
 
 it.each(
   ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
-    [randomUUID(), 'mon_1:notify:3', `arun_${'a'.repeat(32)}:input`].map(
-      (promptId) => ({ decision, promptId }),
+    [0, 16].flatMap((round) =>
+      [randomUUID(), 'mon_1:notify:3', `arun_${'a'.repeat(32)}:input`].map(
+        (promptId) => ({ decision, promptId, round }),
+      ),
     ),
   ),
 )(
-  'restores the original native batch and final Action under a replacement owner ($decision, $promptId)',
-  async ({ decision, promptId }) => {
+  'restores the original native batch and final Action under a replacement owner ($decision, $promptId, round=$round)',
+  async ({ decision, promptId, round }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-step3-baseline-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -160,6 +162,7 @@ it.each(
         isClientInitiated: false,
         prompt_id: promptId,
       };
+      turn.setModelRound(round);
       running = turn
         .execute(
           [call],
@@ -232,6 +235,7 @@ it.each(
         );
         expect(saved?.plan).toMatchObject({
           promptId,
+          round,
           batchId: first.authority
             .eventsInSequenceRange(1, first.authority.committedSequence)
             .find(

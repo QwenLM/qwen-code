@@ -197,7 +197,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.input()));
+                request.input(), request.admissionProfile()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -210,7 +210,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.cancelTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.turnId()));
+                request.turnId(), request.admissionProfile()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -306,6 +306,7 @@ public class WebShellAgentController {
     private static WebShellAdmission webShell(CommandAdmission admission) {
         return new WebShellAdmission(admission.sessionId(),
                 admission.turnId(), admission.status(),
-                admission.replayed());
+                admission.replayed(), admission.operationId(),
+                admission.admissionStage(), admission.deliveryState());
     }
 }

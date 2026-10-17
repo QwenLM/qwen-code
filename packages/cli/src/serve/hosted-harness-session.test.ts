@@ -141,6 +141,7 @@ import { teamMemberPreamble } from './hosted-member-chain.js';
 
 const wakeDeps = vi.hoisted(() => ({
   last: undefined as unknown,
+  runTurnGate: undefined as Promise<void> | undefined,
 }));
 
 const domainEnablement = vi.hoisted(() => ({
@@ -203,7 +204,14 @@ vi.mock('./hosted-monitor-wake-turn.js', async (importOriginal) => {
     ...actual,
     createMonitorWakeRunTurn: (params: never) => {
       wakeDeps.last = params;
-      return actual.createMonitorWakeRunTurn(params as never);
+      const runTurn = actual.createMonitorWakeRunTurn(params as never);
+      const gate = wakeDeps.runTurnGate;
+      return gate
+        ? async (...args: Parameters<typeof runTurn>) => {
+            await gate;
+            return runTurn(...args);
+          }
+        : runTurn;
     },
   };
 });
@@ -337,7 +345,8 @@ vi.mock(
     },
   }),
 );
-vi.mock('./hosted-harness-model.js', () => ({
+vi.mock('./hosted-harness-model.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./hosted-harness-model.js')>()),
   runHostedHarnessTextTurn: state.model,
 }));
 
@@ -418,6 +427,7 @@ function expectFullStreamedAnswer(
 const listeners = new Set<Server>();
 
 beforeEach(() => {
+  wakeDeps.runTurnGate = undefined;
   vi.spyOn(
     HostedWorkspaceBroker.prototype,
     'capabilityDigest',
@@ -1312,12 +1322,18 @@ describe('Hosted Harness no-tool session', () => {
         .set('X-Qwen-Client-Id', clientId)
         .send(body);
     const idle = () =>
-      vi.waitFor(async () => {
-        const result = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(result.body.hasActivePrompt).toBe(false);
-      });
+      vi.waitFor(
+        async () => {
+          const result = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(result.body.hasActivePrompt).toBe(false);
+        },
+        // The turn's settle crosses fsync-backed journal commits before the
+        // active flag clears; the default 1s waitFor window flaked on a loaded
+        // CI runner (#14101, #13219).
+        { timeout: 10_000 },
+      );
     await send().expect(202);
     await idle();
     expect(state.model.mock.calls[0][0].modelSelection).toEqual(
@@ -5058,25 +5074,14 @@ describe('Hosted Harness no-tool session', () => {
     await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();
     repair.unlatch();
-    // The pump's first post-load classification hangs at its projection
-    // read: the prompt route's checkpoint probe must run first, while
-    // the Session is still unblocked.
-    const originalProject = ManagedSessionRecordSink.prototype.project;
+    // Hold the pump itself before load: its first projection can otherwise
+    // run before the load response reaches the test, leaving the wrong
+    // consumer suspended at the probe below.
     let afterLoad = false;
-    let classificationHung = false;
-    let releaseClassify!: () => void;
-    const classifyGate = new Promise<void>((resolve) => {
-      releaseClassify = resolve;
+    let releaseRun!: () => void;
+    wakeDeps.runTurnGate = new Promise<void>((resolve) => {
+      releaseRun = resolve;
     });
-    vi.spyOn(ManagedSessionRecordSink.prototype, 'project').mockImplementation(
-      function (this: ManagedSessionRecordSink) {
-        if (afterLoad && !classificationHung) {
-          classificationHung = true;
-          return classifyGate.then(() => originalProject.call(this));
-        }
-        return originalProject.call(this);
-      },
-    );
     // The route probe's checkpoint read hangs next, so the block lands
     // strictly between the probe's start and its answer.
     const originalAuthorization =
@@ -5126,62 +5131,73 @@ describe('Hosted Harness no-tool session', () => {
       },
     );
     const server = await app(true);
-    const loaded = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store() });
-    expect(loaded.status).toBe(200);
-    afterLoad = true;
-    const authorize = (request: supertest.Test) =>
-      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-    const prompt = [{ type: 'text', text: 'hello' }];
-    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
-    // Promise.resolve dispatches the supertest thenable at once (its
-    // request only leaves on .then), so the probe is in flight while
-    // the test drives the pump below.
-    const prompted = Promise.resolve(
-      authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send({
-        prompt,
-        promptId: randomUUID(),
-        payloadDigest,
-      }),
-    );
-    // The probe is in flight; the pump now classifies the same park,
-    // and its aftermath stops, commits the cancelled results and parks
-    // at the held release — the block the probe started before.
-    await probed;
-    releaseClassify();
-    await releasing;
-    releaseProbe();
-    const refused = await prompted;
-    // The post-probe re-read, not the probe, held the line: the durable
-    // session-scope code, while the transient-window one belongs to the
-    // probe's own finding (the sibling pin above).
-    expect(refused.status).toBe(409);
-    expect(refused.body.code).toBe('hosted_turn_recovery_required');
-    expect(refused.body.reason).toBe('turn_blocked');
-    // Nothing was admitted.
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
-    expect(
-      journal.events.some(
-        (event) =>
-          event.kind === 'input.accepted' &&
-          event.payload['source'] === 'hosted-harness',
-      ),
-    ).toBe(false);
-    releaseRelease();
-    await vi.waitFor(
-      async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
+    try {
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      afterLoad = true;
+      const authorize = (request: supertest.Test) =>
+        headers(request).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
         );
-        expect(status.body.recoveryBlocked).toBe(false);
-      },
-      { timeout: 15_000 },
-    );
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      // Promise.resolve dispatches the supertest thenable at once (its
+      // request only leaves on .then), so the probe is in flight while
+      // the test drives the pump below.
+      const prompted = Promise.resolve(
+        authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send(
+          {
+            prompt,
+            promptId: randomUUID(),
+            payloadDigest,
+          },
+        ),
+      );
+      // The probe is in flight; the pump now classifies the same park,
+      // and its aftermath stops, commits the cancelled results and parks
+      // at the held release — the block the probe started before.
+      await probed;
+      releaseRun();
+      await releasing;
+      releaseProbe();
+      const refused = await prompted;
+      // The post-probe re-read, not the probe, held the line: the durable
+      // session-scope code, while the transient-window one belongs to the
+      // probe's own finding (the sibling pin above).
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      expect(refused.body.reason).toBe('turn_blocked');
+      // Nothing was admitted.
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(
+        journal.events.some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['source'] === 'hosted-harness',
+        ),
+      ).toBe(false);
+      releaseRelease();
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 15_000 },
+      );
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    } finally {
+      releaseRun();
+      releaseProbe();
+      releaseRelease();
+    }
   }, 45_000);
 
   it('reopens over a queued automation input as idle and runs it', async () => {
@@ -33497,6 +33513,90 @@ describe('Hosted Harness stored definitions', () => {
         supertest(server).get(`/session/${SESSION_ID}/status`),
       ).set('X-Qwen-Client-Id', created.body.clientId);
       expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(state.model).toHaveBeenCalledOnce();
+    await expect(state.model.mock.results[0].value).resolves.toMatchObject({
+      text: 'read only',
+    });
+  });
+
+  // #13905 (item 42): the drop is not create-only — a read-profile Session
+  // loaded from its stored definition takes no skill catalog either, so a
+  // regression that keeps the catalog on load is caught here.
+  it('keeps a loaded read-profile Session without a skill catalog from its agent definition', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const skillsRef = await resources.publish(
+      'managed-agent-skills',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'published',
+            description: 'Published instructions',
+            body: 'ORIGINAL_SKILL_BODY',
+            base_directory: 'docs',
+          },
+        ]),
+      ),
+    );
+    const identity = {
+      agentId: `agent_${'a'.repeat(32)}`,
+      revision: '1',
+      digest: 'b'.repeat(64),
+    };
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        agentDefinition: { ...identity, skillsRef },
+        toolProfile: 'hosted-workspace-read/1',
+        childWorkspaces: true,
+        childSnapshots: true,
+      })
+      .expect(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .expect(204);
+    const replacement = await app(true);
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store(), agentDefinition: identity })
+      .expect(200);
+    state.model.mockImplementationOnce(async (input) => {
+      expect((input as { skills?: unknown }).skills).toBeUndefined();
+      expect(
+        (await input.toolTurn!.declarations(input.signal)).map(
+          (tool) => tool.name,
+        ),
+      ).toEqual(['read_file', 'glob']);
+      return { text: 'read only', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'Review the change' }];
+    await headers(supertest(replacement).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(replacement).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
     });
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({

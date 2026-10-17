@@ -23,14 +23,16 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -1297,7 +1299,8 @@ class HostedHarnessClientTest {
                                 null)));
 
         assertTrue(recovery.hasUnknownOutcome());
-        assertFalse(recovery.isCancellationReady());
+        assertFalse(recovery.isContinuationReady());
+        assertTrue(recovery.isCancellationReady());
     }
 
     @Test
@@ -2947,8 +2950,9 @@ class HostedHarnessClientTest {
                     try {
                         // The handler thread must own the keepalive loop:
                         // returning from the handler closes the exchange.
-                        // 120ms cadence against the 500ms budget below keeps
-                        // >4x margin against scheduler jitter.
+                        // 120ms cadence against the 1500ms budget below
+                        // tolerates a stall of more than ten keepalives on a
+                        // loaded runner.
                         while (!stopKeepalives.await(120,
                                 TimeUnit.MILLISECONDS)) {
                             exchange.getResponseBody().write(
@@ -2970,7 +2974,7 @@ class HostedHarnessClientTest {
                 .bearerToken("harness-token")
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ZERO)
-                .sseIdleTimeout(Duration.ofMillis(500))
+                .sseIdleTimeout(Duration.ofMillis(1500))
                 .build();
         try {
             HarnessSessionRef session = createSession(client);
@@ -2984,7 +2988,7 @@ class HostedHarnessClientTest {
                 // (read before any shutdown, where shutdownNow would
                 // already have removed it).
                 assertTrue(client.scheduler().getQueue().size() > 0);
-                // Consumer parked in read for three idle budgets while the
+                // Consumer parked in read for over two idle budgets while the
                 // peer proves liveness only with keepalive comments: the
                 // refills stamp the budget, so the stream must survive.
                 ExecutorService consumer = Executors.newSingleThreadExecutor();
@@ -2992,7 +2996,7 @@ class HostedHarnessClientTest {
                     Future<DaemonEvent> event = consumer.submit(
                             () -> assertTimeoutPreemptively(
                                     Duration.ofSeconds(8), stream::next));
-                    Thread.sleep(1300);
+                    Thread.sleep(3200);
                     stopKeepalives.countDown();
                     assertEquals("turn_complete",
                             event.get(10, TimeUnit.SECONDS).getType());
@@ -3231,8 +3235,9 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        SaturatableQueue queue = new SaturatableQueue();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L,
-                TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2),
+                TimeUnit.MILLISECONDS, queue,
                 runnable -> {
                     Thread thread = new Thread(runnable, "http-r1-5");
                     thread.setDaemon(true);
@@ -3268,8 +3273,9 @@ class HostedHarnessClientTest {
                     }
                 });
                 assertTrue(sawPrompt.await(5, TimeUnit.SECONDS));
-                // Park the only worker and fill its queue, so the response
-                // delivery task is rejected after the server answered.
+                // Park the only worker and saturate its queue, so the
+                // response delivery task is rejected after the server
+                // answered.
                 CountDownLatch parkerEntered = new CountDownLatch(1);
                 executor.execute(() -> {
                     parkerEntered.countDown();
@@ -3281,10 +3287,7 @@ class HostedHarnessClientTest {
                     }
                 });
                 assertTrue(parkerEntered.await(5, TimeUnit.SECONDS));
-                executor.execute(() -> {
-                });
-                executor.execute(() -> {
-                });
+                queue.saturated = true;
                 answerPrompt.countDown();
                 Throwable outcome = submission.get(10, TimeUnit.SECONDS);
                 assertTrue(outcome
@@ -3342,7 +3345,7 @@ class HostedHarnessClientTest {
                                     + EVENT_EPOCH + "\"}");
                 });
         ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L,
-                TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2),
+                TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(),
                 runnable -> {
                     Thread thread = new Thread(runnable,
                             "http-mid-flight-close");
@@ -3428,13 +3431,23 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        Thread caller = Thread.currentThread();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L,
-                TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2),
+                TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(),
                 runnable -> {
                     Thread thread = new Thread(runnable,
                             "http-terminated-before-send");
                     thread.setDaemon(true);
                     return thread;
+                },
+                (task, pool) -> {
+                    // Only the caller's dispatch: a rejected selector-thread
+                    // task trailing createSession would abort the client.
+                    if (Thread.currentThread() != caller) {
+                        ForkJoinPool.commonPool().execute(task);
+                        return;
+                    }
+                    throw new RejectedExecutionException("terminated");
                 });
         HostedHarnessClient client = HostedHarnessClient.builder()
                 .baseUri(baseUri)
@@ -3589,12 +3602,16 @@ class HostedHarnessClientTest {
                                     + "\",\"hasActivePrompt\":false}");
                 });
         AtomicBoolean failNextSend = new AtomicBoolean();
+        Thread caller = Thread.currentThread();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(0,
                 Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
                 new SynchronousQueue<>()) {
             @Override
             public void execute(Runnable command) {
-                if (failNextSend.getAndSet(false)) {
+                // Only the caller's dispatch: a selector-thread task trailing
+                // the previous response must not take the injected fault.
+                if (Thread.currentThread() == caller
+                        && failNextSend.getAndSet(false)) {
                     throw new SecurityException("synthetic send failure");
                 }
                 super.execute(command);
@@ -4845,12 +4862,16 @@ class HostedHarnessClientTest {
                                     + EVENT_EPOCH + "\"}");
                 });
         AtomicBoolean failNextSend = new AtomicBoolean();
+        Thread caller = Thread.currentThread();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(0,
                 Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
                 new SynchronousQueue<>()) {
             @Override
             public void execute(Runnable command) {
-                if (failNextSend.getAndSet(false)) {
+                // Only the caller's dispatch: a selector-thread task trailing
+                // the previous response must not take the injected fault.
+                if (Thread.currentThread() == caller
+                        && failNextSend.getAndSet(false)) {
                     throw new OutOfMemoryError("synthetic send failure");
                 }
                 super.execute(command);
@@ -4918,14 +4939,19 @@ class HostedHarnessClientTest {
     }
 
     private static void awaitSchedulerDrained(HostedHarnessClient client)
-            throws InterruptedException {
+            throws Exception {
+        // A periodic task is off the queue while it runs, so the queue is
+        // read on the single scheduler thread, where no heartbeat task can
+        // be running and a live one must be queued.
+        ScheduledThreadPoolExecutor scheduler = client.scheduler();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (!client.scheduler().getQueue().isEmpty()
+        boolean drained;
+        while (!(drained = scheduler.submit(
+                () -> scheduler.getQueue().isEmpty()).get())
                 && System.nanoTime() < deadline) {
             Thread.sleep(10);
         }
-        assertTrue(client.scheduler().getQueue().isEmpty(),
-                "the scheduler queue never drained");
+        assertTrue(drained, "the scheduler queue never drained");
     }
 
     @Test
@@ -7009,12 +7035,16 @@ class HostedHarnessClientTest {
                     sendSessionJson(exchange, 503, "{\"error\":\"x\"}");
                 });
         AtomicBoolean failNextSend = new AtomicBoolean();
+        Thread caller = Thread.currentThread();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(0,
                 Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
                 new SynchronousQueue<>()) {
             @Override
             public void execute(Runnable command) {
-                if (failNextSend.getAndSet(false)) {
+                // Only the caller's dispatch: a selector-thread task trailing
+                // the previous response must not take the injected fault.
+                if (Thread.currentThread() == caller
+                        && failNextSend.getAndSet(false)) {
                     throw new SecurityException("synthetic send failure");
                 }
                 super.execute(command);
@@ -7943,6 +7973,25 @@ class HostedHarnessClientTest {
         task.set(state, new ParkingCancelFuture(entered, release));
     }
 
+    // Unbounded until saturated, then refuses offers (from one thread when
+    // set): a burst of client setup tasks on a slow runner can never trip
+    // the injected rejection.
+    private static final class SaturatableQueue
+            extends LinkedBlockingQueue<Runnable> {
+        volatile boolean saturated;
+        volatile Thread onlyFrom;
+
+        @Override
+        public boolean offer(Runnable task) {
+            Thread only = onlyFrom;
+            if (saturated
+                    && (only == null || only == Thread.currentThread())) {
+                return false;
+            }
+            return super.offer(task);
+        }
+    }
+
     private static final class ParkingCancelFuture
             implements ScheduledFuture<Object> {
         private final CountDownLatch entered;
@@ -8827,8 +8876,9 @@ class HostedHarnessClientTest {
                                     + "\"eventEpoch\":\""
                                     + EVENT_EPOCH + "\"}");
                 });
+        SaturatableQueue queue = new SaturatableQueue();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L,
-                TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(2),
+                TimeUnit.MILLISECONDS, queue,
                 runnable -> {
                     Thread thread = new Thread(runnable,
                             "http-saturated-running");
@@ -8856,10 +8906,10 @@ class HostedHarnessClientTest {
                 }
             });
             assertTrue(parkerEntered.await(5, TimeUnit.SECONDS));
-            executor.execute(() -> {
-            });
-            executor.execute(() -> {
-            });
+            // Only the caller's dispatch: a rejected selector-thread task
+            // trailing createSession would abort the client instead.
+            queue.onlyFrom = Thread.currentThread();
+            queue.saturated = true;
             try {
                 Map<String, Object> block = Map.of(
                         "type", "text", "text", "saturated-executor");

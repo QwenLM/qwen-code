@@ -175,7 +175,8 @@ public class PublicAgentController {
         CommandAdmission admission;
         if ("agent.session.input.message".equals(request.type())) {
             admission = service.submitTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.input());
+                    idempotencyKey, sessionId, request.input(),
+                    request.admissionProfile());
         } else if ("agent.session.cancel".equals(request.type())) {
             if (request.turnId() == null || request.turnId().isBlank()) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
@@ -183,7 +184,8 @@ public class PublicAgentController {
                         "Cancellation requires turn_id.");
             }
             admission = service.cancelTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.turnId());
+                    idempotencyKey, sessionId, request.turnId(),
+                    request.admissionProfile());
         } else {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "unsupported_event",

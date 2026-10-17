@@ -883,6 +883,40 @@ class ManagedAgentPropertiesTest {
         assertThatThrownBy(missing::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
     }
 
+    @Test
+    void boundSessionIsolationDefaultsToSessionAndWorkspaceRequiresADurableLocalBrokerWithoutChildren() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().getBoundSessionIsolationClass()).isEqualTo("session");
+        plain.validateWorkspaceFiles();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties unknown = new ManagedAgentProperties();
+        unknown.getRuntimeBroker().setBoundSessionIsolationClass("tenant");
+        assertThatThrownBy(unknown::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("session or workspace");
+
+        ManagedAgentProperties notDurable = new ManagedAgentProperties();
+        notDurable.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        notDurable.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThatThrownBy(notDurable::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durable");
+
+        ManagedAgentProperties withChildren = new ManagedAgentProperties();
+        withChildren.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        withChildren.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        assertThatThrownBy(withChildren::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("child Workspaces");
+
+        ManagedAgentProperties nonLocal = new ManagedAgentProperties();
+        nonLocal.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        nonLocal.getRuntimeBroker().setProvisioner("static");
+        assertThatThrownBy(nonLocal::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("local-process");
+    }
+
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(ManagedAgentProperties.class)
     static class PropertiesConfiguration {
