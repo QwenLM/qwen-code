@@ -5,6 +5,11 @@
  */
 
 export const MAX_INDEX_LINE_CHARS = 150;
+// Floor for the title after it is budgeted against the link. The title yields
+// to MAX_INDEX_LINE_CHARS whenever the path leaves room, but a path long enough
+// to starve the title is kept whole (a resolving long link beats a short dead
+// one), so the title is clamped here instead of collapsing to nothing.
+export const MIN_INDEX_TITLE_CHARS = 24;
 export const MAX_INDEX_LINES = 200;
 // Keep the existing UTF-16 code-unit budget; the warning is appended separately.
 export const MAX_INDEX_CHARS = 25_000;
