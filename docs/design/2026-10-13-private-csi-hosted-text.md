@@ -5,7 +5,7 @@
 ## Status and source
 
 This is an independently reviewable feature extraction from #13526. It now targets
-main at `20de6bf12eb5169eff650771c07902e4097fc236`, after the private Session and
+main at `7eb6e00441401e82d049f30a176c39a680d42193`, after the private Session and
 SQL authority in #13996 merged as `3a9bbd7216d67a101e70f8c60e1a92dc0d7a3746`.
 The original stacked baseline was `c0d930c066624988126e22aee2ee30417d45d391`.
 The initial text-only implementation

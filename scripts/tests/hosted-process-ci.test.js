@@ -396,12 +396,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (85 + 16x10 + 20 + 50); the uncapped setup steps
+    // Step ceilings today (90 + 16x10 + 20 + 50); the uncapped setup steps
     // need their own allowance — the job comment estimates it at ~13, so
     // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(315);
+    expect(summed).toBe(320);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(330);
+    expect(job['timeout-minutes']).toBe(335);
   });
 
   it('runs every failover arm with its own runner arguments', () => {
@@ -505,12 +505,14 @@ describe('Hosted real-process gates', () => {
       // no longer leaves one 600 s ceiling room in 3600, so the fork moves
       // to 3990 and the Verify step to 80 minutes; the FG10b/FG10f
       // workflow relay letters add ~82 s, so the fork moves to 4155 and
-      // the Verify step to 85 minutes):
+      // the Verify step to 85 minutes; their slice 2 (FG10c/FG10e) brings
+      // the class to ~182 s, so the fork moves to 4353 and the Verify step
+      // to 90 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4155);
+        expect(forkSeconds).toBe(4353);
       }
     },
   );
@@ -532,14 +534,15 @@ describe('Hosted real-process gates', () => {
   // MySQL 8.4.6 (~290s budgeted at 2x), and the FG10a workflow digest
   // letter — four cases since #14390 — measures 15.9–16.2s for the letter
   // locally on macOS JDK 26 + MySQL 8.4.6 across four acceptance runs
-  // (~33s budgeted at 2x), and the FG10b/FG10f workflow relay letters
-  // (HostedWorkflowRelayFaultGatesIT) measure 81.6–81.7s for the class
-  // locally on JDK 21 + MySQL 8.4.6 across three acceptance runs (~165s
-  // budgeted at 2x, as FG10a); with the fork itself ~14s, 3545s (3380s
-  // with FG8c, FG10a and FG9, plus the relay letters' ~165s) covers them.
+  // (~33s budgeted at 2x), and the FG10b/c/e/f workflow relay letters
+  // (HostedWorkflowRelayFaultGatesIT, four letters since slice 2) measure
+  // 181.2–181.6s for the class locally on JDK 21 + MySQL 8.4.6 across
+  // three acceptance runs (~363s budgeted at 2x, as FG10a, up from slice
+  // 1's ~165s); with the fork itself ~14s, 3743s (3545s after slice 1,
+  // plus slice 2's ~198s) covers them.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 3545;
+  const hostedForkHealthySeconds = 3743;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
