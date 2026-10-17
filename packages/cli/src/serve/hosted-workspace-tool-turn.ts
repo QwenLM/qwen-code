@@ -319,6 +319,23 @@ function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
   );
 }
 
+// #14434: the store refuses a reservation past a tenant or Session limit
+// with its own code: a 429 when open captures will make room as they end,
+// and a 409 when used bytes alone fill the limit, which does not free while
+// their Session lives. Only a reserve answers either, so it refuses the
+// batch rather than faulting it.
+function isPublicationLimitRefusal(
+  cause: unknown,
+): cause is ManagedSessionStoreHttpError {
+  return (
+    cause instanceof ManagedSessionStoreHttpError &&
+    ((cause.status === 429 &&
+      cause.remoteCode === 'managed_tool_publication_capacity_exhausted') ||
+      (cause.status === 409 &&
+        cause.remoteCode === 'managed_tool_publication_retention_exhausted'))
+  );
+}
+
 // H3: background admissions exist only while the child_run domain's shell
 // kind is enabled for commits; otherwise the turn keeps its foreground
 // refusals. The domain itself never joins the plain enabled list — its
@@ -3968,6 +3985,9 @@ export class HostedWorkspaceToolTurn {
       return responses;
     }
     const reserved = new Map<number, string>();
+    // Set once the batch's first call may run; every reservation is made
+    // before that.
+    let executing = false;
     try {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
@@ -4390,6 +4410,7 @@ export class HostedWorkspaceToolTurn {
               ]
             : [],
       );
+      executing = true;
       for (const [index, request] of requests.entries()) {
         const refused = refusal(index);
         if (refused) {
@@ -4672,8 +4693,22 @@ export class HostedWorkspaceToolTurn {
       }
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
-      const cancellationBarriers = new Set<string>();
       const reservedIds = [...reserved.values()];
+      // A limit refusal can only come from a reservation, and every
+      // reservation precedes the batch's first call. Each execution is read
+      // before its cancel: one the Broker still holds as `prepared` was
+      // never dispatched.
+      const limitRefusal =
+        !executing && isPublicationLimitRefusal(cause) ? cause : undefined;
+      const undispatched = new Set<string>();
+      if (limitRefusal)
+        for (const id of reservedIds)
+          if (
+            (await this.broker.status(id).catch(() => undefined))?.state ===
+            'prepared'
+          )
+            undispatched.add(id);
+      const cancellationBarriers = new Set<string>();
       const cancellationResults = await Promise.allSettled(
         reservedIds.map((id) => this.broker.cancel(id)),
       );
@@ -4681,15 +4716,33 @@ export class HostedWorkspaceToolTurn {
         if (result.status === 'fulfilled')
           cancellationBarriers.add(reservedIds[index]!);
       });
+      // Once cancelled, an undispatched execution settles and can no longer
+      // start. A Shell or Monitor execution settles with the Broker's own
+      // not-started result: the execution half of what close_not_started
+      // checks.
+      const neverStarted =
+        limitRefusal &&
+        reservedIds.every(
+          (id) => undispatched.has(id) && cancellationBarriers.has(id),
+        )
+          ? await this.settledNeverStarted(
+              reservedIds,
+              new Set(shellBindings.keys()),
+            )
+          : new Set<string>();
       const probeBindings: Array<{
         readonly executionCallId: string;
         readonly request: (typeof requests)[number] | undefined;
       }> = [];
+      // The ids whose child run or monitor record (when the call has one)
+      // settled as never started.
+      const recordsSettled = new Set<string>();
       const settleNeverStarted = async (
         executionCallId: string,
         request: (typeof requests)[number] | undefined,
         processProven: boolean,
       ) => {
+        let settled = true;
         if (request?.background) {
           try {
             if (this.childRuns !== undefined) {
@@ -4703,6 +4756,7 @@ export class HostedWorkspaceToolTurn {
                 );
             }
           } catch (settleCause) {
+            settled = false;
             writeStderrLineSafe(
               'qwen serve: Unstarted child run record was not settled: ' +
                 String(settleCause),
@@ -4715,12 +4769,14 @@ export class HostedWorkspaceToolTurn {
               stopReason: 'start_failed',
               started: false,
             })
-            .catch((settleCause: unknown) =>
+            .catch((settleCause: unknown) => {
+              settled = false;
               writeStderrLineSafe(
                 'qwen serve: Unstarted monitor run record was not settled: ' +
                   String(settleCause),
-              ),
-            );
+              );
+            });
+        if (settled) recordsSettled.add(executionCallId);
       };
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
@@ -4747,12 +4803,22 @@ export class HostedWorkspaceToolTurn {
           if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
         } catch (closeCause) {
-          writeStderrLineSafe(
-            'qwen serve: Tool publication close was not confirmed: ' +
-              String(closeCause),
-          );
+          // A reservation the limit refused, or never reached, has no row:
+          // its close failing is expected and not worth a line.
+          if (!limitRefusal || saved.originalBinding !== undefined)
+            writeStderrLineSafe(
+              'qwen serve: Tool publication close was not confirmed: ' +
+                String(closeCause),
+            );
         }
         if (grantOwnerState === 'NOT_STARTED') {
+          await settleNeverStarted(executionCallId, request, false);
+          continue;
+        }
+        // A Monitor whose close was not confirmed (its reservation was
+        // refused, or the close failed) settles on the Broker's not-started
+        // record. A background Shell still needs its process ledger (#13801).
+        if (request?.monitoring && neverStarted.has(executionCallId)) {
           await settleNeverStarted(executionCallId, request, false);
           continue;
         }
@@ -4780,12 +4846,150 @@ export class HostedWorkspaceToolTurn {
         // started. Publication absence alone proves nothing.
         await settleNeverStarted(executionCallId, request, true);
       }
+      if (
+        limitRefusal &&
+        reservedIds.every((id) => neverStarted.has(id)) &&
+        [...shellBindings.keys()].every((id) => {
+          const request = requests.find(
+            (_, index) => reserved.get(index) === id,
+          );
+          return (
+            (!request?.background && !request?.monitoring) ||
+            recordsSettled.has(id)
+          );
+        })
+      ) {
+        // No call of the batch ran and none can start now, so the batch is
+        // answered as refused and the turn goes on: the model sees why, and
+        // the Session keeps taking prompts. A reservation granted before the
+        // refusal whose close was not confirmed holds its slot only until
+        // its grant expires.
+        writeStderrLineSafe(
+          `qwen serve: Tool publication refused batch ${messageId} before any call started: ${limitRefusal.message}`,
+        );
+        try {
+          return await this.answerUnstartedBatch(
+            requests,
+            refusal,
+            reserved,
+            paths,
+            model,
+            `This call was not started: ${limitRefusal.message.slice(0, 512)}. ` +
+              (limitRefusal.status === 429
+                ? 'Retry after the running tools finish.'
+                : 'Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.'),
+          );
+        } catch (answerCause) {
+          throw new HostedToolRecoveryRequiredError(answerCause);
+        }
+      }
+      // Any other failure leaves some reserved call's outcome unproven: it
+      // may have started, or its record may not have settled. Answering it
+      // would tell the model a call never ran that might have, so the turn
+      // waits for recovery instead.
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {
       if (renewTimer) clearInterval(renewTimer);
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
     }
+  }
+
+  /**
+   * The cancelled executions that settled without starting, or none when any
+   * one did not. Only a settled record is a witness: a missing, unknown or
+   * abandoned one, or one still open when the window closes, proves no
+   * stop. A publication execution (`v3`) must also settle with the Broker's
+   * not-started result; a started one that was cancelled settles otherwise.
+   */
+  private async settledNeverStarted(
+    ids: readonly string[],
+    v3: ReadonlySet<string>,
+  ): Promise<Set<string>> {
+    const deadline = Date.now() + 30_000;
+    for (const id of ids) {
+      for (;;) {
+        const status = await this.broker.status(id).catch(() => undefined);
+        if (status?.state === 'settled') {
+          if (v3.has(id) && status.executionStatus !== 'not_started')
+            return new Set();
+          break;
+        }
+        if (
+          status === undefined ||
+          status.state === 'unknown' ||
+          status.state === 'abandoned' ||
+          Date.now() >= deadline
+        )
+          return new Set();
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    return new Set(ids);
+  }
+
+  /**
+   * Answers a batch none of whose calls started: each call gets its
+   * pre-dispatch refusal or `reason`. A reserved execution resolves its
+   * await_runtime item with that answer, after the tool_result commits, in
+   * the order the Runtime result path uses.
+   */
+  private async answerUnstartedBatch(
+    requests: readonly HostedPreparedRequest[],
+    refusal: (index: number) => Part[] | undefined,
+    reserved: ReadonlyMap<number, string>,
+    paths: readonly string[],
+    model: string,
+    reason: string,
+  ): Promise<Part[]> {
+    const responses: Part[] = [];
+    for (const [index, request] of requests.entries()) {
+      const parts =
+        refusal(index) ??
+        convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          reason,
+        );
+      if (!this.messageFitsInline('tool_result', parts, model))
+        throw new Error(
+          'Hosted tool refusal exceeds the inline Session Store limit.',
+        );
+      const executionCallId = reserved.get(index);
+      if (executionCallId === undefined) {
+        await this.commit('tool_result', parts, model);
+      } else {
+        const response = parts[0]?.functionResponse;
+        if (!response || parts.length !== 1)
+          throw new Error('Unstarted tool result cannot be recorded.');
+        response.response = {
+          ...response.response,
+          executionStatus: 'not_started',
+        };
+        const outcomeRef = await this.session.resources.publish(
+          'managed-tool-outcome',
+          Buffer.from(JSON.stringify({ executionCallId, ...parts[0] })),
+        );
+        await this.commit('tool_result', parts, model);
+        await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);
+      }
+      responses.push(...parts);
+    }
+    if (paths.length) {
+      const state = await this.broker.fileHistory({
+        kind: 'raw-file-history',
+        action: 'snapshot',
+      });
+      await commitHostedFileHistory(this.session, {
+        schemaVersion: 1,
+        state,
+        pendingTurn: null,
+        pendingUndo: null,
+      });
+    }
+    this.uncertain = false;
+    return responses;
   }
 
   private encodeToolInput(payload: {
