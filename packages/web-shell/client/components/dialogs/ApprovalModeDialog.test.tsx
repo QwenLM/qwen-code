@@ -156,4 +156,16 @@ it('keeps keyboard confirmation valid when an open list shrinks', () => {
   press('Enter');
   expect(onSelect).not.toHaveBeenCalled();
   expect(activeDescendant()).toBeNull();
+  // A later grow must not resurrect the pre-shrink index: the highlight stays
+  // on the clamped row and Enter commits what is highlighted.
+  rerender(
+    <ApprovalModeDialog
+      currentMode="yolo"
+      availableModes={['default', 'auto', 'yolo']}
+      onSelect={onSelect}
+    />,
+  );
+  expect(activeDescendant()).toBe('mode-opt-0');
+  press('Enter');
+  expect(onSelect).toHaveBeenLastCalledWith('default');
 });

@@ -59,6 +59,15 @@ export function ApprovalModeDialog({
     Math.max(0, approvalModes.length - 1),
   );
 
+  // Write the clamp back so a shrink is sticky: otherwise the stale index
+  // survives and resurfaces — moving the highlight and Enter's target off the
+  // row the user is looking at — the moment the list grows again.
+  useEffect(() => {
+    setActiveIndex((prev) =>
+      Math.min(prev, Math.max(0, approvalModes.length - 1)),
+    );
+  }, [approvalModes.length]);
+
   const confirm = (index: number) => {
     const mode = approvalModes[index];
     if (mode) onSelect(mode.id);

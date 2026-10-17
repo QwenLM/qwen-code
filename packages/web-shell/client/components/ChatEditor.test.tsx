@@ -2998,14 +2998,17 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
       availableModes: ['default', 'auto'],
     };
     const container = renderChatEditor(props);
-    act(() =>
-      container
-        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
-        ?.click(),
-    );
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    act(() => modeButton.click());
     expect(
       document.querySelector('[data-web-shell-toolbar-popover]'),
     ).not.toBeNull();
+    // The list emptying while the trigger holds focus must hand focus to the
+    // composer; a disabled button cannot keep it and the body must not get it.
+    act(() => modeButton.focus());
+    composerCoreState.focus.mockClear();
     rerenderChatEditor(container, { ...props, availableModes: [] });
     expect(
       document.querySelector('[data-web-shell-toolbar-popover]'),
@@ -3014,6 +3017,7 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
       container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
         ?.disabled,
     ).toBe(true);
+    expect(composerCoreState.focus).toHaveBeenCalled();
   });
 
   it('keeps permission and Plan controls operable while approval disables input', () => {

@@ -155,6 +155,9 @@ test('empty host override disables selection and cycling @smoke', async ({
   await page.locator('[data-web-shell-composer-editor] .cm-content').focus();
   await page.keyboard.press('Shift+Tab');
   await submitLocalCommand(page, '/approval-mode');
+  await expect(
+    page.locator('[data-web-shell-approval-mode-dialog]'),
+  ).toBeVisible();
   await expect(page.locator(dialogOptions)).toHaveCount(0);
   expect(modeRequests(daemon)).toHaveLength(0);
 });
@@ -269,7 +272,7 @@ test('host allowlist applies to an actual side-task panel @smoke', async ({
 });
 
 for (const split of [false, true]) {
-  test(`secondary workspace keeps its own modes in ${split ? 'split' : 'main'} view @smoke`, async ({
+  test(`secondary workspace reads its scoped settings route in ${split ? 'split' : 'main'} view @smoke`, async ({
     page,
   }, info) => {
     const primary = '/tmp/approval-primary';
@@ -303,9 +306,7 @@ for (const split of [false, true]) {
                 label: 'Modes',
                 category: 'UI',
                 requiresRestart: false,
-                values: {
-                  effective: path === scopedPath ? ['auto'] : ['default'],
-                },
+                values: { effective: ['auto'] },
               },
             ],
           },

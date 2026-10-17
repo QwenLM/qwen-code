@@ -133,7 +133,9 @@ it('does not reuse a prior daemon setting for the same path', async () => {
   render('/secondary');
   expect(container.textContent).toBe('default,auto-edit,auto,yolo');
   await flush();
-  expect(container.textContent).toBe('default,auto-edit,auto,yolo');
+  // The new client has no successful read to fall back on: fail closed
+  // rather than revive the old client's list or offer every mode.
+  expect(container.textContent).toBe('');
 });
 
 it('never reads primary settings for an absent workspace or failed scoped request', async () => {
@@ -144,5 +146,30 @@ it('never reads primary settings for an absent workspace or failed scoped reques
   await flush();
   expect(mocks.workspaceByCwd).toHaveBeenCalledOnce();
   expect(mocks.workspaceByCwd).toHaveBeenCalledWith('/missing');
-  expect(container.textContent).toBe('default,auto-edit,auto,yolo');
+  expect(container.textContent).toBe('');
+});
+
+it('retries a failed read on the next settings event', async () => {
+  mocks.settings.mockRejectedValueOnce(new Error('unavailable'));
+  render('/secondary');
+  await flush();
+  expect(container.textContent).toBe('');
+  mocks.version++;
+  render('/secondary');
+  await flush();
+  expect(mocks.settings).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('default');
+});
+
+it('keeps the last-known-good list when a reload fails', async () => {
+  mocks.settings.mockResolvedValueOnce(status(['auto']));
+  render('/secondary');
+  await flush();
+  expect(container.textContent).toBe('auto');
+  mocks.settings.mockRejectedValueOnce(new Error('unavailable'));
+  mocks.version++;
+  render('/secondary');
+  await flush();
+  expect(mocks.settings).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('auto');
 });

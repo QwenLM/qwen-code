@@ -15,7 +15,10 @@ import {
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
-import { WORKSPACE_RESTRICTED_SETTINGS } from '../../config/settingsUtils.js';
+import {
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
+  WORKSPACE_RESTRICTED_SETTINGS,
+} from '../../config/settingsUtils.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
@@ -148,10 +151,13 @@ function makeApp(
   if (overrides.userSettings || overrides.workspaceSettings) {
     const user = structuredClone(overrides.userSettings ?? {});
     const workspace = structuredClone(overrides.workspaceSettings ?? {});
-    // Mirror the real merge: a workspace value for a restricted key is
-    // stripped before merging, though the raw workspace scope is still
-    // reported under `workspace`.
+    // Mirror the real merge: a workspace value for a restricted key — either
+    // list — is stripped before merging, though the raw workspace scope is
+    // still reported under `workspace`.
     const mergeableWorkspace = structuredClone(workspace);
+    for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+      delete (mergeableWorkspace as Record<string, unknown>)[key];
+    }
     for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
       const sectionValue = mergeableWorkspace[section];
       if (sectionValue && typeof sectionValue === 'object')
@@ -234,30 +240,33 @@ function makeQualifiedApp(
     overrides.invokeWorkspaceCommand ?? vi.fn().mockResolvedValue(undefined);
   const publishWorkspaceEvent = vi.fn();
   const invalidateServeFeaturesCache = vi.fn();
+  const entryFor = (workspaceCwd: string) => ({
+    state: 'active',
+    current: {
+      runtime: {
+        trusted: true,
+        workspaceCwd,
+        routeFileSystemFactory: overrides.ssh
+          ? {
+              sshWorkspace: { host: 'host', directory: '/srv/project' },
+            }
+          : {},
+        bridge: {
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        },
+        workspaceService: { reloadModelProviders },
+        generationGuard: undefined,
+      },
+    },
+  });
   const registry = {
     getEntryByWorkspaceId: (selector: string) =>
       selector === 'primary'
-        ? {
-            state: 'active',
-            current: {
-              runtime: {
-                trusted: true,
-                workspaceCwd: overrides.workspaceCwd ?? '/workspace',
-                routeFileSystemFactory: overrides.ssh
-                  ? {
-                      sshWorkspace: { host: 'host', directory: '/srv/project' },
-                    }
-                  : {},
-                bridge: {
-                  invokeWorkspaceCommand,
-                  publishWorkspaceEvent,
-                },
-                workspaceService: { reloadModelProviders },
-                generationGuard: undefined,
-              },
-            },
-          }
-        : undefined,
+        ? entryFor(overrides.workspaceCwd ?? '/workspace')
+        : selector === 'secondary'
+          ? entryFor('/selected-workspace')
+          : undefined,
   };
 
   registerWorkspaceQualifiedSettingsRoutes(app, {
@@ -1373,7 +1382,9 @@ describe('Web Shell approval mode allowlist settings', () => {
   });
 
   it('reads the list from the selected runtime rather than primary', async () => {
-    const { app } = makeQualifiedApp({ workspaceCwd: '/selected-workspace' });
+    // Primary keeps its own cwd, so a route that falls back to it serves the
+    // ['yolo'] list instead of the selected workspace's ['default'].
+    const { app } = makeQualifiedApp();
     vi.mocked(loadSettings).mockImplementation(
       (cwd) =>
         ({
@@ -1388,12 +1399,26 @@ describe('Web Shell approval mode allowlist settings', () => {
           forScope: vi.fn().mockReturnValue({ settings: {} }),
         }) as never,
     );
-    const response = await request(app).get('/workspaces/primary/settings');
+    const response = await request(app).get('/workspaces/secondary/settings');
     expect(response.status).toBe(200);
     expect(
       response.body.settings.find(
         (setting: { key: string }) => setting.key === 'ui.allowedApprovalModes',
       )?.values.effective,
     ).toEqual(['default']);
+  });
+
+  it('serves the operator value for a root-level restricted key set at workspace scope', async () => {
+    const { app } = makeApp({
+      userSettings: { advisorMaxUses: 3 },
+      workspaceSettings: { advisorMaxUses: 9 },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.settings.find(
+        (setting: { key: string }) => setting.key === 'advisorMaxUses',
+      )?.values,
+    ).toMatchObject({ effective: 3, user: 3, workspace: 9 });
   });
 });

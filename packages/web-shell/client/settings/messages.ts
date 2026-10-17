@@ -263,7 +263,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.ui.theme': '界面的颜色主题。',
   'settings.label.ui.allowedApprovalModes': 'Web Shell 审批模式',
   'settings.description.ui.allowedApprovalModes':
-    'Web Shell 提供的执行审批模式。未配置时显示 default、auto-edit、auto 和 yolo；空列表不提供任何选项。宿主 allowedApprovalModes 优先于此设置。仅控制展示，不改变当前模式或强制约束后端权限。请直接编辑 settings.json。',
+    'Web Shell 提供的执行审批模式。未配置时显示 default、auto-edit、auto 和 yolo；空列表不提供任何选项。宿主 allowedApprovalModes 优先于此设置。仅控制展示，不改变当前模式或强制约束后端权限。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略并产生警告。请直接编辑 settings.json。',
   'settings.label.ui.hideTips': '隐藏提示',
   'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
   'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',

@@ -48462,6 +48462,34 @@ describe('approval mode allowlist', () => {
       planMode: true,
     });
   });
+
+  // The two CustomFooter sites sit in different layout branches, so each is
+  // rendered and observed separately: the mobile-bottom branch needs the
+  // empty-state welcome layout, the other is the default chat footer.
+  for (const mobileWelcomeFooterMiddle of [false, true]) {
+    it(`passes the restricted list to a host footer's mode choices (mobile welcome middle: ${mobileWelcomeFooterMiddle})`, async () => {
+      if (mobileWelcomeFooterMiddle) mockConnection.sessionId = undefined;
+      let footerModes: readonly string[] | undefined;
+      const renderFooter = (props: { availableModes: readonly string[] }) => {
+        footerModes = props.availableModes;
+        return null;
+      };
+      const { rerender } = renderApp({
+        allowedApprovalModes: ['default', 'auto'],
+        mobileWelcomeFooterMiddle,
+        renderFooter,
+      });
+      await flush();
+      expect(footerModes).toEqual(['default', 'auto']);
+      rerender({
+        allowedApprovalModes: [],
+        mobileWelcomeFooterMiddle,
+        renderFooter,
+      });
+      await flush();
+      expect(footerModes).toEqual([]);
+    });
+  }
 });
 
 describe('Managed home integration', () => {

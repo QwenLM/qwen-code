@@ -4109,11 +4109,7 @@ describe('pane approval mode allowlist', () => {
       await Promise.resolve();
     });
     expect(workspaceByCwd).toHaveBeenCalledOnce();
-    expect(latestChatEditorProps.availableModes).toEqual([
-      'default',
-      'auto-edit',
-      'auto',
-      'yolo',
-    ]);
+    // A failed scoped read fails closed rather than offering every mode.
+    expect(latestChatEditorProps.availableModes).toEqual([]);
   });
 });

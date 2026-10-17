@@ -1994,9 +1994,28 @@ export const ChatEditor = memo(
     const planDescriptionId = useId();
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     useEffect(() => {
-      if (modeControlsDisabled || availableModes.length === 0)
-        setModeDropdownOpen(false);
-    }, [availableModes.length, modeControlsDisabled]);
+      if (!modeControlsDisabled && availableModes.length > 0) return;
+      setModeDropdownOpen(false);
+      // The trigger is natively disabled here, so focus held by it or by the
+      // open popover would drop to the body; hand it on, as the plan chip
+      // does when it unmounts. Focus anywhere else is left alone.
+      const toolbar = toolbarLeadingRef.current;
+      const active = getShadowAwareActiveElement(toolbar);
+      if (
+        !(active instanceof HTMLElement) ||
+        (!active.closest('[data-web-shell-mode-button]') &&
+          !active.closest('[data-web-shell-toolbar-popover]'))
+      )
+        return;
+      if (!disabled && !isCoarsePointerDevice()) {
+        focusComposer();
+        return;
+      }
+      // The mode control itself is disabled, so it cannot be the target.
+      toolbar
+        ?.querySelector<HTMLElement>('[data-web-shell-model-button]')
+        ?.focus();
+    }, [availableModes.length, modeControlsDisabled, disabled, focusComposer]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     useEffect(() => {
       if (modelControlsDisabled) setModelDropdownOpen(false);
