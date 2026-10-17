@@ -61,8 +61,9 @@ Issue #13753 对 I3 提出两点：
    - **为什么要单独的开关。** 本变更之前的副本把 `snapshot` 当作 `shared`：它会以父的 Shell profile 在父的目录里创建 child，也就是一个写入者。
      - 本变更逐台副本滚动上线时，child Workspace 可能已经开启。滚动期间，新副本可能宣告支持快照，而老副本认领了这个 run。
      - 这个开关给运维一个开启快照的时机：所有控制面副本都运行本变更之后。
+     - 本变更之前的副本在新副本迁移数据库后仍会继续运行，但一旦 #14316 及之后的服务端迁移过数据库，它就无法再启动：它的启动 schema 检查会拒绝这些迁移新增的列。因此开关防护的窗口，持续到升级前启动的最后一台副本被替换为止。
      - 之后关闭它只会停止新的准入。已提交的 snapshot run 仍按快照运行。
-     - 回滚同理：把任何副本退回到本变更之前的版本前，先关闭开关，等所有未结算的 snapshot run 结算完（或其父关闭），包括仍在创建 child、还没有 child Workspace 行的 run。开关关闭前已开始的 Turn 仍保有它开始时的能力，所以要等正在运行的 Turn 结束后再做这项检查。较旧的 relay 会把尚未创建的 snapshot run 创建为共享的写入者，并且直到父关闭才会丢弃它的副本。较旧的 `qwen serve` 会拒绝只读 profile，因此对仍存有 snapshot child Session 的 storage，它的 Workspace 恢复会中止：回滚 CLI 之前，先让这些 Session 关闭。
+     - 回滚同理：把任何副本退回到本变更之前的版本前，先关闭开关，等所有未结算的 snapshot run 结算完（或其父关闭），包括仍在创建 child、还没有 child Workspace 行的 run。开关关闭前已开始的 Turn 仍保有它开始时的能力，所以要等正在运行的 Turn 结束后再做这项检查。较旧的 relay 会把尚未创建的 snapshot run 创建为共享的写入者，并且直到父关闭才会丢弃它的副本。只有在 #14316 及之后的服务端从未迁移过的数据库上，控制面副本才能退回到本变更之前；在其他数据库上，较旧的服务端会拒绝启动。较旧的 `qwen serve` 会拒绝只读 profile，而 Workspace 恢复会检查 storage 中的每个 Session，包括已关闭的，所以对存有 snapshot child Session 的 storage，即使该 Session 已关闭，它的恢复也会中止。把 CLI 回滚到本变更之前，就放弃了对这些 storage 的 Workspace 恢复。
 
 3. **冻结视图是一个 child Workspace。** relay 准备 snapshot run 的 child Workspace，方式与准备 worktree run 的完全相同（I2 决策 3）。
    - **包含什么。** 基线是 I1 对父工作树的快照提交：已跟踪与未跟踪的文件，不含被忽略的文件。
@@ -84,7 +85,7 @@ Issue #13753 对 I3 提出两点：
 5. **快照从不合并。** 快照的 child Workspace 把模式记录在其 child Workspace 操作的请求中（`ma_operation.request_json` 里的 `workspaceMode`），该请求在行被准入时写入一次，之后从不改写。没有指名模式的请求属于 worktree，所以 worktree 行（包括本变更之前准入的所有行）都读作 `worktree`，其请求保持原样。这不需要 schema 变更。`snapshot` 行的每次收尾都是丢弃。
    - **relay** 从不请求快照的合并，也从不为合并扣住结算。完成的 snapshot run 提交结果时回执不带 `workspace` 成员，也没有 workspace 行到达父的模型：child 什么也没改。
    - **丢弃** 随结果提交一起请求，在 child 关闭后执行（I2 决策 4）。失败、停止与放弃分支以及关闭级联对它的丢弃与 `worktree` 相同。
-   - **存储层** 把对快照行请求的合并记录为它本来就是的丢弃。relay 从不请求合并；这条规则防止一次误发的请求停放一个永远无法执行的合并。
+   - **存储层** 把对快照行请求的合并记录为它本来就是的丢弃。relay 从不请求合并；这条规则防止一次误发的请求停放一个永远无法执行的合并。本变更之前的存储层会照录较旧 relay 对任何就绪行请求的合并，所以扫描也把记录在快照行上的合并按丢弃执行。
    - **行的模式是固定的。** 对已有行指名另一种模式的请求是冲突。
    - **未知模式按关闭处理。** relay 遇到它不支持的 `workspaceMode` 时，把 run 以 `creation_failed`（从未启动）结算，而不是按 shared 创建。记录契约只接受三个取值，所以这是为将来的模式防备较旧的 relay。
 
@@ -161,10 +162,11 @@ Issue #13753 对 I3 提出两点：
   - 消息仍在运行时，它已完成的任务不请求合并；
   - 超出上限、停止与放弃分支都立即结算它，请求丢弃，从不请求合并；
   - relay 不支持的模式以从未启动结算，不创建任何东西；而写明 `shared` 的 run 以共享方式创建 child。
-- **Child Workspace 状态机**（`ChildWorkspaceServiceTest`，新增 3 个用例，H2 加真实仓库）：
+- **Child Workspace 状态机**（`ChildWorkspaceServiceTest`，新增 4 个用例，H2 加真实仓库）：
   - 快照副本包含父未提交与未跟踪的文件，不含被忽略的文件；
   - 它的 child Session 获得的正是 `hosted-workspace-read/1` 与父的审批模式；
   - 对它请求的合并被记录为丢弃，写进副本的文件永远不会到达父，行以 `discarded` 结束且不留 pin；
+  - 按原样记录在它上面的合并（较旧 relay 的存储层就是这样记录的）仍按丢弃执行，写进副本的文件不会到达父；
   - worktree 的请求不指名模式，其行读作 worktree，会合并，并保留父的 profile；
   - run 的模式是固定的。
 - **控制面接线**（`ManagedAgentPropertiesTest`、`QwenHostedHarnessConnectorTest`、`HostedHarnessClientTest`）：开关默认关闭，没有 child Workspace 时拒绝开启，在有效的 child Workspace 配置旁可以正常启动；只有开关开启时，`childSnapshots` 才随创建、加载、恢复、生命周期结算与消息停止加载发送，经过每一次请求复制都保留，且从不在没有 `childWorkspaces` 时出现。
