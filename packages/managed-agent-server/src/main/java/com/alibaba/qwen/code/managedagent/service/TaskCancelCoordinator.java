@@ -26,6 +26,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -55,7 +57,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Runtime Broker, whose worker answers only after the stop-marked finalize
  * settled the record: the record's own stop is the authority's statement,
  * a request revision for a Shell, the {@code stop_requested} settlement
- * for a Monitor, whose record carries no request.</li>
+ * for a Monitor, whose record carries no request;</li>
+ * <li>a planned channel delivery takes its cancel through the Hosted
+ * Harness's channel operation route, whose {@code cancelRequested} flag is
+ * the request: a planned one settles cancelled with it, and one an adapter
+ * claimed meanwhile keeps sending with the flag recorded.</li>
  * </ul>
  * A delivery whose outcome stays unproven retries with the dispatch
  * backoff, bounded at {@link #ATTEMPT_BUDGET} claims; past it the
@@ -226,7 +232,12 @@ public class TaskCancelCoordinator {
             return new Verdict(TaskCancelOutcome.failed(
                     "task_action_unavailable"), target);
         }
+        // The stopReason clause only adds a Monitor's settlement: for a
+        // child_run (child_agent, workflow, background_shell) the record
+        // invariant "childRun stop_requested needs its stop request"
+        // (ManagedExtensionRecords) makes it imply stopRequested.
         if (target.body().path("stopRequested").asBoolean(false)
+                || target.body().path("cancelRequested").asBoolean(false)
                 || "stop_requested".equals(
                         target.body().path("stopReason").textValue())) {
             return new Verdict(TaskCancelOutcome.completed(), target);
@@ -386,28 +397,53 @@ public class TaskCancelCoordinator {
     }
 
     /**
-     * A child Session run's stop request onto the parent's journal, or a
-     * background process's stop through the Broker; both replay-safe.
+     * A child Session run's stop request onto the parent's journal, a
+     * background process's stop through the Broker, or a delivery's cancel
+     * onto its route Session's journal; all replay-safe.
      */
     private void send(OperationRecord operation, TaskTarget target) {
+        if ("channel_delivery".equals(target.kind())) {
+            harness.runChannelOperation(operation.tenantId(),
+                    operation.sessionId(), Map.of(
+                            "operationId", attemptId(operation),
+                            "kind", "cancel_delivery",
+                            "deliveryId", target.recordId()));
+            return;
+        }
         if (BACKGROUND_TASK_KINDS.contains(target.kind())) {
             if (broker == null) {
                 throw new IllegalStateException(
                         "The Runtime Broker is not available");
             }
-            broker.stopBackgroundProcess(operation.tenantId(),
-                    operation.sessionId(), target.recordId())
-                    .toCompletableFuture().join();
+            CompletableFuture<?> stopping = broker.stopBackgroundProcess(
+                    operation.tenantId(), operation.sessionId(),
+                    target.recordId()).toCompletableFuture();
+            // get(), not join(): the attempt deadline abandons a send with
+            // an interrupt, which join() ignores, so a Broker stage that
+            // never settles would hold this thread.
+            try {
+                stopping.get();
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "The background process stop was interrupted", error);
+            } catch (ExecutionException error) {
+                throw new CompletionException(error.getCause());
+            }
             return;
         }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("operationId", UUID.nameUUIDFromBytes(("qwen-task-cancel:\0"
-                + operation.operationId() + "\0" + operation.attemptCount())
-                .getBytes(StandardCharsets.UTF_8)).toString());
+        body.put("operationId", attemptId(operation));
         body.put("kind", "cancel");
         body.put("childRunId", target.recordId());
         harness.runChildOperation(operation.tenantId(),
                 operation.sessionId(), body);
+    }
+
+    private static String attemptId(OperationRecord operation) {
+        return UUID.nameUUIDFromBytes(("qwen-task-cancel:\0"
+                + operation.operationId() + "\0" + operation.attemptCount())
+                .getBytes(StandardCharsets.UTF_8)).toString();
     }
 
     private static boolean runtimeNotHere(Throwable error) {

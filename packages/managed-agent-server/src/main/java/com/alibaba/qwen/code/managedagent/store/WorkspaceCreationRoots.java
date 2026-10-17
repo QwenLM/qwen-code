@@ -118,8 +118,10 @@ final class WorkspaceCreationRoots {
             createDirectory(tenantRoot);
             Path root = tenantRoot.resolve(receiptKey);
             createDirectory(root);
-            // OpenJDK's native guard refuses birth time equal to mtime; this is our new owned root.
-            Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+            if (!"Mac OS X".equals(System.getProperty("os.name"))) {
+                // OpenJDK's native guard refuses birth time equal to mtime; this is our new owned root.
+                Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+            }
             return root;
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailable(error);

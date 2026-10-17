@@ -402,6 +402,7 @@ class SessionRowLockOrderTest {
                         "releaseTurnLease", "renewTurn", "requireTurn",
                         "requireTurnForUpdate", "requireIdlePolicyChange", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
+                        "settleTurnCommands",
                         "updateHarnessCursor", "validateOperationStart",
                         "withdrawSubmissionAttempted");
         // The references the parse cannot resolve to one member —

@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.Task
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -607,6 +608,122 @@ class TaskCancelCoordinatorTest {
                 anyLong());
     }
 
+    // A Broker stop that never settles is abandoned at the attempt
+    // deadline like any send: the interrupt reaches the wait on the stage,
+    // so the send's thread is given back instead of held until it settles.
+    @Test
+    void anAbandonedBackgroundStopGivesItsThreadBack() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            coordinator = new TaskCancelCoordinator(store, records, harness,
+                    broker, executor,
+                    Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                    new ManagedAgentProperties(), Duration.ofMillis(200));
+            target.set(shellRun("running", false, null));
+            when(broker.stopBackgroundProcess(TENANT, SESSION, "shell-1"))
+                    .thenReturn(new java.util.concurrent.CompletableFuture<>());
+            coordinator.dispatch(TENANT, SESSION, OPERATION);
+            verify(store, timeout(10_000)).retryOperation(eq(TENANT),
+                    eq(SESSION), eq(OPERATION), anyString(), eq(1L),
+                    anyLong());
+            assertThat(awaitLog("Abandoned task cancel send failed")
+                    .getFormattedMessage()).contains("operation=op_1",
+                            "The background process stop was interrupted");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    // #13746 F3: a pending delivery takes its cancel through its route
+    // Session's channel operation route; its cancelRequested flag is the
+    // request the outcome is read from.
+    @Test
+    void aPendingDeliveryTakesItsCancelThroughTheChannelRoute() {
+        List<Map<String, Object>> channel = new CopyOnWriteArrayList<>();
+        when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
+                .thenAnswer(args -> {
+                    channel.add(Map.copyOf(args.getArgument(2)));
+                    target.set(delivery("cancelled", true));
+                    return Map.of();
+                });
+        target.set(delivery("pending", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        assertThat(channel).hasSize(1);
+        assertThat(channel.getFirst()).containsEntry("kind", "cancel_delivery")
+                .containsEntry("deliveryId", "delivery-1")
+                .containsKey("operationId");
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    // An adapter that claimed it first keeps sending it: the request is
+    // recorded and the delivery keeps its natural outcome; one that was
+    // delivered without a request fails the cancel definitively.
+    @Test
+    void aDeliveryClaimedFirstKeepsItsOutcome() {
+        when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
+                .thenAnswer(args -> {
+                    target.set(delivery("running", true));
+                    return Map.of();
+                });
+        target.set(delivery("pending", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+        target.set(delivery("completed", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(harness).runChannelOperation(eq(TENANT), eq(SESSION), any());
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                eq(0L));
+    }
+
+    // The channel route re-runs the route Session's Workspace authority on
+    // every operation, a cached attachment included: while its creator
+    // lacks the execution grant the cancel sends nothing, retries and
+    // parks. Parked, it is never sent again, so a delivery an adapter sent
+    // after the grant returned fails it from the record.
+    @Test
+    void aDeliveryCancelTheRouteRefusesParksAndSettlesFromTheRecord() {
+        when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
+                .thenThrow(WorkspaceExecutionStore.unavailable());
+        target.set(delivery("pending", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).retryOperation(eq(TENANT), eq(SESSION), eq(OPERATION),
+                anyString(), eq(1L), anyLong());
+        attempts = TaskCancelCoordinator.ATTEMPT_BUDGET - 1;
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(),
+                eq((long) TaskCancelCoordinator.ATTEMPT_BUDGET),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")),
+                eq(1_000 + TaskCancelCoordinator.PARKED_RECHECK.toMillis()));
+
+        when(store.findParkedTaskCancels(anyInt()))
+                .thenReturn(List.of(new OperationTarget(TENANT, SESSION,
+                        OPERATION)));
+        when(store.findOperation(TENANT, SESSION, OPERATION))
+                .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
+        coordinator.recover();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), isNull(), eq(0L),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")), anyLong());
+        target.set(delivery("completed", false));
+        coordinator.recover();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), isNull(), eq(0L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                anyLong());
+        verify(harness, org.mockito.Mockito.times(2)).runChannelOperation(
+                eq(TENANT), eq(SESSION), any());
+    }
+
     // A Broker process that holds no context for the Runtime Session (a
     // fresh one before a turn or the close acquires it again) cannot stop
     // the process on any retry: the cancel parks at once, so it stops
@@ -723,6 +840,14 @@ class TaskCancelCoordinatorTest {
         return new TaskTarget("monitor_run", "monitor-1", "monitor", state,
                 3, JSON.createObjectNode().put("monitorId", "monitor-1")
                         .put("stopReason", stopReason));
+    }
+
+    private static TaskTarget delivery(String state,
+            boolean cancelRequested) {
+        return new TaskTarget("channel_delivery", "delivery-1",
+                "channel_delivery", state, 3, JSON.createObjectNode()
+                        .put("deliveryId", "delivery-1")
+                        .put("cancelRequested", cancelRequested));
     }
 
     private static TaskTarget workflowRun(String state,
