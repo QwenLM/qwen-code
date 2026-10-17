@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -42,9 +43,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 // original identity); FG8b gates store failures (a rejected commit inside
 // a real transaction leaves zero OS effects); FG8d gates cancellation and
 // the routine/drain release split; FG8e gates SSE continuity across
-// abort/resume; FG8f gates output delivery under publisher loss. Real
-// packaged Harness, real MySQL, JDBC ground truth; no production code
-// changes. FG8c lands with #13986 per the issue's sequencing constraint.
+// abort/resume; FG8f gates output delivery under publisher loss; FG8c
+// gates process crashes — the Harness, the managed worker, or the
+// background process killed (or stopped) for real under a live run. Real
+// packaged Harness, real MySQL, JDBC ground truth.
 class HostedMonitorRunFaultGatesIT {
     private final ObjectMapper json = new ObjectMapper();
 
@@ -111,6 +113,15 @@ class HostedMonitorRunFaultGatesIT {
                 "cancel-during-capture", "cancel-status-unavailable",
                 "cancel-reply-lost", "routine-release-refusal",
                 "drain-release"));
+    }
+
+    @Test
+    @Timeout(600)
+    void fg8cProcessCrashesNeverDuplicateOrFabricateOnMySql()
+            throws Exception {
+        runLetter("fg8c", List.of("harness-kill-dispatch",
+                "harness-kill-capture", "worker-kill", "worker-stop",
+                "process-kill", "generation-remint", "monitor-worker-kill"));
     }
 
     /** Trigger rows this letter installed for FG8b (dropped after it). */
@@ -349,6 +360,7 @@ class HostedMonitorRunFaultGatesIT {
                 String sentinel = switch (letter) {
                     case "fg8a" -> "FG8_REPLY_LOSS_OK";
                     case "fg8b" -> "FG8_STORE_FAILURE_OK";
+                    case "fg8c" -> "FG8_PROCESS_CRASH_OK";
                     case "fg8d" -> "FG8_CANCEL_DRAIN_OK";
                     case "fg8f" -> "FG8_OUTPUT_DELIVERY_OK";
                     case "fg8g" -> "FG8_TASK_CANCEL_OK";
@@ -456,6 +468,334 @@ class HostedMonitorRunFaultGatesIT {
         jdbc.execute("DROP TABLE IF EXISTS fg8b_fire");
     }
 
+    // FG8c per-case ground truth: the signal the driver delivered (the fault
+    // fired), the execution ledger's one `:process` row, the Session's
+    // Runtime binding and slot (one generation, never re-minted), and the
+    // capability record — which may stay open, but never settles on
+    // evidence nobody produced.
+    private void assertCrashCase(JdbcTemplate jdbc, String tenant,
+            Map<String, Object> session, JsonNode report) throws Exception {
+        String sessionId = session.get("sessionId").toString();
+        String name = session.get("name").toString();
+        String promptId = report.path("promptId").asText();
+        assertThat(report.path("case").asText()).isEqualTo(name);
+        JsonNode signal = report.path("signals").path(0);
+        String fault = switch (name) {
+            case "harness-kill-dispatch", "harness-kill-capture" ->
+                "harness SIGKILL";
+            case "process-kill" -> "background SIGKILL";
+            case "worker-stop" -> "worker SIGSTOP";
+            default -> "worker SIGKILL";
+        };
+        assertThat(signal.path("process").asText() + " "
+                + signal.path("signal").asText()).as(name + " fault fired")
+                .isEqualTo(fault);
+        // No duplicate dispatch across every boot, reload and later prompt.
+        assertThat(report.path("starts").asInt()).as(name + " one :start")
+                .isEqualTo(1);
+        assertProcessRows(jdbc, sessionId, name, 1);
+        Map<String, Object> process = jdbc.queryForMap(
+                "SELECT execution_state, execution_status,"
+                        + " CAST(result_json AS CHAR) AS result_json,"
+                        + " CAST(loss_evidence_id AS CHAR) AS loss_evidence_id,"
+                        + " abandoned_at FROM ma_tool_execution WHERE"
+                        + " harness_session_id = ? AND execution_call_id"
+                        + " LIKE '%:process'", sessionId);
+        JsonNode evidence = process.get("result_json") == null
+                ? json.missingNode()
+                : json.readTree(process.get("result_json").toString())
+                        .path("evidence");
+        var bindings = jdbc.queryForList(
+                "SELECT CAST(binding_id AS CHAR) AS binding_id, request_key,"
+                        + " binding_state, runtime_generation,"
+                        + " stop_evidence_json IS NOT NULL AS stopped,"
+                        + " loss_evidence_json IS NOT NULL AS lost FROM"
+                        + " ma_runtime_binding WHERE tenant_id = ? AND"
+                        + " isolation_key = ?", tenant, sessionId);
+        // A dead generation is never silently re-minted: whatever the case
+        // killed, the Session holds exactly the one binding it began with.
+        assertThat(bindings).as(name + " one binding").hasSize(1);
+        var binding = bindings.getFirst();
+        assertThat(((Number) binding.get("runtime_generation")).longValue())
+                .as(name + " generation").isEqualTo(1);
+        var slot = jdbc.queryForMap("SELECT last_generation,"
+                + " CAST(active_binding_id AS CHAR) AS active_binding_id"
+                + " FROM ma_runtime_slot WHERE request_key = ?",
+                binding.get("request_key"));
+        assertThat(((Number) slot.get("last_generation")).longValue())
+                .as(name + " slot generation").isEqualTo(1);
+        assertThat(slot.get("active_binding_id")).as(name + " slot binding")
+                .isEqualTo(binding.get("binding_id"));
+        String runtimeSessionState = jdbc.queryForObject(
+                "SELECT session_state FROM ma_runtime_session WHERE"
+                        + " tenant_id = ? AND harness_session_id = ? AND"
+                        + " runtime_session_id = ?", String.class, tenant,
+                sessionId, promptId);
+        boolean monitor = name.equals("monitor-worker-kill");
+        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                monitor ? "monitor_run" : "child_run");
+        JsonNode close = report.path("close");
+        switch (name) {
+            case "harness-kill-dispatch" -> {
+                assertThat(report.path("committedStartDropped").asBoolean())
+                        .as(name + " the committed :start reply was lost")
+                        .isTrue();
+                // Cold load refuses the unsettled launch turn, by its tag.
+                assertThat(report.path("reload").path("status").asInt())
+                        .isEqualTo(409);
+                assertThat(report.path("reload").path("code").asText())
+                        .isEqualTo("hosted_turn_recovery_required");
+                assertThat(report.path("reload").path("reason").asText())
+                        .isEqualTo("turn_unsettled");
+                // The refusal dispatched nothing: its broker traffic is
+                // reads only (the never-started probe's status read), and
+                // the model was never asked to plan again.
+                assertThat(report.path("reloadOps").findValuesAsText("op"))
+                        .as(name + " cold load broker traffic")
+                        .containsOnly("status");
+                assertThat(report.path("modelCalls").asInt()).isEqualTo(1);
+                assertThat(report.path("bgAliveAfterReload").asBoolean())
+                        .as(name + " the refusal left the run alone").isTrue();
+                // The outcome stays unknown: no terminal event, no settle.
+                assertThat(record.path("run").path("state").asText())
+                        .isEqualTo("running");
+                assertThat(record.path("run").path("execution").asText())
+                        .isEqualTo("dispatch_started");
+                assertThat(record.path("stopReason").isNull()).isTrue();
+                assertThat(process.get("execution_state"))
+                        .isEqualTo("PREPARED");
+                assertThat(journalKinds(jdbc, tenant, sessionId))
+                        .as(name + " no terminal event")
+                        .doesNotContain("turn.settled");
+            }
+            case "harness-kill-capture" -> {
+                assertThat(report.path("reload").path("status").asInt())
+                        .as(name + " a settled launch reloads").isEqualTo(200);
+                // The reload restored the held Runtime and dispatched nothing.
+                assertThat(report.path("reloadOps").findValuesAsText("op"))
+                        .containsExactly("active-holds");
+                assertThat(report.path("bgAliveAfterReload").asBoolean())
+                        .isTrue();
+                // The restored obligation: the reloaded close drained the
+                // run its process never saw, and that drain is what ended it.
+                assertThat(close.path("status").asInt()).isEqualTo(204);
+                assertThat(close.path("releases")).hasSize(1);
+                JsonNode release = close.path("releases").path(0);
+                assertThat(release.path("runtimeSessionId").asText())
+                        .isEqualTo(promptId);
+                assertThat(release.path("drain").asBoolean()).isTrue();
+                assertThat(release.path("status").asInt()).isEqualTo(200);
+                assertThat(report.path("bgAliveAfterClose").asBoolean())
+                        .as(name + " the restored drain stopped the run")
+                        .isFalse();
+                assertThat(process.get("execution_state"))
+                        .isEqualTo("SETTLED");
+                assertThat(process.get("execution_status"))
+                        .isEqualTo("error");
+                assertThat(evidence.path("exitCode").isNull()).isTrue();
+                assertThat(evidence.path("exitSignal").asText())
+                        .as(name + " ended by the platform's stop")
+                        .isIn("SIGTERM", "SIGKILL");
+                assertThat(runtimeSessionState).isEqualTo("RELEASED");
+                // Nobody observed that end on the record's side: it stays
+                // open rather than settling on evidence it never received.
+                assertThat(record.path("run").path("state").asText())
+                        .isEqualTo("running");
+                assertThat(record.path("stopReason").isNull()).isTrue();
+                // The durable prefix stays byte-identical and readable, and
+                // nothing lands once the dead writer is fenced: the count
+                // taken after the reload opened a new writer is the last.
+                assertThat(report.path("segmentsAtReload").asInt())
+                        .as(name + " killed mid-capture")
+                        .isGreaterThanOrEqualTo(3);
+                verifyOutputChain(jdbc, tenant, sessionId, false);
+                assertThat(loadOutputRows(jdbc, tenant, sessionId).byId()
+                        .values().stream().filter(row -> row.get("kind")
+                                .equals("managed-tool-result-content")
+                                && ((Number) row.get("byte_length"))
+                                        .intValue() == SEGMENT_BYTES)
+                        .count())
+                        .as(name + " no segment once the dead writer fenced")
+                        .isEqualTo(report.path("segmentsAtReload").asLong());
+            }
+            case "worker-kill", "generation-remint", "monitor-worker-kill" -> {
+                // The close's drain cannot prove the release over a dead
+                // worker: the broker defers it, the Session still retires.
+                assertThat(close.path("status").asInt()).isEqualTo(204);
+                assertThat(close.path("releases")).hasSize(1);
+                JsonNode release = close.path("releases").path(0);
+                assertThat(release.path("runtimeSessionId").asText())
+                        .isEqualTo(promptId);
+                assertThat(release.path("drain").asBoolean()).isTrue();
+                assertThat(release.path("status").asInt()).isEqualTo(503);
+                assertThat(release.path("code").asText())
+                        .isEqualTo("runtime_reconciliation_required");
+                // The hold is never released without evidence: the binding
+                // is lost with no stop proof, its slot stays pinned, and the
+                // Runtime Session is not released.
+                assertThat(binding.get("binding_state")).isEqualTo("LOST");
+                assertThat(((Number) binding.get("stopped")).intValue())
+                        .as(name + " no stop evidence").isZero();
+                assertThat(runtimeSessionState).isNotEqualTo("RELEASED");
+                if (name.equals("generation-remint")) {
+                    // Each later reach for the Runtime meets the loss, first
+                    // as the dead worker, then as the lost generation; the
+                    // foreground Shells never ran anywhere.
+                    assertThat(refusals(report.path("postCrash").path(0)))
+                            .containsExactly(
+                                    "warm 503 runtime_provision_failed");
+                    assertThat(refusals(report.path("postCrash").path(1)))
+                            .containsExactly(
+                                    "warm 503 runtime_broker_runtime_lost");
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                            + " ma_tool_execution WHERE harness_session_id"
+                            + " = ?", Integer.class, sessionId))
+                            .as(name + " nothing ran on the lost generation")
+                            .isEqualTo(2);
+                    assertThat(((Number) binding.get("lost")).intValue())
+                            .as(name + " loss evidence").isOne();
+                    // The lost generation's unsettled hold is abandoned
+                    // against the loss — never settled as an exit.
+                    assertThat(process.get("execution_state"))
+                            .isEqualTo("ABANDONED");
+                    assertThat(process.get("abandoned_at")).isNotNull();
+                    assertThat(process.get("loss_evidence_id"))
+                            .isEqualTo(binding.get("binding_id")
+                                    + ":1:journal-lost");
+                    assertThat(process.get("result_json")).isNull();
+                } else {
+                    assertThat(process.get("execution_state"))
+                            .isEqualTo("PREPARED");
+                }
+                if (monitor) {
+                    // The idle stop asked the worker the Runtime lost; the
+                    // refusal parks the watch instead of settling a stop
+                    // the physical side never confirmed (#13896).
+                    assertThat(report.path("monitorStops")).isNotEmpty();
+                    for (JsonNode stop : report.path("monitorStops")) {
+                        assertThat(stop.path("status").asInt())
+                                .as(name + " monitor-stop refused")
+                                .isGreaterThanOrEqualTo(400);
+                    }
+                    assertThat(record.path("run").path("state").asText())
+                            .isEqualTo("recovery_blocked");
+                    assertThat(record.path("run").path("reason").asText())
+                            .isEqualTo("runtime_lost");
+                    assertThat(record.path("run").path("execution").asText())
+                            .isEqualTo("outcome_unknown");
+                    assertThat(record.path("stopReason").isNull()).isTrue();
+                    assertThat(record.path("observationSequence").asInt())
+                            .isPositive();
+                    assertThat(record.path("notifiedThrough").asInt())
+                            .isEqualTo(record.path("observationSequence")
+                                    .asInt());
+                } else {
+                    assertThat(record.path("run").path("state").asText())
+                            .as(name + " no exit nobody observed")
+                            .isEqualTo("running");
+                    assertThat(record.path("stopReason").isNull()).isTrue();
+                }
+            }
+            case "worker-stop" -> {
+                assertThat(report.path("signals").path(1).path("signal")
+                        .asText()).isEqualTo("SIGCONT");
+                // The routine sweep's status read waited out the stopped
+                // worker and still refused as held: an unreachable worker is
+                // neither a stopped run nor a lost Runtime.
+                JsonNode held = report.path("stoppedRelease");
+                assertThat(held.path("status").asInt()).isEqualTo(409);
+                assertThat(held.path("code").asText())
+                        .isEqualTo("runtime_session_held");
+                assertThat(held.path("elapsedMs").asLong())
+                        .as(name + " the uncertainty window passed")
+                        .isGreaterThanOrEqualTo(25_000);
+                JsonNode during = report.path("whileStopped");
+                assertThat(during.path("recordState").asText())
+                        .isEqualTo("running");
+                assertThat(during.path("stopReason").isNull()).isTrue();
+                assertThat(during.path("processRow").asText())
+                        .isEqualTo("PREPARED");
+                assertThat(during.path("bindingStates")).hasSize(1);
+                assertThat(during.path("bindingStates").path(0).asText())
+                        .as(name + " a stopped worker is not a lost Runtime")
+                        .isEqualTo("READY");
+                // The resumed worker's own evidence settled the run.
+                assertThat(record.path("run").path("state").asText())
+                        .isEqualTo("settled");
+                assertThat(record.path("stopReason").asText())
+                        .isEqualTo("exited");
+                assertThat(record.path("exitCode").isInt()).isTrue();
+                assertThat(record.path("exitCode").asInt()).isZero();
+                assertThat(process.get("execution_state"))
+                        .isEqualTo("SETTLED");
+                assertThat(process.get("execution_status"))
+                        .isEqualTo("success");
+                assertThat(evidence.path("exitCode").isInt()).isTrue();
+                assertThat(evidence.path("exitCode").asInt()).isZero();
+                assertThat(binding.get("binding_state")).isEqualTo("READY");
+                assertThat(close.path("status").asInt()).isEqualTo(204);
+            }
+            case "process-kill" -> {
+                // The record carries the real end: the signal, not a status
+                // the process never returned.
+                assertThat(record.path("run").path("state").asText())
+                        .isEqualTo("settled");
+                assertThat(record.path("stopReason").asText())
+                        .isEqualTo("exited");
+                assertThat(record.path("exitSignal").asText())
+                        .as(name + " the kill is the evidence")
+                        .isEqualTo("SIGKILL");
+                assertThat(record.path("exitCode").isNull()).isTrue();
+                assertThat(record.path("stopRequested").asBoolean())
+                        .isFalse();
+                assertThat(process.get("execution_state"))
+                        .isEqualTo("SETTLED");
+                assertThat(process.get("execution_status"))
+                        .isEqualTo("error");
+                assertThat(evidence.path("exitSignal").asText())
+                        .isEqualTo("SIGKILL");
+                assertThat(evidence.path("exitCode").isNull()).isTrue();
+                assertThat(binding.get("binding_state")).isEqualTo("READY");
+                assertThat(close.path("status").asInt()).isEqualTo(204);
+            }
+            default -> throw new IllegalStateException(name);
+        }
+    }
+
+    // One prompt's refused broker answers, as "operation status code".
+    private static List<String> refusals(JsonNode answers) {
+        var refused = new ArrayList<String>();
+        for (JsonNode answer : answers) {
+            if (answer.path("status").asInt() >= 400) {
+                refused.add(answer.path("op").asText() + " "
+                        + answer.path("status").asInt() + " "
+                        + answer.path("code").asText());
+            }
+        }
+        return refused;
+    }
+
+    // The managed-session event kinds the Session's journal committed.
+    private List<String> journalKinds(JdbcTemplate jdbc, String tenant,
+            String sessionId) throws Exception {
+        var kinds = new ArrayList<String>();
+        for (var row : jdbc.queryForList("SELECT record_bytes FROM"
+                + " ma_session_journal_tx WHERE tenant_id = ? AND session_id"
+                + " = ? ORDER BY journal_revision", tenant, sessionId)) {
+            for (String line : new String((byte[]) row.get("record_bytes"),
+                    StandardCharsets.UTF_8).lines().toList()) {
+                JsonNode entry = json.readTree(line);
+                if (entry.path("subtype").asText()
+                        .equals("managed_session_event_v1")) {
+                    kinds.add(entry.path("managedSession").path("kind")
+                            .asText());
+                }
+            }
+        }
+        assertThat(kinds).as("journal events").isNotEmpty();
+        return kinds;
+    }
+
     private void assertCase(String letter, JdbcTemplate jdbc, String tenant,
             Map<String, Object> session, JsonNode report) throws Exception {
         switch (letter) {
@@ -464,6 +804,7 @@ class HostedMonitorRunFaultGatesIT {
                     report);
             case "fg8d" -> assertCancelDrainCase(jdbc, tenant, session,
                     report);
+            case "fg8c" -> assertCrashCase(jdbc, tenant, session, report);
             default -> assertStreamPublishCase(letter, jdbc, tenant, session,
                     report);
         }
@@ -931,20 +1272,24 @@ class HostedMonitorRunFaultGatesIT {
         var byId = new HashMap<String, Map<String, Object>>();
         for (var row : jdbc.queryForList(
                 "SELECT resource_id, kind, byte_length, sha256 FROM"
-                        + " ma_resource WHERE tenant_id = ?"
-                        + " AND session_id = ? AND kind LIKE"
-                        + " 'managed-tool-result-%'", tenant, sessionId)) {
+                        + " ma_resource WHERE session_scope_key = ? AND"
+                        + " tenant_id = ? AND session_id = ? AND kind LIKE"
+                        + " 'managed-tool-result-%'",
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                tenant, sessionId)) {
             byId.put(row.get("resource_id").toString(), row);
         }
         var bodies = new HashMap<String, JsonNode>();
         for (var row : jdbc.queryForList(
                 "SELECT resource_id, CONVERT(inline_bytes USING utf8mb4) AS"
-                        + " body FROM ma_resource WHERE"
-                        + " tenant_id = ? AND session_id = ? AND (kind IN"
+                        + " body FROM ma_resource WHERE session_scope_key = ?"
+                        + " AND tenant_id = ? AND session_id = ? AND (kind IN"
                         + " ('managed-tool-result-manifest',"
                         + " 'managed-tool-result-page') OR (kind ="
                         + " 'managed-tool-result-content' AND byte_length <"
-                        + " 1024))", tenant, sessionId)) {
+                        + " 1024))",
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                tenant, sessionId)) {
             String body = row.get("body").toString();
             // The producers' short tail segment is raw bytes, not JSON;
             // only envelopes (manifest, page, seal) are parsed here — the
@@ -1181,19 +1526,26 @@ class HostedMonitorRunFaultGatesIT {
         }
     }
 
+    // ma_resource keys on the Session's scope key and holds the inline
+    // capture bytes: filtered by the unindexed tenant and session columns
+    // alone, every read scans all the bytes the lane has written so far.
+    // The record read leads with the same key.
     private JsonNode extensionRecord(JdbcTemplate jdbc, String tenant,
             String sessionId, String domain) throws Exception {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         var rows = jdbc.queryForList(
                 "SELECT record_resource_id FROM"
-                        + " ma_session_record WHERE"
+                        + " ma_session_record WHERE session_scope_key = ? AND"
                         + " tenant_id = ? AND session_id = ? AND domain = ?",
-                tenant, sessionId, domain);
+                scope, tenant, sessionId, domain);
         assertThat(rows).as(domain + " records").hasSize(1);
         var resources = jdbc.queryForList(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " ma_resource WHERE tenant_id = ?"
-                        + " AND session_id = ? AND resource_id = ?", tenant,
-                sessionId, rows.getFirst().get("record_resource_id"));
+                        + " ma_resource WHERE session_scope_key = ? AND"
+                        + " resource_id = ? AND tenant_id = ? AND session_id"
+                        + " = ?", scope,
+                rows.getFirst().get("record_resource_id"), tenant,
+                sessionId);
         assertThat(resources).hasSize(1);
         return json.readTree(resources.getFirst().get("body").toString());
     }
