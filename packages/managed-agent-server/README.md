@@ -623,6 +623,12 @@ Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, serve
 
 An uncertain response must be retried with the same key and name. The page preserves that pending operation across refresh and selects the result without clearing the prompt or model. Completed replay never restores revoked access, recreates missing registry rows, or registers held storage again. Pending registration resumes in place after a process restart; failed attempts retain their owned directory for retry. There is no automatic storage deletion or arbitrary host-path import. Workspace persistence does not imply recovery of a resident Harness Session whose writer lease expired during control-plane downtime; that existing Session recovery boundary is separate from creating or reusing a Workspace. Keep the configured root and SQL database durable together. Schema V4 extends the receipt namespace after the published V3 Session-list migration while retaining all published migration resources and existing data.
 
+### Select an existing Linux project directory
+
+With verified LOCAL storage enabled, **New workspace → Choose existing directory** browses the Linux execution host through Java. Select an ACTIVE ROOT Workspace you own, then choose an existing project beneath its authorized root. Administrators can register and grant a projects parent directory once; the root must remain outside all Git worktrees. The selected project stays in place and becomes the new Workspace's persistent default working directory. Other Workspaces on that storage retain the same shared file-access scope and physical-owner lease; selecting a subdirectory does not create filesystem isolation.
+
+`POST /api/agent/web-shell/v1/workspaces/directories/query` accepts `workspaceId` and `cwdRelative`, rechecks OWNER access and native storage, and returns at most 100 real immediate child directories (scanning at most 1024 entries). Only this authorized route discloses its Linux root path. The existing create route accepts `sourceWorkspaceId` and `cwdRelative` together to bind a new logical Workspace to the verified source storage, configuration, and policy. It does not create directories or re-register storage. The creation receipt pins source generation and directory; pending retries refuse source changes or revoked ownership. Completed replay checks the new Workspace's current access. WebShell summaries expose `defaultCwdRelative` and `canSelectDirectory`; missing values mean `.` and unsupported, respectively. The page advertises `workspaceDirectorySelection` separately from empty creation and preserves the selected directory across retries, refresh, and reselect. See the [bilingual design](../../docs/design/2026-10-16-managed-workspace-directory-selection.md).
+
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
 `auto-edit`, any caller with a read grant on the bound Workspace can list and
 inspect pending permission Actions through the public API or WebShell;
@@ -1242,9 +1248,14 @@ separate worker bundle exists. The G0 integration test
 
 The real-model run below creates its Session through the public route as a
 Workspace-bound G0 Session, and proves the physical tool execution through
-the durable `qwen_tool_execution` record (exactly one `SETTLED` row) rather
-than a public `item.tool_call.*` event — Broker-worker tool calls are not
-published without O2 tool publication. The run needs live model credentials,
+the durable `ma_tool_execution` record (exactly one `SETTLED` row). Hosted
+tool intent and receipt events also expose tool names and lifecycle status
+through public `item.tool_call.updated` events without O2 publication. Raw
+arguments and output remain behind the existing publication policy. The
+Hosted model loop follows `model.maxSessionTurns` (default `-1`); it no
+longer imposes a separate 16-round limit. See the
+[progress design](../../docs/design/2026-10-16-managed-webshell-progress.md).
+The run needs live model credentials,
 so no CI job executes it; it has been run locally as evidence (macOS,
 qwen3.8-max), and a green CI run therefore says nothing about this mode. The
 script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
