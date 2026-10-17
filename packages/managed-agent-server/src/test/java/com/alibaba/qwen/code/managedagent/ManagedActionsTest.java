@@ -916,10 +916,11 @@ class ManagedActionsTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        properties.getDispatch().setLeaseDuration(Duration.ofSeconds(2));
+        Duration lease = Duration.ofSeconds(2);
+        properties.getDispatch().setLeaseDuration(lease);
         // 4s > leaseDuration/3, so the coordinator's clamp (min → 666ms) is
         // what picks the period. Inverting the clamp (max → 4s) starves the
-        // 2s lease and the competing replica must win it. The wide margins —
+        // lease and the competing replica must win it. The wide margins —
         // over a second of renewal slack per period — keep scheduler jitter
         // on a loaded CI runner from lapsing the lease mid-hold (#14476).
         properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
@@ -960,10 +961,18 @@ class ManagedActionsTest {
             first.dispatch(tenant, session, operation);
             assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
             // The claim precedes resolveAction's entry, so anchoring the hold
-            // to `entered` guarantees the delivery is held past the initial
-            // 2s lease deadline however long dispatch and claiming took.
+            // to `entered` guarantees the delivery is held past the lease
+            // deadline however long dispatch and claiming took. Deriving the
+            // hold as lease + 3 clamped renewal periods keeps "hold outlasts
+            // the lease" structural under rescale and needs more than one
+            // renewal tick, so a one-shot renewal loop loses the claim below.
+            long period = Math.max(1, Math.min(
+                    properties.getDispatch().getLeaseRenewInterval().toMillis(),
+                    lease.toMillis() / 3));
+            long holdMillis = lease.toMillis() + 3 * period;
             long heldSince = System.currentTimeMillis();
-            await().atMost(Duration.ofSeconds(10)).until(() -> System.currentTimeMillis() - heldSince >= 2200);
+            await().atMost(Duration.ofSeconds(10))
+                    .until(() -> System.currentTimeMillis() - heldSince >= holdMillis);
             var claimed = sessions.findOperation(tenant, session, operation).orElseThrow();
             assertThat(claimed.claimGeneration()).isEqualTo(1);
             assertThat(sessions.claimOperation(tenant, session, operation, "competing-replica", Duration.ofSeconds(1)))
