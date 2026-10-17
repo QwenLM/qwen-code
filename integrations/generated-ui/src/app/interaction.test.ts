@@ -25,7 +25,10 @@ afterEach(() =>
   controllers.splice(0).forEach((controller) => controller.stop()),
 );
 
-async function harness(javascript: string) {
+async function harness(
+  javascript: string,
+  html = '<input id="rate" type="number" value="20"><button id="resetButton">Reset</button><button id="calculate">Calculate</button><output id="answer"></output><output id="eventValue"></output>',
+) {
   const frame = document.createElement('iframe');
   document.body.replaceChildren(frame);
   const content = frame.contentDocument!;
@@ -57,7 +60,7 @@ async function harness(javascript: string) {
     createShowResult({
       title: 'Input ordering',
       summary: 'Synthetic double calculation.',
-      html: '<input id="rate" type="number" value="20"><button id="resetButton">Reset</button><button id="calculate">Calculate</button><output id="answer"></output><output id="eventValue"></output>',
+      html,
       css: '',
       javascript,
     }),
@@ -118,6 +121,43 @@ describe('interactions while a worker response is pending', () => {
     expect(h.input.value).toBe('50');
     expect(h.content.getElementById('answer')!.textContent).toBe('100');
     expect(h.content.getElementById('eventValue')!.textContent).toBe('50');
+  });
+
+  it("applies a round whose only queued event is the edit's own change notification", async () => {
+    const h = await harness(`
+      ui.on('rate', 'input', () => {
+        const n = Number(ui.input('rate').value);
+        ui.value('rate', String(n));
+        ui.text('answer', String(n * 2));
+      });
+    `);
+    h.enter('5');
+    h.enter('50');
+    h.input.dispatchEvent(new Event('change', { bubbles: true }));
+    h.deliver();
+    h.deliver();
+    expect(h.input.value).toBe('50');
+    expect(h.content.getElementById('answer')!.textContent).toBe('100');
+    h.deliver();
+    expect(h.content.getElementById('answer')!.textContent).toBe('100');
+  });
+
+  it('reads back a value set on a control created earlier in the same round', async () => {
+    const h = await harness(
+      `
+      ui.on('calculate', 'click', () => {
+        ui.html('eventValue', '<input id="fresh">');
+        ui.value('fresh', '9');
+        ui.text('answer', ui.input('fresh').value);
+      });
+    `,
+      '<input id="rate" type="number" value="20"><button id="resetButton">Reset</button><button id="calculate">Calculate</button><output id="answer"></output><div id="eventValue"></div>',
+    );
+    h.click('calculate');
+    h.deliver();
+    const fresh = h.content.getElementById('fresh') as HTMLInputElement;
+    expect(fresh.value).toBe('9');
+    expect(h.content.getElementById('answer')!.textContent).toBe('9');
   });
 
   it('discards all outputs derived from a value superseded by a queued edit', async () => {

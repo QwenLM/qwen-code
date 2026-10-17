@@ -101,6 +101,7 @@ const BRIDGE = `(() => {
   ui.value = function(id, value) {
     patch('value', id, value);
     if (inputs[id]) inputs[id].value = value;
+    else inputs[id] = {value: value, checked: false};
   };
   Object.defineProperty(globalThis, 'ui', {value: freeze(ui)});
   return function(command, payload) {
@@ -259,13 +260,10 @@ export class UiRuntime {
     this.interrupted = false;
     try {
       execute();
-      const jobs = this.runtime.executePendingJobs(256);
+      const jobs = this.runtime.executePendingJobs();
       if (jobs.error) {
         jobs.error.dispose();
         throw new Error('Generated JavaScript microtask failed.');
-      }
-      if (this.runtime.hasPendingJob()) {
-        throw new Error('Generated JavaScript microtask limit exceeded.');
       }
       const output = this.call('flush');
       let json: string;

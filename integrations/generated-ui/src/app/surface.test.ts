@@ -109,6 +109,29 @@ describe('generated markup display', () => {
     expect(h.content.querySelector('script')).toBeNull();
   });
 
+  it('keeps a declared maxlength and bounds undeclared controls at 2048', () => {
+    const h = harness(
+      '<input id="tight" maxlength="5"><input id="loose"><input id="wide" maxlength="5000">',
+    );
+    expect(
+      (h.content.getElementById('tight') as HTMLInputElement).maxLength,
+    ).toBe(5);
+    expect(
+      (h.content.getElementById('loose') as HTMLInputElement).maxLength,
+    ).toBe(2048);
+    expect(
+      (h.content.getElementById('wide') as HTMLInputElement).maxLength,
+    ).toBe(2048);
+  });
+
+  it('renders the checked radio the markup declares', () => {
+    const h = harness(
+      '<input type="radio" name="plan" id="plan-a" value="a"><input type="radio" name="plan" id="plan-b" value="b" checked>',
+    );
+    expect(h.surface.inputs()['plan-b'].checked).toBe(true);
+    expect(h.surface.inputs()['plan-a'].checked).toBe(false);
+  });
+
   it('rejects duplicate IDs, unsupported controls and excessive markup or input data', () => {
     expect(() => harness('<div id="same"></div><input id="same">')).toThrow(
       /unique/,
@@ -116,6 +139,11 @@ describe('generated markup display', () => {
     expect(() => harness('<input id="upload" type="file">')).toThrow(
       /input type/,
     );
+    expect(() =>
+      harness(
+        '<select id="multi" multiple><option value="a">A</option></select>',
+      ),
+    ).toThrow(/input type/);
     expect(() => harness('<input>')).toThrow(/unique ID/);
     expect(() => harness('<span></span>'.repeat(513))).toThrow(/elements/);
     const h = harness('<input id="value">');
@@ -237,6 +265,73 @@ describe('generated markup display', () => {
     expect(h.content.getElementById('out')?.textContent).toBe('Original');
   });
 
+  it('rejects text patches aimed at an input or select', () => {
+    const h = harness(
+      '<select id="opts"><option value="a">A</option></select><input id="num" type="number" value="3"><output id="out"></output>',
+    );
+    expect(() =>
+      h.surface.apply([{ kind: 'text', id: 'opts', value: 'None' }]),
+    ).toThrow(/plain elements/);
+    expect(h.content.querySelectorAll('#opts option')).toHaveLength(1);
+    expect(h.surface.inputs()['opts'].value).toBe('a');
+    expect(() =>
+      h.surface.apply([{ kind: 'text', id: 'num', value: 'X' }]),
+    ).toThrow(/plain elements/);
+    expect(h.surface.inputs()['num'].value).toBe('3');
+    h.content
+      .getElementById('out')!
+      .dispatchEvent(new Event('click', { bubbles: true }));
+    expect(h.onEvent.mock.lastCall?.[0].id).toBe('out');
+    expect(h.onError).not.toHaveBeenCalled();
+  });
+
+  it('routes a textarea text patch through its value with the input bound', () => {
+    const h = harness('<textarea id="notes">Initial</textarea>');
+    const notes = h.content.getElementById('notes') as HTMLTextAreaElement;
+    notes.value = 'User typed';
+    h.surface.apply([{ kind: 'text', id: 'notes', value: 'Reset' }]);
+    expect(notes.value).toBe('Reset');
+    expect(h.surface.inputs()['notes'].value).toBe('Reset');
+  });
+
+  it('validates the live option selection projected into a batch', () => {
+    const h = harness(
+      `<select id="s"><option value="${'y'.repeat(2000)}">Long</option><option value="b">B</option></select>` +
+        Array.from(
+          { length: 7 },
+          (_, i) => `<textarea id="t${i}"></textarea>`,
+        ).join('') +
+        '<output id="out"></output>',
+    );
+    (h.content.getElementById('s') as HTMLSelectElement).selectedIndex = 1;
+    for (let i = 0; i < 7; i++) {
+      (h.content.getElementById(`t${i}`) as HTMLTextAreaElement).value =
+        'x'.repeat(2000);
+    }
+    h.surface.apply([{ kind: 'text', id: 'out', value: 'ok' }]);
+    expect(h.content.getElementById('out')?.textContent).toBe('ok');
+  });
+
+  it('reports an over-limit live snapshot through the error channel', () => {
+    const h = harness(
+      Array.from(
+        { length: 9 },
+        (_, i) => `<textarea id="t${i}"></textarea>`,
+      ).join(''),
+    );
+    for (let i = 0; i < 9; i++) {
+      (h.content.getElementById(`t${i}`) as HTMLTextAreaElement).value =
+        '界'.repeat(650);
+    }
+    h.content
+      .getElementById('t0')!
+      .dispatchEvent(new Event('input', { bubbles: true }));
+    expect(h.onError).toHaveBeenCalledWith(
+      'The view exceeded its input limit.',
+    );
+    expect(h.onEvent).not.toHaveBeenCalled();
+  });
+
   it('validates implicit option values while allowing ordinary label and dropdown updates', () => {
     const h = harness(
       '<select id="choices"><option id="first">First</option></select><p id="out"></p>',
@@ -266,20 +361,17 @@ describe('generated markup display', () => {
 
   it('retains live control values, selected options and focus after a valid batch', () => {
     const h = harness(
-      '<input id="rate" value="3"><input id="check" type="checkbox"><textarea id="notes">Initial</textarea><select id="choice"><option value="a">A</option><option value="b">B</option></select><select id="multi" multiple><option value="a">A</option><option value="b">B</option></select><output id="out"></output>',
+      '<input id="rate" value="3"><input id="check" type="checkbox"><textarea id="notes">Initial</textarea><select id="choice"><option value="a">A</option><option value="b">B</option></select><output id="out"></output>',
     );
     const input = h.content.getElementById('rate') as HTMLInputElement;
     const check = h.content.getElementById('check') as HTMLInputElement;
     const notes = h.content.getElementById('notes') as HTMLTextAreaElement;
     const choice = h.content.getElementById('choice') as HTMLSelectElement;
-    const multi = h.content.getElementById('multi') as HTMLSelectElement;
     input.value = '7';
     input.focus();
     check.checked = true;
     notes.value = 'Edited';
     choice.selectedIndex = 1;
-    multi.options[0].selected = true;
-    multi.options[1].selected = true;
     h.surface.apply([{ kind: 'text', id: 'out', value: 'Updated' }]);
     expect(h.content.getElementById('rate')).toBe(input);
     expect(h.content.activeElement).toBe(input);
@@ -288,12 +380,8 @@ describe('generated markup display', () => {
       check: { value: 'on', checked: true },
       notes: { value: 'Edited', checked: false },
       choice: { value: 'b', checked: false },
-      multi: { value: 'a', checked: false },
     });
-    expect(Array.from(multi.options, (option) => option.selected)).toEqual([
-      true,
-      true,
-    ]);
+    expect(choice.selectedIndex).toBe(1);
     expect(h.content.getElementById('out')?.textContent).toBe('Updated');
   });
 

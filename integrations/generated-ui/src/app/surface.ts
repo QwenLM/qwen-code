@@ -130,6 +130,13 @@ export class ViewSurface {
     });
     if (fragment.querySelectorAll('*').length > MAX_NODES)
       throw new Error('The view contains too many elements.');
+    // Fragment parsing can drop a radio group's live checkedness; restore it
+    // from the checked attribute so the rendered control matches the markup.
+    for (const radio of fragment.querySelectorAll<HTMLInputElement>(
+      'input[type=radio]',
+    )) {
+      radio.checked = radio.hasAttribute('checked');
+    }
     return fragment;
   }
 
@@ -153,8 +160,19 @@ export class ViewSurface {
       ) {
         throw new Error('This input type is not supported.');
       }
+      if (
+        control.tagName === 'SELECT' &&
+        (control as HTMLSelectElement).multiple
+      ) {
+        // An input snapshot carries one value per control, so a multi-select's
+        // state cannot be represented.
+        throw new Error('This input type is not supported.');
+      }
       if (control.tagName === 'INPUT' || control.tagName === 'TEXTAREA') {
-        (control as HTMLInputElement | HTMLTextAreaElement).maxLength = 2048;
+        const field = control as HTMLInputElement | HTMLTextAreaElement;
+        // Bound typing without raising a smaller declared maxlength.
+        if (field.maxLength < 0 || field.maxLength > 2048)
+          field.maxLength = 2048;
       }
     }
     for (const option of body.querySelectorAll('option')) {
@@ -237,6 +255,13 @@ export class ViewSurface {
         throw new Error('A view update referenced a missing element.');
       switch (patch.kind) {
         case 'text':
+          if (element.tagName === 'TEXTAREA') {
+            // Route through .value so the input length bound applies.
+            (element as HTMLTextAreaElement).value = patch.value;
+            break;
+          }
+          if (element.tagName === 'INPUT' || element.tagName === 'SELECT')
+            throw new Error('Only plain elements have text content.');
           element.textContent = patch.value;
           break;
         case 'html': {

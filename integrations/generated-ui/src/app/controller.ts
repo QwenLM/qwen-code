@@ -7,6 +7,7 @@ import { parseToolResult } from '../contracts.js';
 import type { GeneratedDocument } from '../contracts.js';
 import type { ViewSurface } from './surface.js';
 import type {
+  InputValues,
   UiEvent,
   UiWorkerRequest,
   UiWorkerResponse,
@@ -32,6 +33,7 @@ export class ViewController {
   private sequence = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private readonly queue: UiEvent[] = [];
+  private inflightInputs?: InputValues;
 
   constructor(
     private readonly surface: Pick<
@@ -73,15 +75,22 @@ export class ViewController {
             this.fail(response.error);
             return;
           }
-          // A superseded value and the outputs derived from it belong to one round.
-          const edited = new Set(
-            this.queue
-              .filter((event) => event.type !== 'click')
-              .map((event) => event.id),
-          );
-          const superseded = response.patches.some(
-            (patch) => patch.kind === 'value' && edited.has(patch.id),
-          );
+          // A superseded value and the outputs derived from it belong to one
+          // round. Compare live control state, not queued events: a trailing
+          // `change` re-notifies an edit already delivered as `input` and must
+          // not suppress the round that edit produced.
+          let superseded = false;
+          if (response.patches.some((patch) => patch.kind === 'value')) {
+            const inputs = this.surface.inputs();
+            superseded = response.patches.some((patch) => {
+              if (patch.kind !== 'value') return false;
+              const before = this.inflightInputs?.[patch.id];
+              const now = inputs[patch.id];
+              return (
+                before?.value !== now?.value || before?.checked !== now?.checked
+              );
+            });
+          }
           this.surface.apply(superseded ? [] : response.patches);
           clearTimeout(this.timer);
           this.pending = false;
@@ -153,6 +162,7 @@ export class ViewController {
 
   private send(request: UiWorkerRequest): void {
     this.pending = true;
+    this.inflightInputs = request.inputs;
     if (request.type === 'event') this.watch(1_000);
     try {
       this.worker!.postMessage(request);
