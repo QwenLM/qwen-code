@@ -989,8 +989,9 @@ public final class JdbcRuntimeBindingRepository
     }
 
     /**
-     * Lifecycle authority over a shared binding admits only cleanup, fenced by
-     * the Runtime Session's own Harness Session lifecycle claim.
+     * Lifecycle authority over a shared binding is fenced by the Runtime
+     * Session's own Harness Session lifecycle claim: Hook placement and
+     * cleanup proceed only while that claim matches.
      */
     private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority, Set<HarnessFence> fence) throws SQLException {
@@ -998,9 +999,6 @@ public final class JdbcRuntimeBindingRepository
         boolean retirement = fence.contains(HarnessFence.RETIREMENT);
         boolean cleanup = fence.contains(HarnessFence.CLEANUP);
         if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
-            if (authority != null && !cleanup) {
-                throw admissionClosed();
-            }
             BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         } else if (!"session".equals(scope.getIsolationClass())
                 && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)) {

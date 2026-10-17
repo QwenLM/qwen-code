@@ -88,6 +88,34 @@ class SharedHarnessOwnershipTest {
     }
 
     @Test
+    void lifecycleWorkPlacesOnASharedBindingUnderTheClosingSessionsClaim() throws Exception {
+        var binding = ready(bindings, SHARED);
+        var authority = new RuntimeLifecycleAuthority("close", 1);
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority));
+        assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority));
+        JdbcRepositorySupport.transaction(source, connection -> {
+            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            return null;
+        });
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "UPDATE ma_session_head SET claim_generation = 1, claim_lease_until = ?"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+            statement.setLong(1, System.currentTimeMillis() + 30_000);
+            JdbcRepositorySupport.setIdentity(statement, 2, "tenant");
+            JdbcRepositorySupport.setIdentity(statement, 3, "harness-a");
+            assertEquals(1, statement.executeUpdate());
+        }
+        bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority);
+        bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority);
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("other", 1)));
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("close", 2)));
+        assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-b", authority));
+        assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(binding.getBindingId()).getState());
+    }
+
+    @Test
     void executionAdmissionUsesTheExecutionsHarnessSession() {
         var binding = ready(bindings, SHARED);
         var a = sessionReady(bindings.admitSession(sessions, candidate(binding, "harness-a", "a-1")));
