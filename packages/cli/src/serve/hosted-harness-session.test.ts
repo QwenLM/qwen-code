@@ -8774,6 +8774,117 @@ describe('Hosted Harness no-tool session', () => {
     await posted;
   }, 60_000);
 
+  // #14387: the relay's recovery-blocked settlement for a child whose
+  // Harness generation was lost — dispatched, never continued. The op
+  // admits only the lost-Runtime reason, and a replay restating the same
+  // verdict is the same revision.
+  it('commits a recovery-blocked verdict over a lost generation', async () => {
+    domainEnablement.childRun = true;
+    mockBrokerBroker();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    const childRunId = `${PROMPT_ID}:call-1`;
+    const childSessionId = '550e8400-e29b-41d4-a716-446655440099';
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const callRequest = {
+        name: 'agent',
+        callId: 'call-1',
+        args: {
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+        },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [callRequest],
+        [
+          {
+            functionCall: {
+              id: callRequest.callId,
+              name: callRequest.name,
+              args: callRequest.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'done', model: 'test-model' };
+    });
+    const operation = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/children/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), childRunId, ...body });
+    const prompt = [{ type: 'text', text: 'run the audit' }];
+    const posted = (async () =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        }))();
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'child_run',
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    await operation({
+      kind: 'dispatch_started',
+      dispatchId: 'dispatch-1',
+      runtimeBindingId: 'binding-1',
+      generation: '1',
+    }).expect(202);
+    // Only the lost-Runtime reason is admitted; anything else is a 400.
+    const badReason = await operation({
+      kind: 'recovery_blocked',
+      reason: 'child_failed',
+      childSessionId,
+    });
+    expect(badReason.status).toBe(400);
+    expect(badReason.body.code).toBe('invalid_child_operation');
+    await operation({
+      kind: 'recovery_blocked',
+      reason: 'runtime_lost',
+      childSessionId,
+    }).expect(202);
+    // A replay restating the same verdict is the same revision.
+    await operation({
+      kind: 'recovery_blocked',
+      reason: 'runtime_lost',
+      childSessionId,
+    }).expect(202);
+    await posted;
+  }, 60_000);
+
   // Any early refusal of a claimed request — validation, profile, blocked —
   // still restores the stamped authority. A pre-try return leaking it
   // would attach the claim's lifecycle headers onto this shared client's

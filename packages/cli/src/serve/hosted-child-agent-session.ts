@@ -43,6 +43,7 @@ import {
   childDispatchBody,
   childFailBody,
   childLaunchBody,
+  childRecoveryBlockedBody,
   childSettleCompletedBody,
   childStopRequestedBody,
   decodeChildLaunchEnvelope,
@@ -1466,6 +1467,24 @@ export class HostedChildAgentSession {
       }
       return childFailBody(previous, params);
     });
+  }
+
+  /**
+   * #14387: the Harness generation running this child was lost and the
+   * in-process execution's outcome stays unwitnessed (a workflow's
+   * node:vm work leaves no witness on a new generation). The record
+   * settles blocked — never re-executed, never failed as if observed.
+   */
+  settleRecoveryBlocked(
+    childRunId: string,
+    params: {
+      readonly reason: ChildSessionRun['run']['reason'];
+      readonly childSessionId?: string;
+    },
+  ): Promise<void> {
+    return this.revise(childRunId, (previous) =>
+      childRecoveryBlockedBody(previous, params),
+    );
   }
 
   /** A stop was requested of the owner; set once, never cleared. */

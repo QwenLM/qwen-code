@@ -1427,6 +1427,64 @@ class ManagedAgentServerIntegrationTest {
                 .contains(target);
     }
 
+    // #14387: the recovery-blocked mark is durable on the still-active
+    // row — the status the claim saw stands, no retry counter moves, the
+    // lease releases — and a stale owner never re-marks.
+    @Test
+    void marksATurnRecoveryBlockedWithoutSettlingIt() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-turn-blocked-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "blocked-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "blocked-turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "3".repeat(64));
+        String owner = "blocked-owner";
+        var claimed = store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1)).orElseThrow();
+
+        assertThat(store.markTurnRecoveryBlocked(tenant,
+                session.sessionId(), turn.turnId(), owner,
+                "hosted_workflow_recovery_blocked",
+                "the Harness generation was lost")).isTrue();
+
+        assertThat(store.findTurn(tenant, session.sessionId(),
+                turn.turnId())).get().satisfies(record -> {
+                    assertThat(record.status()).isEqualTo(claimed.status());
+                    assertThat(record.errorCode()).isEqualTo(
+                            "hosted_workflow_recovery_blocked");
+                    assertThat(record.errorMessage()).isEqualTo(
+                            "the Harness generation was lost");
+                    assertThat(record.dispatchOwner()).isNull();
+                    assertThat(record.dispatchLeaseUntil()).isNull();
+                    assertThat(record.retryCount()).isZero();
+                    assertThat(record.completedAt()).isNull();
+                });
+        assertThat(store.markTurnRecoveryBlocked(tenant,
+                session.sessionId(), turn.turnId(), owner,
+                "hosted_workflow_recovery_blocked",
+                "the Harness generation was lost")).isFalse();
+
+        // The parked Turn leaves the dispatch sweep entirely — no
+        // claim-refuse-release spin — until a cancel: settling the Turn
+        // cancelled is the cancel's own act, so a CANCELLING row is
+        // scanned despite the mark.
+        DispatchTarget target = new DispatchTarget(tenant,
+                session.sessionId(), turn.turnId());
+        assertThat(store.findDispatchable(Long.MAX_VALUE, 100))
+                .doesNotContain(target);
+        store.insertCancelCommand(tenant, "CANCEL_TURN", "blocked-cancel",
+                "sha256:" + "4".repeat(64), session.sessionId(),
+                turn.turnId());
+        assertThat(store.findDispatchable(Long.MAX_VALUE, 100))
+                .contains(target);
+        assertThat(store.findTurn(tenant, session.sessionId(),
+                turn.turnId()).get().status()).isEqualTo("CANCELLING");
+    }
+
     // The terminal retry budget counts consecutive failures without
     // journaled progress: every fenced cursor update — admission, recovery
     // admission, and the journaled-event cursor — restarts it (review round

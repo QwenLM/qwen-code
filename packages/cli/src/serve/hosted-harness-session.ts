@@ -7565,6 +7565,31 @@ export function registerHostedHarnessSessionRoutes(
           case 'cancel':
             await children.requestStop(childRunId);
             break;
+          case 'recovery_blocked': {
+            // #14387: the relay's honest settlement for a child whose
+            // Harness generation was lost mid-run — the outcome stays
+            // unwitnessed, so the record blocks instead of failing. Only
+            // the lost-Runtime reason is admitted.
+            const reason = body?.['reason'];
+            const blockedChildSessionId = body?.['childSessionId'];
+            if (
+              reason !== 'runtime_lost' ||
+              !(
+                blockedChildSessionId === null ||
+                blockedChildSessionId === undefined ||
+                typeof blockedChildSessionId === 'string'
+              )
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.settleRecoveryBlocked(childRunId, {
+              reason,
+              ...(typeof blockedChildSessionId === 'string'
+                ? { childSessionId: blockedChildSessionId }
+                : {}),
+            });
+            break;
+          }
           case 'close_scope': {
             const started = body?.['started'];
             const childSessionId = body?.['childSessionId'];

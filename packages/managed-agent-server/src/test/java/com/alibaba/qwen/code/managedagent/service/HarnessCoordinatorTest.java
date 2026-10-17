@@ -636,12 +636,13 @@ class HarnessCoordinatorTest {
 
     // Issue #14387: a workflow Turn runs deterministically in-process under
     // node:vm, and a Harness crash leaves no witness to its in-process
-    // subagents. The recovery must never re-drive it — the Turn stays
-    // unsettled, the relay classifies the record unknown/blocked, and the
-    // cold-load refusal keeps the child Session's reopen refused. Driving
-    // it again would re-run the script and re-dispatch the subagents,
-    // spending the work twice while the first run's outcome stayed
-    // unobserved. Found by the FG10d fault gate.
+    // subagents. The recovery must never re-drive it: the takeover load's
+    // parked snapshot would be continued — re-running the script and
+    // re-dispatching the subagents, spending the work twice while the
+    // first run's outcome stayed unobserved. The drive instead marks the
+    // Turn durably and ends without settling it; the child result relay
+    // reads the code off the Turn line and settles the record blocked.
+    // Found by the FG10d fault gate.
     @Test
     void neverRedrivesAWorkflowTurnOnARecoveryPath() {
         AgentStateStore store = mock(AgentStateStore.class);
@@ -650,7 +651,9 @@ class HarnessCoordinatorTest {
         when(runtimeWarmer.isEnabled()).thenReturn(false);
         // A workflow Turn that was being driven on a Harness that died:
         // bound session (harnessBootId set), the Turn's input carries the
-        // workflow_launch block, and it was submitted and admitted.
+        // workflow_launch block, it was submitted and admitted, and the
+        // takeover load on the new generation parks a recovery snapshot
+        // whose continue would re-run the script.
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
                 "prompt",
                 List.of(Map.of("type", "workflow_launch", "script",
@@ -664,6 +667,10 @@ class HarnessCoordinatorTest {
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", recovery, 1L,
+                        "epoch-new"));
         HarnessCoordinator coordinator = new HarnessCoordinator(store,
                 harness, new HarnessEventProjector(), runtimeWarmer,
                 directExecutor(), Clock.systemUTC(),
@@ -673,10 +680,14 @@ class HarnessCoordinatorTest {
         } finally {
             coordinator.close();
         }
-        // The workflow Turn is never re-driven: no takeover, no re-submit,
-        // and it is never settled FAILED as if its outcome were observed.
-        verify(harness, never()).recoverManagedRuntime(anyString(),
-                anyString(), anyBoolean());
+        // The continuation that would re-run the script never fires; the
+        // Turn is marked for the relay and never settled as if observed.
+        verify(store).markTurnRecoveryBlocked(eq("tenant"), eq("session"),
+                eq("turn"), anyString(),
+                eq(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED),
+                anyString());
+        verify(harness, never()).continueManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
     }
@@ -729,6 +740,146 @@ class HarnessCoordinatorTest {
                 any(), anyString());
         verify(harness, never()).recoverManagedRuntime(anyString(),
                 anyString(), anyBoolean());
+    }
+
+    // The #14387 refusal may only bite an unwitnessed re-execution. A
+    // transient stream drop re-claims the admitted workflow Turn with the
+    // Harness healthy: the same boot answers the recovery attach from its
+    // cache and the drive is observation-only — no submit, no continue,
+    // just the stream resumed (the P1 review finding on #14461).
+    @Test
+    void resumesTheStreamOfAHealthyWorkflowTurnOnTheSameBoot() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old", 3L,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null, null,
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-old", null, 3L,
+                        "epoch-old"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-old"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        when(harness.stream("tenant", "session", 3, "epoch-old"))
+                .thenReturn(cancelledStream("prompt"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness).stream("tenant", "session", 3, "epoch-old");
+        verify(harness, never()).submit(anyString(), anyString(),
+                anyString(), any(), anyString());
+        verify(harness, never()).continueManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // A workflow Turn whose submission went out on the lost generation
+    // without recording an admission may have been admitted there (R10-4):
+    // re-submitting re-runs the script unwitnessed. The refusal marks the
+    // Turn instead, even when the takeover load parked nothing (no
+    // recovery snapshot, plain re-attach arm).
+    @Test
+    void neverResubmitsAWorkflowTurnWhoseAdmissionWasLostWithTheGeneration() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, null, null,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null, null,
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-old", null, 0L,
+                        "epoch-new"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-old"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).markTurnRecoveryBlocked(eq("tenant"), eq("session"),
+                eq("turn"), anyString(),
+                eq(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED),
+                anyString());
+        verify(harness, never()).submit(anyString(), anyString(),
+                anyString(), any(), anyString());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // Once refused, the durable mark ends every later re-claim before any
+    // attach: the scan stays a cheap claim-skip-release until the child
+    // Session's close settles the Turn.
+    @Test
+    void aMarkedWorkflowTurnEndsItsDriveBeforeAnyAttach() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old", 1L,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null,
+                AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                "The Harness generation running this workflow was lost.",
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verifyNoInteractions(harness);
+        verify(store, never()).markTurnRecoveryBlocked(anyString(),
+                anyString(), anyString(), anyString(), anyString(),
+                anyString());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
     }
 
     // `managed_session_writer_conflict` is the only wait that ends on its

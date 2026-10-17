@@ -372,17 +372,16 @@ public class HarnessCoordinator {
         // here wait on the prior generation's lease, a wait bounded by that
         // lease itself rather than by the pre-admission retry budget.
         recoveryPath.set(session.harnessBootId() != null);
-        // #14387: a workflow Turn is never re-driven. Its work is
-        // deterministic and in-process (node:vm), and a Harness crash
-        // leaves no witness to its in-process subagents — re-running the
-        // script would spend the work twice while the first run's outcome
-        // stays unobserved. The Turn stays unsettled: the relay classifies
-        // the record unknown/blocked, the cold-load refusal keeps the
-        // child Session's reopen refused — never re-executed, never failed
-        // as if its outcome were observed. A cancel still drives: settling
-        // the Turn cancelled is the cancel's own act, not a re-run.
+        // #14387: a workflow Turn whose recovery was already refused
+        // carries the durable mark — end the drive before any attach.
+        // The refusal was decided by the drive that found the generation
+        // lost; re-attaching on every scan would only repeat a takeover
+        // load that must never become a re-execution. A cancel still
+        // drives: settling the Turn cancelled is the cancel's own act.
         if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
-                && isWorkflowLaunchTurn(claimed)) {
+                && isWorkflowLaunchTurn(claimed)
+                && AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(
+                        claimed.errorCode())) {
             return false;
         }
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
@@ -431,6 +430,16 @@ public class HarnessCoordinator {
         boolean recoveredCancellation = false;
         boolean cancelledOnAttach = false;
         if (runtimeRecovery != null) {
+            // #14387: continuing a workflow Turn re-runs its deterministic
+            // in-process script while the first run's outcome stays
+            // unwitnessed — the parked snapshot proves nothing about the
+            // in-process subagents the lost generation dispatched. Refuse
+            // the re-execution and mark the Turn so the child result relay
+            // settles the record blocked. A cancel still drives: settling
+            // the Turn cancelled is the cancel's own act, not a re-run.
+            if (!recoveringCancellation && isWorkflowLaunchTurn(claimed)) {
+                return blockWorkflowRecovery(claimed);
+            }
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
                     : !runtimeRecovery.isContinuationReady()) {
@@ -670,6 +679,17 @@ public class HarnessCoordinator {
             current = store.findTurn(claimed.tenantId(),
                     claimed.sessionId(), claimed.turnId()).orElseThrow();
             if (current.harnessEventEpoch() == null) {
+                // #14387: a workflow Turn whose submission went out on a
+                // prior generation without recording an admission may
+                // have been admitted by the dead generation (R10-4) —
+                // re-submitting re-runs the script while that first run
+                // stays unwitnessed. Refuse and mark; a never-submitted
+                // Turn provably never ran, so its first launch still
+                // drives.
+                if (recoveryPath.get() && claimed.submissionAttempted()
+                        && isWorkflowLaunchTurn(claimed)) {
+                    return blockWorkflowRecovery(claimed);
+                }
                 store.markSubmissionAttempted(current.tenantId(),
                         current.sessionId(), current.turnId(), owner);
                 submissionAttempted.set(true);
@@ -1293,6 +1313,23 @@ public class HarnessCoordinator {
 
     private static boolean isHarnessDisabled(RuntimeException error) {
         return error instanceof HarnessDisabledException;
+    }
+
+    // #14387: refuse the workflow Turn's unwitnessed re-execution — mark
+    // it durably (the child result relay reads the code off the Turn line
+    // and settles the record blocked) and end the drive. The Turn itself
+    // stays unsettled: its work's outcome was never observed, so no
+    // terminal status may claim otherwise. The mark releases the dispatch
+    // lease, so the drive reports terminal; a lost mark CAS only means
+    // another owner now holds the Turn and re-walks the same refusal.
+    private boolean blockWorkflowRecovery(TurnRecord claimed) {
+        store.markTurnRecoveryBlocked(claimed.tenantId(), claimed.sessionId(),
+                claimed.turnId(), owner,
+                AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                "The Harness generation running this workflow was lost;"
+                        + " the in-process run's outcome was never"
+                        + " observed.");
+        return true;
     }
 
     // #14387: a workflow Turn's work is one deterministic in-process script
