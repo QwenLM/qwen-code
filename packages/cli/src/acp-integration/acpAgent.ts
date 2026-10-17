@@ -10684,12 +10684,26 @@ class QwenAgent implements Agent {
               );
               break;
             }
-            case 'settings':
-              await this.extMethodInternal(
+            case 'settings': {
+              const reloaded = await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceReload,
                 { cwd: changeCwd },
               );
+              // A tightening change that skipped a live session has not
+              // reached it: acknowledge nothing, so the Bridge keeps the
+              // channel quarantined instead of lifting the fence.
+              const skipped = reloaded['sessionsSkipped'];
+              if (
+                params['tightening'] === true &&
+                Array.isArray(skipped) &&
+                skipped.length > 0
+              ) {
+                throw new Error(
+                  `The settings change did not reach ${skipped.length} live session(s).`,
+                );
+              }
               break;
+            }
             case 'sessionWorkflow':
               await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
