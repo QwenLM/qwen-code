@@ -1163,7 +1163,8 @@ public class HarnessCoordinator {
         boolean recoveryBlocked = "managed_runtime_recovery_blocked".equals(code);
         if (current.submissionAttempted()) {
             boolean reconciled = cancelAdmittedTurnBeforeTerminalFail(current, recoveryBlocked);
-            if (!reconciled && recoveryBlocked) {
+            if (!reconciled && recoveryBlocked
+                    && store.requireSession(turn.tenantId(), turn.sessionId()).workspace() != null) {
                 return transientFailure(current, true,
                         new IllegalStateException("Recovery cancellation remains unsettled"), true);
             }

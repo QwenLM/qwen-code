@@ -1767,7 +1767,10 @@ class HarnessCoordinatorTest {
                 .thenReturn(Optional.of(claimed));
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
-                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+                        null, "ACTIVE", "boot-old", null, 0, 0, 0, 1, 1, null, 1,
+                        new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1),
+                        "default", "hosted-workspace-shell/1"));
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
         when(harness.recoverManagedRuntime("tenant", "session", false))
                 .thenThrow(new HostedHarnessRecoveryDeclinedException(
                         "shell_in_flight"));
@@ -1785,6 +1788,60 @@ class HarnessCoordinatorTest {
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), anyLong(), eq(true));
         verify(harness, never()).cancel(anyString(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unsupportedLegacyRecoveryDoesNotUseNativeCancellationBudget(boolean admitted) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "legacy-turn", "legacy-prompt",
+                admitted ? "epoch-old" : null, admitted ? 4 : 0, "RUNNING", true, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("legacy-turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(claimed));
+        when(store.findTurn("tenant", "session", "legacy-turn"))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(new HostedHarnessRecoveryDeclinedException("model_start"));
+        when(store.failRecoveryBlockedTurn(eq("tenant"), eq("session"), eq("legacy-turn"),
+                anyString(), anyString())).thenReturn(true);
+        if (admitted) {
+            when(store.bindHarness(eq("tenant"), eq("session"), eq("legacy-turn"),
+                    anyString(), eq("boot-old"))).thenReturn(true);
+            DaemonHttpException parked = mock(DaemonHttpException.class);
+            when(parked.getStatusCode()).thenReturn(409);
+            when(parked.getErrorCode()).thenReturn("hosted_turn_recovery_required");
+            doThrow(parked).when(harness).cancel("tenant", "session");
+            when(harness.recoverManagedCancellation("tenant", "session"))
+                    .thenThrow(new HostedHarnessRecoveryDeclinedException("model_start"));
+        }
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer, directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "legacy-turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failRecoveryBlockedTurn(eq("tenant"), eq("session"), eq("legacy-turn"),
+                anyString(), argThat(message -> message.contains("model_start")));
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyBoolean());
+        verify(store, never()).releaseTurnLease(anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).submit(anyString(), anyString(), anyString(), any(), anyString());
+        if (admitted) {
+            verify(harness).cancel("tenant", "session");
+            verify(harness).recoverManagedCancellation("tenant", "session");
+        } else {
+            verify(harness, never()).cancel(anyString(), anyString());
+        }
     }
 
     @Test
@@ -1828,20 +1885,18 @@ class HarnessCoordinatorTest {
         boolean unknownCancellation = "unknown-cancellation".equals(lane);
         boolean missingAdmission = "missing-admission".equals(lane) || unknownCancellation;
         boolean workspaceFailure = "failure-takeover".equals(lane);
+        boolean cancelling = unknownCancellation || "cancel-takeover".equals(lane);
         TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
                 missingAdmission ? null : "epoch-old", missingAdmission ? 0 : 4,
-                unknownCancellation ? "CANCELLING" : "RUNNING", true, 0);
+                cancelling ? "CANCELLING" : "RUNNING", true, 0);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class))).thenReturn(Optional.of(claimed));
         when(store.findTurn("tenant", "session", "turn"))
                 .thenReturn(Optional.of(claimed));
-        SessionRecord session = workspaceFailure
-                ? new SessionRecord("tenant", "session", "qwen-code", null,
-                        null, "ACTIVE", "boot-old", "epoch-old", 4, 4, 0, 1, 1, null, 1,
-                        new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1),
-                        "default", "hosted-workspace-shell/1")
-                : new SessionRecord("tenant", "session", "qwen-code", null,
-                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1);
+        SessionRecord session = new SessionRecord("tenant", "session", "qwen-code", null,
+                null, "ACTIVE", "boot-old", "epoch-old", 4, 4, 0, 1, 1, null, 1,
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1),
+                "default", "hosted-workspace-shell/1");
         when(store.requireSession("tenant", "session")).thenReturn(session);
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
         if (unknownCancellation) {
@@ -1850,7 +1905,7 @@ class HarnessCoordinatorTest {
             when(harness.recoverManagedRuntime("tenant", "session", true))
                     .thenReturn(new Attachment("boot-new", recovery, 4L, "epoch-new"));
         } else {
-            when(harness.recoverManagedRuntime("tenant", "session", false))
+            when(harness.recoverManagedRuntime("tenant", "session", cancelling))
                     .thenThrow(new HostedHarnessRecoveryDeclinedException("shell_in_flight"));
         }
         if (workspaceFailure) {
@@ -1954,7 +2009,7 @@ class HarnessCoordinatorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void terminalRecoveryDeclineReconcilesParkedTurnThroughCancellationTakeover(
+    void legacyRecoveryFailureStillAttemptsCancellationTakeover(
             boolean cancellationFails) {
         AgentStateStore store = mock(AgentStateStore.class);
         when(store.failRecoveryBlockedTurn(anyString(), anyString(), anyString(),
@@ -1976,7 +2031,7 @@ class HarnessCoordinatorTest {
                 anyString(), eq("boot-old"))).thenReturn(true);
         when(harness.recoverManagedRuntime("tenant", "session", false))
                 .thenThrow(new HostedHarnessRecoveryDeclinedException(
-                        "shell_in_flight"));
+                        "model_start"));
         DaemonHttpException parked = mock(DaemonHttpException.class);
         when(parked.getStatusCode()).thenReturn(409);
         when(parked.getErrorCode())
@@ -1998,18 +2053,15 @@ class HarnessCoordinatorTest {
         } finally {
             coordinator.close();
         }
-        if (cancellationFails) {
-            verify(store, never()).failTurn(anyString(), anyString(),
-                    anyString(), anyString(), anyString(), anyString());
-            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
-                    eq("turn"), anyString(), anyLong(), eq(true));
-        } else {
-            verify(store).failRecoveryBlockedTurn(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(),
-                    argThat(message -> message.contains("shell_in_flight")));
-        }
-        verify(harness).cancel("tenant", "session");
-        verify(harness).recoverManagedCancellation("tenant", "session");
+        InOrder order = inOrder(harness, store);
+        order.verify(harness).cancel("tenant", "session");
+        order.verify(harness).recoverManagedCancellation("tenant", "session");
+        order.verify(store).failRecoveryBlockedTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), argThat(message -> message.contains("model_start")));
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(), anyString(),
+                anyString(), anyLong(), anyBoolean());
         verify(harness, never()).submit(anyString(), anyString(),
                 anyString(), any(), anyString());
     }
