@@ -43,19 +43,18 @@ Issue #14449 跟踪 FG13，即 Hosted Hook 两个域 `hook_registration` 与
 - 打包 Harness、带内嵌 Broker 的进程内 Spring、真实 MySQL 8.4 schema、
   durable worker，以及委派的 cgroup v2 根。
 - `HostedHookFaultProcess`（`src/test/resources/hosted-hook-fault-process.mjs`）
-  记录 PID、start ticks、boot id 与 cgroup，可选带存活后代保持运行，可选忽略
-  SIGTERM。
+  记录 PID、start ticks、boot id 与 cgroup，可选带存活后代保持运行。
 
-模型夹具只使用 files profile 的 `read_file`，并在 Hook 阻断时不返回文件正文，
-因此"工具从未运行"是物理证据，而不是状态读数。
+模型夹具只声明 files profile 的 `read_file`；由 IT 断言 Hook 阻断时不会返回文件
+正文，因此"工具从未运行"是物理证据，而不是状态读数。
 
 ## 用例
 
-| 用例                          | 注入                                                                                           | 期望                                                                                                                                                                                                                       |
-| ----------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `harness-kill-during-command` | `PreToolUse` 命令 Hook 带存活后代保持运行；SIGKILL Harness；启动替换 Harness 并提交新 prompt。 | 恰好一次物理调用。替换者的 load 用 worker 的回执对账被杀 Harness 的调用；记录结算为 `settled` 且有 result。命令与后代在自己的持有期结束后退出，单元到达 `populated 0`，worker 与 generation 不变。                         |
-| `worker-kill-during-command`  | 同样的保持型 Hook；SIGKILL durable worker。                                                    | 记录变为 `recovery_blocked` / `outcome_unknown`，绝不是 `settled` 或 `cancelled`。恰好一次物理调用。命令与后代作为无 owner 的有进程单元存活。关闭被拒（409 `turn_active` 或 503），Session 保持打开。generation 不被重铸。 |
-| `command-kill`                | 命令运行中 SIGKILL，且无后代。                                                                 | 在已保存的 `failClosed` 策略下得到 `non_blocking_error`：记录结算，读取绝不返回文件正文，模型看到 Hook 的阻断。单元为空。                                                                                                  |
+| 用例                          | 注入                                                                                           | 期望                                                                                                                                                                                                                                                                                               |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `harness-kill-during-command` | `PreToolUse` 命令 Hook 带存活后代保持运行；SIGKILL Harness；启动替换 Harness 并提交新 prompt。 | 恰好一次物理调用。替换者的 load 回答被杀 Harness 的调用；下一次 prompt 准入用原 worker 的回执对账 Hook 记录（命令仍持有时该准入返回 409）。记录结算为 `settled` 且有 result。命令与后代在夹具持有期结束时结束（夹具会先杀掉后代再写出 allow），单元到达 `populated 0`，worker 与 generation 不变。 |
+| `worker-kill-during-command`  | 同样的保持型 Hook；SIGKILL durable worker。                                                    | 记录变为 `recovery_blocked` / `outcome_unknown`，绝不是 `settled` 或 `cancelled`。恰好一次物理调用。命令与后代作为无 owner 的有进程单元存活。关闭被拒（409 `turn_active` 或 503），Session 保持打开。generation 不被重铸。                                                                         |
+| `command-kill`                | 命令运行中 SIGKILL，且无后代。                                                                 | 在已保存的 `failClosed` 策略下得到 `non_blocking_error`：记录结算，读取绝不返回文件正文，模型看到 Hook 的阻断。单元为空。                                                                                                                                                                          |
 
 ## 变异见证
 

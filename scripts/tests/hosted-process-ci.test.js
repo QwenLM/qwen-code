@@ -675,8 +675,8 @@ describe('Hosted real-process gates', () => {
     // The FG13c owner-restart cells (issue #14449) are independent fixtures
     // sharing the fork like the FG8 letters: each boots its own Spring,
     // Harness and durable worker, so the per-ceiling relation is the honest
-    // model. The class is budgeted inside the slack the FG10b/c/e/f figure
-    // left rather than re-measuring the whole fork.
+    // model. The class is budgeted at 300 s (its ceiling) until the lane
+    // measures it; the healthy sum and the fork move with that budget.
     const ceilings = ceilingsOf(hostedTestSource('HostedHookFaultGatesIT'));
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {

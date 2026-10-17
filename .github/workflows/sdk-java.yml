@@ -676,7 +676,7 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (90 + 10 + 20 + 50 = 170 — the FG8 letters
+    # The step ceilings today (95 + 10 + 20 + 50 = 175 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b/c/e/f workflow relay letters to 4353 s and the FG13c Hook
     # owner-restart cells to 4653 s, so Verify wraps it at its fork + 600 s

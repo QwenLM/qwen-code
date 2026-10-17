@@ -42,9 +42,6 @@ function record(event, fields = {}) {
 }
 
 const solo = signalMode === 'hook-solo';
-if (signalMode === 'ignore-sigterm') {
-  process.on('SIGTERM', () => {});
-}
 
 if (mode === 'child') {
   record('hook.child');

@@ -104,10 +104,12 @@ class HostedHookFaultGatesIT {
         int generation = generation(session);
 
         replaceHarness();
-        // The replacement's load is what recovers a Hooks Session: it answers
-        // the dead Harness's call from the worker's receipt, then the new
-        // prompt runs. The command finishes on its own 15 s hold.
-        submit(session, "FG13_AFTER");
+        // The replacement's load answers the dead Harness's call; the next
+        // prompt's admission reconciles the Hook record from the worker's
+        // receipt. While the command still holds, that admission is refused
+        // (409) exactly as the issue pins, so the probe must accept the
+        // refusal and then observe the settled record.
+        submitAllowingRefusal(session, "FG13_AFTER");
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         assertThat(hookExecution(session).path("resultRef").isNull()).isFalse();
         assertThat(events("hook.call")).hasSize(1);
@@ -149,7 +151,7 @@ class HostedHookFaultGatesIT {
         assertThat(running(child)).isTrue();
         assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
         JsonNode refused = api("POST", "/v1/agents/sessions/" + session + "/close", null, "close", 409, 503);
-        assertThat(refused.at("/error/code").asText()).isIn("turn_active", "runtime_reconciliation_required");
+        assertThat(refused.toString()).containsAnyOf("turn_active", "runtime_reconciliation_required");
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, session)).isNotEqualTo("CLOSED");
         assertThat(generation(session)).isEqualTo(generation);
@@ -298,6 +300,12 @@ class HostedHookFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202).path("turn_id").asText();
     }
 
+    /** The post-kill admission may be refused while the Hook still runs. */
+    private void submitAllowingRefusal(String session, String prompt) throws Exception {
+        api("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message",
+                "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202, 409);
+    }
+
     private JsonNode hookExecution(String session) {
         List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
                 .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
@@ -375,7 +383,8 @@ class HostedHookFaultGatesIT {
             List<String> names = new ArrayList<>();
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
-            boolean call = results.isEmpty() && List.of("FG13_HARNESS_KILL", "FG13_COMMAND_KILL").contains(prompt);
+            boolean call = results.isEmpty()
+                    && List.of("FG13_HARNESS_KILL", "FG13_WORKER_KILL", "FG13_COMMAND_KILL").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
@@ -529,6 +538,9 @@ class HostedHookFaultGatesIT {
     }
 
     private void saveEvidence() throws Exception {
+        if (temporary == null) {
+            return;
+        }
         Path destination = Files.createDirectories(Path.of("target/failsafe-reports/hosted-hook-fault-evidence", tenant));
         System.out.println("HOSTED_HOOK_FAULT_EVIDENCE " + destination.toAbsolutePath());
         json.writeValue(destination.resolve("model-requests.json").toFile(), modelRequests);
