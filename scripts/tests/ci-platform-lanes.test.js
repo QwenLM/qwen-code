@@ -6,21 +6,17 @@
 
 // The macOS and Windows lanes, and the gate that decides when they run.
 //
-// They were gated on `merge_group` alone while no merge queue was enabled, so
-// they had not run since 2026-07-02: reported as "skipped" on every pull
-// request — which reads as agreement — and never reached afterwards. The
-// repository's only non-Linux, non-GNU signal was silently off, and a macOS
-// failure shipped and sat in `main` (#9220). Nothing here can prove a lane
-// ran; what these tests hold is the wiring that lets it: the triggers, the
-// nightly's blast radius, and the alerting that makes a nightly failure
-// visible.
+// A merge_group-only gate leaves both lanes silent when no queue event occurs.
+// Scheduled coverage was added after a macOS-only failure shipped and sat in
+// main (#9220). These tests pin the triggers, nightly scope, and failure
+// reporting that keep platform coverage available.
 //
 // The pull-request trigger and its platform-sensitivity classifier are OFF
 // while the standing Windows failures are being fixed (see the note above
 // test_macos in ci.yml): on pull requests the Windows lane was reporting
 // failures on every PR for defects no PR caused, and neither lane gates a
-// merge. That leaves the nightly as the lanes' ONLY live trigger, so the
-// assertions here are the wiring that keeps it alive — the schedule exists,
+// merge. The nightly provides regular coverage independently of queue activity
+// and manual dispatch, so these assertions keep it alive — the schedule exists,
 // both lanes accept it, nothing else rides it, and its failure files an
 // issue. Restoring the pull-request path means reverting the commit that
 // carried this change; the classifier script and its tests were left in
@@ -185,11 +181,9 @@ const assertEventReachesOnly = (event, allowedJobs) => {
 
 describe('platform lanes — triggers', () => {
   it('gives the workflow a scheduled trigger', () => {
-    // Without it the lanes have no path to `main` at all: `ci.yml`'s push
-    // trigger is accepted only by `test`, `lint_and_static`, and the
-    // `classify_pr` they depend on,
-    // so a merge-queue-only gate on a repository with no merge queue is an off
-    // switch for these two.
+    // Neither lane accepts the push trigger: only test, lint_and_static, and
+    // classify_pr accept it. Regular platform coverage must not depend on a
+    // queue producing merge_group events.
     expect(triggers.schedule).toBeDefined();
     expect(Array.isArray(triggers.schedule)).toBe(true);
     expect(triggers.schedule[0].cron).toMatch(/^\S+ \S+ \S+ \S+ \S+$/);
@@ -303,9 +297,8 @@ describe('platform lanes — triggers', () => {
 
 // The post-merge push lane on `main`.
 //
-// `ci.yml` carried no push trigger while no merge queue was enabled, so
-// nothing validated the merged tree before it landed and the only check after
-// it was the ~40-minute E2E — a regression could sit in `main` for hours. The
+// Without push or queue validation, the only check of a merged tree was the
+// ~40-minute E2E — a regression could sit in main for hours. The
 // trigger is back, taken by `test`, `lint_and_static`, and the `classify_pr`
 // they depend on.
 //
@@ -645,8 +638,8 @@ describe('post-merge push lane', () => {
     // and a newer pending run REPLACES the older one even while this reads
     // `false`, so back-to-back merges still coalesce onto the newest tree —
     // but the in-flight run always finishes and reports, which matters
-    // because with no merge queue this lane is the only fast witness of a
-    // merged tree and its coverage upload is `always()`-gated. The history of
+    // because this lane remains a fast witness without queue validation,
+    // and its coverage upload is `always()`-gated. The history of
     // flipping it the other way is recorded once already: 67 of 100 push runs
     // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
     // a later "make main cancellable" change from landing unnoticed.
