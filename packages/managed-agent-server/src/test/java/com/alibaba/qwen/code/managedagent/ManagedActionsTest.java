@@ -924,6 +924,16 @@ class ManagedActionsTest {
         // over a second of renewal slack per period — keep scheduler jitter
         // on a loaded CI runner from lapsing the lease mid-hold (#14476).
         properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
+        // Deriving the hold as lease + 3 clamped renewal periods keeps "hold
+        // outlasts the lease" structural under rescale and needs more than
+        // one renewal tick, so a one-shot renewal loop loses the claim below.
+        // The release latch and the hold await scale with the hold, so
+        // widening the lease cannot strand them on a stale literal ceiling.
+        long period = Math.max(1, Math.min(
+                properties.getDispatch().getLeaseRenewInterval().toMillis(),
+                lease.toMillis() / 3));
+        long holdMillis = lease.toMillis() + 3 * period;
+        long holdBudgetMillis = holdMillis + 5_000;
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;
@@ -948,7 +958,7 @@ class ManagedActionsTest {
                     }
                     calls.incrementAndGet();
                     entered.countDown();
-                    if (!release.await(10, TimeUnit.SECONDS)) {
+                    if (!release.await(holdBudgetMillis, TimeUnit.MILLISECONDS)) {
                         throw new IllegalStateException("held approval was not released");
                     }
                     journal.change("decided", call.getArgument(3));
@@ -962,16 +972,9 @@ class ManagedActionsTest {
             assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
             // The claim precedes resolveAction's entry, so anchoring the hold
             // to `entered` guarantees the delivery is held past the lease
-            // deadline however long dispatch and claiming took. Deriving the
-            // hold as lease + 3 clamped renewal periods keeps "hold outlasts
-            // the lease" structural under rescale and needs more than one
-            // renewal tick, so a one-shot renewal loop loses the claim below.
-            long period = Math.max(1, Math.min(
-                    properties.getDispatch().getLeaseRenewInterval().toMillis(),
-                    lease.toMillis() / 3));
-            long holdMillis = lease.toMillis() + 3 * period;
+            // deadline however long dispatch and claiming took.
             long heldSince = System.currentTimeMillis();
-            await().atMost(Duration.ofSeconds(10))
+            await().atMost(Duration.ofMillis(holdBudgetMillis))
                     .until(() -> System.currentTimeMillis() - heldSince >= holdMillis);
             var claimed = sessions.findOperation(tenant, session, operation).orElseThrow();
             assertThat(claimed.claimGeneration()).isEqualTo(1);
