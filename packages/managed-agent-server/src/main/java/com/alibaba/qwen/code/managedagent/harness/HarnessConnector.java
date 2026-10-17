@@ -73,6 +73,12 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    default Attachment recoverManagedFailureCancellation(String tenantId,
+            String sessionId, String turnId, String dispatchOwner) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime recovery is unavailable");
+    }
+
     Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
 
