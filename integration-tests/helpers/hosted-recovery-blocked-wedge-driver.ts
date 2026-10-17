@@ -559,7 +559,12 @@ interface WireRow {
 
 async function readWire(): Promise<WireRow[]> {
   try {
-    return (await readFile(config.wireFile, 'utf8'))
+    const text = await readFile(config.wireFile, 'utf8');
+    // wire() appends under the same process, so a poll can land mid-append.
+    // Every row ends with '\n': an unterminated tail is the row still being
+    // written, and the next poll reads it whole.
+    return text
+      .slice(0, text.lastIndexOf('\n') + 1)
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line) as WireRow);
