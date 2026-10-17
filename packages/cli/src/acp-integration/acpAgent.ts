@@ -7500,6 +7500,7 @@ class QwenAgent implements Agent {
     after: PermissionRuleSet,
     settingScope: SettingScope,
     settingsCwd: string,
+    strict = false,
   ): void {
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
@@ -7544,6 +7545,7 @@ class QwenAgent implements Agent {
               error instanceof Error ? error.message : String(error)
             }`,
           );
+          if (strict) throw error;
         }
       }
     }
@@ -10656,9 +10658,16 @@ class QwenAgent implements Agent {
           switch (kind) {
             case 'permissions': {
               // A settings reload alone does not touch the live permission
-              // managers, so diff the rule sets the control engine persisted
-              // and sync them the way the permission-rule route does.
-              const before = readPermissionRuleSet(this.settings.merged);
+              // managers, so diff each scope's own rule set and sync it the
+              // way the permission-rule route does. The merged view carries
+              // workspace rules too, which the User pass would then apply to
+              // every session.
+              const userBefore = readPermissionRuleSet(
+                this.settings.user.settings,
+              );
+              const workspaceBefore = readPermissionRuleSet(
+                this.settings.workspace.settings,
+              );
               if (
                 !this.settings.reloadScopesFromDiskAtomically([
                   SettingScope.User,
@@ -10669,18 +10678,19 @@ class QwenAgent implements Agent {
                   'The permission rules could not be reloaded for a workspace change.',
                 );
               }
-              const after = readPermissionRuleSet(this.settings.merged);
               this.syncLivePermissionManagers(
-                before,
-                after,
+                userBefore,
+                readPermissionRuleSet(this.settings.user.settings),
                 SettingScope.User,
                 changeCwd,
+                true,
               );
               this.syncLivePermissionManagers(
-                before,
-                after,
+                workspaceBefore,
+                readPermissionRuleSet(this.settings.workspace.settings),
                 SettingScope.Workspace,
                 changeCwd,
+                true,
               );
               break;
             }
