@@ -1501,13 +1501,10 @@ export class HostedChildAgentSession {
         'child_run',
         childRunId,
       );
-      const previous =
-        existing === undefined
-          ? undefined
-          : this.parseSessionRun(existing.record, childRunId);
-      if (previous === undefined) {
+      if (existing === undefined) {
         throw new Error(`Child run ${childRunId} has no record to revise.`);
       }
+      const previous = this.parseSessionRun(existing.record, childRunId);
       const next = childRecoveryBlockedBody(previous, params);
       if (isDeepStrictEqual(previous, next)) return;
       const notification =
