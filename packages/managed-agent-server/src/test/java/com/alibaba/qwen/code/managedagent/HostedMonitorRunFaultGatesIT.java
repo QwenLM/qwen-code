@@ -950,64 +950,55 @@ class HostedMonitorRunFaultGatesIT {
             assertProcessRows(jdbc, sessionId, name, 0);
             return;
         }
-        // What a refused publication commit does to the run depends on
-        // which commit the arm targets. A refused OUTPUT MANIFEST commit
-        // is the settle transaction's own head — the fused settle commit
-        // rolls back whole, so the run stays blocked open with the
-        // process long gone and its exit evidence unjournaled (the
-        // issue's "blocks the run" cell, measured on lane run
-        // 38868090681: three refused settle commits, then silence —
-        // including through a drain release). A refused page-envelope
-        // commit poisons the capture alone: the record settles from real
-        // exit evidence with the envelope degraded — never cancelled,
-        // never re-executed.
+        // Both publication arms block the settle. A 24-block capture fills
+        // no page before finish (a page holds 512 segments): its only page
+        // envelope is staged when the stream seals and rides the next
+        // output-advance commitChildRunRecord, and the finalize's success
+        // manifest rides the advance after it. The settle needs both
+        // advances first. Refusing the page refuses the first one and,
+        // because every later manifest still names the staged page, every
+        // retry; refusing the manifest refuses the second. Either way the
+        // run stays blocked open with the process long gone and its exit
+        // evidence unjournaled (the issue's "blocks the run" cell,
+        // measured on lane run 38868090681 and the 0.75 Linux rig: three
+        // refused advance commits, then silence — including through a
+        // drain release) — never cancelled, never re-executed.
         assertProcessRows(jdbc, sessionId, name, 1);
         JsonNode record = extensionRecord(jdbc, tenant, sessionId,
                 "child_run");
-        if (name.equals("manifest-commit")) {
-            assertThat(report.path("recovered").asBoolean())
-                    .as(name + ": a refused settle commit never recovers")
-                    .isFalse();
-            assertThat(record.path("run").path("state").asText())
-                    .as(name + ": the blocked commit keeps the run open")
-                    .isEqualTo("running");
-            assertThat(record.path("stopReason").isNull())
-                    .as(name + ": no stop proof was ever journaled")
-                    .isTrue();
-            assertThat(record.path("stopRequested").asBoolean(false))
-                    .as(name + ": nothing ever asked it to stop")
-                    .isFalse();
-            // The finalize manifest (executionStatus 'success') is the
-            // arm's target and never persisted; the initial empty
-            // manifest is what keeps the read chain honest.
-            var settleManifests = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
-                            + " AND session_id = ? AND kind ="
-                            + " 'managed-tool-result-manifest' AND"
-                            + " CONVERT(inline_bytes USING utf8mb4) LIKE"
-                            + " '%\"executionStatus\":\"success\"%'",
-                    Integer.class, tenant, sessionId);
-            assertThat(settleManifests).as(name
-                    + ": the settle-manifest commit was rejected")
-                    .isZero();
-        } else {
-            assertThat(report.path("recovered").asBoolean())
-                    .as(name + ": the producer exited naturally").isTrue();
-            assertThat(record.path("run").path("state").asText())
-                    .as(name + ": settles from real exit evidence")
-                    .isEqualTo("settled");
-            assertThat(record.path("stopReason").asText())
-                    .isEqualTo("exited");
-            assertThat(record.path("exitCode").asInt()).isZero();
-            assertThat(record.path("stopRequested").asBoolean(false))
-                    .as(name + ": nothing ever asked it to stop")
-                    .isFalse();
+        assertThat(report.path("recovered").asBoolean())
+                .as(name + ": a refused settle commit never recovers")
+                .isFalse();
+        assertThat(report.path("refusedSettleCommits").asInt())
+                .as(name + ": the settle commit was refused").isPositive();
+        assertThat(record.path("run").path("state").asText())
+                .as(name + ": the blocked commit keeps the run open")
+                .isEqualTo("running");
+        assertThat(record.path("stopReason").isNull())
+                .as(name + ": no stop proof was ever journaled").isTrue();
+        assertThat(record.path("stopRequested").asBoolean(false))
+                .as(name + ": nothing ever asked it to stop").isFalse();
+        // The finalize manifest (executionStatus 'success') never persists
+        // in either arm: it is refused itself, or it rides behind the
+        // refused page advance.
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
+                        + " AND session_id = ? AND kind ="
+                        + " 'managed-tool-result-manifest' AND"
+                        + " CONVERT(inline_bytes USING utf8mb4) LIKE"
+                        + " '%\"executionStatus\":\"success\"%'",
+                Integer.class, tenant, sessionId))
+                .as(name + ": the settle-manifest commit never landed")
+                .isZero();
+        if (name.equals("page-envelope-commit")) {
+            // The manifest arm's page lands with the seal-time advance;
+            // only the page arm keeps every page envelope out.
             assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
                             + " AND session_id = ? AND kind ="
                             + " 'managed-tool-result-page'",
                     Integer.class, tenant, sessionId))
-                    .as(name + ": every page-envelope commit was rejected")
+                    .as(name + ": no page envelope ever persisted")
                     .isZero();
         }
         // Whatever manifests did commit (the initial empty one, and in
@@ -1067,8 +1058,15 @@ class HostedMonitorRunFaultGatesIT {
             case "cancel-reply-lost" -> {
                 assertProcessRows(jdbc, sessionId, name, 1);
                 assertThat(report.path("droppedCancelReply").asBoolean())
-                        .as(name + " dropped exactly one cancel reply")
+                        .as(name + " dropped the stop revision's reply")
                         .isTrue();
+                // The re-drive resends the very command whose reply fell;
+                // a second stop revision would carry another command id.
+                assertThat(report.path("stopRevisionCommandIds").size())
+                        .as(name + ": exactly one committed stop revision,"
+                                + " saw %s",
+                                report.path("stopRevisionCommandIds"))
+                        .isEqualTo(1);
                 assertThat(record.path("stopRequested").asBoolean())
                         .isTrue();
                 assertThat(record.path("run").path("state").asText())

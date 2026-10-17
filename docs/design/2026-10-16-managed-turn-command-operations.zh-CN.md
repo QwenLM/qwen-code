@@ -2,7 +2,7 @@
 
 [English](2026-10-16-managed-turn-command-operations.md) | [简体中文](2026-10-16-managed-turn-command-operations.zh-CN.md)
 
-状态：已在本次改动中实现。Turn 的输入与取消成为持久命令 operation，种类为 `submit_input` 与 `cancel`，可经 operation 查询读取；契约 `1.55.0`，schema V8。#14318 先合入了契约 `1.52.0` 与 schema V7，#14358 与 #14412 先后合入了契约 `1.53.0` 与 `1.54.0`，本改动排在它们之后。准入响应暂不携带该 operation，那属于 D7-3。
+状态：已在本次改动中实现。Turn 的输入与取消成为持久命令 operation，种类为 `submit_input` 与 `cancel`，可经 operation 查询读取；契约 `1.57.0`，schema V8。#14318 先合入了契约 `1.52.0` 与 schema V7，#14358、#14412、#14413 与 #14405 先后合入了契约 `1.53.0` 至 `1.56.0`，本改动排在它们之后。准入响应暂不携带该 operation，那属于 D7-3。
 
 这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 伞形 issue）的 **D7-1** 切片，由 [#14168](https://github.com/QwenLM/qwen-code/issues/14168) 跟踪。#12380 规定 Stage D 只有在具备持久命令投递与原命令对账时才能暴露 `java_durable`。本切片提供前一半。D7-2（[#14166](https://github.com/QwenLM/qwen-code/issues/14166)）提供对账，D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选 profile）须等两者都落地。
 
@@ -87,10 +87,10 @@
 
 每个结算调用者都先锁 Session 行，但其 REPEATABLE READ 快照可能早于该锁。例如 `requireLegacyMutation` 在 `recordHarnessEvents` 加锁之前就做了读取。普通读于是可能漏掉其间提交的取消，使其 operation 永远停在 pending。因此 `settleTurnCommands` 以 `FOR UPDATE` 读取 Turn，并以固定在该 Turn 的 `uq_ma_operation_identity` 前缀上的加锁读查找待处理的 operation（写在 MySQL 可执行注释里的 `FORCE INDEX`，H2 会跳过）。这些读只覆盖一个 Session scope 内一个 Turn 的条目。这个固定是必需的：交给优化器时，若某个 Turn 有很长的已结算历史、而表中待处理行很少，扫描会转向 `ix_ma_operation_claim`，其 `(operation_kind, state)` 范围包含所有 Session 的待处理行，两个 Session 的结算于是越过各自的 Session 锁形成死锁。没有调用者会在其后向 `ma_operation` 插入，所以它们无法形成 #13918 所消除的那类插入-间隙环。回执插入及其后的 operation 插入，仍遵循两个准入既有的 Session 与租户 guard 加锁顺序。
 
-### 9. Schema V8 与契约 1.55
+### 9. Schema V8 与契约 1.57
 
 - `V8__turn_command_operations.sql` 删除并重建 `ck_ma_operation_kind`。它保留 V7 约束的每个种类（包括 `WORKSPACE_CREATE`），并加入 `SUBMIT_INPUT` 与 `CANCEL`。这类迁移每次都重建整条 CHECK，所以必须以迁移链末端的约束为起点，而不是 V1 基线。由 #14318 一般化的 `ManagedSchema.extend` 会在规范 DDL 中就地替换重建的 CHECK。服务端由 Flyway 应用 V8，Broker 由 `ManagedSchema.initialize` 应用。V7 目录会被识别为版本 7 并升级。
-- 契约升至 `1.55.0`。operation 路由的描述列出它所服务的每个种类，两处 `failure_code` 描述写明新的失败，两个命令 operation schema 写明输入与取消"完成"的含义，版本说明写明 D7-1 改变什么、不改变什么。生成的 WebShell 类型只在 WebShell operation 的 `failure_code` 与 schema 描述上变化。
+- 契约升至 `1.57.0`。operation 路由的描述列出它所服务的每个种类，两处 `failure_code` 描述写明新的失败，两个命令 operation schema 写明输入与取消"完成"的含义，版本说明写明 D7-1 改变什么、不改变什么。生成的 WebShell 类型只在 WebShell operation 的 `failure_code` 与 schema 描述上变化。
 - `contract-known-gaps.txt` 仍无条目，文件头改为指向 #14122。该文件为空意味着 D4 的出口已满足，而不是不再有契约缺口。
 
 ## 验证

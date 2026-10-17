@@ -57,6 +57,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
 import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
 import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -167,6 +168,7 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
                     entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
+                    entry(WorkspaceDiscoveryController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryQueryRequest")),
                     entry(SshWorkspaceController.CreateRequest.class, List.of("WebShellWorkspaceRegisterRequest")),
                     entry(SshWorkspaceController.OperationRequest.class, List.of("WebShellWorkspaceOperationRequest")),
                     entry(SshWorkspaceService.NodeSummary.class, List.of("WebShellRuntimeNode")),
@@ -1216,6 +1218,10 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/create")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"workspace-create\"}");
+        exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1823,6 +1829,28 @@ class ManagedAgentApiContractTest {
                                 rest.at("/data/0/id").asText()));
     }
 
+    /** A committed record body for a synthetic child_run row. */
+    private void childRunResource(String tenant, String sessionId,
+            String resourceId, String json) {
+        String scope = com.alibaba.qwen.code.managedagent.store
+                .ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key,"
+                + " session_scope_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256,"
+                + " storage_kind, inline_bytes, publish_command_id, state,"
+                + " gmt_create) VALUES (?, ?, ?, 'workspace-contract', ?, ?,"
+                + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                + " 'command', 'REFERENCED', "
+                + com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaTime.SQL_NOW + ")",
+                com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaKeys.key(scope, resourceId),
+                scope, tenant, sessionId, resourceId, body.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
+                body);
+    }
+
     /**
      * H4f: the cancel routes over a monitor task (no cancel action) and a
      * running child-agent task row. Delivery is the coordinator's and is
@@ -1846,12 +1874,26 @@ class ManagedAgentApiContractTest {
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 recordKey, tenant, sessionId, "d".repeat(64));
+        // #13746 F2: the run's committed record names its child Session,
+        // and both task views carry that link inside their schemas.
+        String childSession = UUID.randomUUID().toString();
+        childRunResource(tenant, sessionId, "resource-run-contract",
+                "{\"kind\":\"child_agent\",\"childSessionId\":\""
+                        + childSession + "\"}");
         String childTask = "task_" + recordKey;
         JsonNode view = json(exchange(drift, "getSessionTask", 200,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         childTask).header(TENANT, tenant), null));
         assertThat(view.get("action_capabilities").toString())
                 .isEqualTo("[\"cancel\"]");
+        assertThat(view.get("child_session_id").asText())
+                .isEqualTo(childSession);
+        JsonNode webShellView = json(exchange(drift, "getWebShellTask", 200,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, childTask)));
+        assertThat(webShellView.get("childSessionId").asText())
+                .isEqualTo(childSession);
         String cancelPath = "/v1/agents/sessions/{id}/tasks/{task}/cancel";
         JsonNode admitted = json(exchange(drift, "cancelSessionTask", 202,
                 post(cancelPath, sessionId, childTask).header(TENANT, tenant)
@@ -1956,12 +1998,16 @@ class ManagedAgentApiContractTest {
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 workflowKey, tenant, sessionId, "f".repeat(64));
+        childRunResource(tenant, sessionId, "resource-run-contract-wf",
+                "{\"kind\":\"workflow\",\"childSessionId\":null}");
         String workflowTask = "task_" + workflowKey;
         JsonNode workflowView = json(exchange(drift, "getSessionTask", 200,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         workflowTask).header(TENANT, tenant), null));
         assertThat(workflowView.get("action_capabilities").toString())
                 .isEqualTo("[\"cancel\"]");
+        // Before its child is known, a child task names none.
+        assertThat(workflowView.has("child_session_id")).isFalse();
         // The child_agent cancel above stays open in this fixture, and the
         // one open operation per Session rule spans task kinds.
         assertThat(json(exchange(drift, "cancelSessionTask", 409,

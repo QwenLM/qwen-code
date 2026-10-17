@@ -499,7 +499,8 @@ public final class ApiModels {
             @JsonProperty("output_cursor") String outputCursor,
             @JsonProperty("artifact_refs") List<String> artifactRefs,
             @JsonProperty("action_capabilities")
-                    List<String> actionCapabilities) {
+                    List<String> actionCapabilities,
+            @JsonProperty("child_session_id") String childSessionId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -507,7 +508,8 @@ public final class ApiModels {
             String state, Long definitionRevision, String runtimeState,
             long createdAt, Long startedAt, Long settledAt,
             String outputCursor,
-            List<String> artifactRefs, List<String> actionCapabilities) {
+            List<String> artifactRefs, List<String> actionCapabilities,
+            String childSessionId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

@@ -38,7 +38,8 @@ public class RuntimeBrokerConfiguration {
         require(broker.getCredentialKey(),
                 "Runtime Broker credential key");
         return AesGcmSecretProtector.fromBase64(
-                broker.getCredentialKeyId(), broker.getCredentialKey());
+                broker.getCredentialKeyId(), broker.getCredentialKey(),
+                broker.getPreviousCredentialKeys());
     }
 
     @Bean

@@ -107,7 +107,8 @@ vi.mock(
     },
   }),
 );
-vi.mock('./hosted-harness-model.js', () => ({
+vi.mock('./hosted-harness-model.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./hosted-harness-model.js')>()),
   runHostedHarnessTextTurn: state.model,
 }));
 
