@@ -42,7 +42,12 @@ function isUniformCrlf(text: string): boolean {
     if (!body[i].endsWith('\r')) return false;
   }
   const lastLine = body[body.length - 1];
-  if (lastLine === '') return true;
+  // A blank last line here means the text ends with `\n\n` (or is a lone
+  // `\n`): that final terminator carries no `\r`, so it is a bare LF like any
+  // other and breaks uniformity. The loop above never inspects it — it walks
+  // the interior lines only, and this one is the segment the trailing
+  // newline terminated.
+  if (lastLine === '') return false;
   if (lastLine.endsWith('\r')) return true;
   return !trailing;
 }
@@ -164,7 +169,16 @@ export function buildContextBoundedDiff(
     prefix++;
   }
   if (prefix === oldLines.length && prefix === newLines.length) {
-    return '';
+    // Identical line arrays over non-identical raw text means the only
+    // difference is the final terminator — `splitLines` drops it from both
+    // sides. `''` is this module's "nothing changed" verdict, so returning it
+    // here certified a pending edit that does change the file as a no-op: for
+    // `'a\r\n'` vs `'a\r'` (what `content.replace(/\n$/,'')` over a CRLF file
+    // produces) the approval card rendered a path and no rows, and approving
+    // it applied the edit blind. Report it as the terminator notice instead.
+    return newText.endsWith('\n')
+      ? DIFF_TRAILING_NEWLINE_ADDED_MARKER
+      : DIFF_TRAILING_NEWLINE_REMOVED_MARKER;
   }
   let suffix = 0;
   while (

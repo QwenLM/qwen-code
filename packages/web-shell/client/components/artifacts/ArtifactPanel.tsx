@@ -66,6 +66,7 @@ import { DiffView } from '../messages/tools/DiffView';
 import {
   DIFF_INVISIBLE_CHARACTERS,
   escapeDiffContent,
+  escapeInvisibleForMerge,
 } from '../messages/tools/diffContent';
 import diffStyles from '../messages/tools/DiffView.module.css';
 import { TurnCallsPanel } from './TurnCallsPanel';
@@ -2903,10 +2904,8 @@ function CodeMirrorDiff({
     // inserted side renders escapes: a diff that certifies falsely. Escape
     // BOTH sides through the same transform before they enter the merge view
     // so the comparison runs over escaped text and every side renders the
-    // same visible escapes.
-    const escapeInvisibleForMerge = (text: string): string =>
-      text.replace(DIFF_INVISIBLE_CHARACTERS, (ch) => escapeDiffContent(ch));
-
+    // same visible escapes. The transform leaves line terminators alone (see
+    // DIFF_MERGE_INVISIBLE_CHARACTERS): this text is a document, not a row.
     void import('@codemirror/merge')
       .then(({ MergeView, unifiedMergeView }) => {
         if (cancelled) return;

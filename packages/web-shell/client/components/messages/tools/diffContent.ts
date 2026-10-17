@@ -1,12 +1,31 @@
 import { escapePreviewText } from '../../../adapters/transcriptAdapter';
 import { sanitizeControlChars } from '../toolFormatting';
 
-// Both diff renderers mark the same invisible characters, without rewriting
-// the underlying CodeMirror document or mistaking literal escape text for one.
+// Both diff renderers mark invisible characters, so a bidi override or a
+// zero-width joiner cannot hide what a diff row says. This is the class the
+// decoration layer uses: it also covers the structural characters a line can
+// carry (\t, \r), because a decoration rewrites one row of an existing
+// document and those characters are rendered as text there anyway.
 export const DIFF_INVISIBLE_CHARACTERS =
   // eslint-disable-next-line no-control-regex -- This renderer makes control characters visible.
   /([\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\p{Cf}])/gu;
 
+// The narrow merge layout cannot decorate the deletion side, so it neutralises
+// the same characters in the text it hands CodeMirror as a document. That
+// consumer splits on line endings, so a terminator must survive verbatim:
+// escaping CR would append a literal `\r` to every row of a CRLF file (the
+// row would read `alpha\r` for a line whose content is `alpha`), which buries
+// exactly the line-ending signal the CRLF marker exists to surface.
+export const DIFF_MERGE_INVISIBLE_CHARACTERS =
+  // eslint-disable-next-line no-control-regex -- This renderer makes control characters visible.
+  /([\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029\p{Cf}])/gu;
+
 export function escapeDiffContent(content: string): string {
   return escapePreviewText(sanitizeControlChars(content));
+}
+
+export function escapeInvisibleForMerge(content: string): string {
+  return content.replace(DIFF_MERGE_INVISIBLE_CHARACTERS, (character) =>
+    escapeDiffContent(character),
+  );
 }

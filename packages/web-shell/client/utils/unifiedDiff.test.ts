@@ -4,6 +4,7 @@ import {
   buildUnifiedDiff,
   DIFF_CRLF_UNIFORM_MARKER,
   DIFF_OMITTED_MARKER,
+  DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
   localizeDiffNotice,
   parseUnifiedDiff,
 } from './unifiedDiff';
@@ -84,6 +85,25 @@ describe('buildContextBoundedDiff', () => {
       deletions: 0,
       lines: [{ type: 'header' }],
     });
+  });
+
+  it('shows a CRLF-to-CR terminator change instead of reporting no changes', () => {
+    // `'a\r\n'` vs `'a\r'` is what a step that drops a single trailing LF from
+    // CRLF content produces (`content.replace(/\n$/,'')`). The old strip only
+    // matched `\r?\n`, so one side kept a dangling `\r`, the sides compared
+    // unequal, and the prefix scan below found identical line arrays and
+    // returned `''` — "no changes" for a pending edit that does change the
+    // file, while the same edit rendered rows once completed.
+    const diff = buildContextBoundedDiff('a\r\n', 'a\r');
+    expect(diff).toBe(DIFF_TRAILING_NEWLINE_REMOVED_MARKER);
+    expect(localizeDiffNotice(diff, stubT)).toBe(
+      '[approval.trailingNewlineRemoved]',
+    );
+    expect(buildContextBoundedDiff('a\r\nb\r\n', 'a\r\nb\r')).toBe(
+      DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
+    );
+    // Contrast: a real content change on the last line still renders rows.
+    expect(buildContextBoundedDiff('a\r\n', 'b\r')).toContain('-a');
   });
 
   it('shows a middle edit with three context lines and original line numbers', () => {
@@ -316,6 +336,20 @@ describe('CRLF uniformity is decided at the source layer', () => {
   it('refuses the marker when a final line is terminated by a bare LF', () => {
     const diff = buildUnifiedDiff('a\r\nb\n', 'a\r\nc\n');
     expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
+  it('refuses the marker when the last blank line is terminated by a bare LF', () => {
+    // `'a\r\n\n'` is a CRLF line followed by an empty line closed with a bare
+    // `\n`. The interior loop skips that terminator — it is the trailing
+    // newline itself — so certifying it stamped uniform-CRLF over a file whose
+    // last line-ending is LF, and the renderer then stripped a `\r` that was
+    // content.
+    expect(
+      parseUnifiedDiff(buildUnifiedDiff('a\r\n\n', 'a\r\n\r\n')).crlfUniform,
+    ).toBe(false);
+    expect(parseUnifiedDiff(buildUnifiedDiff('\n', '\r\n')).crlfUniform).toBe(
+      false,
+    );
   });
 
   it('does not stamp the marker for LF files', () => {
