@@ -1,151 +1,22 @@
-/**
- * DingTalk markdown normalization.
- *
- * DingTalk's markdown renderer is a limited subset with quirks:
- * - Max message length ~3800 chars — split into chunks
- * - Code fences must be closed/reopened across chunk boundaries
- */
+import { splitMarkdown } from '@qwen-code/channel-base/markdown-chunks';
 
 export const DINGTALK_CHUNK_LIMIT = 3800;
+export const DINGTALK_MAX_CHUNK_LENGTH = 20_000;
 
 export function escapeDingTalkMarkdown(value: string): string {
   return value.replace(/([\\`*_[\]{}()#+.!|>~:-])/gu, '\\$1');
 }
 
-// --- Chunk splitting ---
-
-function safeUtf16SliceEnd(value: string, end: number): number {
-  if (end <= 0 || end >= value.length) return end;
-  const previous = value.charCodeAt(end - 1);
-  const next = value.charCodeAt(end);
-  return previous >= 0xd800 &&
-    previous <= 0xdbff &&
-    next >= 0xdc00 &&
-    next <= 0xdfff
-    ? end - 1
-    : end;
-}
-
 export function splitChunks(
   text: string,
   chunkLimit = DINGTALK_CHUNK_LIMIT,
+  maxLength = DINGTALK_MAX_CHUNK_LENGTH,
 ): string[] {
-  if (!text || text.length <= chunkLimit) {
-    return [text];
-  }
-
-  const chunks: string[] = [];
-  let buf = '';
-  const lines = text.split('\n');
-  let inCode = false;
-
-  const flush = (keepCodeOpen = inCode) => {
-    if (keepCodeOpen) {
-      buf += '\n```';
-    }
-    chunks.push(buf);
-    buf = keepCodeOpen ? '```' : '';
-  };
-
-  const appendLine = (
-    line: string,
-    needsLineBreak: boolean,
-    closesCodeFence: boolean,
-    leavesCodeFenceOpen: boolean,
-  ) => {
-    let remaining = line;
-    let prefixPending = needsLineBreak;
-    let lineOpenedFenceInBuffer = false;
-
-    while (remaining.length > 0 || prefixPending) {
-      const prefix = prefixPending ? '\n' : '';
-      const fitsAsFinalPiece =
-        remaining.length <= chunkLimit - buf.length - prefix.length;
-      const closeFenceOverhead =
-        (inCode && !(closesCodeFence && fitsAsFinalPiece)) ||
-        (!inCode && leavesCodeFenceOpen)
-          ? '\n```'.length
-          : 0;
-      const available =
-        chunkLimit - closeFenceOverhead - buf.length - prefix.length;
-
-      if (available <= 0) {
-        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
-        if (buf === (keepCodeOpen ? '```' : '')) {
-          throw new RangeError(
-            'chunk limit cannot contain one Unicode character',
-          );
-        }
-        flush(keepCodeOpen);
-        continue;
-      }
-
-      let pieceLength = Math.min(available, remaining.length);
-      if (pieceLength < remaining.length) {
-        for (
-          let fenceStart = Math.max(0, pieceLength - 2);
-          fenceStart < pieceLength;
-          fenceStart++
-        ) {
-          if (
-            remaining.slice(fenceStart, fenceStart + 3) === '```' &&
-            pieceLength < fenceStart + 3
-          ) {
-            pieceLength = fenceStart;
-            break;
-          }
-        }
-      }
-      pieceLength = safeUtf16SliceEnd(remaining, pieceLength);
-
-      if (pieceLength === 0 && remaining.length > 0) {
-        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
-        if (!buf || (keepCodeOpen && buf === '```')) {
-          throw new RangeError(
-            'chunk limit cannot contain one Unicode character',
-          );
-        }
-        flush(keepCodeOpen);
-        continue;
-      }
-
-      const piece = remaining.slice(0, pieceLength);
-      const appendedText = prefix + piece;
-      buf += appendedText;
-      remaining = remaining.slice(piece.length);
-      prefixPending = false;
-      lineOpenedFenceInBuffer ||=
-        !inCode && leavesCodeFenceOpen && appendedText.includes('```');
-
-      if (remaining.length > 0) {
-        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
-        flush(keepCodeOpen);
-        prefixPending = keepCodeOpen;
-      }
-    }
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] || '';
-    const fenceCount = (line.match(/```/g) || []).length;
-    const togglesCodeFence = fenceCount % 2 === 1;
-    appendLine(
-      line,
-      i > 0,
-      inCode && togglesCodeFence,
-      inCode !== togglesCodeFence,
-    );
-
-    if (togglesCodeFence) {
-      inCode = !inCode;
-    }
-  }
-
-  if (buf) {
-    chunks.push(buf);
-  }
-
-  return chunks;
+  return splitMarkdown(text, {
+    targetLength: chunkLimit,
+    maxLength,
+    unit: 'utf16',
+  });
 }
 
 /** Extract a short title from the first line of markdown for the webhook payload. */
@@ -155,10 +26,11 @@ export function extractTitle(text: string): string {
   return cleaned || 'Reply';
 }
 
-/** Split long Markdown messages without changing their formatting. */
+/** Split long Markdown messages without cutting inline structures. */
 export function normalizeDingTalkMarkdown(
   text: string,
   chunkLimit = DINGTALK_CHUNK_LIMIT,
+  maxLength = DINGTALK_MAX_CHUNK_LENGTH,
 ): string[] {
-  return splitChunks(text, chunkLimit);
+  return splitChunks(text, chunkLimit, maxLength);
 }
