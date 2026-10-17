@@ -36,7 +36,8 @@ G1 therefore delivers:
    untrusted clients can reach the server.
 4. **Ungated modes and CI.** Both modes lose the stale gate, drive their
    physical tool through `write_file` (the publicly admitted profile), run in
-   the Hosted MySQL CI job, and the README describes them as runnable.
+   the Hosted MySQL CI job (now `hosted-failover-e2e`), and the README
+   describes them as runnable.
 
 Out of scope: public Shell profile selection, the G2 takeover reconciliation
 scan, G3 owner-affinity removal, and multi-Runtime takeover. Cancellation
@@ -110,8 +111,9 @@ takeover is implemented for contract completeness but has no E2E mode.
   the durable local-process provisioner, whose trusted host identity is
   Linux-only. The runner enables `durable-local-process` for these modes,
   creates the state directory owner-private, and refuses other platforms with
-  an explicit error pointing at the Hosted MySQL CI job. This is the boundary
-  #12766 already records; G1 does not change it.
+  an explicit error pointing at the Linux CI job that runs them (now the
+  Hosted failover E2E job). This is the boundary #12766 already records; G1
+  does not change it.
 - **The E2E seeds Workspace admission as deployment data** (registry row,
   access grant, Broker mount) and enables `harness.workspace-files-enabled`
   plus the trusted-actor header on both Spring owners. The physical side effect
@@ -121,7 +123,10 @@ takeover is implemented for contract completeness but has no E2E mode.
   wiring is no longer mode-gated: every mode's owners carry it (#13258), so
   its configuration matches the other modes.
 - **Both modes join the `hosted-harness-mysql` job**, which installs the MySQL
-  server binaries the runner needs for its private `mysqld`.
+  server binaries the runner needs for its private `mysqld`. They now run with
+  the later failover arms in the `hosted-failover-e2e` job, which installs
+  those binaries itself (see D11 of the
+  [replaceable-Harness design](2026-10-02-hosted-replaceable-harness.md)).
 
 ## Changes and ownership
 
