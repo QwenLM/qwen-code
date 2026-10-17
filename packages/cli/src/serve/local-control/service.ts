@@ -14,7 +14,13 @@ import { sleepInhibitor } from '@qwen-code/qwen-code-core';
 import type { MutableOriginAllowlist } from '../auth.js';
 import type { CredentialStore } from './credentials.js';
 import { tagListener } from './listener-identity.js';
-import { selectLanAddress, type LanCandidate } from './lan-interfaces.js';
+import {
+  isLanIpv4,
+  isSoftwareNetwork,
+  listLanCandidates,
+  selectLanAddress,
+  type LanCandidate,
+} from './lan-interfaces.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 /** Key under which the LAN origin is registered in the mutable CORS allowlist. */
@@ -61,6 +67,15 @@ export interface LocalControlStatus {
 export interface LocalControlEnableOptions {
   /** Which LAN address to expose, when the host has more than one. */
   address?: string;
+  /**
+   * Set only by the CLI's `--local-control-address` path: the named address
+   * is recorded as the daemon's standing explicit grant (#14136) so the Web
+   * Shell card can re-enable it after a disable. The HTTP enable route
+   * refuses non-candidate addresses that do not match this grant, so the
+   * opt-in stays bound to operator provenance rather than to the shape of a
+   * caller-supplied string.
+   */
+  allowExplicitAddress?: boolean;
   /**
    * Path + query the QR should open, e.g. `/?workspace=%2Fsrc%2Fapp`. Lets the
    * phone land on the session the operator was looking at rather than the
@@ -124,6 +139,7 @@ export class LocalControlService {
   #selected: LanCandidate | undefined;
   #sleep: SleepInhibitorHandle | undefined;
   #url: string | undefined;
+  #grantedExplicitCandidate: LanCandidate | undefined;
   #transition: Promise<void> = Promise.resolve();
 
   constructor(deps: LocalControlServiceDeps) {
@@ -132,6 +148,16 @@ export class LocalControlService {
 
   get active(): boolean {
     return this.#server !== undefined;
+  }
+
+  /**
+   * The out-of-candidate-list address the operator granted via
+   * `--local-control-address`, recorded when that enable succeeds. Survives
+   * disable: the grant is the daemon-start decision, not the session's. The
+   * HTTP enable route admits only automatic candidates or this address.
+   */
+  get grantedExplicitCandidate(): LanCandidate | undefined {
+    return this.#grantedExplicitCandidate;
   }
 
   status(): LocalControlStatus {
@@ -225,6 +251,30 @@ export class LocalControlService {
     this.#token = token;
     this.#selected = selected;
     this.#url = url;
+    if (
+      options.allowExplicitAddress === true &&
+      !listLanCandidates().some((c) => c.address === selected.address)
+    ) {
+      this.#grantedExplicitCandidate = selected;
+    }
+    // Warn only now that the enable actually produced a live listener —
+    // earlier placement recorded an exposure on enable attempts that then
+    // failed (bad target, EADDRINUSE) and never existed. A selected address
+    // outside RFC 1918/3927, or one on a VPN/tunnel or virtual interface,
+    // can only have come from the explicit opt-in (#14136): automatic
+    // candidates are pre-filtered by isLanIpv4 and isSoftwareNetwork.
+    // Surface it loudly rather than letting the pairing look routine.
+    if (!isLanIpv4(selected.address)) {
+      writeStderrLine(
+        `qwen serve: WARNING: Local Control address ${selected.address} is outside RFC 1918 private / RFC 3927 link-local space. ` +
+          'It was accepted only because it was named explicitly — advertise it only on a network you trust.',
+      );
+    } else if (isSoftwareNetwork(selected.interfaceName)) {
+      writeStderrLine(
+        `qwen serve: WARNING: Local Control address ${selected.address} is on ${selected.interfaceName}, a VPN/tunnel or virtual interface. ` +
+          'It was accepted only because it was named explicitly — advertise it only on a network you trust.',
+      );
+    }
     // Best-effort, and reported as such: the core inhibitor no-ops on headless
     // SSH sessions and on hosts without a usable backend. A phone losing its
     // session to a sleeping laptop should be explainable from the status, so

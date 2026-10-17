@@ -25,6 +25,13 @@ export interface LocalControlStatus {
   sleepInhibited?: boolean;
   encrypted?: boolean;
   interfaces?: LanCandidate[];
+  /**
+   * The address the operator granted with `--local-control-address` when it
+   * lies outside the automatic candidate list, present only while the host
+   * still holds it. Never folded into `interfaces`: that list is the
+   * automatic-candidate set other clients resolve against.
+   */
+  explicitCandidate?: LanCandidate;
 }
 
 function resolveLocalControlUrl(baseUrl: string, path: string): URL {

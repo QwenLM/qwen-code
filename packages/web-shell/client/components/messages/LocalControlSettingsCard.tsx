@@ -30,6 +30,19 @@ function getLocalControlTarget(): string {
   return `${url.pathname}${url.search}`;
 }
 
+interface SelectionState {
+  /** The address the next enable posts. */
+  selected: string;
+  /**
+   * The address the daemon last committed to — reported by an active status,
+   * or vouched for by the daemon's `explicitCandidate` grant. Kept out of
+   * `interfaces` (the automatic-candidate list) so a Disable→Enable round
+   * trip re-posts the operator's pick instead of silently falling back to an
+   * automatic candidate (#14136).
+   */
+  retained: LanCandidate | undefined;
+}
+
 // Re-run on every status update, not just mount: enable/disable responses
 // carry a fresh candidate list, and the selector only renders with 2+
 // candidates — so a selection that outlived a network change (same adapter,
@@ -37,18 +50,57 @@ function getLocalControlTarget(): string {
 function reconcileSelection(
   interfaces: LanCandidate[] | undefined,
   current: string,
+  retained: LanCandidate | undefined,
 ): string {
   if (!interfaces) return current;
+  if (
+    current &&
+    (current === retained?.address ||
+      interfaces.some((c) => c.address === current))
+  ) {
+    return current;
+  }
+  // The committed pick outranks the single-candidate auto-fill: it is the
+  // address the operator (or the daemon's grant) actually chose.
+  if (retained) return retained.address;
   if (interfaces.length === 1) return interfaces[0]!.address;
-  if (current && !interfaces.some((c) => c.address === current)) return '';
-  return current;
+  return '';
+}
+
+function reconcileRetained(
+  retained: LanCandidate | undefined,
+  next: LocalControlStatus,
+): LanCandidate | undefined {
+  // What the daemon is serving right now is the strongest truth.
+  if (next.active && next.address) {
+    return { interfaceName: next.interfaceName ?? '', address: next.address };
+  }
+  // The daemon vouches for its CLI-granted address only while the host still
+  // holds it.
+  if (next.explicitCandidate) return next.explicitCandidate;
+  // A non-empty candidate list that no longer contains the retained address
+  // proves it stale (same adapter, new DHCP address) — drop it so the picker
+  // recovers. An empty or absent list proves nothing: the retained address
+  // may live on an interface the automatic filter excludes.
+  if (
+    retained &&
+    next.interfaces &&
+    next.interfaces.length > 0 &&
+    !next.interfaces.some((c) => c.address === retained.address)
+  ) {
+    return undefined;
+  }
+  return retained;
 }
 
 export function LocalControlSettingsCard() {
   const { t } = useI18n();
   const { baseUrl, token } = useWorkspace();
   const [status, setStatus] = useState<LocalControlStatus>();
-  const [selectedAddress, setSelectedAddress] = useState('');
+  const [selection, setSelection] = useState<SelectionState>({
+    selected: '',
+    retained: undefined,
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -61,9 +113,17 @@ export function LocalControlSettingsCard() {
       .then((next) => {
         if (ignore) return;
         setStatus(next);
-        setSelectedAddress((current) =>
-          reconcileSelection(next.interfaces, current),
-        );
+        setSelection((prev) => {
+          const retained = reconcileRetained(prev.retained, next);
+          return {
+            retained,
+            selected: reconcileSelection(
+              next.interfaces,
+              prev.selected,
+              retained,
+            ),
+          };
+        });
       })
       .catch((failure: unknown) => {
         if (!ignore) {
@@ -81,6 +141,11 @@ export function LocalControlSettingsCard() {
     if (!status) return;
     setBusy(true);
     setError('');
+    // Captured before the request: the 409 recovery below needs to know
+    // whether the refused address was the retained pick.
+    const postedAddress = status.active
+      ? undefined
+      : selection.selected || undefined;
     try {
       const path = status.active
         ? '/workspace/local-control/disable'
@@ -88,7 +153,7 @@ export function LocalControlSettingsCard() {
       const body = status.active
         ? undefined
         : {
-            address: selectedAddress || undefined,
+            address: postedAddress,
             target: getLocalControlTarget(),
           };
       const next = await requestLocalControl(
@@ -99,9 +164,17 @@ export function LocalControlSettingsCard() {
         body,
       );
       setStatus(next);
-      setSelectedAddress((current) =>
-        reconcileSelection(next.interfaces, current),
-      );
+      setSelection((prev) => {
+        const retained = reconcileRetained(prev.retained, next);
+        return {
+          retained,
+          selected: reconcileSelection(
+            next.interfaces,
+            prev.selected,
+            retained,
+          ),
+        };
+      });
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
       // The enable route attaches the fresh candidate list to 409s; reconcile
@@ -113,14 +186,33 @@ export function LocalControlSettingsCard() {
           : undefined;
       if (recovered) {
         setStatus((prev) => (prev ? { ...prev, interfaces: recovered } : prev));
-        setSelectedAddress((current) => reconcileSelection(recovered, current));
+        setSelection((prev) => {
+          // The daemon just refused the retained pick itself — it is gone
+          // (stale DHCP, departed VPN) — so stop offering it.
+          const retained =
+            prev.retained && postedAddress === prev.retained.address
+              ? undefined
+              : prev.retained;
+          return {
+            retained,
+            selected: reconcileSelection(recovered, prev.selected, retained),
+          };
+        });
       }
     } finally {
       setBusy(false);
     }
   };
 
-  const needsSelection = (status?.interfaces?.length ?? 0) > 1;
+  const candidates = status?.interfaces ?? [];
+  const retainedExtra =
+    selection.retained &&
+    !candidates.some((c) => c.address === selection.retained!.address)
+      ? selection.retained
+      : undefined;
+  // The retained explicit pick renders as its own row, so a card holding one
+  // still offers (and pre-selects) it even with zero automatic candidates.
+  const needsSelection = retainedExtra !== undefined || candidates.length > 1;
 
   return (
     <div
@@ -146,7 +238,12 @@ export function LocalControlSettingsCard() {
       </div>
 
       {!status?.active && needsSelection && (
-        <Select value={selectedAddress} onValueChange={setSelectedAddress}>
+        <Select
+          value={selection.selected}
+          onValueChange={(value) =>
+            setSelection((prev) => ({ ...prev, selected: value }))
+          }
+        >
           <SelectTrigger
             className="w-full max-w-sm"
             aria-label={t('settings.localControl.network')}
@@ -156,11 +253,23 @@ export function LocalControlSettingsCard() {
             />
           </SelectTrigger>
           <SelectContent>
-            {(status?.interfaces ?? []).map((network) => (
+            {candidates.map((network) => (
               <SelectItem key={network.address} value={network.address}>
                 {network.interfaceName} · {network.address}
               </SelectItem>
             ))}
+            {retainedExtra && (
+              <SelectItem
+                key={retainedExtra.address}
+                value={retainedExtra.address}
+              >
+                {retainedExtra.interfaceName
+                  ? `${retainedExtra.interfaceName} · `
+                  : ''}
+                {retainedExtra.address} (
+                {t('settings.localControl.explicitPick')})
+              </SelectItem>
+            )}
           </SelectContent>
         </Select>
       )}
@@ -224,7 +333,7 @@ export function LocalControlSettingsCard() {
         disabled={
           busy ||
           !status ||
-          (!status.active && needsSelection && !selectedAddress)
+          (!status.active && needsSelection && !selection.selected)
         }
         onClick={toggle}
       >
