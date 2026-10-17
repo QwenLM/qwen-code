@@ -7,9 +7,17 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: 'Immutable source commit selected by the release preflight.'
+        description: 'Immutable source commit selected by the caller.'
         required: true
         type: 'string'
+      # 'fast' keeps the flyway guard, the real-daemon E2E and the Linux
+      # Java 21 leg for managed-agent-gate.yml's push-time tier; anything
+      # else, including no value on the nightly, runs every lane.
+      tier:
+        description: 'fast for the push-time subset; full otherwise.'
+        required: false
+        type: 'string'
+        default: 'full'
 
 permissions:
   contents: 'read'
@@ -19,29 +27,24 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  group: 'sdk-java-${{ github.workflow }}-${{ github.ref }}'
+  # Keyed by event and commit: a Managed Agent gate fast run and a full run
+  # on the same pull request must not queue behind each other, where a newer
+  # pending run would displace the older one.
+  group: 'sdk-java-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}'
   # Release callers and daily runs must not displace each other's validation.
   cancel-in-progress: false
 
 jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
-    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
+    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: 'ubuntu-latest'
-            java: '11'
-          - os: 'ubuntu-latest'
-            java: '17'
-          - os: 'ubuntu-latest'
-            java: '21'
-          - os: 'macos-latest'
-            java: '21'
-          - os: 'windows-latest'
-            java: '21'
+        include: >-
+          ${{ fromJSON(inputs.tier == 'fast' && '[{"os":"ubuntu-latest","java":"21"}]' ||
+          '[{"os":"ubuntu-latest","java":"11"},{"os":"ubuntu-latest","java":"17"},{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]') }}
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -188,6 +191,12 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
+      # The fast tier runs the full module suite below, which loads the built
+      # Core and CLI JavaScript, as mysql-integration's suite does.
+      - name: 'Build Managed Agent JavaScript prerequisites (fast tier)'
+        if: "${{ inputs.tier == 'fast' }}"
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
@@ -203,6 +212,7 @@ jobs:
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MATRIX_JAVA: '${{ matrix.java }}'
+          TIER: '${{ inputs.tier }}'
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
@@ -214,7 +224,12 @@ jobs:
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
             cd ../../managed-agent-server
-            mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+            # The fast tier skips mysql-integration, which owns the full H2 unit suite.
+            if [ "${TIER}" = "fast" ]; then
+              mvn --batch-mode --no-transfer-progress clean test
+            else
+              mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+            fi
           fi
 
       - name: 'Run Java SDK tests (hosted)'
@@ -230,9 +245,14 @@ jobs:
         shell: 'bash'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          TIER: '${{ inputs.tier }}'
         run: |-
           mvn --batch-mode --no-transfer-progress -f ../sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-          mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+          if [ "${TIER}" = "fast" ]; then
+            mvn --batch-mode --no-transfer-progress clean test
+          else
+            mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+          fi
 
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
@@ -264,7 +284,7 @@ jobs:
   # default merge-ref checkout is kept on both — the merge result is the point.
   flyway-migrations:
     name: 'Flyway migration version uniqueness'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
       - name: 'Restore workspace ownership'
@@ -389,11 +409,12 @@ jobs:
 
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
     # a zero-step job outright (#13623), the pool does not. The job is
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # 15 covered the hosted lane. On the pool this job takes the per-host
     # sdk-java lock once per Maven step — three acquisitions today. The
     # 20-minute per-acquisition budget was sized on one quiet window
@@ -653,6 +674,7 @@ jobs:
 
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
     # The step ceilings today (85 + 16×10 + 20 + 50 = 315 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s and
@@ -932,6 +954,7 @@ jobs:
 
   event-transport-broker:
     name: 'EventTransport broker gates / RocketMQ 5.5.1 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     # Hosted: the gates boot their own broker on fixed ports.
     runs-on: 'ubuntu-latest'
     # 10 + 20 capped minutes plus the uncapped setup.
@@ -1010,6 +1033,7 @@ jobs:
 
   event-transport-multi-node:
     name: 'EventTransport multi-node gates / RocketMQ 5.5.1 + MySQL 8.4 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     # Hosted: the gate boots its own broker on fixed ports and its own
     # control-plane nodes.
     runs-on: 'ubuntu-latest'
@@ -1122,7 +1146,7 @@ jobs:
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
     # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
     # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
     # about a minute. On the shared pool that setup is what stretches: npm ci
@@ -1131,7 +1155,17 @@ jobs:
     # setup alone needs ~44 min, so 30 cancelled the job before a single
     # assertion ran. Matches the release.yml quality_build tier
     # (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES, default 45).
-    timeout-minutes: 45
+    # The fast tier keeps 90 rather than 45. This budget was originally sized
+    # for the post-job Maven cache save, which added 14-37 minutes on the
+    # saturated pool AFTER the assertions passed; a job killed there concludes
+    # cancelled and reddens the gate of a green suite (run 38936748280, and 4
+    # of the 8 sdk-java.yml runs before it). #14396 has since suppressed that
+    # save on self-hosted runners, so the save is no longer the reason. What
+    # still justifies the headroom is frequency: the fast tier runs this leg on
+    # every touched PR push instead of nightly only, so it meets the ~44 min
+    # stretched-setup tail above far more often than a 45 ceiling leaves room
+    # for.
+    timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
