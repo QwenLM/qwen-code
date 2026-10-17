@@ -253,10 +253,16 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",
                                     "WorkspaceCsiCheckpointSnapshotStore.scope/1")),
+                    // Text dispatch and environment delegation share local
+                    // method names without adding session/turn SQL.
+                    Map.entry("WorkspaceCsiHostedMain.java",
+                            Set.of("WorkspaceCsiHostedMain.required/1")),
                     Map.entry("WorkspaceCsiRuntimeAccess.java",
                             Set.of("WorkspaceCsiRuntimeAccess.attest/3",
                                     "WorkspaceCsiRuntimeAccess.request/0",
                                     "WorkspaceCsiRuntimeAccess.unavailable/0")),
+                    Map.entry("WorkspaceCsiRuntimeMain.java",
+                            Set.of("WorkspaceCsiRuntimeMain.run/1")),
                     Map.entry("WorkspaceCsiWorkerAckStore.java",
                             Set.of("WorkspaceCsiWorkerAckStore.decode/1",
                                     "WorkspaceCsiWorkerAckStore.hash/1")),
