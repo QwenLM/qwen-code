@@ -365,6 +365,35 @@ class WorkspaceMigrationStoreTest {
         assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_operation WHERE operation_kind = 'RENAME'", String.class)).isEqualTo(state);
     }
 
+    // D7-2: a parked task cancel holds no lifecycle hostage, yet its
+    // acceptance is unknown and its task may still use this storage, so a
+    // migration waits until the reconciler settles it.
+    @Test
+    void refusesAStorageWithAParkedTaskCancelUntilItSettles() {
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
+                + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
+                + " context_revision, workspace_config_ref, workspace_policy_ref)"
+                + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
+        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
+                WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+                + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, failure_code, available_at, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'TASK_CANCEL', 'op_cancel', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', 'RECOVERY_BLOCKED',"
+                + " 'RECOVERY_BLOCKED', 'BLOCKED', 'task_cancel_unconfirmed', 0, 1, 1)",
+                WorkspaceOperations.hash("cancel"), scope, scope, WorkspaceOperations.hash("session"));
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        // Settled, it no longer holds the move: the migration gets past its
+        // idle check to the source check, which this bare Session fails.
+        jdbc.update("UPDATE ma_operation SET state = 'FAILED', phase = 'FAILED', failure_code = 'task_already_settled'"
+                + " WHERE operation_kind = 'TASK_CANCEL'");
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("source_drift")
+                .hasMessageNotContaining("migration_work_unsettled");
+    }
+
     @Test
     void rejectsDescriptorDriftBeforeRetirementAndReusesTheNormalBindingReader() {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified,"
