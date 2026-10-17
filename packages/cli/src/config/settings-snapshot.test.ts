@@ -11,8 +11,33 @@ import nodeOs from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { describeTree as describeTreeUnder } from '../test-utils/describe-tree.js';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import { resetHomeEnvBootstrapForTesting } from './environment.js';
 import { readSettingsSnapshot } from './settings.js';
+
+// The system settings overrides are only honored for a root-owned file,
+// which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat } = await import(
+    '../test-utils/trusted-system-settings.js'
+  );
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat } = await import(
+    '../test-utils/trusted-system-settings.js'
+  );
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+  };
+});
 
 describe('readSettingsSnapshot', () => {
   let root: string;
@@ -27,6 +52,7 @@ describe('readSettingsSnapshot', () => {
     root = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-settings-snapshot-')),
     );
+    trustedSystemSettingsDirs.add(root);
     workspace = path.join(root, 'workspace');
     fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
     environment = {
@@ -73,6 +99,7 @@ describe('readSettingsSnapshot', () => {
       expect(process.env).toEqual(processEnvironment);
     } finally {
       vi.unstubAllEnvs();
+      trustedSystemSettingsDirs.delete(root);
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
@@ -253,7 +280,9 @@ describe('readSettingsSnapshot', () => {
       'a version below one',
       () => fs.writeFileSync(userFile, JSON.stringify({ $version: 0 })),
     ],
-    ['a directory in place of the file', () => fs.mkdirSync(systemFile)],
+    // A directory in place of the system settings file is not a read error:
+    // the trust gate refuses a non-regular file before any read, so the
+    // override simply fails closed to the platform default.
     [
       'a dangling link in place of the file',
       () => fs.symlinkSync(path.join(root, 'gone.json'), userFile),
