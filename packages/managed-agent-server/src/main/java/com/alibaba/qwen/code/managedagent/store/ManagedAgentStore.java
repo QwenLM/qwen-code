@@ -5169,6 +5169,51 @@ public class ManagedAgentStore implements AgentStateStore {
         return List.copyOf(records);
     }
 
+    @Override
+    @Transactional
+    public boolean cancelUnadmittedTurn(String tenantId, String sessionId,
+            String turnId, String owner) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
+        if (!"CANCELLING".equals(turn.status())
+                || !owner.equals(turn.dispatchOwner())
+                || turn.harnessEventEpoch() != null
+                || !turn.submissionAttempted()) {
+            return false;
+        }
+        var heads = WorkspaceOperations.rows(jdbc,
+                "SELECT tenant_id, session_id, state, writer_lease_until FROM"
+                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ?"
+                        + " AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId));
+        long now = lifecycleDatabaseTime();
+        if (heads.size() != 1 || !tenantId.equals(heads.getFirst().get("tenant_id"))
+                || !sessionId.equals(heads.getFirst().get("session_id"))
+                || !("SEALED".equals(heads.getFirst().get("state"))
+                        || "ACTIVE".equals(heads.getFirst().get("state"))
+                                && heads.getFirst().get("writer_lease_until") instanceof Number until
+                                && until.longValue() <= now)) {
+            return false;
+        }
+        // The locked, fenced writer cannot admit a late HTTP request. Even an
+        // idle journal may contain this prompt's completed admission: replay
+        // its real result instead of replacing it with cancellation.
+        java.util.Set<String> accepted;
+        try {
+            accepted = WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
+                    tenantId, sessionId, false,
+                    WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2);
+        } catch (ApiException unverified) {
+            return false;
+        }
+        if (accepted.contains(turn.promptId()) || !withdrawSubmissionAttempted(tenantId, sessionId, turnId, owner)) {
+            return false;
+        }
+        cancelBeforeAdmission(tenantId, sessionId, turnId, owner);
+        return "CANCELLED".equals(requireTurn(tenantId, sessionId, turnId).status());
+    }
+
     @Transactional
     public void cancelBeforeAdmission(String tenantId, String sessionId,
             String turnId, String owner) {
@@ -5202,12 +5247,25 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message) {
+        settleFailedTurn(tenantId, sessionId, turnId, owner, code, message, true);
+    }
+
+    @Transactional
+    public boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
+            String turnId, String owner, String message) {
+        return settleFailedTurn(tenantId, sessionId, turnId, owner,
+                "managed_runtime_recovery_blocked", message, false);
+    }
+
+    private boolean settleFailedTurn(String tenantId, String sessionId, String turnId,
+            String owner, String code, String message, boolean allowCancelling) {
         // Session-row lock first; see recordAdmission.
         requireLegacySessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
-                || !ACTIVE_TURN_STATES.contains(turn.status())) {
-            return;
+                || !ACTIVE_TURN_STATES.contains(turn.status())
+                || !allowCancelling && "CANCELLING".equals(turn.status())) {
+            return false;
         }
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET status ="
@@ -5217,16 +5275,18 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " dispatch_lease_until = NULL, version = version +"
                         + " 1 WHERE tenant_id = ? AND session_id = ? AND"
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
-                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
+                        + (allowCancelling ? " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
+                                : " ('ACCEPTED', 'RUNNING') AND")
                         + " dispatch_lease_until >= ?",
                 code, message, now, now, tenantId, sessionId, turnId, owner,
                 now);
         if (updated != 1) {
-            return;
+            return false;
         }
         appendEvent(tenantId, sessionId, turnId, "turn.failed",
                 Map.of("code", code, "message", message), true, null, now);
         settleTurnCommands(tenantId, sessionId, turnId, now);
+        return true;
     }
 
     @Transactional
