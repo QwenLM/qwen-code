@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -535,7 +536,8 @@ public class WorkspaceExecutionStore {
         if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
                 || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
                 || !java.util.Set.of(LocalProcessRuntimeProvisioner.KIND, com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND).contains(saved.getRequest().getProvisionerKind())
-                || !WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())) {
+                || !(WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())
+                        || HarnessOwnership.sharesRuntimeSessions(saved.getRequest()))) {
             return false;
         }
         var claims = jdbc.query("SELECT binding_state, drain_requested, operation_owner, operation_generation,"
@@ -568,9 +570,13 @@ public class WorkspaceExecutionStore {
                     }
                     return saved.getBindingId().equals(binding) && saved.getGeneration() == generation && session != null
                             && holder.equals(digest(binding + "\u0000" + generation + "\u0000" + session))
-                            && jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
-                                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
-                                    Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1;
+                            && (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
+                                    ? jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                                            + " AND runtime_generation = ? AND runtime_session_id = ?",
+                                            Long.class, binding, generation, session) == 1
+                                    : jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                                            + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
+                                            Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1);
                 }, storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()));
         return holders.isEmpty() || holders.size() == 1 && holders.getFirst();
     }

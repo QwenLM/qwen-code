@@ -445,6 +445,8 @@ public class WorkspaceLifecycleStore {
                 && (operation.lifecycleProtocolVersion() != 2 || jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding"
                         + " WHERE tenant_id = ? AND isolation_class = 'session' AND isolation_key = ?", Integer.class,
                         operation.tenantId(), operation.sessionId()) == 0
+                        && !jdbc.execute((ConnectionCallback<Boolean>) connection -> JdbcRuntimeBindingRepository
+                                .hasSharedRuntimeSessions(connection, operation.tenantId(), operation.sessionId()))
                         && jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?",
                                 Integer.class, operation.tenantId(), operation.sessionId()) == 0);
     }
