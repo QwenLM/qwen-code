@@ -226,6 +226,10 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + worker));
+        if (operatorRecovery) {
+            arguments.add("--qwen.managed-agent.runtime-broker.previous-credential-keys["
+                    + HostedOperatorRecoveryProbe.RECOVERY_KEY_ID + "]=" + HostedOperatorRecoveryProbe.RECOVERY_KEY);
+        }
         for (int index = 0; index < workspaces.size(); index++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + index + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
