@@ -479,7 +479,7 @@ describe('Hosted real-process gates', () => {
       // the main-CI failure analyzer can only file an undiagnosable
       // per-commit issue (#13503 for the Hosted verify step, #13684 for the
       // O4 gates). The ceiling must cover the fork plus the wrapped
-      // compile/surefire/spotbugs/checkstyle work — 600 s is the wrap both
+      // compile/spotbugs/checkstyle work — 600 s is the wrap both
       // steps actually carry, so a step trim or fork bump reddens this row.
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
