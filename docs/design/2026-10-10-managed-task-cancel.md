@@ -211,7 +211,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
 - **Not run:**
   - a cancel after the owner is gone;
   - the minted-but-no-Turn window: on the real stack a refused child create still produced a Turn, so only the unit tests reach it.
-- **Shared with the relay, not changed here:** delivery reaches the parent through the same Hosted attachment the child result relay uses. Whatever stops that path (a parent whose creator lost the Workspace grants its execution needs, or a Session another process still holds attached) stops the relay's own commits the same way, and a cancel then parks after its budget.
+- **Shared with the relay, not changed here:** delivery reaches the parent through the same Hosted attachment the child result relay uses. Whatever stops that path (a parent whose creator lost the Workspace grants its execution needs, or a Session another process still holds attached) stops the relay's own commits the same way, and a cancel then parks after its budget. On a cached attachment the child operation route runs no Workspace check of its own; a delivery's cancel takes the channel route, which re-checks on every operation, so for it the parking applies whatever the cache holds ([F3](2026-10-17-managed-delivery-task-cancel.md)).
 
 ## Follow-up work
 
