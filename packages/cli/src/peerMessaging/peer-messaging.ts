@@ -1059,6 +1059,41 @@ export class PeerMessaging {
     return false;
   }
 
+  /**
+   * Settle a peer message whose turn was admitted but whose model call
+   * ended on an error, so no turn ever carried it.
+   *
+   * The drain does not put such an entry back — a terminal error is not a
+   * transient admission conflict, and restoring it re-submitted the same
+   * envelope after every failed call with no bound. The sender still holds
+   * the `delivered` receipt it got at admission, so correct it the same
+   * way the exit scrub settles accepted-but-unconsumed messages: `expired`
+   * is the status that says "accepted, never consumed", which is exactly
+   * this case.
+   */
+  settleFailedPeerTurn(delivery: PeerQueuedDelivery | undefined): void {
+    if (delivery === undefined) {
+      return;
+    }
+    debugLogger.debug(
+      `settling peer message ${delivery.msgId}: its turn ended on an error`,
+    );
+    if (delivery.from) {
+      void sendDeliveryStatus(
+        delivery.from,
+        {
+          status: 'expired',
+          origMsgId: delivery.msgId,
+          from: this.inbox?.socketPath,
+        },
+        delivery.replyToken,
+      );
+    }
+    if (delivery.admissionKey !== undefined) {
+      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
+    }
+  }
+
   private emitHeldChange(held: readonly HeldMessage[]): void {
     for (const listener of this.heldListeners) {
       try {

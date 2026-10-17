@@ -2617,13 +2617,13 @@ describe('AppContainer State Management', () => {
       });
     });
 
-    it('restores a peer entry whose in-flight turn is cancelled or fails', async () => {
+    it('restores a peer entry whose in-flight turn is cancelled', async () => {
       // A frame admitted on parity or /peers accept is receipted
       // `delivered` at admission and destructively popped. Cancelling
-      // (ESC) or erroring the turn then fires only onDeliveryFailed —
-      // the Teammate path adds no user history item, so the generic
-      // ESC auto-restore bails. Without this restore the message dies
-      // while the sender keeps a live `delivered` receipt.
+      // (ESC) then fires only onDeliveryFailed — the Teammate path adds
+      // no user history item, so the generic ESC auto-restore bails.
+      // Without this restore the message dies while the sender keeps a
+      // live `delivered` receipt.
       const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
       const displayText = 'Message from another session (a): x';
       const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
@@ -2636,9 +2636,13 @@ describe('AppContainer State Management', () => {
       const restorePeerMessage = vi.fn(() => {});
       const submitQuery = vi.fn(async (...args: unknown[]) => {
         const metadata = args[3] as
-          | { onDeliveryFailed?: () => void }
+          | {
+              onDeliveryFailed?: (
+                reason: 'cancelled' | 'error' | 'not-admitted',
+              ) => void;
+            }
           | undefined;
-        metadata?.onDeliveryFailed?.();
+        metadata?.onDeliveryFailed?.('cancelled');
       }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
 
       const { rerender } = renderHook(
@@ -2690,6 +2694,154 @@ describe('AppContainer State Management', () => {
       // for a sender holding a live 'delivered' receipt.
       rerender({ pendingSubmissionCount: 1, submissionSettledRevision: 1 });
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+    });
+
+    it('settles a peer turn that ends on a model error instead of re-queueing it', async () => {
+      // The failed turn settles, and that settle releases the admission
+      // guard — so restoring the entry here re-popped and re-submitted
+      // the same envelope after every failed call, with no bound (a
+      // keyless provider run measured 1444 submissions in 90 s). A typed
+      // prompt ends on the same error with one error and a Ctrl+Y hint,
+      // so the peer turn ends the same way and the sender's `delivered`
+      // receipt is corrected instead of silently retried.
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      const delivery = {
+        msgId: 'frame-1',
+        toSessionId: 'session-a',
+        from: '/tmp/a.sock',
+        admissionKey: 'key-1',
+      };
+      // The queue is destructive: popped once, and only a restore puts it
+      // back. Modelling that is what shows the loop — a mock that returns
+      // the entry on every call would keep re-submitting on its own.
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return { kind: 'peer' as const, modelText, displayText, delivery };
+      });
+      const restorePeerMessage = vi.fn(() => {});
+      const settleFailedPeerTurn = vi.fn();
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | {
+              onDeliveryFailed?: (
+                reason: 'cancelled' | 'error' | 'not-admitted',
+              ) => void;
+            }
+          | undefined;
+        metadata?.onDeliveryFailed?.('error');
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
+
+      const { rerender } = renderHook(
+        ({ pendingSubmissionCount, submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            pendingSubmissionCount,
+            getPendingSubmissionCount: () => 0,
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            restorePeerMessage,
+            addHistoryItem: vi.fn(),
+            submitQuery,
+            submissionInFlightRef: { current: false },
+            submissionSettledRevision,
+            peerMessaging: {
+              drainQueuedFrame: () => true,
+              settleFailedPeerTurn,
+            } as unknown as PeerMessaging,
+          }),
+        {
+          initialProps: {
+            pendingSubmissionCount: 1,
+            submissionSettledRevision: 0,
+          },
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(settleFailedPeerTurn).toHaveBeenCalledWith(delivery);
+      });
+      expect(restorePeerMessage).not.toHaveBeenCalled();
+
+      // The failed turn settles and the drain re-arms, but the entry is
+      // gone: one failed model call costs one submission, not a stream of
+      // them.
+      rerender({ pendingSubmissionCount: 0, submissionSettledRevision: 1 });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(submitQuery).toHaveBeenCalledTimes(1);
+      expect(settleFailedPeerTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it('restores a peer envelope once when admission and delivery both fail', async () => {
+      // use-llm-stream fires both callbacks when a submission never
+      // starts. onAdmissionFailed restores it; restoring on the delivery
+      // callback as well left two copies of one envelope in the queue.
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
+      const popNextSubmission = vi.fn(() => ({
+        kind: 'peer' as const,
+        modelText,
+        displayText,
+        delivery,
+      }));
+      const restorePeerMessage = vi.fn(() => {});
+      const settleFailedPeerTurn = vi.fn();
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | {
+              onAdmissionFailed?: () => void;
+              onDeliveryFailed?: (
+                reason: 'cancelled' | 'error' | 'not-admitted',
+              ) => void;
+            }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+        metadata?.onDeliveryFailed?.('not-admitted');
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => 1,
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage,
+          addHistoryItem: vi.fn(),
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+          peerMessaging: {
+            drainQueuedFrame: () => true,
+            settleFailedPeerTurn,
+          } as unknown as PeerMessaging,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(restorePeerMessage).toHaveBeenCalledWith(
+          modelText,
+          displayText,
+          true,
+          delivery,
+        );
+      });
+      expect(restorePeerMessage).toHaveBeenCalledTimes(1);
+      // The entry is back on the queue, so it is not settled as dead.
+      expect(settleFailedPeerTurn).not.toHaveBeenCalled();
     });
 
     it('renders the peer notification once across failed-admission retries', async () => {
