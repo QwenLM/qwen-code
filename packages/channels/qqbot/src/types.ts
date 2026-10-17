@@ -93,6 +93,15 @@ export interface QQChannelConfig {
   chatTypes?: Record<string, 'c2c' | 'group'>;
   /** Enable experimental cron-msg features. Use at your own risk. */
   'cron-msg-experimental'?: boolean;
+  /**
+   * Expose the QQ group-management tools to the agent in this channel's
+   * sessions. Default false: the tools are destructive and run with the bot's
+   * own token, so an existing deployment keeps them off until an operator sets
+   * `true`. The platform's own rules still apply once enabled: recalling a
+   * member's message needs the bot to be a group admin and the message to be
+   * under 2 minutes old.
+   */
+  moderationTools?: boolean;
   /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
   bufferFlushLength?: number;
   /** Max reconnect attempts before giving up. Default 20. 0 = unlimited. */

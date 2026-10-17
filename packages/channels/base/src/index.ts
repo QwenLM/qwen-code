@@ -24,6 +24,8 @@ export type {
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
   ChannelLoopToolResult,
+  ChannelToolContext,
+  ChannelToolDefinition,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
