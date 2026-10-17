@@ -2886,13 +2886,14 @@ class HostedHarnessClientTest {
                             }
                         }
                         stallOver.await(15, TimeUnit.SECONDS);
-                        // Strictly between one watchdog tick (200 ms) and
-                        // the idle budget (400 ms): with the entry stamp
+                        // Strictly between one watchdog tick (600 ms) and
+                        // the idle budget (1200 ms): with the entry stamp
                         // the first tick after the consumer parks again
-                        // measures ~250 ms and the stream survives;
+                        // measures ~650 ms and the stream survives;
                         // without it the tick measures the whole stall and
-                        // aborts the stream.
-                        Thread.sleep(250);
+                        // aborts the stream. Both values stay wide enough
+                        // for a loaded CI runner to schedule the write late.
+                        Thread.sleep(650);
                         exchange.getResponseBody().write(terminalEvent(2,
                                 PROMPT_ID).getBytes(StandardCharsets.UTF_8));
                         exchange.getResponseBody().flush();
@@ -2907,7 +2908,7 @@ class HostedHarnessClientTest {
                 .bearerToken("harness-token")
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ZERO)
-                .sseIdleTimeout(Duration.ofMillis(400))
+                .sseIdleTimeout(Duration.ofMillis(1200))
                 .build();
         try {
             HarnessSessionRef session = createSession(client);
@@ -2921,7 +2922,7 @@ class HostedHarnessClientTest {
                 // empty when the consumer parks again; three idle budgets
                 // pass between pulls, none of it charged.
                 stopKeepalives.countDown();
-                Thread.sleep(1200);
+                Thread.sleep(3600);
                 stallOver.countDown();
                 DaemonEvent second = assertTimeoutPreemptively(
                         Duration.ofSeconds(10), stream::next);

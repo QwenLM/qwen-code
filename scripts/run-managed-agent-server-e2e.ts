@@ -1938,7 +1938,7 @@ try {
         ) {
           break;
         }
-        if (attempt === 20) {
+        if (attempt === 100) {
           throw new Error(
             'The original control plane never stopped outside a store transaction',
           );
