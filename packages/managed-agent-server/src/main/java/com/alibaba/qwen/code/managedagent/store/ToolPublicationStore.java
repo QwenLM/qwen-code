@@ -17,6 +17,8 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -53,6 +55,7 @@ public final class ToolPublicationStore {
         }
     }
 
+    private static final Logger LOG = LoggerFactory.getLogger(ToolPublicationStore.class);
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -490,9 +493,36 @@ public final class ToolPublicationStore {
             Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
                     + " + admission_held_bytes), 0) FROM ma_output_capture"
                     + " WHERE scope_key = ? AND state <> 'NOT_STARTED'", Long.class, scope);
-            require(reserved <= capacity.tenantBytes() - allocation
-                    && sessionReserved <= capacity.sessionBytes() - allocation
-                    && count < capacity.activeCaptures(), "Publication capacity exhausted");
+            // A full tenant or Session is not a malformed request: it answers
+            // its own code and names the limit that refused. Captures hold
+            // more than they use until they finish, are fenced, expire or are
+            // referenced; only used bytes wait for their Session to retire
+            // and its output to be collected. A byte limit that used bytes
+            // alone fill cannot clear while the batch waits, so it is a 409
+            // whichever limit failed first; any other refusal is a 429.
+            boolean tenantFull = reserved > capacity.tenantBytes() - allocation;
+            boolean sessionFull = sessionReserved > capacity.sessionBytes() - allocation;
+            if (tenantFull || sessionFull) {
+                long tenantUsed = usedBytes("tenant_key", tenantKey);
+                long sessionUsed = usedBytes("scope_key", scope);
+                if (tenantUsed > capacity.tenantBytes() - allocation) {
+                    throw reservationRefused("tenant_bytes", true, tenantKey, scope, reserved, tenantUsed,
+                            allocation, capacity.tenantBytes());
+                }
+                if (sessionUsed > capacity.sessionBytes() - allocation) {
+                    throw reservationRefused("session_bytes", true, tenantKey, scope, sessionReserved,
+                            sessionUsed, allocation, capacity.sessionBytes());
+                }
+                throw tenantFull
+                        ? reservationRefused("tenant_bytes", false, tenantKey, scope, reserved, tenantUsed,
+                                allocation, capacity.tenantBytes())
+                        : reservationRefused("session_bytes", false, tenantKey, scope, sessionReserved,
+                                sessionUsed, allocation, capacity.sessionBytes());
+            }
+            if (count >= capacity.activeCaptures()) {
+                throw reservationRefused("active_captures", false, tenantKey, scope, count, 0, 1,
+                        capacity.activeCaptures());
+            }
             jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
                             + " session_id, publication_id, execution_key, capture_id, binding_json,"
                         + " binding_digest, token_hash, state, expires_at, capture_bytes,"
@@ -1109,6 +1139,26 @@ public final class ToolPublicationStore {
             grant.put("expiresAt", row.expiresAt());
         }
         return ToolPublicationContract.parse("grant", grant);
+    }
+
+    // The Harness logs only the message, so it names the limit too.
+    private static ApiException reservationRefused(String limit, boolean retained, String tenantKey,
+            String scope, long held, long used, long requested, long allowed) {
+        LOG.warn("Tool publication reservation refused limit={} retained={} tenant={} scope={} held={}"
+                + " used={} requested={} allowed={}", limit, retained, tenantKey, scope, held, used,
+                requested, allowed);
+        String message = "Tool publication reservation refused at the " + limit + " limit";
+        return retained
+                ? new ApiException(HttpStatus.CONFLICT,
+                        "managed_tool_publication_retention_exhausted", message, Map.of("limit", limit))
+                : new ApiException(HttpStatus.TOO_MANY_REQUESTS,
+                        "managed_tool_publication_capacity_exhausted", message, Map.of("limit", limit));
+    }
+
+    private long usedBytes(String column, String key) {
+        return jdbc.queryForObject("SELECT COALESCE(SUM(capture_used_bytes + producer_used_bytes"
+                + " + admission_used_bytes), 0) FROM ma_output_capture WHERE " + column + " = ?"
+                + " AND state <> 'NOT_STARTED'", Long.class, key);
     }
 
     private static long requireCurrentActivation(Long expiresAt, long nowEpoch, boolean deferLapse) {
