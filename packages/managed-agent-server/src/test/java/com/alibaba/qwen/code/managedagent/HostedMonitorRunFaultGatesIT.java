@@ -127,6 +127,15 @@ class HostedMonitorRunFaultGatesIT {
     /** Trigger rows this letter installed for FG8b (dropped after it). */
     private List<String> fg8bTriggers;
 
+    // FG8g (H4f-c): the public task cancel of a live background Shell and
+    // of a live Monitor watch — the Stage F cancellation gate the H3 kinds
+    // owe now that they advertise cancel.
+    @Test
+    @Timeout(600)
+    void fg8gPublicTaskCancelStopsTheLiveProcessOnMySql() throws Exception {
+        runLetter("fg8g", List.of("cancel-run", "cancel-monitor"));
+    }
+
     private void runLetter(String letter, List<String> allCases)
             throws Exception {
         assertThat(System.getProperty("mysql.url"))
@@ -348,17 +357,16 @@ class HostedMonitorRunFaultGatesIT {
                         .isTrue();
                 assertThat(driver.exitValue())
                         .as(letter + " driver output:\n%s", output).isZero();
-                assertThat(output).contains(letter.equals("fg8f")
-                        ? "FG8_OUTPUT_DELIVERY_OK"
-                        : letter.equals("fg8a")
-                            ? "FG8_REPLY_LOSS_OK"
-                            : letter.equals("fg8b")
-                                ? "FG8_STORE_FAILURE_OK"
-                                : letter.equals("fg8d")
-                                    ? "FG8_CANCEL_DRAIN_OK"
-                                    : letter.equals("fg8c")
-                                        ? "FG8_PROCESS_CRASH_OK"
-                                        : "FG8_STREAM_GAPS_OK");
+                String sentinel = switch (letter) {
+                    case "fg8a" -> "FG8_REPLY_LOSS_OK";
+                    case "fg8b" -> "FG8_STORE_FAILURE_OK";
+                    case "fg8c" -> "FG8_PROCESS_CRASH_OK";
+                    case "fg8d" -> "FG8_CANCEL_DRAIN_OK";
+                    case "fg8f" -> "FG8_OUTPUT_DELIVERY_OK";
+                    case "fg8g" -> "FG8_TASK_CANCEL_OK";
+                    default -> "FG8_STREAM_GAPS_OK";
+                };
+                assertThat(output).contains(sentinel);
                 JsonNode reports = json.readTree(
                         Files.readString(resultFile));
                 assertThat(reports).hasSize(cases.size());
@@ -1113,6 +1121,11 @@ class HostedMonitorRunFaultGatesIT {
             assertPublishCase(jdbc, tenant, sessionId, name, report);
             return;
         }
+        if (letter.equals("fg8g")) {
+            assertCancelCase(jdbc, tenant, sessionId, name, monitor,
+                    processes.getFirst());
+            return;
+        }
         // The public projection is complete: every stream frame the client
         // saw is a committed row, and the row count matches exactly. The
         // SESSION-stream filter mirrors the serving query — a child task's
@@ -1152,6 +1165,31 @@ class HostedMonitorRunFaultGatesIT {
             assertThat(record.path("exitCode").asInt()).isZero();
             assertThat(record.path("startReceiptRef").isNull())
                     .as(name + " start receipt persisted").isFalse();
+        }
+    }
+
+    // FG8g per-case ground truth: one task_cancel operation, completed
+    // with a receipt; the record settled cancelled by stop_requested; and
+    // the process proven gone — its hold row settled from exit evidence.
+    private void assertCancelCase(JdbcTemplate jdbc, String tenant,
+            String sessionId, String name, boolean monitor,
+            Map<String, Object> process) throws Exception {
+        assertThat(process.get("execution_state")).as(name + " hold row")
+                .isEqualTo("SETTLED");
+        var cancels = jdbc.queryForList("SELECT state, receipt_id FROM"
+                + " ma_operation WHERE tenant_id = ? AND session_id = ? AND"
+                + " operation_kind = 'TASK_CANCEL'", tenant, sessionId);
+        assertThat(cancels).as(name + " cancel operations").hasSize(1);
+        assertThat(cancels.getFirst().get("state")).isEqualTo("COMPLETED");
+        assertThat(cancels.getFirst().get("receipt_id")).isNotNull();
+        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                monitor ? "monitor_run" : "child_run");
+        assertThat(record.path("run").path("state").asText())
+                .as(name + " record").isEqualTo("cancelled");
+        assertThat(record.path("stopReason").asText())
+                .isEqualTo("stop_requested");
+        if (!monitor) {
+            assertThat(record.path("stopRequested").asBoolean()).isTrue();
         }
     }
 
