@@ -454,6 +454,7 @@ describe('registerMcpHotReload', () => {
       const fc = makeFakeConfig(cwd, {
         settingsMcp: { stale: { command: 'stale' } },
         gating: {},
+        bootAllowed: ['probe'],
         bootExcluded: ['probe'],
         ...modeState,
       });
@@ -464,6 +465,7 @@ describe('registerMcpHotReload', () => {
       await listener([]);
 
       expect(fc.setExcludedMcpServers).toHaveBeenCalledWith(['probe']);
+      expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(['probe']);
     },
   );
 

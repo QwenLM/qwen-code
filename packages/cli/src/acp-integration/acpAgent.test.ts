@@ -32794,6 +32794,9 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       mockConfig.getCliExcludedMcpServerNames = vi
         .fn()
         .mockReturnValue(['bridge']);
+      mockConfig.getCliAllowedMcpServerNames = vi
+        .fn()
+        .mockReturnValue(['probe']);
 
       const discoveryManager = {
         discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
@@ -32813,7 +32816,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         getMcpServers: vi.fn().mockReturnValue({}),
         getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
         getRuntimeMcpServers: vi.fn().mockReturnValue({}),
-        getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+        getCliAllowedMcpServerNames: vi.fn().mockReturnValue(['probe']),
         getCliExcludedMcpServerNames: vi.fn().mockReturnValue(['bridge']),
         getApprovalMode: vi.fn().mockReturnValue('default'),
         getBareMode: vi.fn().mockReturnValue(false),
@@ -32867,6 +32870,15 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         expect(discoveryConfig.setExcludedMcpServers).toHaveBeenCalledWith(
           expectedExcluded,
         ),
+      );
+      // The launch allow bound survives the reload too.
+      await vi.waitFor(() =>
+        expect(mockConfig.setAllowedMcpServers).toHaveBeenCalledWith(['probe']),
+      );
+      await vi.waitFor(() =>
+        expect(discoveryConfig.setAllowedMcpServers).toHaveBeenCalledWith([
+          'probe',
+        ]),
       );
 
       mockConnectionState.resolve();
