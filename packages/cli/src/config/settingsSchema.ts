@@ -2137,6 +2137,17 @@ const SETTINGS_SCHEMA = {
               { value: 'string', label: 'String' },
             ],
           },
+          toolParametersMandatory: {
+            type: 'boolean',
+            label: 'Require Tool Parameters',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: false,
+            description:
+              'Set true for an OpenAI-compatible server that types `tools[].function.parameters` as a required field and rejects the request with a validation error (its error reads `missing field parameters`) when a parameterless tool omits it: that tool is then sent with `"parameters": { "type": "object", "properties": {} }` instead of the omission. Leave false otherwise — llama.cpp / LM Studio / vLLM reject the replacement shapes (QwenLM/qwen-code#11431, #11410). A route whose hostname matches a MiniMax host always sends the field, and this setting cannot turn that off (#11834). See the `toolParametersMandatory` note under `model.generationConfig` in docs/users/configuration/settings.md for the schema carve-outs, the wires that ignore it, and how each route and side model resolves the value.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           schemaCompliance: {
             type: 'enum',
             label: 'Tool Schema Compliance',

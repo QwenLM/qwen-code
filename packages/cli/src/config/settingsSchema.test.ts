@@ -513,6 +513,22 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should keep toolParametersMandatory off by default', () => {
+      // The value itself is load-bearing: true makes every OpenAI-compatible
+      // route synthesize `parameters` for parameterless tools, the shape
+      // #11410 reports as a 400 on llama.cpp / LM Studio / vLLM.
+      const toolParametersMandatory =
+        getSettingsSchema().model.properties.generationConfig.properties
+          ?.toolParametersMandatory;
+
+      expect(toolParametersMandatory).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+    });
+
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
       expect(
         getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,

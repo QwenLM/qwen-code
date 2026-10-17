@@ -23,6 +23,7 @@ import { isOpenRouterHostname } from './openrouter.js';
 import { resolveReasoningForModel } from '../../reasoning-overrides.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { withEmptyToolParameters } from './utils.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
@@ -240,7 +241,24 @@ export class DefaultOpenAICompatibleProvider
       ...(extraBody ? extraBody : {}),
     };
     this.flattenGptReasoningEffort(result);
-    return result;
+    return this.emitMandatoryToolParameters(result);
+  }
+
+  /**
+   * Fill `parameters` for a tool that declares none, only when the user opts in
+   * with `generationConfig.toolParametersMandatory`. A server that types the
+   * field as required rejects the omission, while llama.cpp / LM Studio / vLLM
+   * reject the replacement shapes, so the choice stays per route rather than a
+   * converter-wide shape. Subclasses that chain `super.buildRequest` inherit
+   * this; DashScope builds its request from scratch and calls it from its own
+   * merge step.
+   */
+  protected emitMandatoryToolParameters(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+  ): OpenAI.Chat.ChatCompletionCreateParams {
+    return this.contentGeneratorConfig.toolParametersMandatory === true
+      ? withEmptyToolParameters(request)
+      : request;
   }
 
   protected flattenGptReasoningEffort(body: Record<string, unknown>): void {
