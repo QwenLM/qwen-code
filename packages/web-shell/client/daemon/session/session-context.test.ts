@@ -13,6 +13,7 @@ import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
   isDaemonErrorExplicitlyNonRetryable,
+  isStandaloneDaemonSession,
   resolveActionSessionContext,
   resolveLiveSessionWorkspaceCwd,
   resolveProviderSessionContext,
@@ -101,6 +102,33 @@ describe('session context', () => {
         workingDirectory: { state: 'ready' },
       } as unknown as DaemonSession),
     ).toBeUndefined();
+  });
+
+  it('identifies standalone sessions by sourceType and context alone', () => {
+    expect(isStandaloneDaemonSession(undefined)).toBe(false);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      } as unknown as DaemonSession),
+    ).toBe(true);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'standalone',
+      } as unknown as DaemonSession),
+    ).toBe(false);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'standalone',
+        context: { kind: 'workspace' },
+      } as unknown as DaemonSession),
+    ).toBe(false);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'default',
+        context: { kind: 'standalone' },
+      } as unknown as DaemonSession),
+    ).toBe(false);
   });
 
   it('resolves one uniquely trusted non-primary Live runtime', () => {
