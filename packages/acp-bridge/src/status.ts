@@ -654,6 +654,7 @@ export interface ServeSessionContextStatus {
       | 'interrupted_turn'
       | 'degraded_history';
     canContinue: boolean;
+    cancellationConfirmationId?: string;
   };
   state: {
     models?: unknown;
@@ -1067,6 +1068,8 @@ export interface ServeSessionWorkflowTaskStatus {
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Chat that owns the workflow dispatch transcripts. */
+  parentSessionId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
   /**

@@ -772,6 +772,14 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * True once the writer seal committed. A close() rejection thrown before
+   * that point left the writer open, so the Session is still usable.
+   */
+  get writerSealed(): boolean {
+    return this.journal.writerSealed;
+  }
+
+  /**
    * Discards a tail that was appended without a commit marker, after proving
    * the retained prefix reads cleanly. Repair is explicit: opening a session
    * reports the tail and refuses to write, because a read-only owner or a

@@ -21,6 +21,7 @@ import {
   SUPPORTED_EVENTS,
 } from './DualOutputBridge.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 function createMockConfig(): Config {
   return {
@@ -372,7 +373,7 @@ describe('DualOutputBridge', () => {
     });
   });
 
-  describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  describe.skipIf(process.platform === 'win32')(
     'FIFO (named pipe) support',
     () => {
       let fifoPath: string;
@@ -420,19 +421,22 @@ describe('DualOutputBridge', () => {
         });
       });
 
-      it('throws actionable error when FIFO lacks read permission', () => {
-        const noReadFifo = path.join(tmpDir, 'no-read.fifo');
-        // chmod 0200 (write-only): first openSync(O_WRONLY) returns ENXIO
-        // (no reader), retry with O_RDWR fails EACCES (no read permission)
-        execSync(`mkfifo "${noReadFifo}" && chmod 0200 "${noReadFifo}"`);
-        try {
-          expect(
-            () => new DualOutputBridge(config, { filePath: noReadFifo }),
-          ).toThrow(/permission denied opening FIFO for read-write/);
-        } finally {
-          execSync(`chmod 644 "${noReadFifo}"`);
-        }
-      });
+      it.skipIf(!arePermissionBitsEnforced())(
+        'throws actionable error when FIFO lacks read permission',
+        () => {
+          const noReadFifo = path.join(tmpDir, 'no-read.fifo');
+          // chmod 0200 (write-only): first openSync(O_WRONLY) returns ENXIO
+          // (no reader), retry with O_RDWR fails EACCES (no read permission)
+          execSync(`mkfifo "${noReadFifo}" && chmod 0200 "${noReadFifo}"`);
+          try {
+            expect(
+              () => new DualOutputBridge(config, { filePath: noReadFifo }),
+            ).toThrow(/permission denied opening FIFO for read-write/);
+          } finally {
+            execSync(`chmod 644 "${noReadFifo}"`);
+          }
+        },
+      );
     },
   );
 });
