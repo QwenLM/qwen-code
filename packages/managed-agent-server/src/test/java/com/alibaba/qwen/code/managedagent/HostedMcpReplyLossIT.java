@@ -616,6 +616,15 @@ class HostedMcpReplyLossIT {
                 }
             }
             http.close();
+            try {
+                if ("Linux".equals(System.getProperty("os.name"))) {
+                    HostedDurableWorkers.stop(
+                            temporary.resolve("broker"), json);
+                }
+            } catch (Exception ignored) {
+                // Best-effort teardown: a worker that refuses to stop must
+                // not mask the case's own failure.
+            }
             saveEvidence();
         }
     }
