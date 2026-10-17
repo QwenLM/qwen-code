@@ -80,9 +80,9 @@ Issue #13753 对 I3 提出两点：
      - **为什么。** hook 目录是运维的策略，不由模型选择。`PreToolUse` hook 可以拒绝 `read_file` 或 `glob` 调用，或改写其输入，例如阻止读取密钥。如果去掉 hooks，只要模型选择 `isolation: "snapshot"`，snapshot child 就能读到同一个 agent 在其他任何地方都被拒绝读取的内容。skill 目录被去掉另有原因：它的说明会提到该 profile 拒绝的工具，而 hook 不向模型提供任何工具。
      - **代价。** 下面这些都不是 snapshot 特有的：
        - `PreToolUse` hook 可能发起询问，所以 child 可能像任何 child 一样等待审批；
-       - hook 命令作用于副本，所以它写入的任何内容都随副本一起丢弃；
+       - hook 命令以副本为工作目录运行，所以它在副本内写入的内容随副本一起丢弃。但它没有隔离：写到副本之外的内容（例如写到绝对路径的日志）以及其他任何副作用，都不会随丢弃消失；
        - Runtime 被替换后恢复的 turn 通过 Session 的 Hook owner 重新 acquire，而不走决策 8 的第 3 步路径；该路径只服务既没有 hooks 也没有 MCP 的 Session，`hosted-workspace-files/1` 也是如此；
-       - command、http 或 function 类 hook 一旦运行，child 的 Hook owner 就会一直占用 storage，直到 child Session 关闭，任何 Session 的 Hook owner 都是如此，所以父的工具回合以及其他 child 的工具回合都要等到那时。
+       - command、http 或 function 类 hook 一旦运行，child 的 Hook owner 就会一直占用 storage，直到 child Session 关闭，任何 Session 的 Hook owner 都是如此，所以父的工具回合以及其他 child 的工具回合都要等到那时。因恢复而阻塞的 turn 可以更早释放：一旦确认其 hook 工作已结束或从未派发，owner 就会归还 mount，而 Session 仍保持打开。
    - **凭什么成立。** 每一环本来就对所有 hosted Session 成立：
      - 声明集合中没有任何会写入的工具；
      - tool turn 在获取 Broker 之前拒绝任何其他名称，并结束该 Turn；

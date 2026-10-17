@@ -80,9 +80,9 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
      - **Why.** A hook catalog is the operator's policy, not the model's choice. A `PreToolUse` hook can deny a `read_file` or `glob` call or rewrite its input, for example to keep a secret from being read. Without its hooks, a snapshot child would read what the same agent is refused everywhere else, whenever the model chose `isolation: "snapshot"`. The skill catalog is dropped for a different reason: its instructions name tools the profile refuses, while a hook offers the model no tool.
      - **What it costs.** None of it is particular to snapshots:
        - a `PreToolUse` hook may ask, so the child can wait on an approval like any child;
-       - a hook command runs against the copy, so anything it writes is discarded with the copy;
+       - a hook command runs with the copy as its working directory, so what it writes within the copy is discarded with it. It is not isolated, though: a write outside the copy, such as a log at an absolute path, and any other side effect outlive the discard;
        - a turn resumed after its Runtime was replaced reacquires through the Session's Hook owner instead of taking decision 8's step-3 path, which serves only Sessions with neither hooks nor MCP, as for `hosted-workspace-files/1`;
-       - once a command, http or function hook runs, the child's Hook owner holds the storage until the child Session closes, as a Hook owner does in any Session, so the parent's tool turns and its other children's wait until then.
+       - once a command, http or function hook runs, the child's Hook owner holds the storage until the child Session closes, as a Hook owner does in any Session, so the parent's tool turns and its other children's wait until then. A turn blocked for recovery can release it earlier: once its hook work is proven settled or never dispatched, the owner hands the mount back while the Session stays open.
    - **What makes it hold.** Each piece already holds for every hosted Session:
      - the declaration set carries no tool that writes;
      - the tool turn refuses any other name before the Broker is acquired, and ends the Turn;
