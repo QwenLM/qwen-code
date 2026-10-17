@@ -32,9 +32,9 @@
     Session 的放置切换到 workspace 隔离的 binding；共享 binding 上的生命周期 authority 由
     Runtime Session 自己的 Harness Session 认领 fence，因此正在关闭的 Session 的生命周期 Hook
     在常驻 worker 上放置并运行；
-  - 修正：枚举索引是 `V7` 迁移，单列 `harness_session_id` 索引——两个列都是
+  - 修正：枚举索引是 `V9` 迁移，单列 `harness_session_id` 索引——两个列都是
     VARBINARY(2048)，4.3 节原先勾勒的 `(tenant_id, harness_session_id)` 组合超过 InnoDB
-    的 3072 字节键长；
+    的 3072 字节键长（本 PR 原先的 `V7` 因 `main` 在评审期间占用 `V7`、`V8` 而改号）；
   - 与 #14340 的关系：私有 Kubernetes CSI 的常驻 Workspace close 单独交付，其语义不变；
   - 验证范围：本切片只有单元/H2 与变异证据；第 9 节的真实进程 Linux 场景留作后续。
 
@@ -159,7 +159,7 @@ Harness Session 认领 fence 放行（见 4.3 节）。
 stopped release 与 `canStopDrained`、恢复维护的封锁、共享 binding 的 retention，
 以及 provisioning 的 scope 解析。
 
-### 4.3 workspace isolation（PR3）
+### 4.3 workspace 隔离（PR3）
 
 #### 配置
 
@@ -203,7 +203,7 @@ resolver 契约本来就允许这样做，因为 scope 变化本就要求新的 
    3. 有条件地清除原 storage holder；
    4. 记录 `RELEASED`。
 
-   按 Harness Session 枚举需要在 `ma_runtime_session` 上新增索引，以 `V7` 迁移的形式加入。
+   按 Harness Session 枚举需要在 `ma_runtime_session` 上新增索引，以 `V9` 迁移的形式加入。
    它是单列 `harness_session_id` 索引：两个列都是 VARBINARY(2048)，原先勾勒的
    `(tenant_id, harness_session_id)` 组合超过 InnoDB 的 3072 字节键长，tenant 改在查询里过滤。
    该 Session 有未结算或 `UNKNOWN` 的执行时，与今天一样阻塞完成。

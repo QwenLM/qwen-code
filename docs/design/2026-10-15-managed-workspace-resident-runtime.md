@@ -43,10 +43,11 @@ Revision history:
     bindings, and lifecycle authority on a shared binding is fenced by the
     Runtime Session's own Harness Session claim, so the closing Session's
     lifecycle Hook places and runs on the resident worker;
-  - correction: the enumeration index is the `V7` migration, a single-column
+  - correction: the enumeration index is the `V9` migration, a single-column
     `harness_session_id` index — both columns are VARBINARY(2048), so the
     `(tenant_id, harness_session_id)` pair sketched in Section 4.3 exceeds
-    InnoDB's 3072-byte key length;
+    InnoDB's 3072-byte key length (the PR's `V7` was renumbered after `main`
+    took `V7` and `V8` during review);
   - relation to #14340: the resident Workspace close for private Kubernetes
     CSI shipped separately; its semantics are unchanged;
   - validation scope: this slice carries unit/H2 and mutation evidence; the
@@ -245,7 +246,7 @@ splits today's close into two operations:
    4. records `RELEASED`.
 
    Enumerating by Harness Session needs a new index on `ma_runtime_session`,
-   added as the `V7` migration. It is a single-column `harness_session_id`
+   added as the `V9` migration. It is a single-column `harness_session_id`
    index: both columns are VARBINARY(2048), so the `(tenant_id,
 harness_session_id)` pair originally sketched here exceeds InnoDB's
    3072-byte key length, and the tenant is filtered in the query instead. An
