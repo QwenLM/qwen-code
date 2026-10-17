@@ -163,6 +163,10 @@ import { emitSessionEnd, emitSessionStart } from './session-events.js';
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
 
+const REDACTED_TOOL_CALL_ARGS = {
+  __redacted: 'tool arguments omitted from telemetry',
+} as const;
+
 function getCommonAttributes(config: Config): LogAttributes {
   return {
     'session.id': config.getSessionId(),
@@ -316,8 +320,12 @@ export function logUserRetry(config: Config, event: UserRetryEvent): void {
 
 export function logToolCall(config: Config, event: ToolCallEvent): void {
   const normalizedEvent = normalizeToolCallEvent(event);
-  const uiEvent = {
+  const telemetryEvent: NormalizedToolCallEvent = {
     ...normalizedEvent,
+    function_args: { ...REDACTED_TOOL_CALL_ARGS },
+  };
+  const uiEvent = {
+    ...telemetryEvent,
     'event.name': EVENT_TOOL_CALL,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
@@ -330,17 +338,17 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     }
   });
   runToolTelemetrySink(() => {
-    QwenLogger.getInstance(config)?.logToolCallEvent(normalizedEvent);
+    QwenLogger.getInstance(config)?.logToolCallEvent(telemetryEvent);
   });
   if (!isTelemetrySdkInitialized()) return;
 
   runToolTelemetrySink(() => {
     const attributes: LogAttributes = {
       ...getCommonAttributes(config),
-      ...normalizedEvent,
+      ...telemetryEvent,
       'event.name': EVENT_TOOL_CALL,
       'event.timestamp': new Date().toISOString(),
-      function_args: safeJsonStringify(normalizedEvent.function_args, 2),
+      function_args: safeJsonStringify(telemetryEvent.function_args, 2),
     };
     if (normalizedEvent.error) {
       attributes['error.message'] = normalizedEvent.error;
