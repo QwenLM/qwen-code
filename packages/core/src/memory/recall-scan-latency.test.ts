@@ -118,10 +118,10 @@ const FAST_RESULT_CEILING_MS = POOL_CI
 // multiplier leaves ~1.2x headroom over the worst sample seen on the slowest
 // row. The first sizing, 2.2x (275ms vs a 227ms sample), stopped holding:
 // 12 of 96 hosted jobs from 15-17 October 2026 failed the 1000-topic row on
-// all three vitest attempts, with best-of-5 samples of 276-346ms, while the
-// 200/500-topic rows never breached 220ms. 3.4x puts that row at 425ms, ~1.2x
-// over the 346ms worst, and the smaller rows at 340ms. The pool's 10x would
-// still swallow the reparse regression at 1250ms.
+// all three vitest attempts, with best-of-5 samples of 276-346ms, while no
+// job failed on the 200/500-topic rows at 220ms. 3.4x puts that row at 425ms,
+// ~1.2x over the 346ms worst, and the smaller rows at 340ms. The pool's 10x
+// would still swallow the reparse regression at 1250ms.
 // What a wall-clock ceiling cannot do is promise that regression reddens
 // fleet-wide: 425ms only catches the +48% reparse where the 1000-topic
 // baseline exceeds 425/1.48 ≈ 287ms, so only the slowest hosted runners see
