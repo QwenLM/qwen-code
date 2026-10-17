@@ -41,6 +41,18 @@ import java.util.Optional;
 import java.util.Set;
 
 public interface AgentStateStore {
+    /**
+     * #14387: the durable error code a workflow Turn carries once its
+     * recovery was refused — the Harness generation running it was lost
+     * and its deterministic in-process work must never be re-executed
+     * while the first run's outcome stays unwitnessed. The Turn is never
+     * settled: the code stays on the active row for the child result
+     * relay to classify the record blocked from, and the dispatch sweep
+     * parks the row (a cancel still scans it — settling the Turn
+     * cancelled is the cancel's own act).
+     */
+    String WORKFLOW_RECOVERY_BLOCKED = "hosted_workflow_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional
@@ -667,6 +679,17 @@ public interface AgentStateStore {
 
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
+
+    /**
+     * #14387: durably marks an active Turn whose recovery was refused —
+     * the error code stays on the still-active row for the child result
+     * relay to classify from, and the dispatch lease is released so the
+     * drive ends without settling the Turn. Never a terminal status: the
+     * unwitnessed execution's outcome was never observed.
+     */
+    boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
+            String turnId, String owner, String errorCode,
+            String errorMessage);
 
     void deferTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
