@@ -27,7 +27,10 @@ This is a CLI-only bugfix; no core, configuration, dependency, or protocol chang
   prefix to scrollback. Overflowing live results therefore keep their newest
   tail and hidden-row count, not an assistant-style head slice.
   Trim trailing whitespace only when probing pending text, matching the renderer;
-  completed results retain their trailing rows in both the probe and rendering.
+  completed results keep their source text unchanged. In both states, ignore
+  leading blank lines and charge each plain blank run as one spacer, matching
+  MarkdownDisplay; do not collapse blanks inside code or math blocks. Decide
+  full fit from rendered height alone, not a raw source-line count.
 - Completed enforceHeightBudget callers with an actual height budget render
   Mermaid as code and display-math as literal source. Math contents are not
   reparsed as Markdown, and their invisible `$$` delimiters do not consume the
@@ -47,7 +50,10 @@ This is a CLI-only bugfix; no core, configuration, dependency, or protocol chang
   fence. Completed bounded Mermaid source keeps ordinary code-block accounting.
 - Reuse the table renderer's pure renderTableText layout function instead of a
   separate approximate column-width algorithm. Budgeting and rendering share
-  horizontal/vertical layout decisions. A pending slice can turn a closed table
+  horizontal/vertical layout decisions. Before layout, reject tables whose
+  minimum height (one row per data row, respecting clamps, plus margins) already
+  exceeds the remaining budget, avoiding full layout of huge tool results.
+  A pending slice can turn a closed table
   into the frontier. If only the streaming layout fits, keep the table as the
   frontier and defer following text; otherwise account for the larger layout
   while following text is retained. Skip the second layout when the first alone
@@ -81,7 +87,11 @@ Markdown tail slicer or layout cache is introduced.
   Pin tail visibility, minimum-budget first-block content, exact fits, pending
   assistant table cues, raw mode, bounded visual source, task lists, disabled
   gutters, runtime mode toggles, explicit shell caps, and tool-preview overflow
-  cleanup after expansion, empty text, or unmount.
+  cleanup after expansion, empty text, or unmount. Leading, internal, and trailing
+  plain blank runs must not reject fitting Markdown; a pending-to-completed
+  transition must preserve formatting and retain the completed trailing spacer.
+  Huge pending/completed tool tables must fall back without a layout crash and
+  keep their visible tail and overflow indicator.
 - Preserve shell caps, explicit plain text, and raw-file detail through regression
   tests. Run related tool, Markdown, table, estimator, MaxSizedBox, and streaming
   tests, plus build, bundle, typecheck, lint, and formatting checks.

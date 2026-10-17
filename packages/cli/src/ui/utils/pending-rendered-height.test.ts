@@ -130,6 +130,40 @@ describe('fitPendingSlice', () => {
     });
   });
 
+  it.each([false, true])(
+    'collapses plain blank runs without dropping source lines with pending=%s',
+    (isPending) => {
+      for (const [text, budget] of [
+        ['\n \t\n', 0],
+        ['\n\n**one**\n**two**', 2],
+        ['**one**\n\n' + ' '.repeat(200) + '\n**two**', 3],
+        ['**one**\n**two**\n**three**\n\n\n', 4],
+      ] as const) {
+        const lines = text.split('\n');
+        expect(fitPendingSlice(lines, 80, budget, CLAMP, isPending)).toEqual({
+          keptLines: lines.length,
+          clipped: false,
+        });
+        if (budget > 0) {
+          expect(
+            fitPendingSlice(lines, 80, budget - 1, CLAMP, isPending).clipped,
+          ).toBe(true);
+        }
+      }
+    },
+  );
+
+  it('does not collapse blank lines inside code or literal math', () => {
+    expect(
+      fitPendingSlice(['```', '', '', '', '```', 'after'], 80, 5, CLAMP),
+    ).toEqual({ keptLines: 5, clipped: true });
+    expect(
+      fitPendingSlice(['$$', '', '', '', '$$', 'after'], 80, 3, CLAMP, false, {
+        rejectVisualBlocks: false,
+      }),
+    ).toEqual({ keptLines: 5, clipped: true });
+  });
+
   it('clips plain text at the budget', () => {
     const lines = Array.from({ length: 20 }, (_, i) => `line ${i}`);
     const { keptLines, clipped } = fitPendingSlice(lines, 80, 5, CLAMP);
@@ -431,6 +465,18 @@ describe('fitPendingSlice', () => {
       fitPendingSlice(lines, 80, 3, CLAMP, true, { keepFirstTable: false }),
     ).toEqual({ keptLines: 0, clipped: true });
   });
+
+  it.each([false, true])(
+    'rejects a huge unclamped tool table without full layout with pending=%s',
+    (isPending) => {
+      const lines = ['| A |', '| --- |', ...Array<string>(70000).fill('| x |')];
+      expect(
+        fitPendingSlice(lines, 80, 5, Number.MAX_SAFE_INTEGER, isPending, {
+          keepFirstTable: false,
+        }),
+      ).toEqual({ keptLines: 0, clipped: true });
+    },
+  );
 
   it('rejects an oversized first table when checking a completed result', () => {
     const lines = ['| A | B |', '| --- | --- |', '| x | y |'];

@@ -656,20 +656,19 @@ const StringResultRenderer: React.FC<{
   const useMarkdown =
     renderAsMarkdown &&
     (markdownBudget === undefined ||
-      (resultLines.length <= markdownBudget &&
-        !fitPendingSlice(
-          resultLines,
-          childWidth,
-          markdownBudget,
-          Number.MAX_SAFE_INTEGER,
-          isPending,
-          {
-            renderVisualBlocks: renderMode === 'render',
-            showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
-            rejectVisualBlocks: true,
-            keepFirstTable: false,
-          },
-        ).clipped));
+      !fitPendingSlice(
+        resultLines,
+        childWidth,
+        markdownBudget,
+        Number.MAX_SAFE_INTEGER,
+        isPending,
+        {
+          renderVisualBlocks: renderMode === 'render',
+          showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+          rejectVisualBlocks: true,
+          keepFirstTable: false,
+        },
+      ).clipped);
   if (useMarkdown) {
     return (
       <Box flexDirection="column">

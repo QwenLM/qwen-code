@@ -101,6 +101,30 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).toContain('lines hidden');
   });
 
+  it.each([false, true])(
+    'keeps the tail of a huge tool table without a layout crash with pending=%s',
+    async (isPending) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          isPending,
+          status: isPending ? ToolCallStatus.Executing : ToolCallStatus.Success,
+          availableTerminalHeight: 11,
+          resultDisplay: [
+            '| A |',
+            '| --- |',
+            ...Array<string>(70000).fill('| x |'),
+            '| TAIL |',
+          ].join('\n'),
+        }),
+      );
+      await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
+      expect(lastFrame()).toContain('| TAIL |');
+      expect(lastFrame()).toContain('lines hidden');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(7);
+    },
+  );
+
   it.each([
     ['wide line', 'x'.repeat(3000), 'xxxx'],
     ['JSON', JSON.stringify({ value: 'x'.repeat(3000) }), 'xxxx'],
@@ -326,19 +350,54 @@ describe('tool result Markdown with a real renderer', () => {
     },
   );
 
-  it('preserves trailing blank rows when measuring completed Markdown', async () => {
-    const { lastFrame } = renderWithProviders(
+  it('keeps fitting Markdown formatted on completion with one trailing spacer', async () => {
+    const props = {
+      ...baseProps,
+      contentWidth: 42,
+      availableTerminalHeight: 11,
+      resultDisplay: '**one**\n**two**\n**three**\n\n\n',
+    };
+    const { lastFrame, rerender } = renderWithProviders(
       resultWithOverflow({
-        ...baseProps,
-        contentWidth: 42,
-        availableTerminalHeight: 11,
-        resultDisplay: '**one**\n**two**\n**three**\n\n\n',
+        ...props,
+        isPending: true,
+        status: ToolCallStatus.Executing,
       }),
     );
-    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
-    expect(lastFrame()).toContain('**three**');
-    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(7);
+    expect(lastFrame()).toContain('one\n  two\n  three');
+    expect(lastFrame()).not.toContain('**');
+    expect((lastFrame() ?? '').split('\n')).toHaveLength(5);
+
+    rerender(withProviders(resultWithOverflow(props)));
+    await vi.waitFor(() => expect(lastFrame()).toContain('✓'));
+    expect(lastFrame()).toContain('one\n  two\n  three\n\n');
+    expect(lastFrame()).not.toContain('**');
+    expect(lastFrame()).not.toContain('hidden');
+    expect(lastFrame()).toContain('overflow:0');
+    expect((lastFrame() ?? '').split('\n')).toHaveLength(6);
   });
+
+  it.each([
+    ['leading', '\n\n\n\n**one**', 'one'],
+    ['internal', '**one**\n\n\n\n**two**', 'one\n\n  two'],
+  ])(
+    'formats completed Markdown with %s blank runs',
+    async (_name, text, rendered) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          contentWidth: 42,
+          availableTerminalHeight: 10,
+          resultDisplay: text,
+        }),
+      );
+      await vi.waitFor(() => expect(lastFrame()).toContain('overflow:0'));
+      expect(lastFrame()).toContain(rendered);
+      expect(lastFrame()).not.toContain('**');
+      expect(lastFrame()).not.toContain('hidden');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(6);
+    },
+  );
 
   it('keeps the newest executing Markdown output and its hidden-line count', async () => {
     const props = {

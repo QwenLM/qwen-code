@@ -239,6 +239,34 @@ describe('<MarkdownDisplay />', () => {
     expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(28);
   });
 
+  it.each([false, true])(
+    'shares plain blank-run heights with the estimator with pending=%s',
+    (isPending) => {
+      const text = '\n \n**one**\n\n' + ' '.repeat(200) + '\n**two**\n\n\n';
+      const { lastFrame } = renderWithProviders(
+        <Box width={24} flexDirection="column">
+          <MarkdownDisplay
+            {...baseProps}
+            text={text}
+            contentWidth={24}
+            isPending={isPending}
+            availableTerminalHeight={undefined}
+          />
+        </Box>,
+      );
+      const expected = isPending ? 'one\n\ntwo' : 'one\n\ntwo\n';
+      expect(lastFrame()).toBe(expected);
+      const height = expected.split('\n').length;
+      const lines = (isPending ? text.trimEnd() : text).split('\n');
+      expect(fitPendingSlice(lines, 24, height, 1000, isPending).clipped).toBe(
+        false,
+      );
+      expect(
+        fitPendingSlice(lines, 24, height - 1, 1000, isPending).clipped,
+      ).toBe(true);
+    },
+  );
+
   it('shares the table margin and exact layout with the height estimator', () => {
     const math = '$x$ $x$ $x$';
     const lines = [

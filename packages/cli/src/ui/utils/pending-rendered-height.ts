@@ -183,6 +183,7 @@ export function fitPendingSlice(
   let inMathBlock = false;
   let codeContentWidth = contentWidth;
   let pendingMermaid = false;
+  let lastLineEmpty = true;
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
@@ -225,6 +226,13 @@ export function fitPendingSlice(
       i++;
       continue;
     }
+    const isBlank = line.trim().length === 0;
+    // MarkdownDisplay drops leading blanks and renders one spacer per blank run.
+    if (isBlank && lastLineEmpty) {
+      i++;
+      continue;
+    }
+    lastLineEmpty = isBlank;
     if (fenceMatch) {
       codeFence = fenceMatch[1]!;
       // CodeColorizer adds padding and a numbered gutter, and expands tabs.
@@ -316,7 +324,12 @@ export function fitPendingSlice(
             : renderedRows;
         return keptRows + TABLE_MARGIN_ROWS;
       };
-      let cost = layoutRows(isPending);
+      // Each data row needs at least one row, even in vertical layout.
+      const minimumCost =
+        Math.min(rows.length, tableClampRows <= 2 ? 1 : tableClampRows) +
+        TABLE_MARGIN_ROWS;
+      let cost =
+        rendered + minimumCost > budget ? minimumCost : layoutRows(isPending);
       if (rendered + cost > budget) {
         kept =
           i > 0 || !isPending || !keepFirstTable || budget <= TABLE_MARGIN_ROWS
@@ -341,7 +354,9 @@ export function fitPendingSlice(
       }
     } else {
       const listItem = /^([ \t]*)(?:([-*+])|(\d+)\.) +(.*)/.exec(line);
-      if (listItem) {
+      if (isBlank) {
+        rendered++;
+      } else if (listItem) {
         const taskItem = renderVisualBlocks
           ? /^\[([ xX])\]\s+(.*)$/.exec(listItem[4]!)
           : null;
