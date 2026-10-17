@@ -467,12 +467,22 @@ describe('backupGlobalSessions / restoreGlobalSessions', () => {
   });
 
   it('backup/restore failures do not crash (caught by try/catch)', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     vi.mocked(writeFileSync).mockImplementationOnce(() => {
       throw new Error('disk full');
     });
     fsStore[sessionsPath] = JSON.stringify({ key: 'data' });
     const ch = makeChannel();
-    expect(() => ch.disconnect()).not.toThrow();
+    try {
+      expect(() => ch.disconnect()).not.toThrow();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('flushQQState write failed: disk full'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 
