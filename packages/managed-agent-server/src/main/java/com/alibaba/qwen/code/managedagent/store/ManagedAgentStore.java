@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.EventIdentity.Identity;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -26,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
@@ -1891,6 +1893,19 @@ public class ManagedAgentStore implements AgentStateStore {
     // barrier, and the Turn dispatcher, which holds the only lease that may
     // act on the Turn, is its only deliverer.
     private static final String TURN_COMMAND_KINDS = "('SUBMIT_INPUT', 'CANCEL')";
+    // D7-2: RECOVERY_BLOCKED carries two meanings, decided by kind. For
+    // these kinds it means the command's acceptance is unknown: no claim
+    // ever takes the row, nothing re-sends it, and only the reconciler
+    // settles it, from the kind's own keyed evidence.
+    private static final String ACCEPTANCE_UNKNOWN_KINDS =
+            "('TASK_CANCEL', 'SUBMIT_INPUT')";
+    // For these it is a published wait on a precondition of an operation
+    // whose acceptance is known: the lifecycle coordinator re-drives it, and
+    // keyed effect receipts keep the re-drive from repeating an effect.
+    private static final String LIFECYCLE_WAIT_KINDS =
+            "('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE')";
+    /** Turn input whose submission no Harness answered (D7-2). */
+    static final String SUBMIT_INPUT_UNCONFIRMED = "submit_input_unconfirmed";
 
     private String insertTurnCommandOperation(String tenantId,
             String sessionId, String turnId, OperationKind kind,
@@ -1964,6 +1979,14 @@ public class ManagedAgentStore implements AgentStateStore {
             settleTurnCommand(tenantId, sessionId, turnId,
                     OperationKind.SUBMIT_INPUT, "CANCELLED", "JAVA_DURABLE",
                     null, now);
+        } else if ("FAILED".equals(turn.status())
+                && turn.submissionAttempted()) {
+            // A null epoch does not prove non-admission (R10-4): the submit
+            // may have been admitted and its reply lost. The input parks
+            // until the Session journal proves which (D7-2).
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "RECOVERY_BLOCKED",
+                    "JAVA_DURABLE", SUBMIT_INPUT_UNCONFIRMED, now);
         } else if ("FAILED".equals(turn.status())) {
             settleTurnCommand(tenantId, sessionId, turnId,
                     OperationKind.SUBMIT_INPUT, "FAILED", "JAVA_DURABLE",
@@ -1982,11 +2005,12 @@ public class ManagedAgentStore implements AgentStateStore {
 
     // Only a completed operation is delivered and carries a receipt; a
     // failed or cancelled one stays java_durable and blocked, so it is never
-    // delivered again.
+    // delivered again, and a parked one is due for the reconciler at once.
     private void settleTurnCommand(String tenantId, String sessionId,
             String turnId, OperationKind kind, String state,
             String admissionStage, String failureCode, long now) {
         boolean completed = "COMPLETED".equals(state);
+        boolean parked = "RECOVERY_BLOCKED".equals(state);
         // The identity index confines this locking scan to the Turn's own
         // operations. Left to the optimizer, a long settled history steers it
         // to a (kind, state) index whose range holds every Session's pending
@@ -2001,12 +2025,13 @@ public class ManagedAgentStore implements AgentStateStore {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"
                             + " admission_stage = ?, delivery_state = ?,"
                             + " receipt_id = ?, failure_code = ?,"
-                            + " gmt_modified = ?, completed_at = ? WHERE"
+                            + " available_at = ?, gmt_modified = ?,"
+                            + " completed_at = ? WHERE"
                             + " operation_key = ? AND state = 'PENDING'",
                     state, state, admissionStage,
                     completed ? "CONFIRMED" : "BLOCKED",
                     completed ? publicId("rcpt") : null, failureCode, now,
-                    now, operationKey);
+                    now, parked ? null : now, operationKey);
         }
     }
 
@@ -2757,17 +2782,123 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public List<OperationTarget> findParkedTaskCancels(int limit) {
-        // delivery_state leads the pending index, so the per-second scan
-        // never reads the whole table.
+    public List<ParkedOperation> findParkedOperations(int limit) {
+        // Kind and state lead the due index, so the per-second scan reads
+        // only parked rows, never a kind's settled history.
         return jdbc.query(
-                "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE delivery_state"
-                    + " = 'BLOCKED' AND available_at <= ? AND operation_kind = 'TASK_CANCEL' AND"
-                    + " state = 'RECOVERY_BLOCKED' AND EXISTS (SELECT 1 FROM ma_session s WHERE"
-                    + " s.tenant_id = ma_operation.tenant_id AND s.session_id ="
-                    + " ma_operation.session_id AND s.csi_guard = FALSE) ORDER BY available_at"
-                    + " LIMIT ?",
-                operationTargetMapper, lifecycleDatabaseTime(), limit);
+                "SELECT tenant_id, session_id, operation_id, operation_kind FROM ma_operation"
+                    + " WHERE operation_kind IN " + ACCEPTANCE_UNKNOWN_KINDS + " AND state ="
+                    + " 'RECOVERY_BLOCKED' AND available_at <= ? AND delivery_state = 'BLOCKED'"
+                    + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id ="
+                    + " ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND"
+                    + " s.csi_guard = FALSE) ORDER BY available_at LIMIT ?",
+                (result, row) -> new ParkedOperation(result.getString("tenant_id"),
+                        result.getString("session_id"), result.getString("operation_id"),
+                        OperationKind.valueOf(result.getString("operation_kind"))),
+                lifecycleDatabaseTime(), limit);
+    }
+
+    @Override
+    @Transactional
+    public boolean settleParkedOperation(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        requireLegacyMutation(parked.tenantId(), parked.sessionId());
+        long now = lifecycleDatabaseTime();
+        List<Object> arguments = new ArrayList<>();
+        String update = switch (verdict.acceptance()) {
+            case COMMITTED -> {
+                arguments.add(publicId("rcpt"));
+                arguments.add(now);
+                arguments.add(now);
+                yield "UPDATE ma_operation SET phase = 'COMPLETED', state = 'COMPLETED',"
+                        + " admission_stage = 'HARNESS_CONFIRMED',"
+                        + " delivery_state = 'CONFIRMED', receipt_id = ?,"
+                        + " failure_code = NULL, gmt_modified = ?, completed_at = ?";
+            }
+            case NOT_COMMITTED -> {
+                // Terminal yet blocked, as the contract has it: available_at
+                // moves past every scan of the blocked range for good.
+                arguments.add(verdict.failureCode());
+                arguments.add(Long.MAX_VALUE);
+                arguments.add(now);
+                arguments.add(now);
+                yield "UPDATE ma_operation SET phase = 'FAILED', state = 'FAILED',"
+                        + " admission_stage = 'JAVA_DURABLE',"
+                        + " delivery_state = 'BLOCKED', failure_code = ?,"
+                        + " available_at = ?, gmt_modified = ?, completed_at = ?";
+            }
+            case UNKNOWN -> {
+                arguments.add(Math.addExact(now,
+                        Math.max(0, retryAt - clock.millis())));
+                arguments.add(now);
+                yield "UPDATE ma_operation SET available_at = ?, gmt_modified = ?,"
+                        + " attempt_count = attempt_count + 1";
+            }
+        };
+        arguments.addAll(List.of(parked.kind().name(), parked.operationId(),
+                parked.tenantId(), parked.sessionId()));
+        // Only a still-parked row: a reconciliation never rewrites an
+        // outcome already recorded, and no claim holds a parked row.
+        return jdbc.update(update + " WHERE operation_kind = ? AND operation_id = ?"
+                        + " AND tenant_id = ? AND session_id = ? AND operation_kind IN "
+                        + ACCEPTANCE_UNKNOWN_KINDS + " AND state = 'RECOVERY_BLOCKED' AND"
+                        + " delivery_state = 'BLOCKED' AND claim_owner IS NULL",
+                arguments.toArray()) == 1;
+    }
+
+    /**
+     * The Harness admits a prompt by committing {@code submitInput} to the
+     * Session journal under the prompt's id, so the journal row keyed by that
+     * command is the admission's own evidence. Its absence proves nothing
+     * while a writer may still commit it; once the head refuses every writer
+     * (DELETING or DELETED) and compaction has not started, the journal is
+     * complete and the absence is proof. Both facts come from one statement,
+     * whose single read view holds under any isolation level: a commit that
+     * preceded the deletion is visible beside it, and no commit can land
+     * between the two reads, as it could between two statements under READ
+     * COMMITTED and turn an admitted input into a failed one.
+     */
+    @Override
+    public AcceptanceVerdict turnInputAcceptance(String tenantId,
+            String sessionId, String operationId) {
+        String turnId = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE"
+                        + " scope_key = ? AND operation_kind = 'SUBMIT_INPUT' AND operation_id = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                operationId).stream().findFirst().orElse(null);
+        TurnRecord turn = turnId == null ? null
+                : findTurn(tenantId, sessionId, turnId).orElse(null);
+        if (turn == null) {
+            return AcceptanceVerdict.unknown();
+        }
+        if (turn.harnessEventEpoch() != null) {
+            return AcceptanceVerdict.committed();
+        }
+        record JournalEvidence(String admittedDigest, boolean sealed) {
+        }
+        JournalEvidence evidence = jdbc.queryForObject("SELECT (SELECT content_digest"
+                        + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                        + " AND command_key_hash = ?) AS admitted_digest, (SELECT COUNT(*) FROM"
+                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                        + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                        + " AND state IN ('DELETING', 'DELETED') AND"
+                        + " COALESCE(compacted_through_revision, 0) = 0) AS sealed",
+                (result, row) -> new JournalEvidence(result.getString("admitted_digest"),
+                        result.getLong("sealed") > 0),
+                tenantId, sessionId,
+                ManagedSessionStore.commandKeyHash("submitInput", turn.promptId()),
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId,
+                sessionId);
+        if (evidence.admittedDigest() != null) {
+            if (("sha256:" + evidence.admittedDigest()).equals(turn.payloadDigest())) {
+                return AcceptanceVerdict.committed();
+            }
+            LOG.warn("Journal admission digest differs from its Turn tenant={}"
+                    + " session={} turn={}", tenantId, sessionId, turnId);
+            return AcceptanceVerdict.unknown();
+        }
+        return evidence.sealed() ? AcceptanceVerdict.notCommitted(turn.errorCode())
+                : AcceptanceVerdict.unknown();
     }
 
     @Override
@@ -2775,14 +2906,14 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean settleTaskCancel(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             TaskCancelOutcome outcome, long retryAt) {
+        if (owner == null) {
+            throw new IllegalArgumentException(
+                    "A parked task cancel settles through settleParkedOperation");
+        }
         requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
-        // A leased claim settles only while it is still this worker's; a
-        // parked one (owner null) only while it is still parked, so a
-        // reconciliation can never rewrite an outcome already recorded.
-        String claim = owner == null
-                ? " AND state = 'RECOVERY_BLOCKED' AND delivery_state = 'BLOCKED'"
-                : " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "";
+        // A leased claim settles only while it is still this worker's.
+        String claim = " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "";
         List<Object> arguments = new ArrayList<>();
         String update = switch (outcome.status()) {
             case "completed" -> {
@@ -2827,10 +2958,7 @@ public class ManagedAgentStore implements AgentStateStore {
             default -> throw new IllegalArgumentException(
                     "Unknown task cancel outcome " + outcome.status());
         };
-        arguments.addAll(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), tenantId, sessionId, operationId));
-        if (owner != null) {
-            arguments.addAll(List.of(owner, claimGeneration));
-        }
+        arguments.addAll(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), tenantId, sessionId, operationId, owner, claimGeneration));
         return jdbc.update(
                         update
                                 + " WHERE scope_key = ? AND operation_kind IN "
@@ -3083,8 +3211,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         "UPDATE ma_operation SET phase = 'RUNNING', state = 'RUNNING', delivery_state = 'LEASED', claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?), claim_generation = claim_generation + 1, gmt_modified = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
-                                + " operation_id = ? AND state IN ('PENDING', 'RUNNING',"
-                                + " 'RECOVERY_BLOCKED') AND ((delivery_state IN ('PENDING', 'BLOCKED')"
+                                + " operation_id = ? AND (state IN ('PENDING', 'RUNNING')"
+                                + " OR state = 'RECOVERY_BLOCKED' AND operation_kind IN "
+                                + LIFECYCLE_WAIT_KINDS
+                                + ") AND ((delivery_state IN ('PENDING', 'BLOCKED')"
                                 + " AND available_at <= ?) OR (delivery_state = 'LEASED' AND"
                                 + " claim_until < " + ManagedSchemaTime.SQL_NOW + "))",
                         owner,
