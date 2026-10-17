@@ -73,13 +73,20 @@ describe('UserMessage slash command stylesheet', () => {
         return [entry.slice(0, splitAt), entry.slice(splitAt + 1).trim()];
       }),
     );
+    // The closing quote right after `slash` is what keeps the sibling
+    // `.cm-input-slash-argument-hint` key out of the match.
     const composerSlash = composerThemeSource.match(
       /'\.cm-input-slash':\s*\{[^}]*\}/,
     )?.[0];
     expect(composerSlash).toBeTruthy();
-    expect(composerSlash).toContain(`color: '${declared.get('color')}'`);
-    expect(composerSlash).toContain(
-      `fontWeight: '${declared.get('font-weight')}'`,
+    // Compare declaration sets, not substrings, so an extra composer-side
+    // declaration (breaking parity the other way) also turns this red.
+    const composerDeclarations = new Map(
+      Array.from(composerSlash!.matchAll(/(\w+):\s*'([^']*)'/g), (m) => [
+        m[1]!.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`),
+        m[2]!,
+      ]),
     );
+    expect(composerDeclarations).toEqual(declared);
   });
 });
