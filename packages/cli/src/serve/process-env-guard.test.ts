@@ -247,6 +247,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-runtime-bootstrap.ts',
+    {
+      reason:
+        'The one-shot SSH bootstrap copies a fixed allowlist from its host process into a detached worker without forwarding credentials or Node loader overrides.',
+      accesses: { 'computed:key': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-ssh-worker.ts',
+    {
+      reason:
+        'The dedicated SSH worker removes launch-only QWEN_MANAGED variables and Node loader overrides before executing workspace tools.',
+      accesses: { 'computed:key': 1, whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:

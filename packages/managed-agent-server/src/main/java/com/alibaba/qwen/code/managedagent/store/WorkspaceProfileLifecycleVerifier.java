@@ -59,8 +59,15 @@ public class WorkspaceProfileLifecycleVerifier {
     }
 
     void verifyPublications(OperationRecord operation) {
+        var backgroundCalls = backgroundCalls(operation);
         for (ToolExecutionRecord execution : executions(operation)) {
-            if (execution.getReference().get("publicationId") != null && execution.getDispatchGeneration() > 0) {
+            if (execution.getReference().get("publicationId") == null) {
+                continue;
+            }
+            if (notStarted(execution)) {
+                verifyNotStartedPublication(operation, execution);
+            } else if (execution.getDispatchGeneration() > 0
+                    && !backgroundCalls.contains(execution.getExecutionCallId())) {
                 if (publications.getIfAvailable() == null
                         || publications.getIfAvailable().verifyReceiptForLifecycle(execution) == null) {
                     unsettled();
@@ -109,14 +116,7 @@ public class WorkspaceProfileLifecycleVerifier {
         }
         Map<String, ToolExecutionRecord> executions = executions(operation).stream()
                 .collect(Collectors.toMap(ToolExecutionRecord::getExecutionCallId, Function.identity()));
-        var backgroundCalls = new java.util.HashSet<String>();
-        for (String domain : List.of("child_run", "monitor_run")) {
-            for (JsonNode record : records.listRecords(operation.tenantId(), operation.sessionId(), domain)) {
-                if ("monitor_run".equals(domain) || "shell".equals(record.path("kind").asText())) {
-                    backgroundCalls.add(record.path("run").path("executionCallId").asText());
-                }
-            }
-        }
+        var backgroundCalls = backgroundCalls(operation);
         var sourcesByCall = jdbc.queryForList("SELECT request_json FROM ma_operation"
                 + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
                 ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
@@ -145,16 +145,8 @@ public class WorkspaceProfileLifecycleVerifier {
             }
             results.getIfAvailable().verifySource(source);
             if (execution.getReference().get("publicationId") != null) {
-                if ("not_started".equals(execution.getExecutionStatus())
-                        || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0) {
-                    var rows = jdbc.queryForList("SELECT producer_phase, terminal_resource_id, quarantined"
-                            + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
-                            operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
-                    if (rows.size() != 1 || !"NOT_STARTED".equals(rows.getFirst().get("producer_phase"))
-                            || Boolean.TRUE.equals(rows.getFirst().get("quarantined"))
-                            || rows.getFirst().get("terminal_resource_id") != null) {
-                        unsettled();
-                    }
+                if (notStarted(execution)) {
+                    verifyNotStartedPublication(operation, execution);
                 } else {
                     var rows = jdbc.queryForList("SELECT producer_phase, admission_resource_id, receipt_sequence, receipt_revision,"
                             + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM ma_output_capture"
@@ -259,6 +251,19 @@ public class WorkspaceProfileLifecycleVerifier {
         }
     }
 
+    private java.util.Set<String> backgroundCalls(OperationRecord operation) {
+        // Detached output is verified against its record and physical exit, not a foreground receipt.
+        var calls = new java.util.HashSet<String>();
+        for (String domain : List.of("child_run", "monitor_run")) {
+            for (JsonNode record : records.listRecords(operation.tenantId(), operation.sessionId(), domain)) {
+                if ("monitor_run".equals(domain) || "shell".equals(record.path("kind").asText())) {
+                    calls.add(record.path("run").path("executionCallId").asText());
+                }
+            }
+        }
+        return calls;
+    }
+
     private java.util.Set<String> nativeFileInputs(OperationRecord operation) {
         var inputs = new java.util.HashSet<String>();
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
@@ -288,6 +293,36 @@ public class WorkspaceProfileLifecycleVerifier {
     private List<ToolExecutionRecord> executions(OperationRecord operation) {
         return jdbc.execute((ConnectionCallback<List<ToolExecutionRecord>>) connection ->
                 JdbcToolExecutionRepository.findHarnessExecutions(connection, operation.tenantId(), operation.sessionId()));
+    }
+
+    private static boolean notStarted(ToolExecutionRecord execution) {
+        return execution.isSettled() && ("not_started".equals(execution.getExecutionStatus())
+                || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0);
+    }
+
+    private void verifyNotStartedPublication(OperationRecord operation, ToolExecutionRecord execution) {
+        var rows = jdbc.queryForList("SELECT state, producer_phase, terminal_resource_id, binding_json, binding_digest,"
+                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
+                operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
+        if (rows.size() != 1 || !"NOT_STARTED".equals(rows.getFirst().get("state"))
+                || !"OPEN".equals(rows.getFirst().get("producer_phase"))
+                || ((Number) rows.getFirst().get("quarantined")).intValue() != 0
+                || rows.getFirst().get("terminal_resource_id") != null) {
+            unsettled();
+        }
+        var row = rows.getFirst();
+        JsonNode binding = ToolPublicationContract.parseBytes("binding", ((String) row.get("binding_json")).getBytes(StandardCharsets.UTF_8));
+        if (!ToolPublicationContract.bindingDigest(binding).equals(row.get("binding_digest"))
+                || !operation.tenantId().equals(binding.path("sessionKey").path("tenantId").asText())
+                || !operation.sessionId().equals(binding.path("sessionKey").path("sessionId").asText())
+                || !execution.getExecutionCallId().equals(binding.path("executionCallId").asText())
+                || !execution.getBindingId().equals(binding.path("runtimeBindingId").asText())
+                || !Long.toString(execution.getRuntimeGeneration()).equals(binding.path("bindingGeneration").asText())
+                || !execution.getRequestDigest().equals(binding.path("requestDigest").asText())
+                || !java.util.Objects.equals(execution.getReference().get("argsDigest"), binding.path("reference").path("argsDigest").asText())) {
+            unsettled();
+        }
     }
 
     private ManagedToolResultStore.Source source(String text) {

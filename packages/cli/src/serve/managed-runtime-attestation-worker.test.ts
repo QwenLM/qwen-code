@@ -336,40 +336,47 @@ describe('Managed Runtime attestation worker', () => {
     expect(unknown.headers.get('cache-control')).toBe('no-store');
   });
 
-  it('creates its ledger from the launch environment, arms its watch, and never leaks the path', async () => {
-    const sandbox = await mkdtemp(path.join(tmpdir(), 'qwen-worker-ledger-'));
-    const ledgerFile = path.join(sandbox, 'worker.json');
-    const previous = process.env[MANAGED_RUNTIME_LEDGER_ENV];
-    const forWorkspace = vi.spyOn(ManagedToolExecutor, 'forWorkspace');
-    const watch = vi.spyOn(ManagedRuntimeLedger.prototype, 'watch');
-    onTestFinished(async () => {
-      forWorkspace.mockRestore();
-      watch.mockRestore();
-      await worker.close().catch(() => undefined);
-      if (previous === undefined) {
-        delete process.env[MANAGED_RUNTIME_LEDGER_ENV];
-      } else {
-        process.env[MANAGED_RUNTIME_LEDGER_ENV] = previous;
-      }
-      await rm(sandbox, { recursive: true, force: true });
-    });
-    process.env[MANAGED_RUNTIME_LEDGER_ENV] = ledgerFile;
+  it.each([boot, contextFixtures.boot])(
+    'creates a boot v$version ledger from the launch environment and never leaks its path',
+    async (document) => {
+      const sandbox = await mkdtemp(path.join(tmpdir(), 'qwen-worker-ledger-'));
+      const ledgerFile = path.join(sandbox, 'worker.json');
+      const previous = process.env[MANAGED_RUNTIME_LEDGER_ENV];
+      const forWorkspace = vi.spyOn(ManagedToolExecutor, 'forWorkspace');
+      const watch = vi.spyOn(ManagedRuntimeLedger.prototype, 'watch');
+      onTestFinished(async () => {
+        forWorkspace.mockRestore();
+        watch.mockRestore();
+        await worker.close().catch(() => undefined);
+        if (previous === undefined) {
+          delete process.env[MANAGED_RUNTIME_LEDGER_ENV];
+        } else {
+          process.env[MANAGED_RUNTIME_LEDGER_ENV] = previous;
+        }
+        await rm(sandbox, { recursive: true, force: true });
+      });
+      process.env[MANAGED_RUNTIME_LEDGER_ENV] = ledgerFile;
 
-    const worker = await startManagedRuntimeAttestationWorker(boot);
+      const worker = await startManagedRuntimeAttestationWorker(document);
 
-    expect(forWorkspace).toHaveBeenCalledWith(
-      boot.workspaceCwd,
-      boot.runtimeInstanceId,
-      expect.objectContaining({ ledger: expect.any(ManagedRuntimeLedger) }),
-    );
-    expect(watch).toHaveBeenCalledTimes(1);
-    // The path is for the worker alone: no Shell command inherits the name
-    // of the file that accounts for it.
-    expect(process.env[MANAGED_RUNTIME_LEDGER_ENV]).toBeUndefined();
-    expect(
-      testInternals.readLedgerDocument(ledgerFile)?.worker.incarnation,
-    ).toBe(boot.runtimeIncarnation);
-  });
+      if (document.version === 1) {
+        expect(forWorkspace).toHaveBeenCalledWith(
+          document.workspaceCwd,
+          document.runtimeInstanceId,
+          expect.objectContaining({ ledger: expect.any(ManagedRuntimeLedger) }),
+        );
+      } else expect(forWorkspace).not.toHaveBeenCalled();
+      expect(watch).toHaveBeenCalledTimes(1);
+      // The path is for the worker alone: no Shell command inherits the name
+      // of the file that accounts for it.
+      expect(process.env[MANAGED_RUNTIME_LEDGER_ENV]).toBeUndefined();
+      expect(
+        testInternals.readLedgerDocument(ledgerFile)?.worker.incarnation,
+      ).toBe(document.runtimeIncarnation);
+      await worker.close();
+      expect(testInternals.readLedgerDocument(ledgerFile)).toBeUndefined();
+    },
+  );
 
   it('rejects an invalid identity before opening a listener', async () => {
     const listeners = () =>

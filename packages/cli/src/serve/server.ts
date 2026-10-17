@@ -4210,12 +4210,14 @@ export function createServeApp(
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
         stopSessionAgentOrchestrators?: () => void;
+        stopHostedMountHandbacks?: () => void;
       };
       stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
+      stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

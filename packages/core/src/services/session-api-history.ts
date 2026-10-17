@@ -80,7 +80,9 @@ export function getLastApiPromptCancellation(
   history: readonly Content[],
   records: readonly ChatRecord[],
   trailingSystemNotifications?: number,
-): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+):
+  | { reason: 'user' | 'unknown'; promptId: string; confirmationId?: string }
+  | undefined {
   const promptId = getLastApiHistoryPromptId(
     history,
     trailingSystemNotifications,
@@ -127,14 +129,32 @@ export function getLastApiPromptCancellation(
   const result = results.findLast((record) => cancellation(record, false));
   if (!result)
     return results.length > 0 ? undefined : cancellation(latest, false);
+  const uniqueOwner =
+    records.filter(
+      (record) =>
+        isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+    ).length === 1;
   const owned =
-    results.length === 1 &&
-    (result.promptId === promptId ||
-      records.filter(
-        (record) =>
-          isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
-      ).length === 1);
-  return cancellation(result, owned);
+    results.length === 1 && (result.promptId === promptId || uniqueOwner);
+  const cancelled = cancellation(result, owned);
+  const payload = result.systemPayload;
+  if (
+    cancelled?.reason === 'unknown' &&
+    owned &&
+    isTurnResultRecordPayload(payload) &&
+    payload.cancelReason === undefined &&
+    payload.promptId === owner.daemonPromptId &&
+    !records
+      .slice(records.indexOf(result) + 1)
+      .some((record) => cancellation(record, false)) &&
+    uniqueOwner &&
+    typeof result.uuid === 'string' &&
+    result.uuid.length > 0 &&
+    records.filter((record) => record.uuid === result.uuid).length === 1
+  ) {
+    return { ...cancelled, confirmationId: result.uuid };
+  }
+  return cancelled;
 }
 
 export interface BuildApiHistoryOptions {

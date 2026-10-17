@@ -678,6 +678,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_status',
   'session_close',
   'session_archive',
+  'session_archive_idle_guard',
   'session_storage_conflict_repair',
   'session_metadata',
   'session_organization',
@@ -708,6 +709,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_write',
   // Binary file upload (never overwrites; auto-numbers occupied names).
   'workspace_file_upload',
+  'workspace_file_delete',
   'workspace_directory_create',
   'workspace_directory_delete',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
@@ -12418,6 +12420,7 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts).toHaveLength(1);
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
+        confirmCancellation: 'legacy-daemon',
       });
       const promptId = bridge.continueSessionContexts[0]?.promptId;
       expect(typeof promptId).toBe('string');
@@ -34359,6 +34362,34 @@ describe('createServeApp', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('validates and forwards the idle-only archive guard', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeed';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const invalid = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], requireIdle: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_request');
+
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], requireIdle: true });
+      expect(archived.status).toBe(200);
+      expect(bridge.closeCalls[0]?.closeOpts).toMatchObject({
+        requireAgentClose: true,
+        requireIdle: true,
+      });
+    });
+
     it('requires an explicit boolean to repair active/archive conflicts', async () => {
       const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeea';
       await writeSession(sid);
@@ -34653,7 +34684,7 @@ describe('createServeApp', () => {
         {
           sessionId: sid,
           clientId: undefined,
-          closeOpts: { requireAgentClose: true },
+          closeOpts: { requireAgentClose: true, requireIdle: false },
         },
       ]);
     });
@@ -42443,6 +42474,65 @@ describe('auth device-flow routes', () => {
         'This install would replace a model configured for another purpose.',
     });
     expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider reports invalid API key as a client error', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'qwencloud-standard',
+        apiKey: 'sk-sp-not-a-real-key',
+        baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      });
+
+    expect(installAuthProvider).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: 'invalid_api_key',
+    });
+    expect(res.body.error).toContain('Token Plan');
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider passes padded valid keys through to installAuthProvider', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'qwencloud-standard',
+      providerLabel: 'Standard API Key',
+      authType: 'openai',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'qwencloud-standard',
+        apiKey: '  sk-valid-pay-as-you-go-key  ',
+        baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+    expect(installAuthProvider.mock.calls[0][0]).toMatchObject({
+      apiKey: 'sk-valid-pay-as-you-go-key',
+    });
   });
 
   it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {

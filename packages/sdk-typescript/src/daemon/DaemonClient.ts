@@ -3638,7 +3638,11 @@ export class DaemonClient {
   /** Admit an interrupted turn without adding a user message. */
   async continueSession(
     sessionId: string,
-    opts: { clientId?: string; signal?: AbortSignal } = {},
+    opts: {
+      clientId?: string;
+      signal?: AbortSignal;
+      confirmCancellation?: string;
+    } = {},
   ): Promise<DaemonContinueSessionResult> {
     opts.signal?.throwIfAborted();
     return await this.jsonRequest<DaemonContinueSessionResult>(
@@ -3646,6 +3650,9 @@ export class DaemonClient {
       'POST /session/:id/continue',
       {
         method: 'POST',
+        ...(typeof opts.confirmCancellation === 'string'
+          ? { body: { confirmCancellation: opts.confirmCancellation } }
+          : {}),
         clientId: opts.clientId,
         signal: opts.signal,
         mode: 'rest',
@@ -6650,7 +6657,9 @@ export class DaemonClient {
 
   async archiveSessionsData(
     sessionIds: string[],
-    clientIdOrOptions?: string | { resolveConflicts?: boolean },
+    clientIdOrOptions?:
+      | string
+      | { resolveConflicts?: boolean; requireIdle?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
     const options =
@@ -6667,6 +6676,9 @@ export class DaemonClient {
           sessionIds,
           ...(options?.resolveConflicts !== undefined
             ? { resolveConflicts: options.resolveConflicts }
+            : {}),
+          ...(options?.requireIdle !== undefined
+            ? { requireIdle: options.requireIdle }
             : {}),
         }),
       },
@@ -8357,7 +8369,9 @@ export class WorkspaceDaemonClient {
 
   archiveSessionsData(
     sessionIds: string[],
-    clientIdOrOptions?: string | { resolveConflicts?: boolean },
+    clientIdOrOptions?:
+      | string
+      | { resolveConflicts?: boolean; requireIdle?: boolean },
     clientId?: string,
   ): Promise<DaemonArchiveSessionsResult> {
     const options =
@@ -8369,6 +8383,9 @@ export class WorkspaceDaemonClient {
         sessionIds,
         ...(options?.resolveConflicts !== undefined
           ? { resolveConflicts: options.resolveConflicts }
+          : {}),
+        ...(options?.requireIdle !== undefined
+          ? { requireIdle: options.requireIdle }
           : {}),
       },
       typeof clientIdOrOptions === 'string' ? clientIdOrOptions : clientId,
@@ -8796,6 +8813,18 @@ export class WorkspaceDaemonClient {
       '/extensions/refresh',
       'POST /workspaces/:workspace/extensions/refresh',
       { method: 'POST', body: {}, clientId, mode: 'rest' },
+    );
+  }
+
+  async deleteWorkspaceFile(
+    filePath: string,
+    clientId?: string,
+  ): Promise<void> {
+    await this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/file/delete',
+      'POST /workspaces/:workspace/file/delete',
+      { method: 'POST', body: { path: filePath }, clientId, mode: 'rest' },
     );
   }
 

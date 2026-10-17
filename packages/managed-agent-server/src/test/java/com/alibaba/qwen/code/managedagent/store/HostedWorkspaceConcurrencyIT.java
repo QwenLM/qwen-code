@@ -210,37 +210,173 @@ class HostedWorkspaceConcurrencyIT {
             failure = error;
             throw error;
         } finally {
+            cleanupTenant(jdbc, tenant, h2, failure);
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void mountReleaseFreesHeldStorageAndKeepsTheSessionReady() throws Exception {
+        temporary = temporary.toRealPath();
+        Server h2 = null;
+        String url = System.getProperty("mysql.url");
+        String user = System.getProperty("mysql.user", "sa");
+        String password = System.getProperty("mysql.password", "");
+        if (url == null) {
+            h2 = Server.createTcpServer("-tcpPort", "0", "-ifNotExists").start();
+            url = "jdbc:h2:tcp://localhost:" + h2.getPort() + "/mem:w1-" + UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE";
+        } else {
+            assertThat(url).startsWith("jdbc:mysql:");
+            assertThat(LINUX).as("MySQL acceptance requires physical Linux identity").isTrue();
+        }
+        var source = new DriverManagerDataSource(url, user, password);
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        String tenant = "w1-mount-" + UUID.randomUUID();
+        Throwable failure = null;
+        try {
+            Path root = Files.createDirectory(temporary.resolve("workspace"));
+            Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+            Files.createDirectory(temporary.resolve("initial-state"));
+            var properties = properties(tenant, root, temporary.resolve("initial-state"));
+            ManagedSchema.initialize(source);
+            var store = store(source, properties);
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                    + " storage_id, display_name, config_ref, policy_ref, state)"
+                    + " VALUES (?, 'workspace', 1, 'storage', 'Mount', ?, ?, 'ACTIVE')", tenant,
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+            var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
+            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
+                    "first", "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
+                    new WorkspaceSelection("workspace", ".")).sessionId());
+            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
+                    "second", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                    new WorkspaceSelection("workspace", ".")).sessionId());
+            guard(source, properties).register(tenant, "storage", UUID.randomUUID().toString());
+            Map<String, Object> config = Map.of("url", url, "user", user, "password", password,
+                    "tenant", tenant, "root", root.toString());
+            try (Broker broker = new Broker("mount", config)) {
+                String holderRuntime = UUID.randomUUID().toString();
+                String claim = UUID.randomUUID().toString();
+                assertOk(broker.acquire(firstSession, holderRuntime, claim).get(20, TimeUnit.SECONDS));
+                var held = row(jdbc, tenant);
+                assertThat(held).containsEntry("runtime_session_id", holderRuntime);
+                assertThat(held.get("holder_key")).as("%s", held).isNotNull();
+
+                // A rival Session's acquire is refused while the mount is held.
+                var refused = broker.acquire(secondSession, UUID.randomUUID().toString()).get(20, TimeUnit.SECONDS);
+                assertThat(refused.statusCode()).as("%s", refused.body()).isEqualTo(409);
+                assertThat(refused.body()).contains("workspace_busy");
+
+                // #13800: unfinished work keeps the mount honestly — the
+                // narrow release refuses while anything is unproven, never
+                // dropping an exclusion live work still needs.
+                String pending = broker.prepareWrite(firstSession, holderRuntime, root.resolve("gate.txt"), "gate");
+                var busy = broker.postAsync("/tool-sessions/" + holderRuntime + ":release-mount",
+                        Map.of("harnessSessionId", firstSession, "mountClaimId", claim)).get(20, TimeUnit.SECONDS);
+                assertThat(busy.statusCode()).as("%s", busy.body()).isEqualTo(409);
+                assertThat(busy.body()).contains("runtime_session_busy");
+                assertThat(row(jdbc, tenant)).isEqualTo(held);
+
+                // Settle the execution; the recovery-blocked turn's handback now succeeds.
+                assertOk(broker.postAsync("/executions/" + pending + ":start",
+                        Map.of("harnessSessionId", firstSession, "runtimeSessionId", holderRuntime))
+                        .get(20, TimeUnit.SECONDS));
+                var executionStore = new JdbcToolExecutionRepository(source);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                while (executionStore.findByExecutionCallId(pending).getResult() == null) {
+                    if (System.nanoTime() > deadline) {
+                        throw new AssertionError("Tool did not settle");
+                    }
+                    Thread.sleep(10);
+                }
+                assertThat(Files.readString(root.resolve("gate.txt"))).isEqualTo("gate");
+                // Only the acquire that owes the handback may send it.
+                var stale = broker.postAsync("/tool-sessions/" + holderRuntime + ":release-mount",
+                        Map.of("harnessSessionId", firstSession, "mountClaimId", UUID.randomUUID().toString()))
+                        .get(20, TimeUnit.SECONDS);
+                assertThat(stale.statusCode()).as("%s", stale.body()).isEqualTo(409);
+                assertThat(stale.body()).contains("runtime_session_conflict");
+                assertThat(row(jdbc, tenant)).isEqualTo(held);
+                var mount = broker.postAsync("/tool-sessions/" + holderRuntime + ":release-mount",
+                        Map.of("harnessSessionId", firstSession, "mountClaimId", claim)).get(20, TimeUnit.SECONDS);
+                assertThat(mount.statusCode()).as("%s", mount.body()).isEqualTo(200);
+                assertThat(mount.body()).contains("\"mountReleased\":true");
+
+                var freed = row(jdbc, tenant);
+                for (String field : List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
+                    assertThat(freed.get(field)).as("%s", field).isNull();
+                }
+                // The Runtime Session is untouched: READY, never RELEASED —
+                // the recovery fleet keeps its adoptable identity.
+                assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session"
+                        + " WHERE runtime_session_id = ?", String.class, holderRuntime)).isEqualTo("READY");
+
+                // The rival proceeds immediately: the #13800 wedge's exit shape.
+                String rival = UUID.randomUUID().toString();
+                assertOk(broker.acquire(secondSession, rival).get(20, TimeUnit.SECONDS));
+                assertThat(row(jdbc, tenant)).containsEntry("runtime_session_id", rival);
+
+                // A re-drive of the handed-back identity claims the mount
+                // again: busy while the rival holds it, its own once free.
+                var contended = broker.acquire(firstSession, holderRuntime, UUID.randomUUID().toString())
+                        .get(20, TimeUnit.SECONDS);
+                assertThat(contended.statusCode()).as("%s", contended.body()).isEqualTo(409);
+                assertThat(contended.body()).contains("workspace_busy");
+                broker.ok("/tool-sessions/" + rival + ":release", Map.of("harnessSessionId", secondSession));
+                assertOk(broker.acquire(firstSession, holderRuntime, UUID.randomUUID().toString())
+                        .get(20, TimeUnit.SECONDS));
+                assertThat(row(jdbc, tenant)).containsEntry("runtime_session_id", holderRuntime);
+                assertOk(broker.postAsync("/tool-sessions/" + holderRuntime + ":release",
+                        Map.of("harnessSessionId", firstSession)).get(20, TimeUnit.SECONDS));
+                assertThat(row(jdbc, tenant).get("holder_key")).isNull();
+                assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session"
+                        + " WHERE runtime_session_id = ?", String.class, holderRuntime)).isEqualTo("RELEASED");
+                System.out.println("W1_MOUNT_RELEASE_OK physical=" + LINUX);
+            }
+        } catch (Exception | Error error) {
+            failure = error;
+            throw error;
+        } finally {
+            cleanupTenant(jdbc, tenant, h2, failure);
+        }
+    }
+
+    // Every tenant-scoped table the fixture's two tests must leave empty;
+    // a schema migration adds its table HERE once, or no test protects it.
+    private static void cleanupTenant(JdbcTemplate jdbc, String tenant, Server h2, Throwable failure) {
+        try {
+            jdbc.update("DELETE FROM ma_tool_execution WHERE binding_id IN"
+                    + " (SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?)", tenant);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id IN"
+                    + " (SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?)",
+                    Long.class, tenant)).isZero();
+            for (String table : List.of("ma_runtime_session", "ma_runtime_binding",
+                    "ma_runtime_slot", "ma_tenant_guard",
+                    "ma_storage_owner", "ma_public_event", "ma_event_stream", "ma_request_receipt", "ma_session",
+                    "ma_workspace_access", "ma_workspace")) {
+                jdbc.update("DELETE FROM " + table + " WHERE tenant_id = ?", tenant);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE tenant_id = ?",
+                        Long.class, tenant)).as("%s fixture tenant cleanup", table).isZero();
+            }
+        } catch (RuntimeException | Error cleanupFailure) {
+            if (failure == null) {
+                failure = cleanupFailure;
+                throw cleanupFailure;
+            }
+            failure.addSuppressed(cleanupFailure);
+        } finally {
             try {
-                jdbc.update("DELETE FROM ma_tool_execution WHERE binding_id IN"
-                        + " (SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?)", tenant);
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE binding_id IN"
-                        + " (SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?)",
-                        Long.class, tenant)).isZero();
-                for (String table : List.of("ma_runtime_session", "ma_runtime_binding",
-                        "ma_runtime_slot", "ma_tenant_guard",
-                        "ma_storage_owner", "ma_public_event", "ma_event_stream", "ma_request_receipt", "ma_session",
-                        "ma_workspace_access", "ma_workspace")) {
-                    jdbc.update("DELETE FROM " + table + " WHERE tenant_id = ?", tenant);
-                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE tenant_id = ?",
-                            Long.class, tenant)).as("%s fixture tenant cleanup", table).isZero();
+                if (h2 != null) {
+                    h2.stop();
                 }
-            } catch (RuntimeException | Error cleanupFailure) {
+            } catch (RuntimeException | Error stopFailure) {
                 if (failure == null) {
-                    failure = cleanupFailure;
-                    throw cleanupFailure;
+                    throw stopFailure;
                 }
-                failure.addSuppressed(cleanupFailure);
-            } finally {
-                try {
-                    if (h2 != null) {
-                        h2.stop();
-                    }
-                } catch (RuntimeException | Error stopFailure) {
-                    if (failure == null) {
-                        throw stopFailure;
-                    }
-                    failure.addSuppressed(stopFailure);
-                }
+                failure.addSuppressed(stopFailure);
             }
         }
     }
@@ -344,6 +480,12 @@ class HostedWorkspaceConcurrencyIT {
         java.util.concurrent.CompletableFuture<HttpResponse<String>> acquire(String session, String runtime) throws Exception {
             return postAsync("/tool-sessions:acquire", Map.of("harnessSessionId", session,
                     "runtimeSessionId", runtime, "turnKind", "bootstrap"));
+        }
+
+        java.util.concurrent.CompletableFuture<HttpResponse<String>> acquire(String session, String runtime,
+                String mountClaimId) throws Exception {
+            return postAsync("/tool-sessions:acquire", Map.of("harnessSessionId", session,
+                    "runtimeSessionId", runtime, "turnKind", "bootstrap", "mountClaimId", mountClaimId));
         }
 
         java.util.concurrent.CompletableFuture<HttpResponse<String>> postAsync(String route, Map<String, Object> body) throws Exception {

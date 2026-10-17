@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.Body;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
@@ -33,9 +34,11 @@ import java.sql.SQLException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -88,10 +91,17 @@ public class ManagedExtensionRecordStore {
             + "):[0-9]+$");
     private static final Pattern TASK_ID = Pattern.compile(
             "^task_([0-9a-f]{64})$");
+    /** The task kinds a child Session of their own runs (H4b, H4c). */
+    private static final Set<String> CHILD_SESSION_TASK_KINDS = Set.of(
+            "child_agent", "workflow");
     private static final Set<String> SESSION_KEY_FIELDS = Set.of("tenantId",
             "workspaceId", "sessionId");
     private static final Set<String> PAYLOAD_FIELDS = Set.of("domain",
             "version", "operationId", "recordRef");
+    private static final String MODEL_CONTEXT_DOMAIN = "hosted_context_usage";
+    private static final String MODEL_CONTEXT_ID = "latest";
+    private static final String MODEL_USAGE_KIND = "managed-hosted-model-usage";
+    private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
     // Parses as strictly as the Session authority's reader: no duplicate
     // keys, no trailing content, no deeper nesting, and, checked after
     // parsing, only finite numbers. The store never accepts a line or a body
@@ -125,8 +135,9 @@ public class ManagedExtensionRecordStore {
         this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
+    /** A task's projection row and the resource holding its record's latest committed body. */
     public record TaskRow(String taskId, String kind,
-            TaskProjection projection) {
+            TaskProjection projection, String resourceId) {
     }
 
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
@@ -158,6 +169,86 @@ public class ManagedExtensionRecordStore {
             body.require().accept(record);
             return record;
         }).toList();
+    }
+
+    public Map<String, WebShellModelContext> findModelContexts(
+            String tenantId, List<String> sessionIds) {
+        return findModelContexts(jdbc, tenantId, sessionIds);
+    }
+
+    static Map<String, WebShellModelContext> findModelContexts(JdbcTemplate jdbc,
+            String tenantId, List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<String> keys = new ArrayList<>();
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(tenantId);
+        for (String sessionId : sessionIds) {
+            keys.add("(r.session_scope_key = ? AND r.record_key = ? AND r.session_id = ?)");
+            arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, sessionId));
+            arguments.add(ManagedExtensionProjection.recordKey(sessionId,
+                    MODEL_CONTEXT_DOMAIN, MODEL_CONTEXT_ID));
+            arguments.add(sessionId);
+        }
+        arguments.add(MODEL_CONTEXT_ID);
+        arguments.add(MODEL_USAGE_KIND);
+        Map<String, WebShellModelContext> contexts = new HashMap<>();
+        jdbc.query("SELECT r.session_id, r.settled_at, u.byte_length, u.sha256, u.inline_bytes"
+                        + " FROM ma_session_record r JOIN ma_resource u ON u.session_scope_key ="
+                        + " r.session_scope_key AND u.resource_id = r.record_resource_id AND"
+                        + " u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND"
+                        + " u.workspace_id = r.workspace_id JOIN ma_session s ON s.tenant_id ="
+                        + " r.tenant_id AND s.session_id = r.session_id AND s.workspace_id ="
+                        + " r.workspace_id WHERE r.tenant_id = ? AND (" + String.join(" OR ", keys)
+                        + ") AND r.record_kind = 'DOMAIN' AND r.domain = 'hosted_context_usage'"
+                        + " AND r.record_id = ? AND r.settled_at IS NOT NULL AND"
+                        + " s.session_kind = 'PUBLIC' AND s.workspace_storage_id IS NOT NULL AND"
+                        + " u.state = 'REFERENCED' AND u.kind = ? AND"
+                        + " u.schema_version = 1 AND u.storage_kind = 'MYSQL_INLINE' AND"
+                        + " u.object_key IS NULL AND u.object_version_id IS NULL AND"
+                        + " u.encryption_key_id IS NULL AND u.byte_length BETWEEN 0 AND 65536"
+                        + " AND OCTET_LENGTH(u.inline_bytes) <= 65536",
+                row -> {
+                    byte[] bytes = row.getBytes("inline_bytes");
+                    if (bytes != null && bytes.length == row.getLong("byte_length")
+                            && sha256(bytes).equals(row.getString("sha256"))) {
+                        WebShellModelContext context = modelContext(bytes,
+                                row.getLong("settled_at"));
+                        if (context != null) {
+                            contexts.put(row.getString("session_id"), context);
+                        }
+                    }
+                }, arguments.toArray());
+        return contexts;
+    }
+
+    private static WebShellModelContext modelContext(byte[] bytes, long observedAt) {
+        JsonNode body = parse(new String(bytes, StandardCharsets.UTF_8));
+        if (body == null || !body.path("version").isIntegralNumber()
+                || !body.path("version").canConvertToLong()
+                || body.path("version").longValue() != 1) {
+            return null;
+        }
+        JsonNode model = body.path("model");
+        if (!model.isTextual() || StringUtils.isBlank(model.textValue())
+                || model.textValue().getBytes(StandardCharsets.UTF_8).length > 512
+                || model.textValue().chars().anyMatch(Character::isISOControl)) {
+            return null;
+        }
+        JsonNode attempts = body.path("attempts");
+        JsonNode latest = attempts.isArray() && !attempts.isEmpty()
+                ? attempts.get(attempts.size() - 1) : null;
+        return new WebShellModelContext(model.textValue(), tokenCount(latest, "promptTokenCount", 0),
+                tokenCount(latest, "contextWindowSize", 1), observedAt);
+    }
+
+    private static Long tokenCount(JsonNode usage, String field, long minimum) {
+        JsonNode value = usage == null ? null : usage.get(field);
+        return value != null && value.isNumber() && value.canConvertToLong()
+                && value.decimalValue().stripTrailingZeros().scale() <= 0
+                && value.longValue() >= minimum && value.longValue() <= MAX_SAFE_INTEGER
+                ? value.longValue() : null;
     }
 
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId) {
@@ -383,6 +474,10 @@ public class ManagedExtensionRecordStore {
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
             }
+            if ("model.attempt".equals(kind)) {
+                projectModelContext(tenantId, workspaceId, sessionId, event,
+                        resources, occurredAt);
+            }
             if (!"domain.committed".equals(kind)) {
                 continue;
             }
@@ -405,6 +500,63 @@ public class ManagedExtensionRecordStore {
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
         return new ApplyResult(List.copyOf(receipts), lastActivation, List.copyOf(records));
+    }
+
+    private void projectModelContext(String tenantId, String workspaceId,
+            String sessionId, JsonNode event,
+            Function<String, StoredResource> resources, long occurredAt) {
+        JsonNode payload = event.path("payload");
+        JsonNode ref = payload.path("usageRef");
+        if (!"output_committed".equals(payload.path("state").textValue())
+                || !MODEL_USAGE_KIND.equals(ref.path("kind").textValue())
+                || !ref.path("schemaVersion").isIntegralNumber()
+                || !ref.path("schemaVersion").canConvertToLong()
+                || ref.path("schemaVersion").longValue() != 1
+                || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ? AND session_kind = 'PUBLIC' AND workspace_id = ?"
+                        + " AND workspace_storage_id IS NOT NULL", Integer.class,
+                        tenantId, sessionId, workspaceId) == 0) {
+            return;
+        }
+        try {
+            ManagedExtensionRecords.durableRef(ref, "Hosted model usage");
+        } catch (InvalidRecordException error) {
+            throw rejected(error.getMessage());
+        }
+        StoredResource resource = resources.apply(ref.get("resourceId").textValue());
+        requireReference(resource, ref);
+        require(resource.byteLength() <= ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
+                "Hosted model usage exceeds the inline resource limit.");
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String key = ManagedExtensionProjection.recordKey(sessionId, MODEL_CONTEXT_DOMAIN,
+                MODEL_CONTEXT_ID);
+        long sequence = event.get("sequence").longValue();
+        List<Long> previous = jdbc.queryForList("SELECT revision FROM ma_session_record"
+                + " WHERE session_scope_key = ? AND record_key = ?", Long.class, scope, key);
+        if (!previous.isEmpty() && previous.getFirst() >= sequence) {
+            return;
+        }
+        if (previous.isEmpty()) {
+            jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key,"
+                    + " tenant_id, workspace_id, session_id, domain, record_id, revision,"
+                    + " record_resource_id, gmt_create, settled_at, first_sequence) VALUES"
+                    + " ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId,
+                    workspaceId, sessionId, MODEL_CONTEXT_DOMAIN, MODEL_CONTEXT_ID, sequence,
+                    resource.resourceId(), occurredAt, occurredAt, sequence);
+        } else {
+            jdbc.update("UPDATE ma_session_record SET revision = ?, record_resource_id = ?,"
+                    + " settled_at = ? WHERE session_scope_key = ? AND record_key = ?"
+                    + " AND revision < ?", sequence, resource.resourceId(), occurredAt, scope,
+                    key, sequence);
+        }
+        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
+                + " AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scope, key);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?,"
+                + " " + ManagedSchemaTime.SQL_NOW + ")", scope, key, sequence,
+                ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId,
+                sessionId, resource.resourceId());
     }
 
     /**
@@ -630,6 +782,21 @@ public class ManagedExtensionRecordStore {
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 recordKey).stream().findFirst();
+    }
+
+    /**
+     * #13746 F2: the child Session that runs a child agent or workflow task, once the run's
+     * committed record names it (the attach, or a verdict that names a minted child), else null.
+     * The record body is the only place that fact lives; no other kind has a child Session.
+     */
+    public String childSessionId(String tenantId, String sessionId,
+            TaskRow task) {
+        if (!CHILD_SESSION_TASK_KINDS.contains(task.kind())) {
+            return null;
+        }
+        JsonNode named = readBody(readResource(tenantId, sessionId,
+                task.resourceId())).get("childSessionId");
+        return named == null || named.isNull() ? null : named.textValue();
     }
 
     /**
@@ -1197,6 +1364,11 @@ public class ManagedExtensionRecordStore {
         String deliveryState = delivery.isNull() ? null
                 : delivery.get("state").textValue();
         long revision = previous == null ? 1 : previous.revision() + 1;
+        // A row's task kind is fixed at its insert: a row written before
+        // its domain projected tasks (a channel delivery planned before
+        // #13746 F3) stays a non-task on every later revision.
+        String taskKind = previous == null ? body.taskKindOf().apply(record)
+                : previous.taskKind();
         if (previous == null) {
             try {
                 jdbc.update("INSERT INTO ma_session_record"
@@ -1212,8 +1384,8 @@ public class ManagedExtensionRecordStore {
                                 + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         scopeKey, recordKey, tenantId, workspaceId, sessionId,
                         domain, recordId, operationHash, revision, resourceId,
-                        body.taskKindOf().apply(record),
-                        body.taskKindOf().apply(record) == null ? null : projection.state(), projection.runtimeState(),
+                        taskKind, taskKind == null ? null : projection.state(),
+                        projection.runtimeState(),
                         projection.definitionRevision(), deliveryTarget,
                         deliveryState, projection.createdAt(),
                         projection.startedAt(), projection.settledAt(), sequence,
@@ -1236,7 +1408,7 @@ public class ManagedExtensionRecordStore {
                         + " = ?, runtime_state = ?, definition_revision = ?, delivery_target = ?,"
                         + " delivery_state = ?, started_at = ?, settled_at = ? WHERE record_kind ="
                         + " 'DOMAIN' AND session_scope_key = ? AND record_key = ?",
-                    revision, resourceId, body.taskKindOf().apply(record) == null ? null : projection.state(),
+                    revision, resourceId, taskKind == null ? null : projection.state(),
                     projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.startedAt(),
@@ -1251,7 +1423,7 @@ public class ManagedExtensionRecordStore {
         jdbc.update(
                 "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scopeKey, recordKey, revision, ManagedSchemaKeys.key(scopeKey, resourceId), tenantId, workspaceId, sessionId, resourceId);
-        if (body.taskKindOf().apply(record) != null && (previous == null
+        if (taskKind != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
             if (isBeingDeleted(tenantId, sessionId)) {
@@ -1286,14 +1458,16 @@ public class ManagedExtensionRecordStore {
         }
         return new TaskRow(ManagedExtensionProjection.taskId(
                 result.getString("record_key")),
-                result.getString("task_kind"), projection(result));
+                result.getString("task_kind"), projection(result),
+                result.getString("record_resource_id"));
     }
 
     private static StoredRow storedRow(ResultSet result, int row)
             throws SQLException {
         return new StoredRow(result.getString("domain"),
                 result.getString("record_id"), result.getLong("revision"),
-                result.getString("record_resource_id"), projection(result));
+                result.getString("record_resource_id"),
+                result.getString("task_kind"), projection(result));
     }
 
     private static TaskProjection projection(ResultSet result)
@@ -1743,7 +1917,7 @@ public class ManagedExtensionRecordStore {
     }
 
     private record StoredRow(String domain, String recordId, long revision,
-            String resourceId, TaskProjection projection) {
+            String resourceId, String taskKind, TaskProjection projection) {
     }
 
     /** Whether the event id sits in the domain's own reserved {@code <domain>:<n>} namespace. */
