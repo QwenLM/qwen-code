@@ -195,14 +195,17 @@ try {
     true,
   );
   await evidence('entered');
+  // The committed tool intent publishes the in-progress tool update before
+  // the tool body runs.
+  await Promise.all([publicBefore.through(2), webBefore.through(2)]);
   await Promise.all([publicBefore.close(), webBefore.close()]);
   assert.deepEqual(
     publicBefore.frames.map((frame) => frame.id),
-    [1],
+    [1, 2],
   );
   assert.deepEqual(
     webBefore.frames.map((frame) => frame.id),
-    [1],
+    [1, 2],
   );
   await unlink(`${proof}.read-gate`);
   await waitUntil(
@@ -217,19 +220,19 @@ try {
     publicAfter.start(publicBefore.frames.at(-1)!.id),
     webAfter.start(webBefore.frames.at(-1)!.id),
   ]);
-  await Promise.all([publicAfter.through(2), webAfter.through(2)]);
+  await Promise.all([publicAfter.through(4), webAfter.through(4)]);
   assert.deepEqual(
     publicAfter.frames.map((frame) => frame.id),
-    [2],
+    [3, 4],
     'Public cursor replay',
   );
   assert.deepEqual(
     webAfter.frames.map((frame) => frame.id),
-    [2],
+    [3, 4],
     'WebShell cursor replay',
   );
   await evidence('release');
-  await Promise.all([publicAfter.through(3), webAfter.through(3)]);
+  await Promise.all([publicAfter.through(5), webAfter.through(5)]);
   await Promise.all([publicAfter.close(), webAfter.close()]);
   const ledger: Array<Record<string, unknown>> = await evidence('ledger');
   const publicFrames = [...publicBefore.frames, ...publicAfter.frames];
@@ -241,7 +244,7 @@ try {
     const expected = projectEvents(ledger, surface);
     assert.deepEqual(
       frames.map((frame) => frame.id),
-      [1, 2, 3],
+      [1, 2, 3, 4, 5],
       `${surface} no gaps or duplicates`,
     );
     assert.deepEqual(
@@ -266,15 +269,15 @@ try {
       sessionId,
       limit: 100,
     });
-    return transcript.coveredSequence === 3;
+    return transcript.coveredSequence === 5;
   });
-  assert.equal(transcript.lastSequence, 3);
+  assert.equal(transcript.lastSequence, 5);
   assert.equal(transcript.hasMore, false);
-  assert.equal(transcript.coveredSequence, 3);
+  assert.equal(transcript.coveredSequence, 5);
   assert.equal(
     transcript.items
-      .flatMap((item: { content: Array<{ text: string }> }) =>
-        item.content.map((part) => part.text),
+      .flatMap((item: { content?: Array<{ text?: string }> }) =>
+        (item.content ?? []).map((part) => part.text ?? ''),
       )
       .join(''),
     'FG6e tool finished once.',
