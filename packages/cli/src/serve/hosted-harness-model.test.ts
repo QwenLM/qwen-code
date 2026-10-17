@@ -31,6 +31,7 @@ import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 import { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -166,6 +167,123 @@ function nativeInput(event: HookEventName): HookInput {
 
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it.each(['success', 'lost-output', 'round-limit'] as const)(
+    'commits final output before consuming file results (%s)',
+    async (scenario) => {
+      const model = config([]);
+      if (scenario === 'round-limit')
+        state.config['getMaxSessionTurns'] = () => 1;
+      const order: string[] = [];
+      let round = 0;
+      model.sendMessageStream.mockImplementation(async function* () {
+        if (++round === 1) {
+          model.getHistory.mockReturnValue([
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'read_file',
+                    args: { file_path: 'owned.txt' },
+                  },
+                },
+              ],
+            },
+          ]);
+          yield {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'original-call',
+              name: 'read_file',
+              args: { file_path: 'owned.txt' },
+              isClientInitiated: false,
+              prompt_id: input.promptId,
+            },
+          };
+        } else {
+          model.getHistory.mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'reason', thought: true }, { text: 'answer' }],
+            },
+          ]);
+          yield { type: LlmEventType.Content, value: 'answer' };
+        }
+        yield { type: LlmEventType.Finished };
+      });
+      const first = Object.assign(vi.fn().mockResolvedValue(undefined), {
+        attemptId: 'first',
+      });
+      const final = Object.assign(vi.fn().mockResolvedValue(undefined), {
+        attemptId: 'final',
+      });
+      const toolTurn = {
+        declarations: vi.fn(async () => []),
+        execute: vi.fn(async () => [
+          {
+            functionResponse: {
+              id: 'original-call',
+              name: 'read_file',
+              response: { output: 'owned' },
+            },
+          },
+        ]),
+        consumeResults: vi.fn(async () => {
+          order.push('consume');
+        }),
+      };
+      const completeFinalOutput = vi.fn<
+        NonNullable<
+          Parameters<typeof runHostedHarnessTextTurn>[0]['completeFinalOutput']
+        >
+      >(async (complete, usage, parts, name) => {
+        expect(complete).toBe(final);
+        expect(parts).toEqual([
+          { text: 'reason', thought: true },
+          { text: 'answer' },
+        ]);
+        expect(name).toBe('test-model');
+        order.push('output');
+        if (scenario === 'lost-output') throw new Error('owned lost output');
+        await complete(true, usage);
+      });
+      const running = runHostedHarnessTextTurn({
+        ...input,
+        toolTurn,
+        completeFinalOutput,
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          beginMainAttempt: vi
+            .fn()
+            .mockResolvedValueOnce(first)
+            .mockResolvedValueOnce(final),
+        },
+      });
+      if (scenario === 'round-limit') {
+        await expect(running).rejects.toBeInstanceOf(
+          HostedToolRecoveryRequiredError,
+        );
+        expect(order).toEqual([]);
+        expect(final).not.toHaveBeenCalled();
+        expect(completeFinalOutput).not.toHaveBeenCalled();
+      } else if (scenario === 'lost-output') {
+        await expect(running).rejects.toBeInstanceOf(
+          HostedToolRecoveryRequiredError,
+        );
+        expect(order).toEqual(['output']);
+        expect(final).not.toHaveBeenCalled();
+      } else {
+        await expect(running).resolves.toMatchObject({ text: 'answer' });
+        expect(order).toEqual(['output', 'consume']);
+        expect(final).toHaveBeenCalledOnce();
+      }
+      expect(first).toHaveBeenCalledOnce();
+      if (scenario !== 'round-limit')
+        expect(completeFinalOutput).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([-1, 18])(
     'continues beyond sixteen rounds with limit %s',

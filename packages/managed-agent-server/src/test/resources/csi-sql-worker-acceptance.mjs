@@ -348,6 +348,36 @@ try {
         wakeReason: 'input',
       },
     );
+    if (input.hostedProducer) {
+      const { runHostedFileTurn } = await import('./csi-hosted-file-turns.mjs');
+      const actual = await runHostedFileTurn({
+        root,
+        output,
+        session,
+        promptId,
+        prompt,
+        index,
+        mutation,
+        files: {
+          broker: { baseUrl: input.broker, token: input.operatorToken },
+          runtime: input.runtime,
+        },
+      });
+      invocations.push(...actual);
+      observation = await control('snapshot');
+      assert.deepEqual(session.activation, initialActivation);
+      if (index === 0) firstPins = structuredClone(observation.retainedBackups);
+      else
+        for (const pin of firstPins)
+          assert.deepEqual(
+            observation.retainedBackups.find(
+              (current) => current.name === pin.name,
+            ),
+            pin,
+          );
+      completedTurns++;
+      continue;
+    }
     const harness = createManagedHarnessHandle(session);
     await new ManagedHookActivationController(session).runTurn(
       promptId,
@@ -864,6 +894,7 @@ try {
     JSON.stringify(
       {
         completedTurns,
+        hostedProducer: input.hostedProducer === true,
         nativeSqlGrant: true,
         workerClosed: true,
         finalBytes,
