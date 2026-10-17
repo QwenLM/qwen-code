@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -19,8 +20,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
 
 import javax.sql.DataSource;
 
@@ -33,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -48,7 +54,12 @@ class ManagedRenameReconciliationTest {
     static final String OWNER = "title-worker";
     static final String TITLE = "Renamed";
     private final AtomicLong now = new AtomicLong(1_000_000);
+    // A statement containing this text fails, as a dropped connection would.
+    private final AtomicReference<String> failOn = new AtomicReference<>();
     ManagedAgentStore store;
+    // The same store behind its @Transactional boundaries, as Spring wires
+    // it: each call commits or rolls back as one transaction.
+    AgentStateStore transactional;
     JdbcTemplate jdbc;
     String sessionId;
 
@@ -63,7 +74,16 @@ class ManagedRenameReconciliationTest {
     void setUp() {
         DataSource dataSource = dataSource();
         ManagedSchema.initialize(dataSource);
-        jdbc = new ManagedSchemaJdbcTemplate(dataSource);
+        jdbc = new ManagedSchemaJdbcTemplate(dataSource) {
+            @Override
+            public int update(String sql, Object... args) {
+                String marker = failOn.get();
+                if (marker != null && sql.contains(marker)) {
+                    throw new IllegalStateException("injected fault");
+                }
+                return super.update(sql, args);
+            }
+        };
         Clock clock = new Clock() {
             @Override
             public ZoneId getZone() {
@@ -83,6 +103,12 @@ class ManagedRenameReconciliationTest {
         store = new ManagedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties());
+        ProxyFactory proxy = new ProxyFactory(store);
+        proxy.setInterfaces(AgentStateStore.class);
+        proxy.addAdvice(new TransactionInterceptor(
+                new DataSourceTransactionManager(dataSource),
+                new AnnotationTransactionAttributeSource()));
+        transactional = (AgentStateStore) proxy.getProxy();
         sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
                 "create", "digest", "qwen-code", null, null, List.of(), null)
                 .sessionId();
@@ -289,6 +315,63 @@ class ManagedRenameReconciliationTest {
         assertThat(store.settleParkedRename(parkedOperation(delivery),
                 AcceptanceVerdict.committed(), 0)).isFalse();
         assertThat(titleEvents()).containsExactly(TITLE);
+    }
+
+    // Review of #14475: a fault between parking a row and retiring its
+    // receipt leaves neither, so a parked row never keeps the wedge.
+    @Test
+    void parkingAndRetiringTheReceiptCommitTogether() {
+        RenameDelivery delivery = submitted("title-1", TITLE);
+        expireClaims();
+        failOn.set("UPDATE ma_request_receipt SET state = 'FAILED'");
+        assertThatThrownBy(() -> transactional.deliverableRenames(Long.MAX_VALUE))
+                .hasMessageContaining("injected fault");
+        failOn.set(null);
+        assertThat(row(delivery.revision())).containsEntry("state", "RUNNING")
+                .containsEntry("phase", "SUBMITTED");
+        assertThat(receipt("title-1")).isEqualTo("PENDING");
+        assertThat(transactional.deliverableRenames(Long.MAX_VALUE)).isEmpty();
+        assertThat(row(delivery.revision())).containsEntry("state", "RECOVERY_BLOCKED");
+        assertThat(receipt("title-1")).isEqualTo("FAILED");
+    }
+
+    // Review of #14475: the title, its event, the receipt and the row
+    // settle as one; a fault before the row completes shows nothing.
+    @Test
+    void aCommittedTitleIsShownOnlyWithItsSettledOutcome() {
+        RenameDelivery delivery = parked("title-1", TITLE);
+        managedHead("ACTIVE", 0);
+        journalTitle(delivery.revision(), TITLE);
+        ParkedOperation due = parkedOperation(delivery);
+        failOn.set("admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'COMPLETED'");
+        assertThatThrownBy(() -> transactional.settleParkedRename(due,
+                AcceptanceVerdict.committed(), 0)).hasMessageContaining("injected fault");
+        failOn.set(null);
+        assertThat(store.requireSession(TENANT, sessionId).title()).isNull();
+        assertThat(titleEvents()).isEmpty();
+        assertThat(receipt("title-1")).isEqualTo("FAILED");
+        assertThat(row(delivery.revision())).containsEntry("state", "RECOVERY_BLOCKED");
+        assertThat(transactional.settleParkedRename(due, AcceptanceVerdict.committed(), 0))
+                .isTrue();
+        assertThat(store.requireSession(TENANT, sessionId).title()).isEqualTo(TITLE);
+        assertThat(titleEvents()).containsExactly(TITLE);
+        assertThat(receipt("title-1")).isEqualTo("COMPLETED");
+    }
+
+    // Review of #14475: a row whose request lost its title is never read as
+    // committed, yet a complete journal without the commit still fails it.
+    @Test
+    void aTitleRowWithoutItsTitleIsNeverCommittedButCanFail() {
+        RenameDelivery delivery = parked("title-1", TITLE);
+        jdbc.update("UPDATE ma_operation SET request_json = '{}' WHERE operation_kind = 'RENAME'");
+        ParkedOperation due = parkedOperation(delivery);
+        managedHead("ACTIVE", 0);
+        journalTitle(delivery.revision(), TITLE);
+        assertThat(store.renameAcceptance(due)).contains(AcceptanceVerdict.unknown());
+        jdbc.update("DELETE FROM ma_session_journal_tx");
+        jdbc.update("UPDATE ma_session_head SET state = 'DELETING'");
+        assertThat(store.renameAcceptance(due)).contains(
+                AcceptanceVerdict.notCommitted("session_title_undelivered"));
     }
 
     // A delivery that failed before it was submitted is known not to have

@@ -2989,8 +2989,10 @@ public class ManagedAgentStore implements AgentStateStore {
         String title = (String) readMap((String) rows.getFirst().get("request_json")).get("title");
         JournalEvidence evidence = journalEvidence(parked.tenantId(), parked.sessionId(),
                 "renameSession", "hosted-title:" + revision);
+        // A row without its title can still be proven undelivered, never
+        // matched (review of #14475).
         if (evidence.admittedDigest() != null) {
-            if (DigestUtils.sha256Hex(title).equals(evidence.admittedDigest())) {
+            if (title != null && DigestUtils.sha256Hex(title).equals(evidence.admittedDigest())) {
                 return Optional.of(AcceptanceVerdict.committed());
             }
             LOG.warn("Journal title digest differs from its delivery tenant={}"
@@ -3031,9 +3033,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 // whatever status a lifecycle has since reached, unless a
                 // deletion took the Session away. A later title would have
                 // superseded this row, so it is still the newest.
-                if (!List.of("DELETING", "DELETED").contains(session.status())) {
-                    String title = (String) readMap((String) rows.getFirst().get("request_json"))
-                            .get("title");
+                String title = (String) readMap((String) rows.getFirst().get("request_json"))
+                        .get("title");
+                if (title != null && !List.of("DELETING", "DELETED").contains(session.status())) {
                     jdbc.update("UPDATE ma_session SET title = ?, gmt_modified = ?,"
                                     + " version = version + 1 WHERE tenant_id = ? AND session_id = ?",
                             title, now, tenantId, sessionId);
