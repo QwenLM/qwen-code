@@ -1783,7 +1783,7 @@ export class NativeLspService {
             results.push(symbol);
           }
           if (results.length >= limit) {
-            return results.slice(0, limit);
+            break;
           }
         }
       } catch (error) {
@@ -1798,9 +1798,20 @@ export class NativeLspService {
           error,
         );
       }
+      if (results.length >= limit) break;
     }
 
-    return results.slice(0, limit);
+    const directories = this.workspaceContext.getDirectories();
+    const scopeCache = new Map<string, boolean>();
+    return results
+      .filter((symbol) =>
+        this.isCurrentWorkspaceDocument(
+          symbol.location.uri,
+          directories,
+          scopeCache,
+        ),
+      )
+      .slice(0, limit);
   }
 
   /**
@@ -2665,23 +2676,21 @@ export class NativeLspService {
           serverName ? undefined : handle,
         );
 
-        if (response === undefined) {
+        if (response === undefined || response === null) {
           failures.push({
             name,
             handle,
-            // Disposed connections resolve undefined, not a clean report.
             error: new Error(
-              'Invalid diagnostic report: server returned no response (disposed connection)',
+              response === undefined
+                ? 'Invalid diagnostic report: server returned no response (disposed connection)'
+                : 'Invalid diagnostic report: server returned null',
             ),
           });
         } else {
-          // Document null is tolerated for compatibility with existing servers.
           const items =
-            response === null
-              ? []
-              : typeof response === 'object'
-                ? (response as Record<string, unknown>)['items']
-                : undefined;
+            typeof response === 'object'
+              ? (response as Record<string, unknown>)['items']
+              : undefined;
           if (!Array.isArray(items)) {
             throw new InvalidDiagnosticReportError(
               'Invalid diagnostic report: server returned an unusable diagnostic report',
@@ -2876,21 +2885,20 @@ export class NativeLspService {
           },
         );
 
-        if (response === undefined) {
+        if (response === undefined || response === null) {
           failures.push({
             name,
-            // Disposed connections resolve undefined without changing handle identity.
             error: new Error(
-              'Invalid diagnostic report: server returned no response (disposed connection)',
+              response === undefined
+                ? 'Invalid diagnostic report: server returned no response (disposed connection)'
+                : 'Invalid diagnostic report: server returned null',
             ),
           });
         } else {
           const items =
-            response === null
-              ? []
-              : typeof response === 'object'
-                ? (response as Record<string, unknown>)['items']
-                : undefined;
+            typeof response === 'object'
+              ? (response as Record<string, unknown>)['items']
+              : undefined;
           if (!Array.isArray(items)) {
             throw new InvalidDiagnosticReportError(
               'Invalid diagnostic report: server returned an unusable diagnostic report',
@@ -2950,10 +2958,12 @@ export class NativeLspService {
               scanned--;
             }
           }
-          if (dropped > 0 && pushed === 0) {
-            throw new InvalidDiagnosticReportError(
+          if (dropped > 0) {
+            const error = new InvalidDiagnosticReportError(
               'Invalid diagnostic report: server returned only unusable diagnostics',
             );
+            if (pushed === 0) throw error;
+            failures.push({ name, error });
           }
           answered++;
         }
@@ -2990,7 +3000,12 @@ export class NativeLspService {
       }
     }
 
-    if (results.length === 0) {
+    const directories = this.workspaceContext.getDirectories();
+    const scopeCache = new Map<string, boolean>();
+    const currentResults = results.filter((report) =>
+      this.isCurrentWorkspaceDocument(report.uri, directories, scopeCache),
+    );
+    if (currentResults.length === 0) {
       const unreachable = this.unreachableDiagnosticServers(
         queried,
         serverName,
@@ -3005,7 +3020,7 @@ export class NativeLspService {
         );
       }
     }
-    return results.slice(0, limit);
+    return currentResults.slice(0, limit);
   }
 
   /**

@@ -125,10 +125,9 @@ the [file routing contract](lsp-file-routing.md).
   diagnostics still display as clean only when a usable answering server backs
   them. Independent transport failures are recorded per server; actual nonempty
   diagnostics from healthy servers survive under main's existing partial-result
-  policy, but do not certify complete analysis. A missing (`undefined`) response
-  backs no clean answer. A successful literal `null` counts as an empty report
-  under the same relevance, ownership and failure checks: protocol-allowed for
-  workspace diagnostics and tolerated for document compatibility. Invalid report
+  policy, but do not certify complete analysis. Missing (`undefined`) and literal
+  `null` responses are recorded as failures with distinct reasons; neither backs
+  a clean answer. Actual diagnostics survive a later null response. Invalid report
   envelopes or malformed in-scope payloads reject
   immediately, even after earlier diagnostics. Synchronization failures, scope
   resolution errors and workspace scan-budget exhaustion also remain hard errors.
@@ -157,7 +156,7 @@ the [file routing contract](lsp-file-routing.md).
   server, however, an unsupported workspace pull cannot certify clean results and
   rejects with the unsupported server's reason. Other transport catches are
   unchanged; their empty arrays or null are not evidence of clean diagnostics.
-  This accounting and null tolerance follow the
+  This failure accounting follows the
   [diagnostic failure contract](lsp-diagnostic-failures.md).
 
 - Notification delivery is not acknowledged by the transport. This change does

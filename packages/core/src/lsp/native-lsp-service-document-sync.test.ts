@@ -597,31 +597,34 @@ describe('NativeLspService disk document synchronization', () => {
         expect(filter.mock.calls.map(([target]) => target)).not.toContain(uri);
       });
 
-      it('rechecks the same URI in a later asynchronous server response', async () => {
-        const alias = path.join(directory, 'alias.ts');
-        fs.symlinkSync(outside, alias);
-        const aliasUri = pathToFileURL(alias).toString();
-        const second = createConnection();
-        useHandles([
-          ['test', handle],
-          ['second', { ...handle, connection: second }],
-        ]);
-        connection.request.mockResolvedValue(response([aliasUri]));
-        second.request.mockImplementation(async () => {
-          fs.unlinkSync(alias);
-          fs.symlinkSync(file, alias);
-          return response([aliasUri]);
-        });
-        const realpath = vi.spyOn(fs, 'realpathSync');
-        try {
-          expect(await query()).toHaveLength(1);
-          expect(
-            realpath.mock.calls.filter(([target]) => target === alias),
-          ).toHaveLength(2);
-        } finally {
-          realpath.mockRestore();
-        }
-      });
+      it.each([true, false])(
+        'rechecks a URI retargeted during a later response, initially outside %s',
+        async (outsideFirst) => {
+          const alias = path.join(directory, 'alias.ts');
+          fs.symlinkSync(outsideFirst ? outside : file, alias);
+          const aliasUri = pathToFileURL(alias).toString();
+          const second = createConnection();
+          useHandles([
+            ['test', handle],
+            ['second', { ...handle, connection: second }],
+          ]);
+          connection.request.mockResolvedValue(response([aliasUri]));
+          second.request.mockImplementation(async () => {
+            fs.unlinkSync(alias);
+            fs.symlinkSync(outsideFirst ? file : outside, alias);
+            return response([aliasUri]);
+          });
+          const realpath = vi.spyOn(fs, 'realpathSync');
+          try {
+            expect(await query()).toHaveLength(outsideFirst ? 1 : 0);
+            expect(
+              realpath.mock.calls.filter(([target]) => target === alias),
+            ).toHaveLength(3);
+          } finally {
+            realpath.mockRestore();
+          }
+        },
+      );
 
       it('shares the scan budget across servers', async () => {
         const second = createConnection();
@@ -927,15 +930,20 @@ describe('NativeLspService disk document synchronization', () => {
         expect(await run(queryDiagnostics())).toEqual([]);
       });
 
-      it('accepts a successful null report as empty', async () => {
+      it('shows a successful null report as a tool failure', async () => {
         connection.request.mockResolvedValue(null);
-        expect(await run(queryDiagnostics())).toEqual([]);
+        await expect(run(queryDiagnostics())).rejects.toThrow(
+          'server returned null',
+        );
         const result = await execute(lspTool(), {
           operation,
           filePath: file,
         });
-        expect(result.error).toBeUndefined();
-        expect(result.llmContent).toMatch(/^No diagnostics found/);
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+        for (const content of [result.llmContent, result.returnDisplay]) {
+          expect(content).toContain('server returned null');
+          expect(content).not.toContain('No diagnostics found');
+        }
       });
 
       it('retains empty-message diagnostics beside real errors', async () => {
@@ -2199,6 +2207,113 @@ describe('NativeLspService disk document synchronization', () => {
             'untitled:buffer',
             healthyUri,
           ]);
+        },
+      );
+
+      it.each(
+        (['workspace/diagnostic', 'workspace/symbol'] as const).flatMap(
+          (method) =>
+            (['empty', 'null', 'failure'] as const).map((answer) => ({
+              method,
+              answer,
+            })),
+        ),
+      )(
+        'rechecks earlier $method results after a later $answer answer revokes scope',
+        async ({ method, answer }) => {
+          const second = createConnection();
+          useHandles([
+            ['test', handle],
+            ['second', { ...handle, connection: second }],
+          ]);
+          vi.spyOn(manager, 'isTypescriptServer').mockReturnValue(true);
+          vi.spyOn(manager, 'warmupTypescriptServer').mockResolvedValue(
+            undefined,
+          );
+          connection.request.mockResolvedValue(
+            method === 'workspace/symbol'
+              ? [{ name: 'fn', location: { uri: extraUri, range } }]
+              : {
+                  items: [
+                    {
+                      uri: extraUri,
+                      items: [{ range, message: 'revoked', severity: 1 }],
+                    },
+                  ],
+                },
+          );
+          second.request.mockImplementation(async () => {
+            workspace.removeDirectory(extra);
+            if (answer === 'failure') throw new Error('second failed');
+            if (answer === 'null') return null;
+            return method === 'workspace/symbol' ? [] : { items: [] };
+          });
+
+          const result = run<unknown[]>(
+            method === 'workspace/symbol'
+              ? service.workspaceSymbols('fn')
+              : service.workspaceDiagnostics(),
+          );
+          if (method === 'workspace/diagnostic' && answer !== 'empty') {
+            await expect(result).rejects.toThrow(
+              answer === 'null' ? 'server returned null' : 'second failed',
+            );
+          } else {
+            expect(await result).toEqual([]);
+          }
+          expect(second.request).toHaveBeenCalledWith(
+            method,
+            expect.anything(),
+          );
+        },
+      );
+
+      it.each([false, true])(
+        'retains unusable-report accounting after scope revocation, healthy survivor %s',
+        async (survivor) => {
+          const healthyFile = path.join(primary, 'healthy.ts');
+          fs.writeFileSync(healthyFile, 'healthy');
+          const healthyUri = pathToFileURL(healthyFile).toString();
+          const second = createConnection();
+          useHandles([
+            ['test', handle],
+            ['second', { ...handle, connection: second }],
+          ]);
+          vi.spyOn(manager, 'warmupTypescriptServer').mockResolvedValue(
+            undefined,
+          );
+          connection.request.mockResolvedValue({
+            items: ['not a URI', extraUri].map((target) => ({
+              uri: target,
+              items: [{ range, message: 'revoked', severity: 1 }],
+            })),
+          });
+          second.request.mockImplementation(async () => {
+            workspace.removeDirectory(extra);
+            return {
+              items: survivor
+                ? [
+                    {
+                      uri: healthyUri,
+                      items: [{ range, message: 'healthy issue', severity: 1 }],
+                    },
+                  ]
+                : [],
+            };
+          });
+
+          const result = await execute(lspTool(), {
+            operation: 'workspaceDiagnostics',
+          });
+          if (survivor) {
+            expect(result.error).toBeUndefined();
+            expect(result.llmContent).toContain('healthy issue');
+            expect(result.llmContent).not.toContain('revoked');
+          } else {
+            expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+            expect(result.llmContent).toContain('unusable diagnostics');
+            expect(result.llmContent).not.toContain('No diagnostics found');
+          }
         },
       );
 
@@ -5428,13 +5543,18 @@ describe('NativeLspService disk document synchronization', () => {
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'rejects %s when a connection answers with no response',
       async (operation) => {
-        // Disposed connections resolve undefined while the handle stays READY.
-        connection.request.mockResolvedValue(undefined);
-        await expect(
-          operation === 'diagnostics'
-            ? run(service.diagnostics(uri))
-            : run(service.workspaceDiagnostics()),
-        ).rejects.toThrow('server returned no response');
+        for (const response of [undefined, null]) {
+          connection.request.mockResolvedValue(response);
+          await expect(
+            operation === 'diagnostics'
+              ? run(service.diagnostics(uri))
+              : run(service.workspaceDiagnostics()),
+          ).rejects.toThrow(
+            response === undefined
+              ? 'server returned no response (disposed connection)'
+              : 'server returned null',
+          );
+        }
       },
     );
 

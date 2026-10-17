@@ -104,7 +104,10 @@ URI entries when no usable nonempty diagnostics remain;
 legitimate out-of-scope file URIs do not count as unusable. Workspace output
 discloses that out-of-scope file results are omitted, even when
 empty. Result filtering uses fresh physical paths without per-item refusal logs,
-reusing URI decisions only within one synchronous server-response filter. Malformed
+reusing URI decisions only within one synchronous filter. Before returning, both
+workspace queries revalidate the aggregate against current directories and physical
+paths, including results collected before a later server awaited. Diagnostics apply
+the empty-result/failure ledger after this final filtering. Malformed
 URI syntax is omitted, but physical-resolution failures (including EACCES, ELOOP,
 ESTALE and EIO) reject both workspace queries rather than certifying an unknown
 scope as outside. An unresolved result does not change delivered snapshots,
