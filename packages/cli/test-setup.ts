@@ -110,15 +110,30 @@ export function reapStaleQwenHomePins(now: number = Date.now()): void {
 }
 
 reapStaleQwenHomePins();
-// Exported so the teardown witness in test-setup-qwen-home-witness.ts can
-// assert the pin outlives every test file's hooks; tests that reassign
-// process.env['QWEN_HOME'] do not move this.
-export const suiteQwenHome: string = pinQwenHome(process.env);
+const suiteQwenHome: string = pinQwenHome(process.env);
 
 import { configure } from '@testing-library/react';
-import { beforeEach } from 'vitest';
+import { afterAll, beforeEach } from 'vitest';
 
 import './src/test-utils/customMatchers.js';
+
+// Teardown witness: the pin must outlive every test file's hooks. Vitest
+// runs root-level afterAll hooks in reverse registration order (measured on
+// this repo's vitest), and this hook is the first root afterAll this file
+// registers, so it runs LAST — a teardown sweep of the live pin reintroduced
+// anywhere below runs before it and turns every file red here. A test-file
+// afterAll cannot witness this: it runs BEFORE the setup file's root
+// afterAll. Tests that reassign process.env['QWEN_HOME'] do not move the
+// closure variable this checks.
+afterAll(() => {
+  if (!fs.existsSync(suiteQwenHome)) {
+    throw new Error(
+      `QWEN_HOME pin ${suiteQwenHome} was deleted during the test file run; ` +
+        'the pin must stay alive for the process lifetime (see the pin ' +
+        'comment above).',
+    );
+  }
+});
 
 // Capture the real timer so sync-heavy suites can drain worker RPC replies.
 const realSetTimeout = setTimeout;
