@@ -165,12 +165,17 @@ jobs:
 
       # setup-java updates Maven files non-atomically. Keep them job-local
       # because runner instances on one ECS host share HOME.
+      #
+      # The Maven cache is hosted-only. An ECS host keeps ~/.m2 between jobs,
+      # and the post-job save tars that whole shared repository — 14 to 37
+      # minutes per job on 2026-10-16 — only to lose the reservation race to
+      # a parallel job and discard the archive.
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
           java-version: '${{ matrix.java }}'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/managed-agent-server/pom.xml
@@ -567,7 +572,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/managed-agent-server/pom.xml
@@ -623,8 +628,8 @@ jobs:
             echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
-          # Seed from the cache-restored shared repo so cache: 'maven' and
-          # the egress proxy keep paying off for the job-local copy.
+          # Seed from the host-shared repo (cache-restored on hosted runners)
+          # so it and the egress proxy keep paying off for the job-local copy.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
 
@@ -653,6 +658,11 @@ jobs:
           # seed: the warning arm keeps a copy failure from reddening the
           # gate after mvn has already passed, and pipefail keeps a
           # failing left-hand tar from being masked by the extractor.
+          # On a fresh ECS host nothing creates ~/.m2/repository anymore
+          # (the hosted-only cache no longer restores it), so create it
+          # before the write-back or every job re-resolves through the
+          # egress proxy instead of bootstrapping the shared repository.
+          mkdir -p "${HOME}/.m2/repository"
           tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
             | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
             || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
@@ -666,15 +676,13 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings (45 + 16×10 + 20 + 50 = 275 — the Verify, admission
-    # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
-    # classes raised the hosted fork 900→1200 s and the L4 recovery class
-    # 1200→1800 s, with the FG8 monitor/run letters riding inside it; the
-    # admission gates share a 2400 s fork for both witness classes)) plus
-    # ~13 minutes for the uncapped setup steps (Checkout..Install MySQL
-    # binaries, the report checks) need ~288; 290 keeps a thin margin, and
-    # each arm buys its own 10 instead of sharing an envelope.
-    timeout-minutes: 290
+    # The step ceilings today (75 + 16×10 + 20 + 50 = 305 — the FG8 letters
+    # grew the shared failsafe fork to 3600 s, so Verify wraps it at its
+    # fork + 600 s plus margin, and admission plus O4 keep per-fork
+    # ceilings) plus ~13 minutes for the uncapped setup steps (Checkout..
+    # Install MySQL binaries, the report checks): 318 + 2 with the new fork
+    # story at 2× headroom, and each arm buys its own 10 like before.
+    timeout-minutes: 320
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     services:
@@ -700,7 +708,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
@@ -764,8 +772,9 @@ jobs:
         # compile/surefire/spotbugs/checkstyle work: a step killed before its
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
-        # hosted-process-ci.test.js pins this ordering.
-        timeout-minutes: 45
+        # hosted-process-ci.test.js pins this ordering; the fork budget is
+        # 3600 s, so the step wraps to fork + 600 s plus margin.
+        timeout-minutes: 75
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -876,6 +885,7 @@ jobs:
             packages/managed-agent-server/target/fg7-cases/
             packages/managed-agent-server/target/fg8-cases/
             packages/managed-agent-server/target/fg9-cases/
+            packages/managed-agent-server/target/fg10-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
       # A separate artifact keeps the reports' layout: a .qwen/ path in the
@@ -961,7 +971,7 @@ jobs:
           java-version: |-
             17
             21
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
@@ -1055,7 +1065,7 @@ jobs:
           java-version: |-
             17
             21
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
@@ -1293,7 +1303,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '11'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
