@@ -6,6 +6,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { listFiles, PackageManager } from '@vscode/vsce';
 import { describe, expect, it } from 'vitest';
 
 describe('package.json command metadata', () => {
@@ -51,12 +52,37 @@ describe('package.json command metadata', () => {
       ),
     ) as Record<string, string>;
 
+    expect(english).toEqual({
+      'qwen-code.copyMessage.title': 'Copy Message',
+      'qwen-code.copyAllMessages.title': 'Copy All Messages',
+      'qwen-code.copyLastReply.title': 'Copy Last Reply',
+      'qwen.diff.accept.title': 'Qwen Code: Accept Current Diff',
+      'qwen.diff.cancel.title': 'Qwen Code: Close Diff Editor',
+      'qwen-code.runQwenCode.title': 'Qwen Code: Run',
+      'qwen-code.showNotices.title': 'Qwen Code: View Third-Party Notices',
+      'qwen-code.openChat.title': 'Qwen Code: Open',
+      'qwen-code.auth.title': 'Qwen Code: Auth',
+      'qwen-code.focusChat.title': 'Qwen Code: Focus Chat View',
+      'qwen-code.newConversation.title': 'Qwen Code: New Conversation',
+      'qwen-code.showLogs.title': 'Qwen Code: Show Logs',
+    });
+
     for (const command of manifest.contributes.commands) {
-      expect(command.title).toMatch(/^%[^%]+%$/);
-      const key = command.title.slice(1, -1);
+      const key = `${command.command}.title`;
+      expect(command.title).toBe(`%${key}%`);
       expect(english[key]).toEqual(expect.stringMatching(/\S/));
       expect(chinese[key]).toEqual(expect.stringMatching(/[\u3400-\u9fff]/));
     }
+  });
+
+  it('includes both NLS catalogs in the extension package', async () => {
+    const files = await listFiles({
+      cwd: resolve(import.meta.dirname, '..'),
+      packageManager: PackageManager.None,
+    });
+
+    expect(files).toContain('package.nls.json');
+    expect(files).toContain('package.nls.zh-cn.json');
   });
 
   it('keeps the Activity Bar chat entry visible without runtime context', () => {
