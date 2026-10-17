@@ -24,6 +24,8 @@ Issue #13967 请求扩展 Companion 的本地化。维护者明确欢迎独立�
 - 尝试隔离的 VS Code 显示语言验证；若语言包或宿主不可用，明确区分真实宿主证据与安装包级检查。
 - 执行仓库构建、类型检查、bundle、Companion 检查、格式检查及完整 diff 审查，明确记录未执行或受阻的检查。
 
+Command Palette 证据：[修改前](../verification/issue-13967/before-zh.png)和[修改后](../verification/issue-13967/after-zh.png)。截图来自真实 VS Code 1.142.0 窗口，使用隔离的清单及语言文件副本和空激活模块，展示的是命令标题本地化，而非完整 Companion 激活或命令执行。
+
 ## 待决问题
 
 本次范围内无待决问题。语言优先级及共享翻译归属仍由维护者在本次范围之外决定。

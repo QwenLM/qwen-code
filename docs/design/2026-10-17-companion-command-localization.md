@@ -24,6 +24,8 @@ Affected files are the Companion manifest, two NLS catalogs, packaging whitelist
 - Attempt isolated VS Code display-language validation; distinguish real-host evidence from package-level checks if a language pack or host is unavailable.
 - Run repository build, typecheck and bundle, companion checks, formatting and full-diff review. Record unexecuted or blocked checks explicitly.
 
+Command Palette evidence: [before](../verification/issue-13967/before-zh.png) and [after](../verification/issue-13967/after-zh.png). These are real VS Code 1.142.0 windows using isolated copies of the manifest and catalogs with no-op activation. They demonstrate command-label localization, not full Companion activation or command execution.
+
 ## Open questions
 
 None for this slice. Language precedence and shared translation ownership remain maintainer decisions outside it.
