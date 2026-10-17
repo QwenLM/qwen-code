@@ -79,6 +79,15 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
       : [{ text: output }];
   }, [live, result, text, active, tool.rawOutput]);
   const output = segments?.map((seg) => seg.text).join('') ?? '';
+  const emptyOutput = t(
+    raw == null &&
+      !tool.content?.some(
+        (block) =>
+          block.type === 'content' && typeof block.content?.text === 'string',
+      )
+      ? 'shell.result.unavailable'
+      : 'shell.result.empty',
+  );
   const outputRef = useRef<HTMLPreElement>(null);
   const following = useRef(true);
   useLayoutEffect(() => {
@@ -154,7 +163,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
         </div>
         <div className={styles.expandedCardBody}>
           <pre className={styles.expandedOutput}>
-            {output ? sanitizeControlChars(output) : t('shell.result.empty')}
+            {output ? sanitizeControlChars(output) : emptyOutput}
           </pre>
         </div>
       </div>
@@ -241,7 +250,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
                       {sanitizeControlChars(seg.text)}
                     </span>
                   ))
-                : t(active ? 'shell.result.waiting' : 'shell.result.empty')}
+                : active
+                  ? t('shell.result.waiting')
+                  : emptyOutput}
             </pre>
           </details>
           {!documentMode && (
