@@ -26465,6 +26465,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
   let liveAssertCanStartTurn: ReturnType<typeof vi.fn>;
   let liveBeginHistoryMutation: ReturnType<typeof vi.fn>;
   let liveReleaseHistoryMutation: ReturnType<typeof vi.fn>;
+  let liveFlushPendingPeerNotifications: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -26487,6 +26488,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     liveBeginHistoryMutation = vi
       .fn()
       .mockReturnValue(liveReleaseHistoryMutation);
+    liveFlushPendingPeerNotifications = vi.fn();
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -26615,6 +26617,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           isTurnIdle: liveIsTurnIdle,
           assertCanStartTurn: liveAssertCanStartTurn,
           beginHistoryMutation: liveBeginHistoryMutation,
+          flushPendingPeerNotifications: liveFlushPendingPeerNotifications,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -27947,6 +27950,34 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     expect(liveBeginClose).toHaveBeenCalledWith('user');
     expect(admission.signal.reason).toBe('qwen:user-cancel');
     expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('lands an undrained teammate report before the recorder stops accepting writes', async () => {
+    const recording = makeRecordingService();
+    // `close()` clears the recorder's write gate, after which `appendRecord`
+    // drops records silently — so preservation only counts ahead of it.
+    let acceptingWrites = true;
+    const landed: string[] = [];
+    recording.close.mockImplementation(async () => {
+      acceptingWrites = false;
+    });
+    liveFlushPendingPeerNotifications.mockImplementation(() => {
+      if (acceptingWrites) landed.push('<teammate_message from="security"/>');
+    });
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(recording),
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: liveSessionId,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+
+    expect(landed).toEqual(['<teammate_message from="security"/>']);
     mockConnectionState.resolve();
     await agentPromise;
   });
