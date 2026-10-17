@@ -107,7 +107,7 @@ Issue #13753 对 I3 提出两点：
 8. **恢复能读取新的 profile。** `hosted-workspace-read/1` 加入已保存 profile 的词汇，所以创建、加载与 Workspace 恢复都接受它。
    - 恢复不认识的 profile 会中止整个共享 storage 的恢复。W1b 把 hosted 文件与 Shell profile 放在那个捕获闭包之内。
    - 存储迁移仍只接受 `files/1` Session，所以带有存活 snapshot child 的父会被拒绝，与带有任何 Shell child 的父一样。
-   - 已提交的读取结果在 Runtime 被替换后仍可恢复。G3 第 3 步的路径（#14059）不重新 acquire 已退役的 owner，直接恢复 `results_ready` checkpoint；它在 `hosted-workspace-files/1` 之外也接受只读 profile。只读 profile 的批次永远只有 `read_file` 与 `glob`，正是该路径本就允许没有文件历史而恢复的批次。
+   - 既没有 hooks 也没有 MCP 的 Session，其已提交的读取结果在 Runtime 被替换后仍可恢复（决策 4）。G3 第 3 步的路径（#14059）不重新 acquire 已退役的 owner，直接恢复 `results_ready` checkpoint；它在 `hosted-workspace-files/1` 之外也接受只读 profile。只读 profile 的批次永远只有 `read_file` 与 `glob`，正是该路径本就允许没有文件历史而恢复的批次。
 
 9. **串行共享不需要单独的取值（最终）。** 这确认了 I1 决策 15。
    - **保证。** storage lease 一次只接纳一个 holder，storage 的每个写入方在写入前都获取它：父、`shared` 与 `worktree` child，以及 child Workspace 维护。snapshot child 的读取也获取它。所以同一父的任何两个 child 都不能同时持有 storage。

@@ -107,7 +107,7 @@ The facts below are from `main` at `415925cbda`, after the schema consolidation 
 8. **Recovery reads the new profile.** `hosted-workspace-read/1` joins the saved-profile vocabulary, so creation, load and Workspace recovery all accept it.
    - A profile that recovery did not know would abort recovery of the whole shared storage. W1b puts the hosted files and Shell profiles inside that capture closure.
    - Storage migration still accepts only `files/1` Sessions, so a parent with a live snapshot child is refused, as one with any Shell child already is.
-   - Committed read results survive a replaced Runtime. The G3 step-3 path (#14059) resumes a `results_ready` checkpoint without reacquiring the retired owner; it accepts the read profile beside `hosted-workspace-files/1`. A read profile's batch is always `read_file` and `glob`, the batch that path already resumes without file history.
+   - Committed read results of a Session with neither hooks nor MCP survive a replaced Runtime (decision 4). The G3 step-3 path (#14059) resumes a `results_ready` checkpoint without reacquiring the retired owner; it accepts the read profile beside `hosted-workspace-files/1`. A read profile's batch is always `read_file` and `glob`, the batch that path already resumes without file history.
 
 9. **Serialized sharing needs no value of its own (final).** This confirms I1 decision 15.
    - **The guarantee.** The storage lease admits one holder at a time, and every writer of a storage takes it before writing: the parent, `shared` and `worktree` children, and child Workspace maintenance. A snapshot child's reads take it too. So no two children of one parent can hold the storage at once.
