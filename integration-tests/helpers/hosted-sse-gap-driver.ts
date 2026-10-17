@@ -282,10 +282,15 @@ try {
       .join(''),
     'FG6e tool finished once.',
   );
+  // Progress frames materialize as transcript items, not transcript events.
+  const itemFrames = new Set([
+    'item.output_text.delta',
+    'item.tool_call.updated',
+  ]);
   assert.deepEqual(
     transcript.events,
     webFrames
-      .filter((frame) => frame.event !== 'item.output_text.delta')
+      .filter((frame) => !itemFrames.has(frame.event))
       .map((frame) => frame.data),
   );
   assert.equal(
