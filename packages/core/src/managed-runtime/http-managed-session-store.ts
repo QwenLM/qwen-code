@@ -313,7 +313,16 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     const { revision, ref } = pending.pop()!;
     const key = `${revision}\u0000${ref.resourceId}`;
     const stored = resources.get(ref.resourceId);
-    if (stored === undefined) throw corrupt('snapshot resource is missing.');
+    if (stored === undefined) {
+      // A manifest committed before the closure edge shipped names page
+      // envelopes the Session never staged. Keep such a snapshot
+      // inspectable by dropping the dangling page ref from the walk
+      // without registering it — adding it would fire the enumeration
+      // check below for exactly the snapshots this keeps readable
+      // (#13930 R1-43).
+      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      throw corrupt('snapshot resource is missing.');
+    }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
       throw corrupt('snapshot dependency was not committed at its use.');
     }
