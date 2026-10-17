@@ -253,10 +253,16 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",
                                     "WorkspaceCsiCheckpointSnapshotStore.scope/1")),
+                    // Text dispatch and environment delegation share local
+                    // method names without adding session/turn SQL.
+                    Map.entry("WorkspaceCsiHostedMain.java",
+                            Set.of("WorkspaceCsiHostedMain.required/1")),
                     Map.entry("WorkspaceCsiRuntimeAccess.java",
                             Set.of("WorkspaceCsiRuntimeAccess.attest/3",
                                     "WorkspaceCsiRuntimeAccess.request/0",
                                     "WorkspaceCsiRuntimeAccess.unavailable/0")),
+                    Map.entry("WorkspaceCsiRuntimeMain.java",
+                            Set.of("WorkspaceCsiRuntimeMain.run/1")),
                     Map.entry("WorkspaceCsiWorkerAckStore.java",
                             Set.of("WorkspaceCsiWorkerAckStore.decode/1",
                                     "WorkspaceCsiWorkerAckStore.hash/1")),
@@ -358,6 +364,9 @@ class SessionRowLockOrderTest {
                 // session-row FOR UPDATE before its delivery-row work.
                 "beginSessionRename", "completeSessionRename",
                 "abandonSessionRename", "claimRename",
+                // D7-2's parked-title settle locks the session row before
+                // its delivery row, as the late reply it races does.
+                "settleParkedRename",
                 // Main's internal child close (#14069) locks the child's
                 // session row before its operation-row work.
                 "beginChildClose",
@@ -378,6 +387,7 @@ class SessionRowLockOrderTest {
                         "completeSessionMutation", "unarchiveWorkspaceSession",
                         "beginSessionRename", "completeSessionRename",
                         "abandonSessionRename", "claimRename",
+                        "settleParkedRename",
                         "replayChildSessionCommand", "requireCsiRequest");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
