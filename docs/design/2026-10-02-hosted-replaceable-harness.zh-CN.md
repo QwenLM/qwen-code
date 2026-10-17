@@ -472,8 +472,9 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 
 ### D11 —— 残留门禁：Step 3 进 CI、模型轮支路、Q2 的 binding 半边
 
-runner 新增三项，补上前面各切片留成手工或未证明的门禁。三项都是
-`hosted-harness-mysql` 的步骤，对打包后的栈运行，使用现有的假模型。
+runner 新增三项，补上前面各切片留成手工或未证明的门禁。三项最初作为
+`hosted-harness-mysql` 的步骤加入，现在在 `hosted-failover-e2e` 任务中运行（见本
+决策末尾）；它们对打包后的栈运行，使用现有的假模型。
 
 1. **Step 3 打包门禁进 CI。** Step 3 设计里的 Allow、Deny、Cancel、过期
    与 continuation 收尾五个门禁此前只能手工跑，用 `G3_VERIFY_MODE` 选模式。
@@ -543,16 +544,21 @@ Turn。所以它的过期工作只有 lease 续约和一次重试，两者都到
 
 自 #14205 起，该任务只按每日计划或手动触发运行，不在 pull request 上运行。
 新增步骤排在 `Verify Hosted Java, Spring and MySQL processes` 和此前的 failover
-步骤之后。加入这些门禁时，所有 failover 步骤都不带 `if:`，因此只有前面每个步骤
-都通过才会执行。当时 Verify 步骤在 `main` 上是失败的，之后的四次运行又各自败在
-不同的测试上，因此没有任何一次 CI 运行执行过这些门禁；它们的证据来自在 CI
-之外运行同样的 `package.json` 脚本。
+步骤之后，且所有 failover 步骤都不带 `if:`，因此只有前面每个步骤都通过才会执行。
+当时 Verify 步骤在 `main` 上是失败的，之后的四次运行又各自败在不同的测试上，
+因此没有任何一次 CI 运行执行过这些门禁；它们的证据来自在 CI 之外运行同样的
+`package.json` 脚本。
 
-现在 failover 步骤只依赖它们实际用到的东西。`Install MySQL binaries for the
-failover E2E` 在 Managed Agent 依赖装好且运行未被取消时运行，并先检查 server jar
-已经打包；即使 Verify 步骤里有集成测试失败，它的 package 阶段也已经留下了这个
-jar。每个 failover 步骤在该安装步骤成功且运行未被取消时运行，因此无论是集成测试
-失败还是前面的支路失败，都不会让它被跳过。支路自己失败时，任务仍然失败。
+因此全部十五个 failover 步骤移到了独立任务 `hosted-failover-e2e`
+（`Hosted failover E2E / Java 21`）。这些支路只需要打包好的 CLI、server jar 和
+runner 私有的 `mysqld`，不需要 Hosted MySQL 任务的 MySQL service 或 cgroup 根，
+所以新任务自己构建 CLI、安装 SDK、以 `-DskipTests` 打包 server 并安装 MySQL
+二进制，不对 Hosted MySQL 任务设 `needs:`。那里的集成测试失败不再让任何支路被
+跳过。每条支路在 MySQL 二进制安装成功且运行未被取消时执行，所以前面支路的失败
+也不会让后面的支路被跳过；支路自己失败时，任务仍然失败。仅供 runner 使用的
+`QWEN_E2E_REGISTER_STORAGE=1` 与 Step 3 证据上传也一并迁移。Hosted MySQL 任务的
+步骤上限之和现为 160（80 + 10 + 20 + 50），任务上限 175 分钟；新任务十五条支路
+之和为 150，任务上限 165 分钟。
 
 ## 改动与属主
 

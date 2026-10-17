@@ -564,8 +564,9 @@ idempotency and the parked-input refusal as specified in D4 above.
 ### D11 — Residual gates: Step 3 in CI, the model-round arm and Q2's binding half
 
 Three runner additions close the gates the slices above left manual or
-unproven. All three are steps of `hosted-harness-mysql`; they run against
-the packaged stack and use the existing fake model.
+unproven. All three were added as steps of `hosted-harness-mysql` and now
+run in the `hosted-failover-e2e` job (see the end of this decision); they run
+against the packaged stack and use the existing fake model.
 
 1. **Step 3 packaged gates in CI.** The Allow, Deny, Cancel, expiry and
    continuation-closeout gates from the Step 3 design ran only by hand,
@@ -658,22 +659,26 @@ to 275 (45 + 16×10 + 20 + 50) and the job ceiling moves from 220 to 290
 minutes.
 
 Since #14205 the job runs daily or on demand, never on a pull request. The
-new steps come after `Verify Hosted Java, Spring and MySQL processes` and the
-earlier failover steps. When these gates were added none of the failover
-steps had an `if:`, so they ran only when every earlier step passed. The
-Verify step was failing on `main` then, and it kept failing on a different
-test in each of the next four runs, so no CI run executed the
-gates; their evidence came from running the same `package.json` scripts
-outside CI.
+new steps came after `Verify Hosted Java, Spring and MySQL processes` and the
+earlier failover steps, and none of the failover steps had an `if:`, so they
+ran only when every earlier step passed. The Verify step was failing on
+`main` then, and it kept failing on a different test in each of the next
+four runs, so no CI run executed the gates; their evidence came from running
+the same `package.json` scripts outside CI.
 
-The failover steps now depend only on what they use. `Install MySQL binaries
-for the failover E2E` runs once the Managed Agent dependencies are installed
-and the run was not cancelled, and it first checks that the server jar was
-packaged; the Verify step's package phase leaves that jar behind even when
-one of its integration tests fails. Each failover step runs when that
-install step succeeded and the run was not cancelled, so neither a failing
-integration test nor a failing earlier arm skips it. A failing arm still
-fails the job.
+All fifteen failover steps therefore moved into their own job,
+`hosted-failover-e2e` (`Hosted failover E2E / Java 21`). The arms need only
+the bundled CLI, the server jar and a runner-private `mysqld`, not the Hosted
+MySQL job's MySQL service or cgroup root, so the new job builds the CLI,
+installs the SDK, packages the server with `-DskipTests` and installs the
+MySQL binaries itself, with no `needs:` on the Hosted MySQL job. A failing
+integration test there no longer skips an arm. Each arm runs when the MySQL
+binaries install succeeded and the run was not cancelled, so an earlier
+arm's failure does not skip the later ones either, and a failing arm still
+fails the job. The runner-only `QWEN_E2E_REGISTER_STORAGE=1` and the Step 3
+evidence upload moved with them. The Hosted MySQL job's step ceilings now
+sum to 160 (80 + 10 + 20 + 50) under a 175-minute job ceiling; the new job's
+fifteen arms sum to 150 under 165.
 
 ## Changes and ownership
 
