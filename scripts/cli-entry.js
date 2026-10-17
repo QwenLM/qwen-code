@@ -45,6 +45,7 @@ function isInProcessFastPath() {
   if (
     first === 'serve' ||
     first === 'mcp' ||
+    first === 'memory' ||
     first === 'managed-runtime-bootstrap' ||
     first === 'managed-runtime-bootstrap-worker'
   ) {

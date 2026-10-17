@@ -1,0 +1,187 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import type { Application, Request, Response, RequestHandler } from 'express';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import type { MemoryImportBatchProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
+import { runWithMemoryProjectScope } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { previewSource } from '../memory-import/source.js';
+import { MemoryImportService } from '../memory-import/service.js';
+import { runWithWorkspaceRuntimeStorage } from './workspace-runtime-storage.js';
+import { resolveTrustedRuntime } from './workspace-route-runtime.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from './workspace-registry.js';
+
+export function mountMemoryImportRoutes(
+  app: Application,
+  deps: {
+    workspaceRegistry: WorkspaceRegistry;
+    mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  },
+): void {
+  const services = new WeakMap<WorkspaceRuntime, MemoryImportService>();
+  function active(runtime: WorkspaceRuntime): void {
+    const entry = deps.workspaceRegistry.getEntryByWorkspaceId(
+      runtime.workspaceId,
+    );
+    if (
+      !entry ||
+      entry.state !== 'active' ||
+      entry.current?.runtime !== runtime ||
+      !runtime.trusted ||
+      runtime.routeFileSystemFactory.sshWorkspace
+    )
+      throw new Error('Workspace memory import is unavailable.');
+    entry.current.guard.assertOpen();
+    // These legacy process-global overrides cannot safely describe a selected
+    // runtime with different memory settings. Refuse rather than use primary.
+    for (const key of ['QWEN_CODE_MEMORY_BASE_DIR', 'QWEN_CODE_MEMORY_LOCAL']) {
+      if ((runtime.env.effectiveEnv?.[key] ?? process.env[key]) !== undefined)
+        throw new Error(
+          'Memory import does not support legacy memory path overrides.',
+        );
+    }
+  }
+  function withRuntime<T>(runtime: WorkspaceRuntime, run: () => T): T {
+    const configured =
+      runtime.env.effectiveEnv !== undefined
+        ? runtime.env.effectiveEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE']
+        : runtime.env.mode === 'parent-process'
+          ? process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']
+          : undefined;
+    const scope =
+      configured?.trim().toLowerCase() === 'workspace'
+        ? 'workspace'
+        : 'git-root';
+    return runWithWorkspaceRuntimeStorage(runtime, () =>
+      runWithMemoryProjectScope(scope, run),
+    );
+  }
+  function service(runtime: WorkspaceRuntime): MemoryImportService {
+    active(runtime);
+    let value = services.get(runtime);
+    if (!value) {
+      value = new MemoryImportService({
+        projectRoot: runtime.workspaceCwd,
+        assertActive: () => active(runtime),
+        propose: async (input, signal) => {
+          signal.throwIfAborted();
+          active(runtime);
+          const response =
+            await runtime.bridge.invokeWorkspaceCommand<MemoryImportBatchProposal>(
+              SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
+              { ...input },
+              { timeoutMs: 130_000 },
+            );
+          signal.throwIfAborted();
+          active(runtime);
+          return response;
+        },
+      });
+      services.set(runtime, value);
+      void value.recover().catch(() => {
+        /* Explicit status/retry reports storage failures. */
+      });
+    }
+    return value;
+  }
+  const handle =
+    (
+      action: (
+        req: Request,
+        runtime: WorkspaceRuntime,
+      ) => Promise<unknown> | unknown,
+      status = 200,
+    ): RequestHandler =>
+    async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+      if (!runtime) return;
+      try {
+        active(runtime);
+        const result = await withRuntime(runtime, () => action(req, runtime));
+        active(runtime);
+        res.status(status).json(result);
+      } catch (error) {
+        sendError(res, error);
+      }
+    };
+  const base = '/workspaces/:workspace/memory/import';
+  app.post(
+    `${base}/preview`,
+    deps.mutate({ strict: true }),
+    handle((req) => previewSource(req.body)),
+  );
+  app.post(
+    `${base}/batches`,
+    deps.mutate({ strict: true }),
+    handle(
+      (req, runtime) =>
+        service(runtime).submit(
+          req.body?.source,
+          req.body?.selection,
+          req.body?.idempotencyKey,
+        ),
+      202,
+    ),
+  );
+  app.get(
+    `${base}/batches`,
+    handle((_req, runtime) => service(runtime).list()),
+  );
+  app.get(
+    `${base}/batches/:batch`,
+    handle((req, runtime) => service(runtime).get(String(req.params['batch']))),
+  );
+  app.get(
+    `${base}/batches/:batch/sources/:section`,
+    handle((req, runtime) =>
+      service(runtime).source(
+        String(req.params['batch']),
+        String(req.params['section']),
+      ),
+    ),
+  );
+  app.post(
+    `${base}/batches/:batch/cancel`,
+    deps.mutate({ strict: true }),
+    handle((req, runtime) =>
+      service(runtime).cancel(String(req.params['batch'])),
+    ),
+  );
+  app.post(
+    `${base}/batches/:batch/retry`,
+    deps.mutate({ strict: true }),
+    handle(
+      (req, runtime) => service(runtime).retry(String(req.params['batch'])),
+      202,
+    ),
+  );
+  // Recover registered trusted runtimes at daemon startup; later runtimes recover
+  // on their first import request. No source/model work occurs for previews.
+  for (const runtime of deps.workspaceRegistry.list()) {
+    try {
+      withRuntime(runtime, () => service(runtime));
+    } catch {
+      /* Unsupported runtimes stay unavailable. */
+    }
+  }
+}
+function sendError(res: Response, error: unknown): void {
+  if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    res.status(404).json({
+      code: 'memory_import_not_found',
+      error: 'Import batch not found.',
+    });
+    return;
+  }
+  res.status(400).json({
+    code: 'memory_import_rejected',
+    error:
+      'Invalid source, selection, batch, or unavailable workspace storage. No existing memory was overwritten.',
+  });
+}
