@@ -153,6 +153,11 @@ const reviewParams = (
   sessionId: 'sess',
   history: [userText('hi')],
   toolCallCount: 25,
+  experienceSignals: {
+    retryArc: false,
+    userSteer: false,
+    hasSubstantiveWork: true,
+  },
   threshold: 2,
   skillsModified: false,
   config: makeMockConfig(),
@@ -2080,6 +2085,39 @@ describe('MemoryManager', () => {
   });
 
   describe('scheduleSkillReview()', () => {
+    it.each([
+      [21, false, false, false, 'skipped'],
+      [4, true, false, false, 'skipped'],
+      [5, true, false, false, 'scheduled'],
+      [4, false, true, false, 'skipped'],
+      [5, false, true, false, 'scheduled'],
+      [19, false, false, true, 'skipped'],
+      [20, false, false, true, 'scheduled'],
+      [5, false, false, true, 'skipped'],
+    ] as const)(
+      'gates count=%i retry=%s steer=%s work=%s as %s',
+      async (
+        toolCallCount,
+        retryArc,
+        userSteer,
+        hasSubstantiveWork,
+        status,
+      ) => {
+        const mgr = new MemoryManager();
+        const result = mgr.scheduleSkillReview(
+          reviewParams('/project', {
+            toolCallCount,
+            threshold: 20,
+            experienceSignals: { retryArc, userSteer, hasSubstantiveWork },
+          }),
+        );
+        expect(result.status).toBe(status);
+        if (status === 'skipped') {
+          expect(result.skippedReason).toBe('below_threshold');
+        }
+        await result.promise;
+      },
+    );
     beforeEach(() => {
       vi.resetAllMocks();
       vi.mocked(runSkillReviewByAgent).mockResolvedValue({

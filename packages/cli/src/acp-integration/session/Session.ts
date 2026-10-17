@@ -451,6 +451,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { userContentPushAcceptedKey } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
@@ -9351,6 +9352,21 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
+    let experienceInputRecorded = false;
+    const experienceSessionId = this.config.getSessionId();
+    const recordAcceptedToolResults = () => {
+      const acceptedParts = (
+        message as unknown as Record<PropertyKey, unknown>
+      )[userContentPushAcceptedKey];
+      if (
+        !experienceInputRecorded &&
+        this.config.getSessionId() === experienceSessionId &&
+        Array.isArray(acceptedParts)
+      ) {
+        experienceInputRecorded = true;
+        llmClient.acceptCompletedToolResults(acceptedParts);
+      }
+    };
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       sourceStream =
@@ -9362,6 +9378,7 @@ export class Session implements SessionContext {
             ? await chat.sendMessageStream(model, request, promptId, goalPermit)
             : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
+      recordAcceptedToolResults();
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;
     }
@@ -9382,6 +9399,7 @@ export class Session implements SessionContext {
       };
       try {
         for await (const event of sourceStream) {
+          recordAcceptedToolResults();
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
           } else if (event.type === StreamEventType.COMPRESSED) {
@@ -9399,6 +9417,7 @@ export class Session implements SessionContext {
           commitMemoryDelivery();
         }
       } finally {
+        recordAcceptedToolResults();
         if (!committed && receivedChunk && abortSignal.aborted) {
           commitMemoryDelivery();
         }
@@ -14401,6 +14420,8 @@ export class Session implements SessionContext {
     };
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
+    let completedResultDisplay: ToolResultDisplay | undefined;
+    let terminalErrorType: ToolErrorType | undefined;
     // Released when the call ends, however it ends, as the core scheduler does.
     let builtInvocation: { release?: () => Promise<void> } | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -14568,6 +14589,7 @@ export class Session implements SessionContext {
     ) => {
       executionStatus = opts.executionStatus;
       terminalStatus = opts.status;
+      terminalErrorType = opts.errorType;
       finishToolLifecycle(opts.status);
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
@@ -16773,6 +16795,7 @@ export class Session implements SessionContext {
                 }
               }
               executeReturned = true;
+              completedResultDisplay = toolResult.returnDisplay;
               try {
                 settledArtifacts = toolResult.artifacts;
               } catch {
@@ -17408,8 +17431,19 @@ export class Session implements SessionContext {
             debugLogger.warn('Tool invocation resource cleanup failed:', error);
           });
       }
-      if (terminalStatus && terminalStatus !== 'cancelled') {
-        this.config.getLlmClient().recordCompletedToolCall(toolName, args);
+      if (terminalStatus) {
+        this.config.getLlmClient().recordCompletedToolCall(toolName, args, {
+          callId,
+          executionStatus,
+          error:
+            terminalStatus === 'error'
+              ? new Error(spanError ?? 'Tool execution failed')
+              : undefined,
+          status: terminalStatus,
+          modelFacing: !codeModeContext && !appExecution,
+          errorType: terminalErrorType ?? executionErrorType,
+          resultDisplay: completedResultDisplay,
+        });
       }
       if (terminalStatus === 'cancelled') {
         endToolSpan(toolSpan, { success: false, cancelled: true });
