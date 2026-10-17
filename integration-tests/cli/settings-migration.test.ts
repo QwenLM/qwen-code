@@ -197,14 +197,15 @@ describe('settings-migration', () => {
         hideWindowTitle: true,
         theme: 'light',
       });
-      // String "false" for disableAutoUpdate is treated as truthy (non-empty string)
-      // So enableAutoUpdate = !truthy = false, but output shows true
-      // This suggests string "false" is parsed as boolean false
+      // disableAutoUpdate "false" coerces to `false`, i.e. auto update was
+      // left on. This file is the test workspace's `.qwen/settings.json`, and
+      // workspace scope may only tighten `general.enableAutoUpdate` (set it to
+      // `false`), so the "not disabled" default is not written at all.
       expect(
         (migratedSettings['general'] as Record<string, unknown>)?.[
           'enableAutoUpdate'
         ],
-      ).toBe(true);
+      ).toBeUndefined();
       // Custom sections should be preserved
       expect(migratedSettings['customSection']).toEqual({ keepMe: true });
     });
@@ -237,11 +238,14 @@ describe('settings-migration', () => {
           ] as Record<string, unknown>
         )?.['enableLoadingPhrases'],
       ).toBe(true);
+      // Both disable* sources are `false`, i.e. auto update was left on. As a
+      // workspace-scope file it may only tighten `general.enableAutoUpdate`,
+      // so the "not disabled" default is omitted instead of written.
       expect(
         (migratedSettings['general'] as Record<string, unknown>)?.[
           'enableAutoUpdate'
         ],
-      ).toBe(true);
+      ).toBeUndefined();
       expect(
         (
           (migratedSettings['context'] as Record<string, unknown>)?.[
