@@ -78,7 +78,8 @@ function collectFailedCallIds(history: Content[]): Set<string> {
   for (const content of history) {
     for (const part of content.parts ?? []) {
       const fr = part.functionResponse as
-        { id?: string; response?: Record<string, unknown> } | undefined;
+        | { id?: string; response?: Record<string, unknown> }
+        | undefined;
       if (fr?.id && fr.response && 'error' in fr.response) {
         failed.add(fr.id);
       }
@@ -149,7 +150,8 @@ export function extractRecentFilePaths(
         continue;
       }
       const args = (bridged ? call.args?.['arguments'] : call.args) as
-        { file_path?: unknown } | undefined;
+        | { file_path?: unknown }
+        | undefined;
       const filePath =
         typeof args?.file_path === 'string' ? args.file_path : undefined;
       if (!filePath || seen.has(filePath)) continue;
@@ -627,6 +629,13 @@ export interface ComposePostCompactOptions {
  * (Finding 3). Returns `undefined` if the last history entry is not
  * a model turn with a functionCall part.
  */
+function trailingFunctionCallContent(history: Content[]): Content | undefined {
+  const last = history[history.length - 1];
+  if (!last || last.role !== 'model') return undefined;
+  if (!last.parts?.some((p) => !!p.functionCall)) return undefined;
+  return last;
+}
+
 /**
  * Parts of a trailing model+functionCall turn that are carried into the
  * post-compact ack: every functionCall part (ids intact) and every plain
@@ -643,13 +652,6 @@ export function trailingTurnPartsForAck(turn: Content): Part[] {
         !p.thought &&
         !p.thoughtSignature),
   );
-}
-
-function trailingFunctionCallContent(history: Content[]): Content | undefined {
-  const last = history[history.length - 1];
-  if (!last || last.role !== 'model') return undefined;
-  if (!last.parts?.some((p) => !!p.functionCall)) return undefined;
-  return last;
 }
 
 /**
