@@ -199,32 +199,49 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it.each(['test', 'mysql-integration', 'daemon-e2e'])(
-    'keeps setup-java Maven files job-local in the %s job',
-    (name) => {
-      const block = job(name);
+  it.each([
+    'test',
+    'mysql-integration',
+    'daemon-e2e',
+    'event-transport-broker',
+    'event-transport-multi-node',
+  ])('keeps setup-java Maven files job-local in the %s job', (name) => {
+    const block = job(name);
+    expect(block).toContain(
+      "settings-path: '${{ runner.temp }}/setup-java-m2'",
+    );
+    // Two tail-anchored forms, no prefix match: mysql-integration appends
+    // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
+    // (pinned by the 'installs and verifies against one job-local Maven
+    // repository' test), the EventTransport lanes to both of theirs; the
+    // other jobs must carry no suffix at all — an appended -DskipTests
+    // would be word-split live by the mvn launcher.
+    const exact = block.match(
+      /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+    );
+    const jobLocal = block.match(
+      /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
+    );
+    expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
+      {
+        test: 6,
+        'mysql-integration': 2,
+        'daemon-e2e': 1,
+        'event-transport-broker': 2,
+        'event-transport-multi-node': 2,
+      }[name],
+    );
+    if (name.startsWith('event-transport-')) {
+      expect(exact).toBeNull();
       expect(block).toContain(
-        "settings-path: '${{ runner.temp }}/setup-java-m2'",
+        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
       );
-      // Two tail-anchored forms, no prefix match: mysql-integration appends
-      // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
-      // (pinned by the 'installs and verifies against one job-local Maven
-      // repository' test); the other jobs must carry no suffix at all — an
-      // appended -DskipTests would be word-split live by the mvn launcher.
-      const exact = block.match(
-        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
-      );
-      const jobLocal = block.match(
-        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
-      );
-      expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 6, 'mysql-integration': 2, 'daemon-e2e': 1 }[name],
-      );
-      if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
-      expect(block).not.toContain('Drop shared Maven toolchains.xml');
-      expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
-    },
-  );
+    } else if (name !== 'mysql-integration') {
+      expect(jobLocal).toBeNull();
+    }
+    expect(block).not.toContain('Drop shared Maven toolchains.xml');
+    expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
+  });
 
   it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
     // A step copied between jobs and later fixed in only one is the #13506
@@ -238,9 +255,13 @@ describe('SDK Java self-hosted workflow guards', () => {
       ),
     );
     const bodies = [
-      ...['test', 'mysql-integration', 'daemon-e2e'].map(
-        (name) => parsed.jobs[name],
-      ),
+      ...[
+        'test',
+        'mysql-integration',
+        'daemon-e2e',
+        'event-transport-broker',
+        'event-transport-multi-node',
+      ].map((name) => parsed.jobs[name]),
       reference.jobs.build,
     ].map((pooledJob, index) => {
       const s = pooledJob.steps.find(
@@ -252,9 +273,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
       return s.run;
     });
-    expect(bodies[1]).toBe(bodies[0]);
-    expect(bodies[2]).toBe(bodies[0]);
-    expect(bodies[3]).toBe(bodies[0]);
+    for (const body of bodies.slice(1)) expect(body).toBe(bodies[0]);
     expect(reference.jobs.build.env).toEqual({
       MAVEN_VERSION: parsed.env.MAVEN_VERSION,
       MAVEN_SHA512: parsed.env.MAVEN_SHA512,
@@ -812,6 +831,8 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     ['sdk-java.yml', 'test'],
     ['sdk-java.yml', 'flyway-migrations'],
     ['sdk-java.yml', 'mysql-integration'],
+    ['sdk-java.yml', 'event-transport-broker'],
+    ['sdk-java.yml', 'event-transport-multi-node'],
     ['sdk-java.yml', 'daemon-e2e'],
     ['sdk-java-flyway-open-prs.yml', 'recheck'],
     ['sdk-java-contract-open-prs.yml', 'recheck'],
@@ -953,7 +974,7 @@ describe('setup-java Maven cache stays on hosted runners', () => {
     String(runsOn ?? '').includes('self-hosted'),
   );
   it('finds every pool-capable setup-java step', () => {
-    expect(poolCapable.length).toBe(4);
+    expect(poolCapable.length).toBe(6);
   });
   it.each(poolCapable)('%s caches Maven only on hosted runners', (_, step) => {
     expect(step.with?.cache).toBe(hostedOnly);

@@ -708,6 +708,18 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       ['push', 'workflow_dispatch'],
     ],
     [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
       'assign-pr-owner.yml',
       'assign',
       'pull_request_target',
