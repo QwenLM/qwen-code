@@ -632,6 +632,29 @@ export function parseChannelWebhookConfigLenient(
   return { sources };
 }
 
+/**
+ * The session scope a channel runs with: an explicit config value wins, then
+ * multiSession forces 'user' (per-sender sessions are the only shape it
+ * supports, so a plugin's group-shared default must not be applied over it),
+ * then the plugin default, then 'user'.
+ *
+ * The parser and the settings store must resolve this identically: when the
+ * store resolved a plugin default that the parser had overridden for
+ * multiSession, an existing channel ran under one scope and every later save
+ * of it was rejected by the compatibility check.
+ */
+export function effectiveSessionScope(
+  rawConfig: Record<string, unknown>,
+  multiSession: boolean | undefined,
+  plugin: { defaultSessionScope?: ChannelConfig['sessionScope'] },
+): ChannelConfig['sessionScope'] {
+  return (
+    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+    (multiSession ? 'user' : plugin.defaultSessionScope) ||
+    'user'
+  );
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
@@ -696,14 +719,22 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
-  const configuredSessionScope =
-    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
-    plugin.defaultSessionScope ||
-    'user';
   const multiSession = optionalBooleanField(
     name,
     'multiSession',
     rawConfig['multiSession'],
+  );
+  // QQ's opt-in purge of legacy session routes. Validated like multiSession so
+  // a stringified "true" cannot silently leave the purge off.
+  const purgeLegacySessions = optionalBooleanField(
+    name,
+    'purgeLegacySessions',
+    rawConfig['purgeLegacySessions'],
+  );
+  const configuredSessionScope = effectiveSessionScope(
+    rawConfig,
+    multiSession,
+    plugin,
   );
   const sessionRotation = parseSessionRotationConfig(
     name,
@@ -735,6 +766,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope: configuredSessionScope,
     multiSession,
+    purgeLegacySessions,
     sessionRotation,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
