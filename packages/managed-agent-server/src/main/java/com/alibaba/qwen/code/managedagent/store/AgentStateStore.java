@@ -448,6 +448,29 @@ public interface AgentStateStore {
         return AcceptanceVerdict.unknown();
     }
 
+    /**
+     * D7-2: what the Session journal proves about a parked Session title, or
+     * empty when its delivery is no longer parked: committed once the journal
+     * holds its revision's title, not committed once no writer can still
+     * commit it.
+     */
+    default Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
+        return Optional.of(AcceptanceVerdict.unknown());
+    }
+
+    /**
+     * D7-2: settles a parked Session title, only while it is still parked.
+     * Committed completes its command and shows the title; not committed
+     * fails it; unknown parks it again until {@code retryAt}.
+     *
+     * @return false when the title is no longer parked
+     */
+    default boolean settleParkedRename(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        throw new UnsupportedOperationException(
+                "Operation reconciliation is unavailable");
+    }
+
     /** A task cancel's recorded outcome: its public status and code. */
     record TaskCancelOutcome(String status, String failureCode) {
         public static TaskCancelOutcome completed() {

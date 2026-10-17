@@ -390,8 +390,14 @@
                                  81.6–81.7 s healthy locally, ~165 s
                                  budgeted at 2×) raise the healthy sum to
                                  3545 s, so the fork moves to 4155 s and
-                                 the Verify step to 85 minutes. -->
-                            <forkedProcessTimeoutInSeconds>4155</forkedProcessTimeoutInSeconds>
+                                 the Verify step to 85 minutes. Their
+                                 slice 2 (FG10c, FG10e) brings the class
+                                 to four letters measuring 181.2–181.6 s
+                                 (~363 s budgeted at 2×): the healthy sum
+                                 becomes 3743 s, so the fork moves to
+                                 4353 s and the Verify step to 90
+                                 minutes. -->
+                            <forkedProcessTimeoutInSeconds>4353</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
