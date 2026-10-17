@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
+import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
@@ -292,6 +293,88 @@ class AdmittedTurnRetryTerminalStateTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
+    // A generation change on a bound Session is the other exempt caller: one
+    // change is bounded by the prior generation's lease, so an admitted Turn
+    // whose earlier failures were all generation waits still retries past
+    // the post-admission budget instead of being cancelled and failed
+    // (review round 3, R3-3). 39 is the last run below the churn cap
+    // (4 × the post-admission budget of 10).
+    @ParameterizedTest(name = "consecutive exempt failures = {0}")
+    @ValueSource(ints = {10, 39})
+    void aGenerationChangeStillRetriesPastThePostAdmissionBudget(
+            int failures) {
+        Dispatched dispatched = dispatchTransientFailure(failures, failures,
+                new ManagedAgentProperties(),
+                mock(HostedHarnessGenerationException.class), "epoch-1");
+
+        verify(dispatched.store()).scheduleTurnRetry(eq("tenant"),
+                eq("session"), eq("turn"), anyString(), anyLong(), eq(true));
+        verify(dispatched.store(), never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(dispatched.harness(), never()).cancel(anyString(), anyString());
+    }
+
+    // A Harness that restarts between every attempt keeps throwing the
+    // generation change, and the exemption alone would retry the Turn
+    // forever with nothing to tell it from a healthy retry. Once its run
+    // without journaled progress reaches the churn cap the exemption lapses:
+    // the admitted Turn is cancelled and failed with the post-admission
+    // unavailable code, as a spent budget would be (review round 3, R3-6).
+    @ParameterizedTest(name = "consecutive exempt failures = {0}")
+    @ValueSource(ints = {40, 57})
+    void aGenerationChurnPastTheCapFailsTheAdmittedTurn(int failures) {
+        Dispatched dispatched = dispatchTransientFailure(failures, failures,
+                new ManagedAgentProperties(),
+                mock(HostedHarnessGenerationException.class), "epoch-1");
+        AgentStateStore store = dispatched.store();
+
+        InOrder order = inOrder(store, dispatched.harness());
+        order.verify(dispatched.harness()).cancel("tenant", "session");
+        order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable_after_admission"),
+                anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+    }
+
+    // Zero budgets are a supported "no retries" policy, but the exempt
+    // waits keep their exemption under it, and a generation change is one
+    // of them: the cap floors the budget to one, so an admitted Turn still
+    // re-attaches across a single change and only a run of four fails it
+    // (review round 1, R1-1).
+    @ParameterizedTest(name = "consecutive exempt failures = {0}")
+    @CsvSource({"0, false", "3, false", "4, true"})
+    void aZeroBudgetStillAdoptsAGenerationChange(int failures,
+            boolean terminal) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(0);
+        properties.getDispatch().setMaxPostAdmissionRetries(0);
+        properties.getDispatch().setMaxOperationRetries(0);
+        Dispatched dispatched = dispatchTransientFailure(failures, failures,
+                properties, mock(HostedHarnessGenerationException.class),
+                "epoch-1");
+        AgentStateStore store = dispatched.store();
+
+        if (terminal) {
+            InOrder order = inOrder(store, dispatched.harness());
+            order.verify(dispatched.harness()).cancel("tenant", "session");
+            order.verify(store).failTurn(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(),
+                    eq("hosted_harness_unavailable_after_admission"),
+                    anyString());
+            verify(store, never()).scheduleTurnRetry(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyBoolean());
+        } else {
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(),
+                    anyString(), anyString(), anyString(), anyString());
+            verify(dispatched.harness(), never()).cancel(anyString(),
+                    anyString());
+        }
+    }
+
     // The budget counts consecutive failures without journaled progress: a
     // Turn at the budget whose delivery admitted and journaled new events
     // since the last failure reschedules instead of terminating — the fenced
@@ -461,6 +544,15 @@ class AdmittedTurnRetryTerminalStateTest {
     private static Dispatched dispatchTransientFailure(int retryCount,
             ManagedAgentProperties properties, RuntimeException failure,
             String admittedEpoch) {
+        return dispatchTransientFailure(retryCount, 0, properties, failure,
+                admittedEpoch);
+    }
+
+    // budgetExemptFailures is how many of the retryCount consecutive
+    // failures were exempt waits.
+    private static Dispatched dispatchTransientFailure(int retryCount,
+            int budgetExemptFailures, ManagedAgentProperties properties,
+            RuntimeException failure, String admittedEpoch) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
@@ -468,7 +560,8 @@ class AdmittedTurnRetryTerminalStateTest {
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, admittedEpoch,
                 null, "previous-owner", Long.MAX_VALUE, retryCount,
-                retryCount, 0, null, null, null, 1, 1, null, 1);
+                retryCount, budgetExemptFailures, null, null, null, 1, 1,
+                null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
