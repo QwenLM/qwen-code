@@ -169,16 +169,23 @@ letter 欠的摘要性质；记录的 relay 结算是 FG10b/c 的机制。probe 
 
 ### FG10d —— 进程崩溃
 
-**本切片不落地 FG10d。** 驱动器与门禁都已搭好，而门禁是红在一个真实
-发现上、不是夹具缺陷：在 workflow 中途（子 agent 在飞）SIGKILL
-Harness 再重启后，child 未结算的 workflow Turn 被恢复机制重新驱动——
-脚本重跑并重新派发了它的子 agent（击杀后的 model 请求带着子 agent
-的系统提示词）。这正是本 letter 要钉的「never re-executed on reopen」
-所禁止的。该发现已作为生产 bug（#14387）落地并在 #14461 修复：
-恢复机制把该 Turn 泊车为 `hosted_workflow_recovery_blocked`——绝不
-重驱动、绝不结算——relay 随之把记录结算为 `recovery_blocked` 覆盖
-`outcome_unknown`。FG10d 随其落地并断言该形状；本节保留为其设计。
-本切片只交付 FG10a。
+**已在 coordinator 持有 parent 的夹具上交付。** 驱动器与门禁在本切片里都已搭好，
+而门禁是红在一个真实发现上、不是夹具缺陷：在 workflow 中途（子 agent 在飞）SIGKILL
+Harness 再重启后，恢复机制重新驱动了 child 未结算的 workflow Turn——脚本重跑并重新
+派发了它的子 agent（击杀后的 model 请求带着子 agent 的系统提示词）。这正是本 letter
+要钉的「never re-executed on reopen」所禁止的。
+
+该发现已作为生产 bug（#14387）落地并在 #14461 修复：恢复机制把该 Turn 泊车为
+`hosted_workflow_recovery_blocked`——绝不重驱动、绝不结算——relay 随之把记录结算为
+`recovery_blocked` 覆盖 `outcome_unknown`。
+
+FG10d 随后作为 [relay 设计](2026-10-17-workflow-relay-fault-gates.zh-CN.md) 的第 3 片
+落在 `HostedWorkflowRelayFaultGatesIT` 里，而不是这个由 driver 持有 parent 的类。它的
+期望——记录的阻断结算、ledger 以及 parent 收到的通知——都在 relay 从 bind 到 deliver
+的流程里，本类由 driver 持有的 parent 跑不了这条流程（见上文 FG10a 的说明），而
+coordinator 持有的 lead 可以。下面两个用例沿用原名；每项注入和期望如何落地、门禁在那里
+又发现并修复的两个缺陷，以及变异，都记在 relay 设计里。本切片只交付 FG10a。下文保留为
+原始设计。
 
 仅 POSIX。驱动器持有 Harness 子进程并 SIGKILL。在飞见证是假模型
 服务器的请求日志：一次 `agent()` 派发即一次 POST，所以「子 agent
@@ -247,10 +254,9 @@ FG6/FG7/FG8 已记录的手工流程。
    摘要一律视为相等）：`tampered-script-refused` 与
    `same-length-substitution-refused` 变红——被篡改的脚本被执行，
    假模型服务器记录到 child 请求。
-2. FG10d——把 relay 对「Harness 已死的 child」的有限观望归类改写
-   为把记录结算 `failed` 而非宣告事实 `unknown`：
-   `kill-mid-workflow-subagents-in-flight` 在绝不为 `failed` 的断言
-   处变红。
+2. FG10d——本设计原计划把 relay 对「Harness 已死的 child」的有限观望归类改写
+   为把记录结算 `failed` 而非宣告事实 `unknown`。FG10d 随 relay 设计落地，由其
+   第 3 片的变异取代这一条。
 
 ## 验证与验收
 

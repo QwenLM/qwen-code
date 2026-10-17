@@ -799,27 +799,42 @@ public class ChildResultRelayStore {
             throw new IllegalArgumentException("Unknown child operation state " + state);
         }
         if ("close_debt".equals(state) && !"CHILD_SESSION_CLOSE".equals(row.operationKind())) {
-            transactions.executeWithoutResult(status -> {
-                int changed = jdbc.update("UPDATE ma_operation SET state = 'done', claim_owner = NULL, claim_until = NULL, result_json = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
-                        resultBody(childSessionId, lastError), now, operationKey(row.operationKind(), row.tenantId(),
-                                row.parentSessionId(), row.childRunId()), owner, row.claimGeneration(), now);
-                if (changed != 1) {
-                    return;
-                }
-                String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", row.creationKey()).toString();
-                jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, request_digest, request_json, result_json, state, phase, claim_owner, claim_generation, claim_until, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHILD_SESSION_CLOSE', ?, ?, ?, 'CHILD_RUN', ?, ?, ?, ?, 'close_debt', 'CLOSING', ?, 1, ?, ?, ?, ?)",
-                        operationKey("CHILD_SESSION_CLOSE", row.tenantId(), row.parentSessionId(), row.childRunId()),
-                        scope(row.tenantId(), row.parentSessionId()), scope(row.tenantId(), row.parentSessionId()), row.childRunId(), row.tenantId(), row.parentSessionId(),
-                        ManagedSchemaKeys.key(row.childRunId()), ManagedSchemaKeys.key(request), request,
-                        resultBody(childSessionId, lastError), owner, leaseUntil, nextRetryAt, now, now);
-                recordDelivery(row, childSessionId, "delivered", now);
-            });
+            retainCloseDebt(row, owner, "done", childSessionId, nextRetryAt, lastError, leaseUntil, now);
             return;
         }
         jdbc.update("UPDATE ma_operation SET state = ?, result_json = ?, available_at = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                 state, resultBody(childSessionId, lastError), nextRetryAt, leaseUntil, now,
                 operationKey(row.operationKind(), row.tenantId(), row.parentSessionId(), row.childRunId()),
                 owner, row.claimGeneration(), now);
+    }
+
+    /**
+     * Retires the walk under its proven classification and parks the child close it still owes on
+     * its own {@code CHILD_SESSION_CLOSE} row. The classification is the result's truth, never the
+     * host's close capability: a run whose outcome was never witnessed stays {@code unknown} on
+     * both the walk and its delivery row, exactly as when the close is admitted at once (#14165
+     * FG10d found the debt arm writing {@code done}/{@code delivered} for such a run).
+     */
+    public void retainCloseDebt(RelayRow row, String owner, String classification, String childSessionId,
+            long nextRetryAt, String lastError, long leaseUntil, long now) {
+        if (!Set.of("done", "unknown").contains(classification)) {
+            throw new IllegalArgumentException("Unknown close-debt classification " + classification);
+        }
+        transactions.executeWithoutResult(status -> {
+            int changed = jdbc.update("UPDATE ma_operation SET state = ?, claim_owner = NULL, claim_until = NULL, result_json = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
+                    classification, resultBody(childSessionId, lastError), now, operationKey(row.operationKind(),
+                            row.tenantId(), row.parentSessionId(), row.childRunId()), owner, row.claimGeneration(), now);
+            if (changed != 1) {
+                return;
+            }
+            String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", row.creationKey()).toString();
+            jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, request_digest, request_json, result_json, state, phase, claim_owner, claim_generation, claim_until, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHILD_SESSION_CLOSE', ?, ?, ?, 'CHILD_RUN', ?, ?, ?, ?, 'close_debt', 'CLOSING', ?, 1, ?, ?, ?, ?)",
+                    operationKey("CHILD_SESSION_CLOSE", row.tenantId(), row.parentSessionId(), row.childRunId()),
+                    scope(row.tenantId(), row.parentSessionId()), scope(row.tenantId(), row.parentSessionId()), row.childRunId(), row.tenantId(), row.parentSessionId(),
+                    ManagedSchemaKeys.key(row.childRunId()), ManagedSchemaKeys.key(request), request,
+                    resultBody(childSessionId, lastError), owner, leaseUntil, nextRetryAt, now, now);
+            recordDelivery(row, childSessionId, "done".equals(classification) ? "delivered" : classification, now);
+        });
     }
 
     public void scheduleRetry(RelayRow row, String owner, long nextRetryAt, long leaseUntil, long now) {

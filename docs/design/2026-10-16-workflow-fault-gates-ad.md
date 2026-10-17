@@ -194,18 +194,29 @@ never conflicts.
 
 ### FG10d — process crash
 
-**Deferred out of this slice.** The driver and the gate were built, and the
-gate went red on a genuine finding, not a fixture gap: after a SIGKILL of
-the Harness mid-workflow (a subagent in flight) and a restart, the child's
-unsettled workflow Turn was re-driven by the recovery — the script re-ran
-and re-dispatched its subagent (the post-kill model request carried the
-subagent's system prompt). That is exactly the "never re-executed on
-reopen" violation this letter exists to pin. The finding landed as a
-production bug (#14387) and was fixed in #14461: the recovery parks the
-Turn `hosted_workflow_recovery_blocked` — never re-driven, never settled —
-and the relay settles the record `recovery_blocked` over `outcome_unknown`.
-FG10d lands after it, asserting that shape; this section stays as its
-design. FG10a alone ships here.
+**Delivered on the coordinator-owned fixture.** The driver and the gate
+were built in this slice and went red on a genuine finding, not a fixture
+gap. After a SIGKILL of the Harness mid-workflow (a subagent in flight)
+and a restart, the recovery re-drove the child's unsettled workflow Turn:
+the script re-ran and re-dispatched its subagent (the post-kill model
+request carried the subagent's system prompt). That is exactly the "never
+re-executed on reopen" violation this letter exists to pin.
+
+The finding landed as a production bug (#14387) and was fixed in #14461.
+The recovery parks the Turn `hosted_workflow_recovery_blocked` — never
+re-driven, never settled — and the relay settles the record
+`recovery_blocked` over `outcome_unknown`.
+
+FG10d then landed after it, as slice 3 of
+[the relay design](2026-10-17-workflow-relay-fault-gates.md) in
+`HostedWorkflowRelayFaultGatesIT`, not in this driver-held class. Its
+expectations — the record's blocked settlement, its ledger and the
+parent's notification — are the relay's bind-to-deliver walk, which this
+class's driver-held parent cannot run (FG10a's note above); the
+coordinator-owned lead can. The two cases below keep their names; the
+relay design records how each injection and expectation landed, the two
+further defects the gate found there and fixed, and the mutations. FG10a
+alone ships here. The section below stays as the original design.
 
 POSIX-only. The driver owns the Harness child process and SIGKILLs it.
 The in-flight witness is the fake model server's request log: an `agent()`
@@ -283,10 +294,10 @@ reverted, following the FG6/FG7/FG8 documented manual procedure.
    `tampered-script-refused` and `same-length-substitution-refused` red —
    the tampered script executes and the fake model server records child
    requests.
-2. FG10d — the relay's bounded-watch classification for a child whose
-   Harness died rewritten to settle the record `failed` instead of
-   declaring the fact `unknown`: `kill-mid-workflow-subagents-in-flight`
-   red at the never-`failed` assertion.
+2. FG10d — planned here as the relay's bounded-watch classification for
+   a child whose Harness died rewritten to settle the record `failed`
+   instead of declaring the fact `unknown`. FG10d landed with the relay
+   design, whose slice-3 mutations replace this one.
 
 ## Validation and acceptance
 

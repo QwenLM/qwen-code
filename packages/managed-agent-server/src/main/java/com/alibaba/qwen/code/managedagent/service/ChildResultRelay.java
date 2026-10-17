@@ -1364,14 +1364,15 @@ public class ChildResultRelay {
         return true;
     }
 
-    /** The terminal write of every settled arm: with its close admitted
-     * the row retires to its proven classification; without close
-     * capability the settled record already freed its quota and the
-     * parent's next Turn, so the row keeps only the close debt — parked
-     * due on the heartbeat, named by the child id, still claimed, and
-     * still discoverable, because a settled parent record is not the
-     * child Session's close and discarding this row would strand the
-     * ACTIVE child with no durable owner anywhere. */
+    /** The terminal write of every settled arm: the row retires to its
+     * proven classification either way. With its close admitted that is
+     * all; without close capability the settled record already freed its
+     * quota and the parent's next Turn, so only the close debt stays —
+     * parked due on the heartbeat, named by the child id, still claimed,
+     * and still discoverable, because a settled parent record is not the
+     * child Session's close and discarding it would strand the ACTIVE
+     * child with no durable owner anywhere. The classification never
+     * depends on that capability: an `unknown` run stays `unknown`. */
     private void finishOrRetainDebt(RelayRow row, String child,
             boolean closed, String classification, String lastError,
             long now) {
@@ -1379,7 +1380,7 @@ public class ChildResultRelay {
             relayStore.classify(row, owner, classification, lastError, now);
             return;
         }
-        relayStore.advance(row, owner, "close_debt", child,
+        relayStore.retainCloseDebt(row, owner, classification, child,
                 now + HEARTBEAT_MS,
                 "close debt retained: host cannot close a Workspace Session",
                 now + LEASE_MS, now);
