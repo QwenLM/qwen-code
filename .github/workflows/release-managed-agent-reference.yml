@@ -230,7 +230,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/managed-agent-server/pom.xml
@@ -290,6 +290,10 @@ jobs:
         env:
           RELEASE_VERSION: '${{ steps.version.outputs.version }}'
         run: |-
+          # A pool runner can keep RUNNER_TEMP across jobs: a leftover
+          # extracted/ fails the verify step's mkdir, and another PR's
+          # archive would match the upload globs.
+          rm -rf -- "${RUNNER_TEMP}/managed-agent-reference"
           node scripts/package-managed-agent-reference.mjs \
             --version "${RELEASE_VERSION}" \
             --source-revision "${GITHUB_SHA}" \
