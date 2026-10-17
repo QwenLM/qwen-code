@@ -29,6 +29,9 @@ const INVISIBLE_PLUS = String.fromCharCode(0x2064); // INVISIBLE PLUS
 const WJ = String.fromCharCode(0x2060); // WORD JOINER
 const BOM = String.fromCharCode(0xfeff); // ZERO WIDTH NO-BREAK SPACE / BOM
 const VS16 = String.fromCharCode(0xfe0f); // VARIATION SELECTOR-16
+const HANGUL_FILLER = String.fromCharCode(0x3164); // HANGUL FILLER (zero-ink)
+const BRAILLE_BLANK = String.fromCharCode(0x2800); // BRAILLE PATTERN BLANK (zero-ink)
+const LONE_SURROGATE = String.fromCharCode(0xd800); // malformed half of a pair
 // U+1F389 PARTY POPPER as its UTF-16 surrogate pair, kept ASCII in source. A
 // length cap landing between the two units yields a lone surrogate (-> `replace`
 // char downstream); the sanitizers truncate on code-point boundaries to avoid it.
@@ -415,6 +418,26 @@ describe('sanitizeDisplayText', () => {
   it('keeps brackets and multi-line structure that sanitizePromptText folds', () => {
     const out = sanitizeDisplayText('[BUG] title:\n- one\n- two', 100);
     expect(out).toBe('[BUG] title:\n- one\n- two');
+  });
+
+  it.each([
+    ['hangul filler', HANGUL_FILLER],
+    ['braille blank', BRAILLE_BLANK],
+    ['lone surrogate', LONE_SURROGATE],
+  ])('neutralizes a zero-ink %s projection', (_name, payload) => {
+    // Mutation check: reverting the class to the enumerated C1/Cf/VS set lets
+    // these through untouched, so the projection renders as a line that looks
+    // empty while carrying attacker-chosen bytes.
+    expect(sanitizeDisplayText(`a${payload}b`, 100)).toBe('a b');
+    expect(sanitizeDisplayText(payload, 100)).not.toContain(payload);
+  });
+
+  it('strips a lone surrogate without shredding a well-formed pair', () => {
+    // Regression guard: the surrogate term must match a malformed half only.
+    // The `u` flag matches by code point, so an intact pair is never split.
+    const out = sanitizeDisplayText(`a${EMOJI}b${LONE_SURROGATE}c`, 100);
+    expect(out).toBe(`a${EMOJI}b c`);
+    expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
   });
 
   it('caps to maxLen code points without splitting a surrogate pair', () => {

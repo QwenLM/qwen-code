@@ -9,9 +9,15 @@
  * logical byte order). Also strips common zero-width format chars that make
  * visually identical names/text compare differently. ASCII C0/DEL (incl. CR/LF)
  * are stripped by each caller.
+ *
+ * Derived from Unicode properties rather than a hand list - an enumeration
+ * always has an unlisted corner, and the set grows with Unicode. U+2800
+ * (BRAILLE PATTERN BLANK) and a lone surrogate are not Default_Ignorable but
+ * likewise render as nothing, so they are listed explicitly; matching by code
+ * point (the `u` flag) keeps an intact surrogate pair out of that term.
  */
 export const PROMPT_UNSAFE_INVISIBLES =
-  /[\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+  /[\u0080-\u009f\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029\u2800\ud800-\udfff]/gu;
 
 /**
  * Truncate to at most `max` Unicode CODE POINTS (not UTF-16 code units). A cap
