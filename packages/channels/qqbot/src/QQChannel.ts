@@ -357,18 +357,63 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
-    // groupAllPolicy 'keyword' or 'all' requires 'single' session scope
-    // because all group messages share one conversation context.
+    // groupAllPolicy 'keyword' or 'all' requires per-group shared context.
+    // 'thread' is the only scope that gives it without collateral: it shares
+    // each group's session (routing key = channel:chatId) while keeping every
+    // direct message per-user. 'chat_thread' routes groups identically but
+    // ChannelBase treats it as unconditionally shared, so every DM becomes a
+    // shared session too (no operator can /clear it, and a DM tool call has no
+    // answerer). 'single' is shared as well but collapses every group and every
+    // DM into one `channel:__single__` context — the cross-group leakage issue
+    // #8238 describes. 'user' fragments group messages per sender. We warn but
+    // do NOT force the scope: forcibly flattening the user's multi-level
+    // session isolation into a global single session was incorrect (see
+    // PR #6457 review). The user's sessionScope choice wins.
     const qqCfg = config as unknown as QQChannelConfig;
     if (
       (qqCfg.groupAllPolicy === 'keyword' || qqCfg.groupAllPolicy === 'all') &&
-      config.sessionScope !== 'single'
+      config.sessionScope !== 'thread'
     ) {
-      const originalScope = config.sessionScope;
+      // multiSession pins sessionScope to 'user' (enforced by the channel
+      // parser), so the scope advice below would tell the operator to set a
+      // combination the parser rejects on the next start. Name the conflict
+      // instead and leave the scope alone.
       process.stderr.write(
-        `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${originalScope}' (not 'single'). Forcing sessionScope to 'single' to ensure shared group context.\n`,
+        config.multiSession
+          ? `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}'. multiSession requires sessionScope 'user', so groupAllPolicy keyword/all and multiSession are mutually exclusive — groupAllPolicy keyword/all is not supported with multiSession enabled; change groupAllPolicy or turn multiSession off.\n`
+          : `[QQ:${name}] WARNING: groupAllPolicy is '${qqCfg.groupAllPolicy}' but sessionScope is '${config.sessionScope}' (not 'thread'). groupAllPolicy keyword/all needs sessionScope: 'thread' for per-group shared context with each direct message kept private; 'chat_thread' routes groups the same but makes every direct message a shared session, and 'single' merges every group and direct message into one context. With 'user', group messages fragment per sender.\n`,
       );
-      config = { ...config, sessionScope: 'single' as const };
+    }
+
+    // A shared-scope session is operated only by config.operators (see
+    // ChannelBase.isSharedSessionOperator) — membership grants no
+    // session-control rights. Warn whenever such a session exists and no
+    // operator is configured: permission requests, the session-control
+    // commands (/clear, /cancel, /who, /status, /loop, /btw, /approve*, /deny)
+    // and steering an in-flight turn are then unreachable, with no other
+    // signal. Group access is not required for the lockout: 'single' and
+    // 'chat_thread' share direct-message sessions too, so a DM-only channel on
+    // those scopes has the same dead end ('thread' shares only group sessions,
+    // because a direct message is one chat with one sender).
+    const sharedScope =
+      config.sessionScope === 'thread' ||
+      config.sessionScope === 'chat_thread' ||
+      config.sessionScope === 'single';
+    const dmSharedScope =
+      config.sessionScope === 'single' || config.sessionScope === 'chat_thread';
+    const groupAccess =
+      config.groupPolicy !== undefined && config.groupPolicy !== 'disabled';
+    if (
+      sharedScope &&
+      (groupAccess || dmSharedScope) &&
+      (config.operators ?? []).length === 0
+    ) {
+      const where = groupAccess
+        ? `group access is enabled with shared sessionScope '${config.sessionScope}'`
+        : `sessionScope '${config.sessionScope}' makes every session shared, direct messages included`;
+      process.stderr.write(
+        `[QQ:${name}] WARNING: ${where}, but no operators are configured — no one can answer permission requests, run session-control commands, or steer an in-flight turn until 'operators' is set.\n`,
+      );
     }
 
     const router =

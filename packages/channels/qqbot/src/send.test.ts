@@ -153,8 +153,22 @@ type QQChannelInstance = InstanceType<typeof QQChannel>;
 type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];
 type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
+/**
+ * The resolved ChannelConfig of a channel built by the adapter's own
+ * constructor. `config` is a protected ChannelBase field with no public
+ * accessor; the rows that assert the constructor's scope decision read it
+ * through this one typed door instead of the protected member directly.
+ */
+function channelConfig(ch: QQChannelInstance): Record<string, unknown> {
+  return (ch as unknown as { config: Record<string, unknown> }).config;
+}
+
 afterEach(() => {
   vi.useRealTimers();
+  // Restore every spyOn-created spy even when an assertion fails mid-test —
+  // tests that put spy.mockRestore() at the end leak the mock (e.g. a
+  // mocked QQChannel.prototype.sendMessage) into subsequent tests otherwise.
+  vi.restoreAllMocks();
 });
 
 /** Create a mock Response-like object for sendQQMessage. */
@@ -289,6 +303,255 @@ describe('session persistence paths', () => {
         'registerBridgeEvents'
       ],
     ).toBe(false);
+  });
+});
+
+describe('groupAllPolicy session-scope warning (no forcing)', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        groupAllPolicy: 'log',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // The verdict these rows assert (`config.sessionScope`) is a protected
+  // ChannelBase field, read here through channelConfig because the channel
+  // under test IS the adapter's own construction: the constructor's decision is
+  // the subject, and no public accessor exposes the resolved scope. The warning
+  // text the same decision writes is asserted alongside, so the outcome is
+  // observable even where the field is not public.
+  it('does NOT force sessionScope when groupAllPolicy=all and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'user' });
+    // The user's scope choice is preserved — no forced flattening to 'single'.
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain('WARNING');
+    expect(logged).toContain("needs sessionScope: 'thread'");
+    expect(logged).not.toContain('Forcing');
+  });
+
+  it('does NOT force sessionScope when groupAllPolicy=keyword and scope is not thread; emits warning', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
+    expect(capturedStderr()).toContain('WARNING');
+  });
+
+  it('emits NO warning when groupAllPolicy=all and sessionScope=thread', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'thread' as const,
+    });
+    expect(channelConfig(ch)['sessionScope']).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('warns when groupAllPolicy=all and sessionScope=chat_thread (DMs become shared)', () => {
+    // chat_thread routes groups the same as thread (QQ has no threadId), but
+    // ChannelBase treats it as unconditionally shared, so it also turns every
+    // direct message into a shared session — the DM /clear rejection issue
+    // #8238 records. The warning must not offer it as an equal alternative.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'chat_thread' as const,
+    });
+    expect(channelConfig(ch)['sessionScope']).toBe('chat_thread');
+    const logged = capturedStderr();
+    expect(logged).toContain('groupAllPolicy is');
+    expect(logged).toContain('makes every direct message a shared session');
+    // The operator warning also fires: chat_thread shares DMs with no
+    // operators configured.
+    expect(logged).toContain('makes every session shared');
+  });
+
+  it('warns when groupAllPolicy=all and sessionScope is single (all contexts collapse)', () => {
+    // 'single' is shared, but it merges every group and every DM into one
+    // `channel:__single__` context — the cross-group leakage issue #8238
+    // reports — so it must not be exempt from the scope warning.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'single' });
+    expect(channelConfig(ch)['sessionScope']).toBe('single');
+    const logged = capturedStderr();
+    expect(logged).toContain('groupAllPolicy is');
+    expect(logged).toContain(
+      "'single' merges every group and direct message into one context",
+    );
+    // The operator warning fires too because 'single' shares every session.
+    expect(logged).toContain('makes every session shared');
+  });
+
+  it('with multiSession, warns of the conflict instead of prescribing sessionScope: thread', () => {
+    // multiSession pins sessionScope to 'user' at parse time, so obeying the
+    // normal advice would make the channel fail to start. The warning must
+    // name the mutual exclusion and never tell the operator to set 'thread'.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: 'user',
+      multiSession: true,
+    });
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain('WARNING');
+    expect(logged).toContain('multiSession requires sessionScope');
+    expect(logged).toContain('mutually exclusive');
+    expect(logged).toContain('turn multiSession off');
+    expect(logged).not.toContain("sessionScope: 'thread'");
+    expect(logged).not.toContain("needs sessionScope: 'thread'");
+  });
+
+  it('without multiSession, the groupAllPolicy advice still prescribes sessionScope: thread', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
+    const logged = capturedStderr();
+    expect(logged).toContain("needs sessionScope: 'thread'");
+    expect(logged).not.toContain('mutually exclusive');
+  });
+
+  it('emits NO warning for log policy with non-thread scope (baseline)', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
+  it('declares thread as defaultSessionScope, so zero-config defaults get per-group shared context', async () => {
+    const { plugin } = await import('./index.js');
+    expect(plugin.defaultSessionScope).toBe('thread');
+  });
+
+  it('emits NO warning for groupAllPolicy=all when sessionScope is the CLI-filled default (thread)', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { plugin } = await import('./index.js');
+    // Simulate parseChannelConfig (packages/cli/src/commands/channel/
+    // config-utils.ts): when the config omits sessionScope, the plugin's
+    // defaultSessionScope becomes the effective scope before construction.
+    const ch = makeChannel({
+      groupAllPolicy: 'all',
+      sessionScope: plugin.defaultSessionScope as 'thread',
+    });
+    expect(channelConfig(ch)['sessionScope']).toBe('thread');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+});
+
+describe('shared-session operator warning', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'thread' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  function capturedStderr(): string {
+    return vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((c) => String(c[0]))
+      .join('');
+  }
+
+  it('warns when group access is enabled on a shared scope with no operators', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open' });
+    const logged = capturedStderr();
+    expect(logged).toContain('no operators are configured');
+    expect(logged).toContain('session-control commands');
+  });
+
+  it('warns for chat_thread and single shared scopes too', () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // Each scope separately: a shared containment check cannot tell which
+    // scope the warning came from, so dropping one from sharedScope survived.
+    makeChannel({ groupPolicy: 'allowlist', sessionScope: 'chat_thread' });
+    expect(capturedStderr()).toContain("shared sessionScope 'chat_thread'");
+    stderrSpy.mockClear();
+    makeChannel({ groupPolicy: 'pairing', sessionScope: 'single' });
+    expect(capturedStderr()).toContain("shared sessionScope 'single'");
+  });
+
+  it('warns for a DM-only channel on a shared scope with no operators', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // No group access at all: 'single' shares direct-message sessions too, so
+    // the lockout is identical and must be warned about.
+    const ch = makeChannel({ sessionScope: 'single' });
+    expect(channelConfig(ch)['groupPolicy']).toBe('disabled');
+    const logged = capturedStderr();
+    expect(logged).toContain('makes every session shared');
+    expect(logged).toContain('no operators are configured');
+  });
+
+  it('stays silent on the user scope, where a direct message is never shared', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ sessionScope: 'user' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when operators are configured', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', operators: ['member-1'] });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning when group access is disabled', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'disabled' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
+  });
+
+  it('emits NO operator warning for a per-sender (user) scope', () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    makeChannel({ groupPolicy: 'open', sessionScope: 'user' });
+    expect(capturedStderr()).not.toContain('no operators are configured');
   });
 });
 
