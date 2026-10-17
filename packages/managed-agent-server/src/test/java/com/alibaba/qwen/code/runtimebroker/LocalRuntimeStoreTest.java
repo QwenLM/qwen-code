@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class LocalRuntimeStoreTest {
@@ -35,6 +36,28 @@ class LocalRuntimeStoreTest {
         try (var entries = Files.list(state)) {
             assertEquals(0, entries.count());
         }
+    }
+
+    @Test
+    void macNamespacesMustBePaired() {
+        var host = DurableLocalProcessRuntimeProvisionerTest.HOST;
+        assertThrows(IllegalArgumentException.class, () -> new LocalRuntimeStore.HostIdentity(
+                host.hostId(), host.bootId(), "macos", host.timeNamespace()));
+        assertThrows(IllegalArgumentException.class, () -> new LocalRuntimeStore.HostIdentity(
+                host.hostId(), host.bootId(), host.pidNamespace(), "macos"));
+    }
+
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.MAC)
+    @Test
+    void nativeMacIdentityAndTrustedRebootRefusal(@org.junit.jupiter.api.io.TempDir Path directory) {
+        var identity = LocalRuntimeStore.HostIdentity.current();
+        assertEquals("macos", identity.pidNamespace());
+        assertEquals("macos", identity.timeNamespace());
+        assertEquals(identity, LocalRuntimeStore.HostIdentity.current());
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> LocalProcessRuntimeProvisioner.durable(List.of("must-not-run"), directory,
+                        new HttpRuntimeTransport(), true));
+        assertTrue(error.getMessage().contains("trusted-local-reboot-recovery=false"));
     }
 
     @Test

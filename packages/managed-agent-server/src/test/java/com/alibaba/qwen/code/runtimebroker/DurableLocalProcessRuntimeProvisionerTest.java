@@ -48,6 +48,61 @@ class DurableLocalProcessRuntimeProvisionerTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"host", "boot"})
+    void macIdentityChangeCannotAdoptStopOrAttestTheOriginalWorker(String changedField) throws Exception {
+        var identity = new LocalRuntimeStore.HostIdentity(HOST.hostId(), HOST.bootId(), "macos", "macos");
+        var store = new LocalRuntimeStore(directory.toRealPath(), identity);
+        var request = closeRequest();
+        try (var first = provisioner(store)) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            var lease = launch(first, store, request);
+            var binding = closeBinding(request, handle, lease);
+            var changed = new LocalRuntimeStore.HostIdentity(
+                    changedField.equals("host") ? "b".repeat(32) : identity.hostId(),
+                    changedField.equals("boot") ? "22222222-2222-2222-2222-222222222222" : identity.bootId(),
+                    "macos", "macos");
+            var replaced = new LocalRuntimeStore(directory.toRealPath(), changed);
+            assertFalse(replaced.rebooted(registration(store, request, handle)));
+            try (var second = provisioner(replaced)) {
+                assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                        await(second.reconcile(request, SEED, handle, lease)).getOutcome());
+                assertThrows(RuntimeBrokerException.class, () -> second.verifyOperatorRegistration(binding));
+                assertThrows(RuntimeBrokerException.class,
+                        () -> second.attestOperatorStop(binding, "11111111-1111-1111-1111-111111111111"));
+                assertBlocked(second.stopDrained(binding));
+                assertTrue(workers.getLast().isAlive());
+                assertEquals(LocalRuntimeStore.State.READY, registration(store, request, handle).state());
+            }
+        }
+    }
+
+    @org.junit.jupiter.api.condition.EnabledOnOs(OS.MAC)
+    @Test
+    void nativeMacDurableWorkerIsAdoptedAcrossBrokerRestartAndStoppedExactly() throws Exception {
+        directory = directory.toRealPath();
+        var request = closeRequest();
+        var store = new LocalRuntimeStore(directory, LocalRuntimeStore.HostIdentity.current());
+        List<String> command = List.of("node", Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath().toString());
+        RuntimeResourceHandle handle;
+        RuntimeLease lease;
+        try (var first = LocalProcessRuntimeProvisioner.durable(command, directory, TRANSPORT)) {
+            handle = await(first.ensureResource(request, SEED, null));
+            lease = launch(first, store, request);
+        }
+        assertTrue(workers.getLast().isAlive());
+        try (var second = LocalProcessRuntimeProvisioner.durable(command, directory, TRANSPORT)) {
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    await(second.reconcile(request, SEED, handle, lease)).getOutcome());
+            assertEquals(lease.getEndpoint(), await(second.provision(request, SEED)).getEndpoint());
+            var binding = closeBinding(request, handle, lease);
+            assertTrue(await(second.stopDrained(binding)).matches(binding));
+            assertTrue(registration(store, request, handle).processAbsent());
+            assertFalse(workers.getLast().isAlive());
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void restartAndConcurrentObserversKeepTheSameWorker(boolean managed) throws Exception {
         RuntimeProvisionRequest request = request(managed);
