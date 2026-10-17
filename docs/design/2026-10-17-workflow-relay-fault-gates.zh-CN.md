@@ -1,0 +1,314 @@
+# workflow child_run relay 故障门禁 FG10b、FG10c、FG10e、FG10f
+
+[English](2026-10-17-workflow-relay-fault-gates.md) | [简体中文](2026-10-17-workflow-relay-fault-gates.zh-CN.md)
+
+## 问题与范围
+
+Issue #14165 是 #12380 Stage F 的 FG10 轮（伞形 issue #14054）：为 #13858
+启用的 `child_run` `workflow` kind 补上故障门禁。FG10a（摘要完整性）已随
+#14390 落地，见 [a+d 设计](2026-10-16-workflow-fault-gates-ad.zh-CN.md)。FG10d
+（进程崩溃）在那里被延后，并带出了它抓到的生产问题 #14387：Harness 被杀后，恢复
+流程会重新驱动一个未结算的 workflow Turn。它的修复 #14461 让协调器对已绑定、且
+不在取消中的 workflow Turn 保持未结算，不再重新驱动。本设计覆盖剩下的四个字母：
+**FG10b（应答丢失）、FG10c（存储故障）、FG10e（取消）和 FG10f（通知与输出投递）。**
+
+a+d 设计说这四个"大体与 kind 无关"。但它们并不能白拿：每一个都落在记录的
+**relay 驱动的结算**上，也就是从启动到父 Session 收到通知的整条流程。FG10a 由
+driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操作冲突，而由协调器
+持有父 Session 的方案需要 workspace 执行，macOS 本地跑不了。在 Linux 上，协调器
+持有的父 Session 就是 FG9 夹具里的 team lead。在它上面做的探测，大约十秒就能把一个
+后台 workflow 子运行完整跑完：
+
+1. lead 的 `workflow` 调用被受理；
+2. relay 创建并绑定子 Session；
+3. 子 Turn 执行脚本及其进程内的 `agent()` 派发；
+4. 结果 revision 让记录结算；
+5. 通知以 `<task-notification>` 输入的形式落到 lead 上，lead 的唤醒 Turn 读取它。
+
+这四个字母钉住的，是这条流程在故障下的 workflow 专属承诺：
+
+- **每次启动至多一个 workflow 实例**：一个子 Session、脚本只执行一次、每次调用
+  只派发一次 `agent()`，无论流程中哪一个应答丢失（FG10b）；
+- 被拒的提交**让记录保持阻塞，绝不被静默推进**，通知也绝不会在记录毫无痕迹的
+  情况下丢失（FG10c）；
+- 子 agent 在飞时取消，**记录结算为 cancelled，其下不留任何仍在运行的东西**，
+  子 agent 的回答永远不会落地；而丢失的取消应答和结算之后的取消都诚实地解决
+  （FG10e）；
+- 通知**至多投递一次**，workflow 中途被切断的流续传时不缺失、不重复（FG10f）。
+
+本设计**不改任何生产代码**。
+
+## 现状
+
+于 `main` = `3547398d2b`（2026-10-17）核实，依据源码阅读，以及在 FG9 夹具上的一次
+探测（一个后台 workflow，含一次 `agent()` 调用）。
+
+- **启动。** `workflow` 会提供给顶层 Session，条件是它有子 agent funnel，并且有
+  shell 或后台通道（`packages/cli/src/serve/hosted-workspace-tool-turn.ts:1855-1862`）；
+  协调器持有的 team lead 满足条件。`acceptChildWorkflow`（`:5802`）pin 住定义，经
+  `childLaunchAdmission` 受理启动，再经 `admitWorkflow` 提交（`startChildRun`，
+  revision 1，`admitted`）。默认在后台运行：调用立即应答（"started in the
+  background as `task_…`"），结果稍后以通知到达；"失败或被取消的子运行不产生通知"
+  （`:1483`）。
+- **relay 流程。** `ChildResultRelay`
+  （`packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/ChildResultRelay.java`）
+  依次驱动 `create`（`:464`）→ `bind`（`:851`）→ `watch`（`:887`）→ `complete`
+  （`:1062`）→ `accept`（`:1148`）→ `deliver`（`:1261`）。每一步都从已提交状态
+  对账，`defer`（`:1385`）在 `MAX_ATTEMPTS = 64` 内按 `1 s << attempts` 退避，
+  封顶 300 s。停止走 `stopChild`（`:299`）。
+- **一次流程产生的提交**，读自 store proxy 的 `op=` 日志：
+  - lead：`startChildRun`；relay 的 `commitChildRunRecord` ×2（dispatch、attach）；
+    结果那一次 `commitChildRunRecord`；`acceptChildResult`（通知输入）；唤醒
+    Turn 的各次提交；再两次 `commitChildRunRecord`（delivered、consumed）；
+  - 子 Session：`session.create`、`installActivation`、`submitInput`、
+    `commitCheckpoint`、`commitMessage` ×2、`settleTurn`。进程内的子 agent 自己
+    不提交任何东西，它的回答只以 workflow Turn 消息的形式进入 journal。
+
+  记录依次走过 revision 1 `admitted` → 3 `running`（子 Session 已挂上）→ 6
+  `settled` / `completed`，投递状态 `consumed`。relay 台账（`ma_delivery`）里有
+  一行 `CHILD_RESULT`，`delivered`/`accepted`/`consumed`。
+
+- **取消。** `workflow` 在 `CANCELLABLE_TASK_KINDS` 里
+  （`store/ManagedExtensionProjection.java:133`；动作见 `:244`），所以公开的
+  `POST /v1/agents/sessions/{id}/tasks/{taskId}/cancel` 会受理一个 `TASK_CANCEL`
+  操作。在模型处扣住 `agent()` 请求时探测到：
+  - 子 Turn 在三秒内结束为 `CANCELLED`，记录结算为 revision 5
+    `cancelled` / `stop_requested`；
+  - `agent()` 派发次数保持为一，`CHILD_RESULT` 行的接收状态保持 `pending`
+    （被取消的子运行不发通知）；
+  - 子 Session 的关闭作为欠账留下；
+  - 结算之后的取消返回 409 `task_action_unavailable`，以同一 `Idempotency-Key`
+    重发返回 202 `replayed: true`。
+- **通知应答丢失。** lead 第一次 `acceptChildResult` 的应答在提交后被丢弃时，
+  重试重放原事务，lead 上恰好只有一份 `<task-notification>` 输入，由一次唤醒轮
+  读取。
+- **沿用自 FG9**（#14164）的机制：
+  - 挡在 store 前、可丢弃或扣住应答的 proxy，按提交记录 `op=`/`status=`
+    （`journalCommits`）；
+  - trigger 加 `fg9b_fire` 的存储拒绝及其机制：store 客户端对不确定的 5xx 会重试
+    三次，之后 Session 锁存写入，只有冷启动 Harness 能治愈；
+  - 冷重启及其 writer generation 见证；
+  - 挡在公开 API 前、模拟客户端应答丢失的 proxy；
+  - in-JVM 的 SSE 观察者。
+
+## 范围决策
+
+1. **四个字母，两片。** 第 1 片 = **FG10b + FG10f**：应答的丢失与延迟，以及流的
+   连续性，不重启。第 2 片 = **FG10c + FG10e**：带冷重启的存储拒绝，以及取消。
+   FG10d 留给 #14387。每片各自一个 PR，并在 #14165 上标记其字母已交付。
+2. **在 FG9 夹具上新建一个类。** 这些字母放在 `HostedWorkflowRelayFaultGatesIT`
+   里：纯 Java、协调器持有的 lead、in-JVM Spring、打包的 Harness、脚本化模型，
+   选择子为 `-Dqwen.fg10b.case` … `-Dqwen.fg10f.case`，证据放在
+   `target/fg10-cases/<letter>/` 下。
+
+   它们不并入 `HostedWorkflowFaultGatesIT`。FG10a 由 driver 持有父 Session，按设计
+   在子 Turn 处钉住摘要；而这些字母断言的是记录的结算，需要协调器持有的父
+   Session。类名命中已有的 `hosted-workflow-gates` 聚焦 profile。
+
+   夹具是私有副本，沿用 FG8/FG9 遵循的 #14147 约定；而
+   `HostedSessionRelayForwardingProxy` 原样复用，因为它是通用的 store/API proxy，
+   不带 FG9 语义。协调器持有的 workspace 执行把这个类限定在 Linux 上，和车道一致。
+
+3. **重启只发生在子 Turn 结算之后。** 跨越运行中 workflow Turn 的冷重启属于 FG10d
+   的地盘：它的恢复行为正是 #14387 发现、#14461 改变的（Turn 保持未结算，不再被
+   重新驱动），由 FG10d 门禁来钉住。所以 FG10c 只拒绝子 Turn 完成之后的提交，即
+   结果 revision 和通知，它的重启也只重载 lead。本轮没有任何一处会在运行中的
+   workflow Turn 上布防 kill 或重启，那是 FG10d 的事。
+4. **钉住结果，不钉错误码。** 和 FG9 一样，门禁断言的是记录、journal 和模型看到了
+   什么，并用各自的见证给每次故障归因：丢弃计数、点火计数、被扣住的请求。中间的
+   错误码只记进机制说明，不做断言，所以修正一个误标（#14419 那类）永远不会让门禁
+   变红。
+5. **#13339 纪律。** 只新增类；每个用例在断言期望之前先证明其故障确实点火；JDBC
+   变更都限定在用例 tenant 内；任何拒绝写入或重启的布防之前，lead 自己的 Turn
+   都已结束（FG9 第 3 片的教训）。
+6. **可关闭性。** 第 2 片之后，#14165 上只剩 FG10d，它阻塞在 #14387 上。跟踪
+   issue 是继续为它开着，还是把它交给 #14387，由跟踪 issue 的负责人决定，在第 2 片
+   落地时记到 #14165 上。
+
+## 门禁总账
+
+Ground truth 是 JDBC：
+
+- lead 的 `child_run` 记录（`ma_session_record` 及其资源体）；
+- `ma_delivery` 里的 `CHILD_RESULT` 行；
+- `ma_operation` 行；
+- 子 Session 的 journal 与 `ma_turn`；
+- lead 的输入；
+- FG10f 各条流的公开事件台账。
+
+脚本化模型的请求日志统计 workflow 的 `agent()` 派发：子 agent 请求是系统提示里写着
+"由 workflow 编排脚本派生"的那一个。它同时也是 FG10e 的在飞见证。每个用例都断言
+其故障确实点火了。
+
+共享的编排：每个用例一个全新的 tenant 和 team lead；lead 的第一轮调用 `workflow`，
+脚本里做一次 `agent()` 调用并返回其回答；之后各轮以文本收尾。第 1 片的用例在启动
+前布防，因为它们的注入既不会锁存 Session，也不会重启 Harness。第 2 片的拒绝与
+重启布防，要先等 lead 自己的 Turn 结束。
+
+### FG10b —— 应答丢失（第 1 片，已交付）
+
+relay 在 lead 上的每一步都是 Harness 的子操作（`runChildOperation`，每次尝试都用
+新的 `operationId`）。所以"原身份"指的是 Harness funnel 按 revision 生成的
+command id（`<promptId>:<callId>:<revision>`），在此之前还有 relay 自己按已提交
+状态的对账。
+
+store 客户端在一次提交调用内部重驱的丢弃，根本到不了 relay，那是 FG9a 已经钉住的、
+与 kind 无关的重放。所以两个 relay 步骤的用例改为把提交的应答**扣住**，扣住的时间
+超过 relay 的请求超时（本字母的 `qwen.managed-agent.harness.request-timeout` 设为
+3 s，与 FG9f 相同）。过程是：
+
+1. 提交已在上游落地；
+2. relay 的调用超时，relay defer 这一步，在它的创建行上消耗一次 attempt，这就是
+   见证；
+3. 这之后才放开扣住的应答。
+
+这样这一步确实跑了两遍。子 Turn 自己的 journal 提交不涉及 relay 步骤，保持丢弃。
+
+| 用例                  | 注入                                                                                                      | 期望                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dispatch-reply`      | 扣住 lead 上 `dispatch_started` revision（`commitChildRunRecord`，revision 2）的应答，直到 relay 已 defer | 一个子 Session，一个 `CHILD_SESSION_START` 操作，一次 workflow 运行：模型处只有一次 `agent()` 派发。记录只走一遍，到 `settled` / `completed` / `consumed`，revision 6，`kind` 为 `workflow`。relay 的五个 revision 各提交一次，被扣住的那一次绝不重新提交。一行 `CHILD_RESULT`，`delivered`/`accepted`/`consumed`；一份携带脚本返回值的通知；lead 上一次唤醒轮 |
+| `child-message-reply` | 丢弃子 Session 第一次 `commitMessage`（workflow Turn 自己的 journal）提交后的应答                         | 被丢弃的确实是子 Session 的应答。store 客户端的重放让这条消息只落地一次，子 Turn 只完成一次，脚本只执行一次。`dispatch-reply` 的每条期望都成立                                                                                                                                                                                                                 |
+| `result-reply`        | 扣住 lead 上 `commit_result` revision（revision 4）的应答，直到 relay 已 defer                            | 记录只结算一次，绝没有第二个终态 revision，仍是 revision 6；只通知一次，由一次唤醒轮读取；脚本绝不重跑。`dispatch-reply` 的每条期望都成立                                                                                                                                                                                                                      |
+
+### FG10f —— 通知与输出投递（第 1 片，已交付）
+
+| 用例                  | 注入                                                                                                                                  | 期望                                                                                                                                                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `notification-reply`  | 扣住 lead 第一次 `acceptChildResult`（落地通知输入的那次提交）的应答，直到 relay 已 defer 这次 acceptance                             | lead 上恰好一份 `<task-notification>` 输入，由一次唤醒轮读取。记录只一次结束于 `consumed`（revision 6），`CHILD_RESULT` 行为 `delivered`/`accepted`/`consumed`                                               |
+| `child-stream-resume` | 扣住 `agent()` 请求；打开子 Session 的公开流与 WebShell 流，追平后同时切断，放开请求，再分别按 `Last-Event-ID` / `afterSequence` 续传 | 子 agent 的回答、Turn 的输出及其终态，都在两个客户端断开期间提交，续传前由 JDBC 证明。每个续传后的视图都是从 1 起的一条序列，不缺失、不重复，逐帧等于该表面所提供的台账，并且恰好带一次 workflow Turn 的终态 |
+
+落地时记录的机制说明：
+
+- **重驱步骤上的纵深防御。** 重驱的 `commit_result` 根本到不了 Harness：relay
+  先读已提交的记录（`settledAlready`，`ChildResultRelay.java:1035`），发现结果已在，
+  就直接去做 acceptance。在它后面，Harness funnel 会用已提交的副本回答重放的结果
+  （`settleCompleted`，逐字节比对，`hosted-child-agent-session.ts:1362`）。
+
+  重驱的 acceptance 会到达 Harness，遇到 funnel 的深比较检查（`accept`，`:1505`）。
+  再往后，记录契约会拒绝第二次 acceptance 提交：即使这个检查和 `:accept` command
+  key 都被去掉，也不会落地第二份通知。
+
+  在这些窗口上，单独中和其中任何一层都是等价变异，所以本片的变异一次去掉全部
+  防线（见「变异检查」）。
+
+- `CHILD_RESULT` 台账行在记录的 consumed revision 落地之后才被归类，所以门禁两者
+  都要等。
+- lead 的唤醒 Turn 不投影到它的公开流（与 FG9e 对成员唤醒 Turn 的发现一致）；
+  workflow 子 Session 的 Turn 会投影，从 `turn.accepted` 到 `turn.completed`。所以
+  FG10f 切断的是子 Session 的流，而不是 lead 的流：lead 的台账在启动 Turn 之后就
+  没有新事件了。
+- `child-stream-resume` 也断言没有多出的通知，因此除了流之外，还会跑一遍
+  `assertOneWorkflowInstance` 的全部期望。
+
+### FG10c —— 存储故障（第 2 片）
+
+在 `ma_session_record` 上建测试专用 trigger，限定到用例 tenant、一个 Session 和一种
+记录形态，在用例拆掉它之前拒绝每一次匹配的写入：沿用 FG9b 的形态和
+`fg9b_fire` 式点火计数，每次拒绝恰好点火三次。每个用例只在子 Turn 完成之后布防
+（决策 3），拆掉 trigger 后冷启动 Harness。
+
+| 用例                      | 注入                                                                | 期望                                                                                                                                                                                                                |
+| ------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `result-revision-refused` | 在子 Turn 完成之后，拒绝把 lead 的 `child_run` 记录更新为 `settled` | 锁存期间记录保持 `running`：绝不被静默推进，没有通知，没有唤醒。拆掉 trigger 并冷重启之后，relay 的重试让它只结算一次（`completed`），落地一份通知，脚本绝不重跑：整个用例只有一次 `agent()` 派发，子 Turn 不被触碰 |
+| `notification-refused`    | 拒绝 lead 上落地通知输入的那次写入；具体是哪一行，落地时再钉住      | 记录表明通知仍然欠着：被拒期间投递状态绝不读到 `consumed`，`CHILD_RESULT` 行的接收状态也不是 `accepted`。治愈之后，恰好一份通知、一次唤醒轮                                                                         |
+
+### FG10e —— 取消（第 2 片）
+
+取消是 lead 上的公开任务取消。在飞窗口是脚本化模型处被扣住的 `agent()` 请求，直到
+用例读到取消的结果之后才放开。
+
+| 用例                        | 注入                                                                                         | 期望                                                                                                                                                                                                                                                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-subagent-in-flight` | 在 `agent()` 请求被扣住时取消 workflow 任务                                                  | 一个 `TASK_CANCEL` 操作完成。子 Turn 结束为 `CANCELLED`，记录结算为 `cancelled` / `stop_requested`。没有通知：`CHILD_RESULT` 的接收状态绝不读到 `accepted`。被取消的记录下不留任何仍在运行的东西：`agent()` 派发次数保持为一，被扣住的子 agent 回答随后放开，也绝不会进入子 journal。任务视图读到 `cancelled` |
+| `cancel-reply-lost`         | 同一窗口，取消的 POST 经过挡在公开 API 前的 proxy，提交后其应答被丢弃；客户端以同一 key 重发 | 重发对同一操作返回 202 `replayed: true`；只有一个 `TASK_CANCEL` 操作，该 key 只有一份请求回执；`cancel-subagent-in-flight` 的每条期望都成立                                                                                                                                                                   |
+| `cancel-after-settlement`   | 取消一个运行早已完成并被消费的 workflow 任务                                                 | 409 `task_action_unavailable`。没有操作行；记录不变（revision 与状态同前）；没有第二份通知                                                                                                                                                                                                                    |
+
+## 夹具设计
+
+**形态。** `HostedWorkflowRelayFaultGatesIT` 是 FG9 类的夹具，按一个父 Session 加
+一个子 Session 重新裁剪：
+
+- 每个字母一个 in-JVM `ManagedAgentServerApplication`，MySQL 属性必填，Spring 与
+  内嵌 broker 使用临时端口、启动后读回；
+- 打包的 Harness 使用预选端口，日志在重启之间追加；
+- 每个用例一个全新 tenant、一个预置的 workspace，以及一个经
+  `insertInternalTeamLeadSessionCommand` 和公开输入路由创建的 team lead。
+
+**脚本化模型。** 它识别三种请求：lead 的请求（带用例标记）；唤醒轮的请求（同一
+标记，历史里带着通知）；子 agent 的请求（看系统提示）。lead 的计划是带用例脚本的
+`workflow` 调用，然后以文本收尾。子 agent 回答一段固定文本；在 FG10e 和 FG10f 中则
+停在用例的闩锁上，作为在飞见证。脚本都是纯 ASCII，含一次 `agent()` 调用，用例断言
+它返回的结果文本。
+
+**proxy。** store proxy 挡在每个 Session（lead 和子 Session）的 Session-Store 边界
+前。它的规则按提交 operation 和 command id 里的 child_run revision 布防；日志现在
+在 operation 和状态码旁边记下每次提交的 command id，以区分重放和新的一步。FG10b 与
+FG10f 运行时把 Harness 请求超时设为 3 s，这样超过它被扣住的应答比 relay 的调用活得
+更久。另一个实例挡在公开 API 前，用于 FG10e 的取消应答丢失。
+
+**拒绝与重启**（第 2 片）沿用 FG9b 的 `refuse`/`dropRefusals`、点火表，以及带
+writer generation 见证的 `restartHarness`，只在子 Turn 结算之后使用。
+
+**CI。** 类名把它放进 `hosted-harness-mysql` 车道（`Hosted*IT`；
+`check-failsafe-reports.js hosted` 强制它必须跑过），已有的 `hosted-workflow-gates`
+profile 用于本地运行。每片重新推导共享 fork 预算时，都要把自己实测的开销与期间
+兄弟轮次的改动**叠加**，绝不覆盖那个字面值（#14420 评审的教训），并在
+`scripts/tests/hosted-process-ci.test.js` 里补上 per-class 上限断言。
+`target/fg10-cases/` 已在上传的报告路径里。
+
+第 1 片在本地重测三次，本类健康用时 81.6–81.7 s（FG10b 约 44 s、FG10f 约 38 s），
+与 FG10a 一样按 2× 预算约 165 s。叠加到 FG9 第 3 片（#14420）之后 main 的配额上：
+3380 + 165 ≈ 3545 s。一个 600 s 上限加上它，需要至少 4145 s 的 fork，于是 fork
+3990→4155 s。Verify 步骤要在其 600 s 之外包住 fork，改为 80→85 分钟（余量 345 s；
+80 分钟只剩 45 s）。job 上限 325→330，以保持在各 step 上限之和（315）加未设上限
+的准备步骤之上。
+
+## 变异检查
+
+每个变异先应用、证明恰好让其用例变红、再还原。Harness 侧的变异原地修补打包 bundle
+的 chunk，并逐字节还原；Java 侧的变异修补源码。
+
+第 1 片，每个只对其目标用例运行（`-Dqwen.fg10b.case` / `-Dqwen.fg10f.case`）：
+
+1. FG10b —— 相同的 `dispatch_started` 重述变成冲突，而不是被解决（去掉
+   `dispatchStarted` 的 no-op 分支）：`dispatch-reply` 红；重驱的 dispatch 永远失败，
+   记录永远离不开 `running`。
+2. FG10b —— store 客户端重试时铸出新的事务身份：`child-message-reply` 红；重放的
+   消息被当作排在已落地那次之后的新事务而遭拒，流程永远走不完。
+3. FG10b —— relay 重新提交一个已结算的结果，Harness 也把它当作新的结算（同时去掉
+   `settledAlready` 的结果分支和 `settleCompleted` 的重放检查）：`result-reply` 红；
+   第二个终态 revision 被拒，记录永远离不开 `accepting`。单独去掉任何一层在这里都是
+   等价变异。
+4. FG10f —— 重驱的 acceptance 既不检查，也不按其 run 取键（去掉 `accept` 的重放
+   检查，并让它的 command id 每次调用都加盐）：`notification-reply` 红。记录契约仍会
+   拒绝第二次 acceptance，所以不会落地第二份通知，但 relay 永远不会归类它的台账行。
+   单独做其中任何一个改动都是等价变异。
+5. FG10f —— 公开 `Last-Event-ID` 游标少读一位：`child-stream-resume` 红，续传边界
+   出现一处重复。
+
+第 2 片的计划，落地时再细化：
+
+- FG10c —— relay 越过被拒的结果 revision 推进记录：`result-revision-refused` 在
+  "绝不被推进"的断言处红。
+- FG10e —— 子运行的停止没有中止进程内运行（在 `agent()` 之前丢掉中止信号）：
+  `cancel-subagent-in-flight` 红；被扣住的回答进入子 journal，或子 Turn 正常完成。
+
+## 验证与验收
+
+- 新类在本地 MySQL 8.4 上全绿，每片连续三次全类运行，每个用例的故障都有见证；按
+  字母的选择子可用。
+- 每片的变异各自单独变红，源码还原后门禁复绿。
+- 模块 `mvn verify`（surefire、Checkstyle、SpotBugs）以及 workflow/pom 元测试，在
+  叠加后的预算下全绿。
+- 本设计随第 1 片以中英文落地；每片都在 #14165 上记录其字母。
+
+## 开放问题
+
+1. 第 1 片已解决：lead 的唤醒 Turn 不投影，子 Session 的 workflow Turn 会投影，所以
+   FG10f 切断子 Session 的流（见 FG10f 的机制说明）。
+2. `acceptChildResult` 为通知写的是哪一行，从而 FG10c 的 `notification-refused`
+   trigger 该放在哪里。第 2 片落地时对照已提交的形态钉住。
+3. kind 门禁在每次 revision 提交时的重查，即 a+d 设计的开放问题 1。这些门禁断言
+   每个 revision 上 `kind` 都是 `workflow`。它们无法断言重查本身：kind 全程都是启用
+   的，没有任何故障能在运行中途把它禁用。重查仍由 `managed-session-authority.ts` 的
+   功能测试负责。
