@@ -22732,25 +22732,27 @@ export function App({
                   aria-hidden={!managedChatVisible || undefined}
                   data-testid="managed-home"
                 >
-                  <ManagedSessionsPage
-                    key={managedAgentProvider.storageKey}
-                    sessionId={managedSessionId}
-                    onSelectSession={(id) => {
-                      setManagedSessionId(id);
-                      if (managedModeRef.current) {
-                        closeMobileDrawer();
-                        returnToChat();
+                  <WebShellCustomizationProvider value={customization}>
+                    <ManagedSessionsPage
+                      key={managedAgentProvider.storageKey}
+                      sessionId={managedSessionId}
+                      onSelectSession={(id) => {
+                        setManagedSessionId(id);
+                        if (managedModeRef.current) {
+                          closeMobileDrawer();
+                          returnToChat();
+                        }
+                      }}
+                      workspaceCwd={lockedWorkspaceCwd}
+                      managedAgentProvider={managedAgentProvider}
+                      interactive={managedChatVisible}
+                      navigationTarget={
+                        sidebarOptions.enabled
+                          ? managedNavigationTarget
+                          : undefined
                       }
-                    }}
-                    workspaceCwd={lockedWorkspaceCwd}
-                    managedAgentProvider={managedAgentProvider}
-                    interactive={managedChatVisible}
-                    navigationTarget={
-                      sidebarOptions.enabled
-                        ? managedNavigationTarget
-                        : undefined
-                    }
-                  />
+                    />
+                  </WebShellCustomizationProvider>
                 </div>
               )}
               <div

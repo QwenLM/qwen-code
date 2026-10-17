@@ -86,6 +86,7 @@ import {
   type ManagedSessionLifecycleAuthority,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
+  ManagedSessionCloseError,
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -134,7 +135,11 @@ import {
   readHostedAgentInstructions,
   type HostedAgentDefinition,
 } from './hosted-agent-definition.js';
-import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import {
+  HostedModelRoundLimitError,
+  runHostedHarnessTextTurn,
+} from './hosted-harness-model.js';
+import { hostedToolProgress } from './hosted-tool-progress.js';
 import {
   HostedSkillCatalog,
   readHostedSkills,
@@ -2642,6 +2647,16 @@ async function eventEnvelope(
 }> {
   const sessionId =
     session.managed.authority.sessionHeader.sessionKey.sessionId;
+  const progress = await hostedToolProgress(session.managed, event);
+  if (progress && event.kind !== 'message.committed') {
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'session_update',
+      promptId: progress.promptId,
+      data: { sessionId, update: progress.update },
+    };
+  }
   if (event.kind === 'message.delta') {
     const text = event.payload['text'];
     const turnId = event.payload['turnId'];
@@ -2724,7 +2739,11 @@ async function eventEnvelope(
           ...(message.daemonPromptId
             ? { promptId: message.daemonPromptId }
             : {}),
-          data: { sessionId, record: message },
+          data: {
+            sessionId,
+            record: message,
+            ...(progress ? { update: progress.update } : {}),
+          },
         };
       }
       return {
@@ -2766,6 +2785,7 @@ async function eventEnvelope(
       event.payload['stopReason'] === 'model_unavailable';
     const storeUnavailable =
       event.payload['stopReason'] === 'managed_session_store_unavailable';
+    const roundLimit = event.payload['stopReason'] === 'model_round_limit';
     return {
       v: 1,
       id: event.sequence,
@@ -2780,10 +2800,14 @@ async function eventEnvelope(
             ? 'model_unavailable'
             : storeUnavailable
               ? 'managed_session_store_unavailable'
-              : 'hosted_turn_failed',
+              : roundLimit
+                ? 'hosted_turn_limit_exceeded'
+                : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
-          : 'Hosted Harness turn failed.',
+          : roundLimit
+            ? 'The Hosted Harness Turn reached its configured model round limit.'
+            : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -3316,6 +3340,11 @@ async function executeHostedTurn(
             cause instanceof HostedModelUnavailableError
           )
             stopReason = 'model_unavailable';
+          if (
+            stopReason === 'error' &&
+            cause instanceof HostedModelRoundLimitError
+          )
+            stopReason = 'model_round_limit';
           if (
             stopReason === 'error' &&
             cause instanceof WorkflowStartCancelledError
@@ -5899,9 +5928,20 @@ export function registerHostedHarnessSessionRoutes(
           brokerOptions,
           !!committedModelOutput,
         );
-    } catch (cause) {
+    } catch (thrown) {
       await managed?.close().catch(() => undefined);
       await stores.close().catch(() => undefined);
+      // A refusal's close that failed both to release the activation and to
+      // seal the writer rejects with both. The seal failure says what the
+      // writer was left as, so the answer is classified on it: a fenced
+      // writer must still answer its self-healing 409, not the generic 503.
+      if (thrown instanceof ManagedSessionCloseError) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} close failed during open: ${sanitizeDaemonLogLine(String(thrown))}`,
+        );
+      }
+      const cause =
+        thrown instanceof ManagedSessionCloseError ? thrown.sealError : thrown;
       if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
       } else if (

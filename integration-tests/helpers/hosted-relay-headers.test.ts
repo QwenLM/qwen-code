@@ -141,6 +141,7 @@ describe('Hosted proxy header relay', () => {
       'hosted-recovery-blocked-wedge-driver.ts',
       'hosted-shell-output-driver.ts',
       'hosted-store-failure-driver.ts',
+      'hosted-workflow-fault-driver.ts',
       'hosted-workspace-tool-turn-driver.ts',
     ]);
   });
