@@ -9,8 +9,11 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.TaskCancelOutcome;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -585,6 +588,32 @@ class TaskCancelCoordinatorTest {
                 anyLong());
     }
 
+    // A Broker stop that never settles is abandoned at the attempt
+    // deadline like any send: the interrupt reaches the wait on the stage,
+    // so the send's thread is given back instead of held until it settles.
+    @Test
+    void anAbandonedBackgroundStopGivesItsThreadBack() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            coordinator = new TaskCancelCoordinator(store, records, harness,
+                    broker, executor,
+                    Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                    new ManagedAgentProperties(), Duration.ofMillis(200));
+            target.set(shellRun("running", false, null));
+            when(broker.stopBackgroundProcess(TENANT, SESSION, "shell-1"))
+                    .thenReturn(new java.util.concurrent.CompletableFuture<>());
+            coordinator.dispatch(TENANT, SESSION, OPERATION);
+            verify(store, timeout(10_000)).retryOperation(eq(TENANT),
+                    eq(SESSION), eq(OPERATION), anyString(), eq(1L),
+                    anyLong());
+            assertThat(awaitLog("Abandoned task cancel send failed")
+                    .getFormattedMessage()).contains("operation=op_1",
+                            "The background process stop was interrupted");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     // #13746 F3: a pending delivery takes its cancel through its route
     // Session's channel operation route; its cancelRequested flag is the
     // request the outcome is read from.
@@ -631,6 +660,51 @@ class TaskCancelCoordinatorTest {
                 eq(OPERATION), anyString(), eq(1L),
                 eq(TaskCancelOutcome.failed("task_already_settled")),
                 eq(0L));
+    }
+
+    // The channel route re-runs the route Session's Workspace authority on
+    // every operation, a cached attachment included: while its creator
+    // lacks the execution grant the cancel sends nothing, retries and
+    // parks. Parked, it is never sent again, so a delivery an adapter sent
+    // after the grant returned fails it from the record.
+    @Test
+    void aDeliveryCancelTheRouteRefusesParksAndSettlesFromTheRecord() {
+        when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
+                .thenThrow(WorkspaceExecutionStore.unavailable());
+        target.set(delivery("pending", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).retryOperation(eq(TENANT), eq(SESSION), eq(OPERATION),
+                anyString(), eq(1L), anyLong());
+        attempts = TaskCancelCoordinator.ATTEMPT_BUDGET - 1;
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(),
+                eq((long) TaskCancelCoordinator.ATTEMPT_BUDGET),
+                eq(TaskCancelOutcome.recoveryBlocked(
+                        "task_cancel_unconfirmed")),
+                eq(1_000 + TaskCancelCoordinator.PARKED_RECHECK.toMillis()));
+
+        // Parked, only the reconciler (D7-2) reads it, from the record.
+        ParkedOperation parked = new ParkedOperation(TENANT, SESSION,
+                OPERATION, OperationKind.TASK_CANCEL);
+        when(store.findParkedOperations(
+                org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(parked));
+        when(store.findOperation(TENANT, SESSION, OPERATION))
+                .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
+        OperationReconciler reconciler = new OperationReconciler(store,
+                List.of(coordinator),
+                Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC));
+        reconciler.reconcile();
+        verify(store).settleParkedOperation(eq(parked),
+                eq(AcceptanceVerdict.unknown()), anyLong());
+        target.set(delivery("completed", false));
+        reconciler.reconcile();
+        verify(store).settleParkedOperation(eq(parked),
+                eq(AcceptanceVerdict.notCommitted("task_already_settled")),
+                anyLong());
+        verify(harness, org.mockito.Mockito.times(2)).runChannelOperation(
+                eq(TENANT), eq(SESSION), any());
     }
 
     // A Broker process that holds no context for the Runtime Session (a

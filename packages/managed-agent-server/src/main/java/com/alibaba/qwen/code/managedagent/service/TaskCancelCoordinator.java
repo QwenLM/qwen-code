@@ -28,6 +28,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -228,6 +230,10 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
             return new Verdict(TaskCancelOutcome.failed(
                     "task_action_unavailable"), target);
         }
+        // The stopReason clause only adds a Monitor's settlement: for a
+        // child_run (child_agent, workflow, background_shell) the record
+        // invariant "childRun stop_requested needs its stop request"
+        // (ManagedExtensionRecords) makes it imply stopRequested.
         if (target.body().path("stopRequested").asBoolean(false)
                 || target.body().path("cancelRequested").asBoolean(false)
                 || "stop_requested".equals(
@@ -407,9 +413,21 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
                 throw new IllegalStateException(
                         "The Runtime Broker is not available");
             }
-            broker.stopBackgroundProcess(operation.tenantId(),
-                    operation.sessionId(), target.recordId())
-                    .toCompletableFuture().join();
+            CompletableFuture<?> stopping = broker.stopBackgroundProcess(
+                    operation.tenantId(), operation.sessionId(),
+                    target.recordId()).toCompletableFuture();
+            // get(), not join(): the attempt deadline abandons a send with
+            // an interrupt, which join() ignores, so a Broker stage that
+            // never settles would hold this thread.
+            try {
+                stopping.get();
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "The background process stop was interrupted", error);
+            } catch (ExecutionException error) {
+                throw new CompletionException(error.getCause());
+            }
             return;
         }
         Map<String, Object> body = new LinkedHashMap<>();
