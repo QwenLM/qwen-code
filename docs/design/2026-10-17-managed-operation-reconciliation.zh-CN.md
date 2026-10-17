@@ -77,13 +77,13 @@ public interface AcceptanceEvidence {
 
 ### 5. Session journal 是输入的证据
 
-Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInput`，`commandId = promptId`，`contentDigest` 为 payload digest。Java 把这次提交存进 `ma_session_journal_tx`，按 `commandKeyHash("submitInput", promptId)` 做 key。`turnInputAcceptance` 在同一个快照里判断：
+Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInput`，`commandId = promptId`，`contentDigest` 为 payload digest。Java 把这次提交存进 `ma_session_journal_tx`，按 `commandKeyHash("submitInput", promptId)` 做 key。`turnInputAcceptance` 用一条语句同时读取 journal 行和 head，然后判断：
 
 - Turn 上有 event epoch，或者 journal 里有该 prompt 的一行、且内容 digest 与 Turn 的 payload digest 一致：**已提交**；
 - 没有这一行，并且 `MANAGED_SESSION` head 处于 `DELETING` 或 `DELETED`、尚未开始压缩：**未提交**，失败码取 Turn 的错误码；
 - 其他情况：**未知**。
 
-只要还有 writer 可能提交，缺少这一行就证明不了什么。`ACTIVE` 或 `SEALED` 的 head 还能接受 writer；而且托管提交的处理逻辑要在若干次 await 之后才读取 Session 的 authority，所以即使是之后的 writer 代际，也可能提交一个更早到达的请求。处于 `DELETING` 或 `DELETED` 的 head 会拒绝所有 writer，而删除之前完成的提交在同一快照里一定可见。一旦开始压缩，journal 可能已经丢掉这一行，缺失就又证明不了什么。digest 与 Turn 不一致的行不是这条输入的准入，只记日志、保持未知。
+只要还有 writer 可能提交，缺少这一行就证明不了什么。`ACTIVE` 或 `SEALED` 的 head 还能接受 writer；而且托管提交的处理逻辑要在若干次 await 之后才读取 Session 的 authority，所以即使是之后的 writer 代际，也可能提交一个更早到达的请求。处于 `DELETING` 或 `DELETED` 的 head 会拒绝所有 writer，而删除之前完成的提交一定能同时被读到。这两个事实特意放在一条语句里读：一条语句在任何隔离级别下都只有一个读视图；如果拆成两条语句，在 READ COMMITTED 下，准入和删除可能在两条语句之间先后提交，结果读成"journal 已完整却没有这次准入"，把一条已准入的输入永久记为失败。一旦开始压缩，journal 可能已经丢掉这一行，缺失就又证明不了什么。digest 与 Turn 不一致的行不是这条输入的准入，只记日志、保持未知。
 
 如果 Session 没有托管 journal，或者 journal 先被压缩了，这条输入就一直挂起。它不构成任何屏障：Turn 命令不是 Session operation。
 

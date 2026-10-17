@@ -21,6 +21,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.PreparedStatementSetter;
+import org.springframework.jdbc.core.ResultSetExtractor;
 
 import javax.sql.DataSource;
 
@@ -32,6 +34,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -53,6 +56,7 @@ class ManagedTurnCommandOperationTest {
     JdbcTemplate jdbc;
     DataSource dataSource;
     String sessionId;
+    Clock clock;
 
     protected DataSource dataSource() {
         JdbcDataSource source = new JdbcDataSource();
@@ -66,7 +70,7 @@ class ManagedTurnCommandOperationTest {
         dataSource = dataSource();
         ManagedSchema.initialize(dataSource);
         jdbc = new ManagedSchemaJdbcTemplate(dataSource);
-        Clock clock = new Clock() {
+        clock = new Clock() {
             @Override
             public ZoneId getZone() {
                 return ZoneOffset.UTC;
@@ -244,6 +248,41 @@ class ManagedTurnCommandOperationTest {
         assertThat(failed.failureCode()).isEqualTo("hosted_harness_unavailable");
         assertThat(failed.receiptId()).isNull();
         assertThat(store.findParkedOperations(50)).isEmpty();
+    }
+
+    // Review of #14443: the journal row and the head come from one
+    // statement. Between two statements an admission and then the deletion
+    // could both commit, and under READ COMMITTED the second read would show
+    // a complete journal while the first had missed the admission. Here every
+    // statement autocommits, weaker than READ COMMITTED, and that race lands
+    // right after the first statement that reads the journal.
+    @Test
+    void anAdmissionCommittedBetweenTheEvidenceReadsIsNeverReadAsMissing() {
+        Admission admitted = attemptedThenFailed("submit-1");
+        managedHead("ACTIVE", 0);
+        AtomicBoolean raced = new AtomicBoolean();
+        JdbcTemplate racingJdbc = new ManagedSchemaJdbcTemplate(dataSource) {
+            @Override
+            public <T> T query(String sql, PreparedStatementSetter setter,
+                    ResultSetExtractor<T> extractor) {
+                T result = super.query(sql, setter, extractor);
+                if (sql.contains("ma_session_journal_tx")
+                        && raced.compareAndSet(false, true)) {
+                    journalAdmission(admitted, "c".repeat(64));
+                    jdbc.update("UPDATE ma_session_head SET state = 'DELETED'");
+                }
+                return result;
+            }
+        };
+        ManagedAgentStore racing = new ManagedAgentStore(racingJdbc,
+                new ObjectMapper(), clock, ignored -> {},
+                new ManagedWorkspaceRegistry(racingJdbc),
+                new ManagedAgentProperties());
+        assertThat(racing.turnInputAcceptance(TENANT, sessionId,
+                admitted.operationId())).isEqualTo(AcceptanceVerdict.unknown());
+        assertThat(raced).isTrue();
+        assertThat(acceptance(admitted))
+                .isEqualTo(AcceptanceVerdict.committed());
     }
 
     @Test

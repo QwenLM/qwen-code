@@ -77,13 +77,13 @@ The settle applies only while the row is still parked and unclaimed (`state = 'R
 
 ### 5. The Session journal is the input's evidence
 
-The Harness admits a prompt by committing `submitInput` to the managed Session journal with `commandId = promptId` and the payload digest as `contentDigest`. Java stores that commit in `ma_session_journal_tx`, keyed by `commandKeyHash("submitInput", promptId)`. `turnInputAcceptance` reads, in one snapshot:
+The Harness admits a prompt by committing `submitInput` to the managed Session journal with `commandId = promptId` and the payload digest as `contentDigest`. Java stores that commit in `ma_session_journal_tx`, keyed by `commandKeyHash("submitInput", promptId)`. `turnInputAcceptance` reads the journal row and the head in one statement:
 
 - an event epoch on the Turn, or a journal row for the prompt whose content digest matches the Turn's payload digest: **committed**;
 - no such row, and a `MANAGED_SESSION` head in `DELETING` or `DELETED` whose compaction has not started: **not committed**, with the Turn's error code;
 - anything else: **unknown**.
 
-Absence proves nothing while a writer may still commit. An `ACTIVE` or `SEALED` head can still take a writer, and the hosted submit handler reads the Session's authority only after it awaits, so even a later writer generation may commit a submit that arrived earlier. A head in `DELETING` or `DELETED` refuses every writer, and a commit that preceded the deletion is visible in the same snapshot. Once compaction starts, the journal may have lost the row, so absence proves nothing again. A digest that differs from the Turn's is not this input's admission, and is logged and left unknown.
+Absence proves nothing while a writer may still commit. An `ACTIVE` or `SEALED` head can still take a writer, and the hosted submit handler reads the Session's authority only after it awaits, so even a later writer generation may commit a submit that arrived earlier. A head in `DELETING` or `DELETED` refuses every writer, and a commit that preceded the deletion is visible beside it. The two facts come from one statement on purpose: a statement has a single read view under any isolation level, whereas two statements under READ COMMITTED let an admission and the deletion commit between them, which would read as a complete journal without the admission and fail an admitted input for good. Once compaction starts, the journal may have lost the row, so absence proves nothing again. A digest that differs from the Turn's is not this input's admission, and is logged and left unknown.
 
 An input on a Session without a managed journal, or whose journal was compacted first, stays parked. It holds no barrier: Turn commands are not Session operations.
 

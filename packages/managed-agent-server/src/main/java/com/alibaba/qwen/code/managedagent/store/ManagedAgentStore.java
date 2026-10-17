@@ -2852,11 +2852,13 @@ public class ManagedAgentStore implements AgentStateStore {
      * command is the admission's own evidence. Its absence proves nothing
      * while a writer may still commit it; once the head refuses every writer
      * (DELETING or DELETED) and compaction has not started, the journal is
-     * complete and the absence is proof. One snapshot serves both reads, so a
-     * commit that preceded the deletion is visible beside it.
+     * complete and the absence is proof. Both facts come from one statement,
+     * whose single read view holds under any isolation level: a commit that
+     * preceded the deletion is visible beside it, and no commit can land
+     * between the two reads, as it could between two statements under READ
+     * COMMITTED and turn an admitted input into a failed one.
      */
     @Override
-    @Transactional(readOnly = true)
     public AcceptanceVerdict turnInputAcceptance(String tenantId,
             String sessionId, String operationId) {
         String turnId = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE"
@@ -2871,27 +2873,31 @@ public class ManagedAgentStore implements AgentStateStore {
         if (turn.harnessEventEpoch() != null) {
             return AcceptanceVerdict.committed();
         }
-        List<String> admitted = jdbc.queryForList("SELECT content_digest FROM"
-                        + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND command_key_hash = ?", String.class, tenantId, sessionId,
-                ManagedSessionStore.commandKeyHash("submitInput", turn.promptId()));
-        if (!admitted.isEmpty()) {
-            if (("sha256:" + admitted.getFirst()).equals(turn.payloadDigest())) {
+        record JournalEvidence(String admittedDigest, boolean sealed) {
+        }
+        JournalEvidence evidence = jdbc.queryForObject("SELECT (SELECT content_digest"
+                        + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                        + " AND command_key_hash = ?) AS admitted_digest, (SELECT COUNT(*) FROM"
+                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                        + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                        + " AND state IN ('DELETING', 'DELETED') AND"
+                        + " COALESCE(compacted_through_revision, 0) = 0) AS sealed",
+                (result, row) -> new JournalEvidence(result.getString("admitted_digest"),
+                        result.getLong("sealed") > 0),
+                tenantId, sessionId,
+                ManagedSessionStore.commandKeyHash("submitInput", turn.promptId()),
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId,
+                sessionId);
+        if (evidence.admittedDigest() != null) {
+            if (("sha256:" + evidence.admittedDigest()).equals(turn.payloadDigest())) {
                 return AcceptanceVerdict.committed();
             }
             LOG.warn("Journal admission digest differs from its Turn tenant={}"
                     + " session={} turn={}", tenantId, sessionId, turnId);
             return AcceptanceVerdict.unknown();
         }
-        boolean sealed = !jdbc.queryForList("SELECT state FROM ma_session_head WHERE"
-                        + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND"
-                        + " session_id = ? AND head_kind = 'MANAGED_SESSION' AND state IN"
-                        + " ('DELETING', 'DELETED') AND COALESCE(compacted_through_revision,"
-                        + " 0) = 0", String.class,
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId,
-                sessionId).isEmpty();
-        return sealed ? AcceptanceVerdict.notCommitted(turn.errorCode())
+        return evidence.sealed() ? AcceptanceVerdict.notCommitted(turn.errorCode())
                 : AcceptanceVerdict.unknown();
     }
 
