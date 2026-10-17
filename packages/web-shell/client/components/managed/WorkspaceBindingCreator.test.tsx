@@ -386,6 +386,74 @@ describe('WorkspaceBindingCreator', () => {
     );
   });
 
+  // The server reconciles a blocked registration from its machine (D7-2),
+  // so the dialog keeps querying it: a button while it stays open, and a
+  // fresh query each time it opens, without remounting or a discarded draft.
+  it('completes a blocked registration from a later query without remounting', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'workspace_registration_failed',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce({
+      ...blocked,
+      status: 'completed',
+      workspaceId: 'ws-remote',
+    });
+    const storageKey = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'has not confirmed',
+    );
+    await click('Continue confirming registration');
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-blocked',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-remote',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('queries a blocked registration again when the dialog reopens', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'workspace_registration_failed',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce({ ...blocked, status: 'failed' });
+    const storageKey = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    await click('Close');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(registration.query).not.toHaveBeenCalled();
+    await click('Add Workspace');
+    expect(registration.query).toHaveBeenCalledOnce();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Registration failed',
+    );
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(false);
+  });
+
   it('clears only a confirmed blocked browser draft before starting another registration', async () => {
     const registration = enableRegistration();
     const blocked = {
