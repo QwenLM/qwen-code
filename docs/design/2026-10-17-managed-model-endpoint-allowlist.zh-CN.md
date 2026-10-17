@@ -1,0 +1,59 @@
+# 托管模型端点白名单（`model.allowedBaseUrls`）
+
+[English](2026-10-17-managed-model-endpoint-allowlist.md) | [简体中文](2026-10-17-managed-model-endpoint-allowlist.zh-CN.md)
+
+## 状态与范围
+
+已在 PR #14231 中实现（第 1–3 轮修复）。`model.allowedBaseUrls` 是模型端点 baseUrl 的托管白名单。这是一个纯配置机制：没有新的 CLI 参数，没有新的协议。范围之外：SDK 内部逐请求的端点策略执行，以及把 workspace 不可覆盖语义推广到整个 `modelProviders` 映射（见“开放问题”）。
+
+## 问题
+
+在此设计之前，白名单只在模型注册阶段过滤。出站端点通过另一条路径（`resolveCliGenerationConfig` → `resolveModelConfig`）解析，完全不看策略，因此托管部署仍可能通过 `--model`、`--openaiBaseUrl`、环境变量、`security.auth` 或凭据的 preserve/capture 路径拨向白名单之外的端点。此外还有若干缺口：workspace（受信仓库）可以替换操作员配置的白名单；非数组值会以裸 `TypeError` 崩溃启动；退化条目（例如 `"https://"`）会静默匹配所有 HTTPS URL；qwen-oauth 空列表 pin 会被任何 scope 生效且无警告；advisor-model 错误从不点名责任设置项，还把原始选择器（含凭据）插值进 stderr。
+
+## 匹配语义
+
+匹配基于 `new URL()` 的 URL 语义：
+
+- Scheme 和 host 不区分大小写比较（URL origin 规范化）；path 区分大小写。
+- 显式默认端口视为不存在：`https://corp.example:443/v1` 匹配条目 `https://corp.example`，因为 URL origin 会省略默认端口。非默认端口（`:8443`）必须精确匹配。
+- Path 按路径边界做前缀匹配：条目 `https://corp.example` 匹配 `https://corp.example/v1`，但不匹配 `https://corp.example.evil.com`（不同 host），也不匹配仅字符串前缀相同的兄弟路径。尾部斜杠忽略。
+- 无法解析的值回退到旧的字符串比较（trim + 边界前缀），使部分可用的条目退化为旧行为，而不是匹配一切。
+- 没有显式 `baseUrl` 的模型按其协议默认端点（SDK 实际会拨向的端点）判定。空列表拦截一切（fail closed）；`undefined` 表示无策略。
+
+## 执行点
+
+同一个谓词（`isBaseUrlAllowed`）在出站模型端点生效的每个位置执行：
+
+1. **注册** — `ModelRegistry` 在注册时丢弃白名单外的模型（选择器/`--model` 列表只提供允许的端点），并记录每个被丢弃项（`getAllowlistDroppedModels`）。
+2. **解析** — 当有效端点（显式 `baseUrl`，未设置时为协议默认端点）不在白名单内时，`resolveModelConfig` 抛出点名 `model.allowedBaseUrls` 的 `FatalConfigError`。这堵住了 `--model`/`--openaiBaseUrl`/env/`security.auth` 的旁路。
+3. **凭据恢复/捕获** — `ModelsConfig`（`syncAfterAuthRefresh` 的 preserve 分支、`detectAndCaptureRuntimeModel`）拒绝白名单外的端点，使已存凭据无法重新放行注册表从未注册的端点。
+4. **兄弟 `ModelsConfig` 站点** — voice 模型源、daemon voice 配置、workspace provider 状态、fast-model ACP 检查、provider 安装冲突探测都接收同一策略（`undefined` = 无策略；绝不强转为 `[]`）。
+5. **Live Voice** — 实时 wss 路径读原始配置、从不接触注册表，因此对最终端点应用策略（wss 按其 HTTPS 形式判定）。被拒绝的路由直接抛错，不能回落到 free-standing `liveVoice.endpoint`。现有 DashScope 主机校验作为附加控制保留。
+
+## 输入校验
+
+- `model.allowedBaseUrls` 必须是数组。非数组值是点名该键的启动期 `FatalConfigError`（CLI 在构造前校验；注册表也防御性地 fail closed）。
+- 条目必须是非空字符串且可解析为带 hostname 的 URL。非字符串、空值、无法解析、无 hostname 的条目（例如 `"https://"`）会被警告并跳过 —— 退化条目绝不可能变成匹配一切的通配。
+- 列表像 `providerProtocol` 一样在启动时冻结：reload 保留策略。
+
+## Scope 优先级与 qwen-oauth pin
+
+- System scope 优先于 user；**workspace-scope 的列表只有在 User、System、SystemDefaults 均未定义时才生效**（该设置在 `WORKSPACE_NON_OVERRIDING_SETTINGS` 中，与 `security.allowedHttpHookUrls` 同一机制），workspace 值被剥离时发出警告。
+- 内置 Qwen OAuth 模型是硬编码的。只能通过**操作员 scope pin** 禁用：在 System、User、SystemDefaults 配置中，把某个经生效 `providerProtocol` 映射解析到 `qwen-oauth` 的 provider id 的模型列表显式置空。workspace-scope 的 pin 在合并时剥离（仓库不得替其用户禁用个人 Qwen 登录），被剥离的 workspace pin 和生效的操作员 pin 都会产生加载期警告。
+- pin 生效时，Qwen OAuth 解析以 `FatalConfigError` fail closed，而不是回落到默认内置模型，因此 `--model` 和持久化的 `model.name` 无法重新放行动态端点。
+- 注意：设置 `model.allowedBaseUrls` 本身也会禁用内置 Qwen OAuth 模型，因为其端点在登录时动态发现、无法列入白名单。需要个人 Qwen 登录的部署既不应设置白名单，也不应 pin 空列表。
+
+## Advisor-model 诊断
+
+当白名单是 advisor 模型不可用的原因时（端点不在名单内，或模型被注册表丢弃），advisor-model 启动错误会点名 `model.allowedBaseUrls`；选择器用于展示时会被脱敏：endpoint-qualified 选择器（`modelId\0baseUrl`）以剥离凭据的形式展示，绝不原样输出。
+
+## 验证计划与验收标准
+
+- 每个执行点都有单元测试/行为测试，且各自配有一个命名 mutant，使其在变异后转红：默认端口匹配、退化条目跳过、非数组启动错误、workspace 列表不可覆盖、workspace pin 剥离、mapped-id pin、qwen-oauth `--model`/持久化名称 fail closed、带协议默认端的解析门、Live Voice 路由门、advisor 消息内容、以及 `loadCliConfig` → `Config` → `ModelsConfig` 交接。
+- 按仓库测试策略在 Docker 中运行全部受影响套件（core + CLI 的 `tsc`/eslint/vitest）。
+
+## 开放问题与后续工作
+
+- **动态 Qwen OAuth 端点**：任何白名单都会禁用内置 Qwen OAuth 模型（动态端点无法列入）。此行为已记录、未改动；让内置模型可被白名单覆盖是另一个独立设计决策。
+- **推广 workspace 不可覆盖**：受信 workspace 仍可用空列表（或其他列表）替换非 qwen-oauth provider id 的非空操作员 `modelProviders` 列表。把 pin 剥离推广到所有 provider id 是行为影响更大的后续工作。
+- Live Voice 路径还额外把端点限制在 DashScope 主机；托管部署若想要非 DashScope 实时端点，需要单独的设计决策。

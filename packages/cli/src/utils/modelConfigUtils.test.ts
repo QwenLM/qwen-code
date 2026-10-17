@@ -464,6 +464,36 @@ describe('modelConfigUtils', () => {
       } as Settings;
     }
 
+    it('threads the allowlist into the resolver so an off-list --model fails closed (e2e)', async () => {
+      // Run the real core resolver (the gate lives there), not a stub.
+      const original = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      vi.mocked(resolveModelConfig).mockImplementation(
+        original.resolveModelConfig,
+      );
+
+      expect(() =>
+        resolveCliGenerationConfig({
+          argv: { model: 'ext' },
+          settings: makeMockSettings({
+            modelProviders: {
+              openai: [
+                {
+                  id: 'ext',
+                  baseUrl: 'https://external-llm.example/v1',
+                  envKey: 'EXT_KEY',
+                },
+              ],
+            },
+          }),
+          selectedAuthType: AuthType.USE_OPENAI,
+          env: { EXT_KEY: 'ext-key' },
+          allowedBaseUrls: ['https://corp.example'],
+        }),
+      ).toThrowError(/model\.allowedBaseUrls/);
+    });
+
     it('loads none as an explicit reasoning disable', () => {
       vi.mocked(resolveModelConfig).mockReturnValue({
         config: {

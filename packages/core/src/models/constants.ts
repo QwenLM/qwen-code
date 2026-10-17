@@ -110,8 +110,12 @@ export const DEFAULT_MODELS = {
 } as Partial<Record<AuthType, string>>;
 
 /**
- * Hard-coded Qwen OAuth models that are always available.
- * These cannot be overridden by user configuration.
+ * Hard-coded Qwen OAuth models. User configuration can neither add to nor
+ * replace them; they are only disabled by the operator-scope pin (an
+ * explicitly empty model list for a qwen-oauth provider id in System, User,
+ * or SystemDefaults settings — see isQwenOAuthBuiltinsPinnedEmpty), or by
+ * setting model.allowedBaseUrls, which cannot list their dynamically
+ * discovered endpoint.
  */
 export const QWEN_OAUTH_MODELS: ModelConfig[] = [
   {

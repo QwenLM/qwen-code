@@ -1595,6 +1595,13 @@ export interface ConfigParameters {
    * filter.
    */
   allowedModelBaseUrls?: readonly string[];
+  /**
+   * Whether the hard-coded qwen-oauth built-ins are disabled by an
+   * operator-scope pin (an explicitly empty qwen-oauth model list in a
+   * User/System/SystemDefaults scope). `undefined` lets the registry fall
+   * back to detecting the pin in the merged config.
+   */
+  qwenOAuthBuiltinsDisabled?: boolean;
   /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -2879,6 +2886,7 @@ export class Config {
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly allowedModelBaseUrls?: readonly string[];
+  private readonly qwenOAuthBuiltinsDisabled?: boolean;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -3624,6 +3632,7 @@ export class Config {
     this.modelProvidersConfig = params.modelProvidersConfig;
     this.providerProtocolConfig = params.providerProtocolConfig;
     this.allowedModelBaseUrls = params.allowedModelBaseUrls;
+    this.qwenOAuthBuiltinsDisabled = params.qwenOAuthBuiltinsDisabled;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -3768,6 +3777,7 @@ export class Config {
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
       allowedModelBaseUrls: this.allowedModelBaseUrls,
+      qwenOAuthBuiltinsDisabled: this.qwenOAuthBuiltinsDisabled,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
@@ -7566,6 +7576,25 @@ export class Config {
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
     return this.modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
+   * The managed endpoint allowlist (`model.allowedBaseUrls`) in effect at boot,
+   * or undefined when no policy is configured. Exposed so the advisor-model
+   * availability check can name the setting in its error message (issue #12805,
+   * review R1-16: the error never named the setting).
+   */
+  getAllowedModelBaseUrls(): readonly string[] | undefined {
+    return this.allowedModelBaseUrls;
+  }
+
+  /**
+   * Models dropped from the registry by the managed endpoint allowlist, with
+   * the resolved baseUrl each was judged against. Read-only diagnostics view;
+   * empty when no policy dropped anything.
+   */
+  getAllowlistDroppedModels(): Array<{ id: string; baseUrl: string }> {
+    return this.modelsConfig.getAllowlistDroppedModels();
   }
 
   /**

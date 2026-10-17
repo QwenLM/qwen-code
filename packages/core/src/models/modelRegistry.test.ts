@@ -8,6 +8,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   ModelRegistry,
   QWEN_OAUTH_MODELS,
+  isBaseUrlAllowed,
+  isQwenOAuthBuiltinsPinnedEmpty,
   modelRegistryKey,
   resolveProviderProtocol,
 } from './modelRegistry.js';
@@ -1251,5 +1253,166 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
 
     registry.reloadModels({ 'qwen-oauth': [] });
     expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
+  });
+
+  it('matches an explicit default port as absent (URL origin semantics)', () => {
+    // new URL() elides explicit default ports from the origin, so
+    // https://corp.example:443/v1 is the same endpoint as https://corp.example.
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}:443/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+
+    // A non-default port is a different endpoint and must not match.
+    const offPort = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}:8443/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(offPort.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('fails closed (no models, no throw) for a non-array allowlist value', () => {
+    // A hand-edited settings value that is not an array must not crash the
+    // constructor with a raw TypeError; it blocks every model instead.
+    let registry!: ModelRegistry;
+    expect(
+      () =>
+        (registry = new ModelRegistry(
+          { openai: [{ id: 'llm', baseUrl: CORP }] },
+          undefined,
+          'https://corp.example' as unknown as readonly string[],
+        )),
+    ).not.toThrow();
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('model.allowedBaseUrls is not an array'),
+      ),
+    ).toBe(true);
+  });
+
+  it('warns and skips degenerate entries instead of matching everything', () => {
+    // 'https://' has no host — the old string fallback let it match every
+    // https URL (silent fail-open). It must be skipped with a warning.
+    const registry = new ModelRegistry(
+      {
+        custom: [
+          {
+            id: 'ext',
+            baseUrl: 'https://external-llm.example/v1',
+            envKey: 'EXT_KEY',
+          },
+          { id: 'ok', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' },
+        ],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP, 'https://', '', 'not a url', 42 as unknown as string],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ok']);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('is not a URL with a host'),
+      ),
+    ).toBe(true);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('is not a non-empty string'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a whitespace-padded allowlist entry against the exact baseUrl', () => {
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`  ${CORP}  `],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+  });
+
+  it('isBaseUrlAllowed fails closed for empty, non-string, and non-array inputs', () => {
+    expect(isBaseUrlAllowed(undefined, [CORP])).toBe(false);
+    expect(isBaseUrlAllowed('', [CORP])).toBe(false);
+    expect(isBaseUrlAllowed(`${CORP}/v1`, undefined)).toBe(false);
+    expect(
+      isBaseUrlAllowed(`${CORP}/v1`, null as unknown as readonly string[]),
+    ).toBe(false);
+    expect(isBaseUrlAllowed(`${CORP}/v1`, [`${CORP}/`])).toBe(true);
+    expect(isBaseUrlAllowed(`${CORP}/v1`, ['https://other.example'])).toBe(
+      false,
+    );
+  });
+
+  it('detects the qwen-oauth builtins pin through providerProtocol mappings', () => {
+    expect(isQwenOAuthBuiltinsPinnedEmpty({ 'qwen-oauth': [] })).toBe(true);
+    expect(
+      isQwenOAuthBuiltinsPinnedEmpty(
+        { 'corp-qwarn': [] },
+        { 'corp-qwarn': 'qwen-oauth' },
+      ),
+    ).toBe(true);
+    // A mapped-to-openai id with an empty list is a regular empty provider,
+    // not the qwen-oauth pin.
+    expect(
+      isQwenOAuthBuiltinsPinnedEmpty(
+        { 'corp-openai': [] },
+        { 'corp-openai': 'openai' },
+      ),
+    ).toBe(false);
+    expect(
+      isQwenOAuthBuiltinsPinnedEmpty({ 'qwen-oauth': [{ id: 'x' }] }),
+    ).toBe(false);
+    expect(isQwenOAuthBuiltinsPinnedEmpty(undefined)).toBe(false);
+  });
+
+  it('keeps the built-ins when the caller passes an explicit false (workspace-only pin)', () => {
+    // The merge strips workspace-scope pins; callers with scope visibility
+    // pass false so a workspace-only pin never suppresses the built-ins.
+    const registry = new ModelRegistry(
+      { 'qwen-oauth': [] },
+      undefined,
+      undefined,
+      false,
+    );
+    expectHardCodedQwenCount(registry);
+  });
+
+  it('suppresses the built-ins on an explicit true even without a merged pin', () => {
+    const registry = new ModelRegistry(undefined, undefined, undefined, true);
+    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
+  });
+
+  it('records each allowlist drop with the judged baseUrl', () => {
+    const registry = new ModelRegistry(externalCustom(), { custom: 'openai' }, [
+      CORP,
+    ]);
+    // The off-list provider entry plus the built-in qwen-oauth model, whose
+    // dynamic endpoint can never match an allowlist entry.
+    expect(registry.getAllowlistDroppedModels()).toEqual([
+      { id: 'coder-model', baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL' },
+      { id: 'ext', baseUrl: 'https://external-llm.example/v1' },
+    ]);
+  });
+
+  it('stamps the judged baseUrl on resolved models (protocol default)', () => {
+    // Pair assertion: a model without an explicit baseUrl is judged against
+    // its protocol default endpoint, and the resolved model carries exactly
+    // that baseUrl — the same value the allowlist saw.
+    const registry = new ModelRegistry(
+      { openai: [{ id: 'llm', name: 'llm' }] },
+      undefined,
+      [OPENAI_URL],
+    );
+    const model = registry.getModel(AuthType.USE_OPENAI, 'llm');
+    expect(model?.baseUrl).toBe(OPENAI_URL);
   });
 });

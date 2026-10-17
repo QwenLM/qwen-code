@@ -15,6 +15,7 @@ import type { ModelGenerationConfig } from './types.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 const TIMEOUT_ENV = 'QWEN_CODE_API_TIMEOUT_MS';
 // Every original input spells out cli/settings/env; they default to {} here.
@@ -770,6 +771,96 @@ describe('modelConfigResolver', () => {
 
       expect(result.config.contextWindowSize).toBe(32_000);
       expect(result.sources['contextWindowSize'].kind).toBe('settings');
+    });
+  });
+
+  describe('managed allowlist gate (model.allowedBaseUrls)', () => {
+    const CORP = 'https://corp.example';
+
+    const expectFatal = (fn: () => unknown, ...fragments: string[]): void => {
+      let error: unknown;
+      try {
+        fn();
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(FatalConfigError);
+      for (const fragment of fragments) {
+        expect(String((error as Error).message)).toContain(fragment);
+      }
+    };
+
+    it('fails closed when the resolved model endpoint is off the allowlist', () => {
+      expectFatal(
+        () =>
+          resolve({
+            env: { MY_CUSTOM_KEY: 'provider-key' },
+            modelProvider: {
+              id: 'provider-model',
+              name: 'Provider Model',
+              envKey: 'MY_CUSTOM_KEY',
+              baseUrl: 'https://external-llm.example/v1',
+              generationConfig: {},
+            },
+            allowedBaseUrls: [CORP],
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+      );
+    });
+
+    it('judges a model without baseUrl against the protocol default endpoint', () => {
+      // No explicit baseUrl anywhere: the SDK would dial the protocol
+      // default, so the gate must judge that URL, not undefined.
+      expectFatal(
+        () =>
+          resolve({
+            env: { OPENAI_API_KEY: 'key', OPENAI_MODEL: 'some-model' },
+            allowedBaseUrls: [CORP],
+          }),
+        'model.allowedBaseUrls',
+        'https://api.openai.com/v1',
+      );
+    });
+
+    it('resolves normally when the endpoint is on the allowlist', () => {
+      const result = resolve({
+        env: { MY_CUSTOM_KEY: 'provider-key' },
+        modelProvider: {
+          id: 'provider-model',
+          name: 'Provider Model',
+          envKey: 'MY_CUSTOM_KEY',
+          baseUrl: `${CORP}/v1`,
+          generationConfig: {},
+        },
+        allowedBaseUrls: [CORP],
+      });
+      expect(result.config.baseUrl).toBe(`${CORP}/v1`);
+      expect(result.config.model).toBe('provider-model');
+    });
+
+    it('does not gate when no allowlist is provided', () => {
+      const result = resolve({
+        env: { OPENAI_API_KEY: 'key', OPENAI_MODEL: 'some-model' },
+      });
+      expect(result.config.model).toBe('some-model');
+    });
+
+    it('fails closed for Qwen OAuth when the operator pin is active', () => {
+      expectFatal(
+        () => oauth({ qwenOAuthBuiltinsDisabled: true }),
+        'pinned to an empty model list',
+        'modelProviders["qwen-oauth"]',
+      );
+    });
+
+    it('cannot re-admit a Qwen OAuth model via --model while the pin is active', () => {
+      expectFatal(() =>
+        oauth({
+          cli: { model: 'coder-model' },
+          qwenOAuthBuiltinsDisabled: true,
+        }),
+      );
     });
   });
 });
