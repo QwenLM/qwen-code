@@ -12,6 +12,10 @@ import type { MessageListHandle, MessageListProps } from './MessageList';
 import type { Message } from '../adapters/types';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 
+vi.mock('../hooks/useMessageDeletion', () => ({
+  useMessageDeletion: () => undefined,
+}));
+
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
   props: undefined as MessageListProps | undefined,

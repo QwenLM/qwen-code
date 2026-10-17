@@ -238,7 +238,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
- 'non_blocking_prompt', 'session_language', 'user_language_sync', 'session_rewind',
+ 'non_blocking_prompt', 'session_language', 'user_language_sync', 'session_message_deletion', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
  'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
@@ -586,6 +586,7 @@ operator diagnostic snapshot documented below.
 | Tag                                      | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `agent_collaboration_v1`                 | at least one registered workspace opted into persistent workspace Agent collaboration via `experimental.agentCollaboration` (any scope, workspace included) or `QWEN_CODE_ENABLE_AGENT_COLLABORATION=1`. Present means `/workspaces/:workspace/agent/*` and the Agent Host transport routes are mounted; `workspaces[].agentCollaborationEnabled` identifies each workspace's opt-in state, and clients must only show or call the collaboration surface for enabled entries. Older daemons omit that workspace field, so clients may fall back to this top-level tag for compatibility. Absent means collaboration is not served on this response — the tag is recomputed per request, not snapshotted at boot — so a client must drop the entry point rather than render it and let the calls 404. First enabling it requires a restart; toggling it for a workspace while another already has it on takes effect on the next request. Distinct from the unconditional `workspace_agents` tag, which is subagent-definition CRUD.                            |
+| `session_message_deletion`               | the private Hosted Harness profile is not active. Lists and deletes message groups through live-session-owner routes; ordinary local daemon sessions support physical deletion, while Managed authoritative storage and SSH workspaces reject it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `hosted_harness_private_v1`              | the private Hosted Harness profile is active; only its authenticated session API is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `managed_session_journal_delta_v1`       | the private Hosted Harness profile is active (same condition as `hosted_harness_private_v1`) and this build can open Managed Session journals containing `message.delta` records. A control plane requires the tag at capability negotiation, so a rolled-back Harness predating those records is refused once there instead of failing every Session open (`managed_session_open_failed`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `require_auth`                           | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every normal API route, including `/health` on loopback binds; channel webhook ingress keeps its independent shared-secret authentication, and Web Shell document and asset routes remain pre-auth.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -3635,6 +3636,68 @@ daemon does not reshape it, so the top level carries no `modelId`. Read the
 switch details from `_meta.qwenModelSwitch`.
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. `settings.model.name` is still updated as the default for **new** sessions.
+
+### `GET /session/:id/message-groups`
+
+Capability tag: `session_message_deletion`. Bridge → ACP extMethod `qwen/status/session/message_groups`. This is a live-session-owner read: it resolves the session's owning runtime and never falls back to the primary workspace. The daemon-wide capability does not imply support for every session; SSH workspaces and Managed authoritative storage refuse deletion.
+
+Lists safely attributable prompt/reply or command-display groups in active-history order. It does not acquire a writer lease for an ordinary legacy recorder. The read waits for earlier history mutations; a returned snapshot may become stale as the session changes. Deletion itself requires an idle session.
+
+Response (200):
+
+```json
+{
+  "snapshot": "<opaque selection token>",
+  "groups": [
+    {
+      "id": "<group-id>",
+      "promptId": "<prompt-id>",
+      "recordIds": ["<user-record-id>", "<reply-record-id>"]
+    }
+  ]
+}
+```
+
+`promptId` and `promptIds` are optional prompt identities; `recordIds` identifies the group's saved records. An empty history returns `groups: []`. Treat group IDs and the snapshot as opaque; pass the returned snapshot unchanged when deleting.
+
+Errors include `404` for an unknown session, `400 unsupported_operation` for an SSH workspace, and `422 session_message_deletion_unsupported` for unsupported storage or unavailable recording. Existing writer-integrity errors may also return `409 session_writer_conflict`, `409 session_writer_lost`, `409 session_transcript_changed`, or `503 session_writer_unavailable`.
+
+### `POST /session/:id/messages/delete`
+
+Capability tag: `session_message_deletion`. Bridge → ACP extMethod `qwen/control/session/messages_delete`. Strict mutation gate; live-session-owner scoped with no fallback to the primary workspace. Accepts optional `X-Qwen-Client-Id` for event attribution.
+
+Request:
+
+```json
+{ "snapshot": "<token from message-groups>", "groupIds": ["<group-id>"] }
+```
+
+Both fields are required. `snapshot` must be non-empty; `groupIds` must contain distinct non-empty strings. The selected groups must still exist in that snapshot. The server rejects busy sessions rather than queuing deletion behind a model turn.
+
+Response (200):
+
+```json
+{
+  "deletedGroupIds": ["<group-id>"],
+  "deletedPromptIds": ["<daemon-prompt-id>"]
+}
+```
+
+A successful response may additionally contain `removedApiPromptIds` for removed API-history identities. Selected original records and their owned raw compression context are physically removed from JSONL. Existing summary text, command effects, and project files are preserved. Deleting every group leaves the session available for later prompts.
+
+Errors:
+
+- `400 invalid_message_groups` — malformed, unknown, or duplicate group selection.
+- `400 invalid_client_id` — malformed attribution header.
+- `404` — session unknown.
+- `409 session_busy` — prompt or history mutation active; retry after it finishes.
+- `409 message_groups_conflict` — selection snapshot is stale; fetch groups again and require a new selection before retrying.
+- `409 message_history_invalid` — history cannot be safely attributed; changing the selection token alone cannot repair it.
+- `400 unsupported_operation` / `422 session_message_deletion_unsupported` — session/workspace storage does not support this operation; refreshing and repeating the request will not enable it.
+- `409 session_writer_conflict`, `409 session_writer_lost`, `409 session_transcript_changed`, or `503 session_writer_unavailable` — exclusive transcript ownership could not be established or retained.
+- `503 message_deletion_context_unavailable` — deletion **has persisted**, but the live context could not be installed. The JSON body includes `persisted: true`, `deletedGroupIds`, and `deletedPromptIds`. Reconcile the UI from authoritative history and reopen the session before sending another prompt. Do not retry deletion as though nothing was removed; later prompts remain refused with this code until reopening.
+
+After persistence the session publishes `session_messages_deleted` with data `{sessionId, deletedGroupIds, deletedPromptIds, removedApiPromptIds?}` and optional `originatorClientId` on the **event envelope**. This event also occurs for the persisted-503 path. Peers must invalidate cached transcript, navigation, search and selection state and reload authoritative history. The originator must reconcile both successful HTTP responses and `persisted: true` errors; it must not rely on processing its own SSE echo.
 
 ### `POST /session/:id/recap`
 

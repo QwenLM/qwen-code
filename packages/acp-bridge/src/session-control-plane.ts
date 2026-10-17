@@ -15660,6 +15660,120 @@ export function createSessionControlPlane(
       }
     },
 
+    async getMessageGroups(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      await entry.rewindTail;
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionMessageGroups,
+      );
+    },
+
+    async deleteMessageGroups(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry || isClosingOrAuthorizingClose(entry))
+        throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      assertSessionResetNotPending(sessionId);
+      if (
+        entry.pendingPromptCount > 0 ||
+        entry.promptActive ||
+        entry.backgroundTurn
+      ) {
+        throw new SessionBusyError(
+          sessionId,
+          'Cannot delete messages while a prompt is running',
+        );
+      }
+      const result = entry.promptQueue.then(async () => {
+        if (entry.closing) throw new SessionNotFoundError(sessionId);
+        let response: { deletedGroupIds: string[]; deletedPromptIds: string[] };
+        let contextError: unknown;
+        try {
+          response = (await Promise.race([
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete,
+              { sessionId, ...req },
+            ),
+            getTransportClosedReject(entry),
+          ])) as typeof response;
+        } catch (error) {
+          const data = (
+            error as {
+              data?: {
+                errorKind?: string;
+                deletedGroupIds?: string[];
+                deletedPromptIds?: string[];
+              };
+            }
+          ).data;
+          if (data?.errorKind !== 'message_deletion_context_unavailable')
+            throw error;
+          contextError = error;
+          response = {
+            deletedGroupIds: data.deletedGroupIds ?? [],
+            deletedPromptIds: data.deletedPromptIds ?? [],
+          };
+        }
+        entry.terminalTurnStatuses.clear();
+        entry.enrichedTerminalPromptIds.clear();
+        entry.rewindGeneration += 1;
+        entry.turnErrorEvent = undefined;
+        // Clear both reconnect replay and compacted content before publishing
+        // invalidation. Reloading clients fetch the authoritative transcript.
+        entry.events.resetReplay();
+        const replayStartEventId = entry.events.lastEventId;
+        try {
+          const replay = (await Promise.race([
+            entry.connection.extMethod('qwen/session/loadUpdates', {
+              sessionId,
+            }),
+            getTransportClosedReject(entry),
+          ])) as {
+            updates?: SessionUpdate[];
+            partial?: boolean;
+            replayError?: string;
+          };
+          if (entry.events.lastEventId !== replayStartEventId)
+            throw new Error(
+              'Session changed while rebuilding deleted-message replay',
+            );
+          await info.client.seedSessionUpdates(entry, replay.updates ?? [], {
+            ingestArtifacts: false,
+          });
+          entry.restoreReplayPartial =
+            replay.partial === true ? true : undefined;
+          entry.restoreReplayError = replay.replayError;
+        } catch (error) {
+          entry.restoreReplayPartial = true;
+          entry.restoreReplayError = extractErrorMessage(error);
+        }
+        entry.restoreHistoryHasMore = undefined;
+        entry.restoreHistoryAnchorRecordId = undefined;
+        entry.events.publish({
+          type: 'session_messages_deleted',
+          data: { sessionId, ...response },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+        if (contextError) throw contextError;
+        return response;
+      });
+      const settled = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      entry.promptQueue = settled;
+      entry.rewindTail = settled;
+      return result;
+    },
+
     async getRewindSnapshots(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

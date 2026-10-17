@@ -15102,7 +15102,14 @@ describe('App read-only local commands mid-turn', () => {
     });
 
     expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/stats');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/stats',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('runs /about immediately while streaming and skips the echo', async () => {
@@ -15145,6 +15152,42 @@ describe('App read-only local commands mid-turn', () => {
     ]);
   });
 
+  it.each(['/about', '/status'])(
+    'does not append a late %s result after switching sessions',
+    async (command) => {
+      const { rerender } = renderApp({});
+      await flush();
+      const preflight = deferred<null>();
+      mockWorkspaceActions.loadPreflight.mockReturnValueOnce(preflight.promise);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit(command);
+        await Promise.resolve();
+      });
+      const previousSession = mockConnection.sessionId;
+      try {
+        act(() => {
+          mockConnection.sessionId = 'session-switched';
+          testState.ownerVersion += 1;
+          rerender({});
+        });
+        mockStore.dispatch.mockClear();
+        await act(async () => {
+          preflight.resolve(null);
+          await preflight.promise;
+        });
+        await flush();
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+          expect.objectContaining({
+            clearActiveText: false,
+            promptId: expect.stringMatching(/^local-command:/),
+          }),
+        ]);
+      } finally {
+        mockConnection.sessionId = previousSession;
+      }
+    },
+  );
+
   it('echoes /about when idle', async () => {
     renderApp({});
     await flush();
@@ -15156,7 +15199,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/about');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/about',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('runs /status immediately while streaming and skips the echo', async () => {
@@ -15210,7 +15260,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/status');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/status',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it.each(['/context', '/context detail', '/context -d'])(
@@ -15284,7 +15341,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/context');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/context',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('reports /stats load failures instead of swallowing them', async () => {
@@ -41937,6 +42001,7 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).toHaveBeenCalledWith([
       {
         type: 'status',
+        promptId: expect.stringMatching(/^local-command:/),
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
       },
     ]);

@@ -1421,6 +1421,7 @@ export function transcriptBlocksToDaemonMessages(
 
   synchronizeToolGroupSourceIdentity(messages);
   attachTurnPromptIds(messages, blocks);
+  attachDeletionIdentity(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
 }
@@ -1449,6 +1450,34 @@ function attachTurnPromptIds(
       const promptId = promptIdByBlockId.get(id);
       if (promptId) {
         message.promptId = promptId;
+        break;
+      }
+    }
+  }
+}
+
+function attachDeletionIdentity(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const byId = new Map(blocks.map((block) => [block.id, block]));
+  for (const message of messages) {
+    const sources = [message.id, ...(message.sourceBlockIds ?? [])].flatMap(
+      (id) => (byId.get(id) ? [byId.get(id)!] : []),
+    );
+    const records = [
+      ...new Set(sources.flatMap((block) => block.sourceRecordIds ?? [])),
+    ];
+    if (records.length) message.sourceRecordIds = records;
+    for (const block of sources) {
+      const meta = 'meta' in block ? getRecord(block.meta) : undefined;
+      const local =
+        getString(meta, 'localCommandId') ??
+        (block.promptId?.startsWith('local-command:')
+          ? block.promptId
+          : undefined);
+      if (local) {
+        message.localCommandId = local;
         break;
       }
     }

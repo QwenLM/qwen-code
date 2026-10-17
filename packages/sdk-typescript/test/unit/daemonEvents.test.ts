@@ -26,6 +26,32 @@ import type {
 } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
+describe('session_messages_deleted', () => {
+  it.each([undefined, ['api-1']])(
+    'accepts optional removed API identities: %j',
+    (removedApiPromptIds) => {
+      const data = {
+        sessionId: 'session',
+        deletedGroupIds: ['g'],
+        deletedPromptIds: ['p'],
+        removedApiPromptIds,
+      };
+      const event: DaemonEvent = {
+        v: 1,
+        type: 'session_messages_deleted',
+        data,
+      };
+      expect(asKnownDaemonEvent(event)).toBe(event);
+      expect(
+        asKnownDaemonEvent({
+          ...event,
+          data: { ...data, removedApiPromptIds: [42] },
+        }),
+      ).toBeUndefined();
+    },
+  );
+});
+
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
   it('is the wire literal and a registered known event type', () => {
     // The same const is imported by the daemon publisher (acp-bridge) and the
