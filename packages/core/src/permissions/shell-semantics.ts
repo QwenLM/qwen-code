@@ -82,24 +82,65 @@ export interface ShellOperation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * How one character of a word was written. The shell expands `$` and
+ * backticks unless the character is `literal` (single quotes or a backslash
+ * escape), and reads `<` and `>` as syntax only when the character is
+ * unquoted (`none`). The inside of a `${…}` or `$((…))` expansion counts as
+ * `double`: its `$` still expands, but its spaces, `<`, `>` and `#` belong
+ * to the expansion, not to the command.
+ */
+type CharQuoting = 'none' | 'double' | 'literal';
+
+/** A word after quote removal, remembering how each character was quoted. */
+interface ShellWord {
+  text: string;
+  quoting: readonly CharQuoting[];
+}
+
+/**
  * Tokenize a shell command string, respecting single/double quotes and
- * backslash escapes, splitting on unquoted whitespace.
+ * backslash escapes, splitting on unquoted whitespace. A `#` that starts a
+ * word begins a comment. A `${…}` or `$((…))` expansion stays in one word,
+ * as in bash, and its `<`, `>` and `#` are not syntax.
  *
  * The input should be a single simple command (already split from compound
  * commands via `splitCompoundCommand`).
  */
-function tokenize(command: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
+function tokenizeCommand(command: string): ShellWord[] {
+  const words: ShellWord[] = [];
+  let text = '';
+  let quoting: CharQuoting[] = [];
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
+  // Set once anything, even an empty `""`, has been written for this word.
+  let wordStarted = false;
+  // What closes each open expansion, innermost last: `}` for `${`, `))` for
+  // `$((`, and `)` for a parenthesis inside arithmetic.
+  const closers: string[] = [];
+  // A `#` inside `` `…` `` comments out the inner command only.
+  let inBackquote = false;
+
+  const flush = (): void => {
+    const word = toShellWord(text, quoting);
+    if (word) words.push(word);
+    text = '';
+    quoting = [];
+    wordStarted = false;
+  };
+  const append = (chars: string, how: CharQuoting): void => {
+    text += chars;
+    for (let k = 0; k < chars.length; k++) quoting.push(how);
+    wordStarted = true;
+  };
+  // The delimiters of an expansion are syntax unless it is nested in another.
+  const outside = (): CharQuoting => (closers.length > 0 ? 'double' : 'none');
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
 
     if (escaped) {
-      current += ch;
+      append(ch, 'literal');
       escaped = false;
       continue;
     }
@@ -109,32 +150,78 @@ function tokenize(command: string): string[] {
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
+      wordStarted = true;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      wordStarted = true;
       continue;
     }
-    if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      if (current) {
-        pushToken(tokens, current);
-        current = '';
+    if (!inSingle && !inDouble) {
+      const opener = command.startsWith('$((', i)
+        ? '$(('
+        : command.startsWith('${', i)
+          ? '${'
+          : undefined;
+      if (opener) {
+        append(opener, outside());
+        closers.push(opener === '${' ? '}' : '))');
+        i += opener.length - 1;
+        continue;
       }
-      continue;
+      const closer = closers[closers.length - 1];
+      if (closer !== undefined) {
+        if (ch === closer[0]) {
+          closers.pop();
+          // `))` ends arithmetic. A lone `)` means the `$((` opened a
+          // substitution of a subshell, `$( (…) )`, which ends here too.
+          const end = closer === '))' && command[i + 1] === ')' ? '))' : ch;
+          append(end, outside());
+          i += end.length - 1;
+          continue;
+        }
+        if (ch === '(' && closer !== '}') closers.push(')');
+        append(ch, 'double');
+        continue;
+      }
+      if (ch === ' ' || ch === '\t') {
+        flush();
+        continue;
+      }
+      if (ch === '`') inBackquote = !inBackquote;
+      // Only a `#` that starts a word begins a comment: `""#x` is one word.
+      if (ch === '#' && !wordStarted && !inBackquote) break;
     }
-    current += ch;
+    append(ch, inSingle ? 'literal' : inDouble ? 'double' : 'none');
   }
-  if (current) pushToken(tokens, current);
-  return tokens;
+  flush();
+  return words;
 }
 
-function pushToken(tokens: string[], token: string): void {
-  if (token === '{' || token === '}') return;
-  const normalized = trimShellSyntax(token);
-  if (normalized) tokens.push(normalized);
+/** The words of a command, without quoting information. */
+function tokenize(command: string): string[] {
+  return tokenizeCommand(command).map((word) => word.text);
 }
 
-function trimShellSyntax(token: string): string {
+function toShellWord(
+  text: string,
+  quoting: readonly CharQuoting[],
+): ShellWord | undefined {
+  if (text === '{' || text === '}') return undefined;
+  const { start, end } = shellSyntaxBounds(text, quoting);
+  if (start >= end) return undefined;
+  return { text: text.slice(start, end), quoting: quoting.slice(start, end) };
+}
+
+/**
+ * Bounds of a token without leading `(` and trailing `)` / `&`. The `&` of
+ * a `>&` or `<&` redirection operator is kept.
+ */
+function shellSyntaxBounds(
+  token: string,
+  quoting: readonly CharQuoting[],
+): { start: number; end: number } {
   let start = 0;
   let end = token.length;
 
@@ -144,10 +231,18 @@ function trimShellSyntax(token: string): string {
   while (end > start) {
     const ch = token[end - 1];
     if (ch !== ')' && ch !== '&') break;
+    const before = token[end - 2];
+    if (
+      ch === '&' &&
+      (before === '<' || before === '>') &&
+      quoting[end - 2] === 'none'
+    ) {
+      break;
+    }
     end--;
   }
 
-  return token.slice(start, end);
+  return { start, end };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -189,6 +284,14 @@ function isEnvAssignmentToken(token: string): boolean {
 }
 
 /**
+ * `<(cmd)` and `>(cmd)` become a pipe such as `/dev/fd/63`, not a file on
+ * disk.
+ */
+function isProcessSubstitution(word: string): boolean {
+  return /^[<>]\(/.test(word);
+}
+
+/**
  * Return true if a token looks like a file/directory path argument, as
  * opposed to a flag, shell variable, number, or script expression.
  */
@@ -204,6 +307,8 @@ function looksLikePath(s: string): boolean {
   if (s.includes('{') || s.includes('}')) return false;
   // URLs are handled separately by the web-fetch handlers
   if (s.includes('://')) return false;
+  // A process substitution is a pipe, not a file
+  if (isProcessSubstitution(s)) return false;
   return true;
 }
 
@@ -212,8 +317,10 @@ function looksLikePath(s: string): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface RedirectResult {
-  readFiles: string[];
-  writeFiles: string[];
+  /** File operations performed by the redirections. */
+  ops: ShellOperation[];
+  /** The command's words with every redirection removed. */
+  words: string[];
 }
 
 /**
@@ -225,110 +332,193 @@ function isNetworkPseudoDevice(target: string): boolean {
   return /^\/dev\/(tcp|udp)\//.test(target);
 }
 
+/** Redirect targets that are not files on disk. */
+const NON_FILE_TARGET_RE = /^\/dev\/(?:null|stdin|stdout|stderr|tty|fd\/\d+)$/;
+
 /**
- * Extract I/O redirections from a token array.
- *
- * Modifies `tokens` in-place to remove redirect operators and their targets.
- * Returns the absolute paths of redirect targets as read / write operations.
- *
- * Handles:
- *   `> file`   `>> file`  `< file`   (with or without space)
- *   `2> file`  `2>> file` `&> file`  `&>> file`
- *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
+ * One redirection: an optional fd number (or `&` for stdout+stderr), the
+ * operator, and the target when it is written without a space.
  */
-function extractRedirects(tokens: string[], cwd: string): RedirectResult {
-  const readFiles: string[] = [];
-  const writeFiles: string[] = [];
-  const toRemove = new Set<number>();
+const REDIRECT_RE = /^(\d+|&)?(>>|>\||>&|<>|<&|<<<|<<-|<<|>|<)([\s\S]*)$/;
 
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i]!;
+/** `>&2`, `2>&1`, `>&-`, `3<&0-`: fd duplication or closing, not a file. */
+const FD_DUP_TARGET_RE = /^(?:\d+-?|-)$/;
 
-    // ── Separate-token redirect operators ─────────────────────────────────
-    if (tok === '>' || tok === '1>') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '>>' || tok === '1>>') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '<<' || tok === '<<-') {
-      toRemove.add(i);
-      if (tokens[i + 1]) {
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '<') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') {
-      // stderr / combined redirect — consume target
-      const target = tokens[i + 1];
-      if (target) {
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
+/**
+ * Split a word at its unquoted `<` / `>` characters. Returns the plain word
+ * in front of the first redirection, if any, and each redirection's text.
+ * A run of digits (or `&`) directly before the first operator is its fd.
+ * Shell syntax glued to the end of the plain word is dropped, as for any
+ * word: the `&` of `.env&>f` and the `)` of `(cat .env)>f`.
+ */
+function splitWordRedirects(
+  word: ShellWord,
+): { before?: string; redirects: string[] } | undefined {
+  const { text, quoting } = word;
+  const starts: number[] = [];
+  for (let k = 0; k < text.length; k++) {
+    const ch = text[k];
+    if ((ch !== '<' && ch !== '>') || quoting[k] !== 'none') continue;
+    // `<(cmd)` and `>(cmd)` are process substitutions, not redirections.
+    if (text[k + 1] === '(') continue;
+    // The second character of `>>`, `<>`, `<<` continues the operator; a
+    // quoted `>` before it is plain text and starts nothing.
+    if (
+      k > 0 &&
+      (text[k - 1] === '<' || text[k - 1] === '>') &&
+      quoting[k - 1] === 'none'
+    ) {
+      continue;
+    }
+    starts.push(k);
+  }
+  if (starts.length === 0) return undefined;
+
+  const lead = text.slice(0, starts[0]);
+  const leadIsFd = lead === '' || lead === '&' || /^\d+$/.test(lead);
+  const redirects = starts.map((start, idx) =>
+    text.slice(idx === 0 && leadIsFd ? 0 : start, starts[idx + 1]),
+  );
+  if (leadIsFd) return { redirects };
+  const { start, end } = shellSyntaxBounds(lead, quoting.slice(0, starts[0]));
+  return start < end
+    ? { before: lead.slice(start, end), redirects }
+    : { redirects };
+}
+
+function redirectOps(
+  op: string,
+  target: string,
+  cwd: string,
+): ShellOperation[] {
+  // Heredoc delimiters and here-strings carry data, not file names.
+  if (op.startsWith('<<')) return [];
+  if ((op === '>&' || op === '<&') && FD_DUP_TARGET_RE.test(target)) {
+    return [];
+  }
+  if (op === '<' || op === '<&') {
+    return redirectTargetOps('read_file', target, cwd);
+  }
+  if (op === '<>') {
+    return [
+      ...redirectTargetOps('read_file', target, cwd),
+      ...redirectTargetOps('write_file', target, cwd),
+    ];
+  }
+  return redirectTargetOps('write_file', target, cwd);
+}
+
+function redirectTargetOps(
+  tool: 'read_file' | 'write_file',
+  target: string,
+  cwd: string,
+): ShellOperation[] {
+  if (
+    NON_FILE_TARGET_RE.test(target) ||
+    isNetworkPseudoDevice(target) ||
+    !looksLikePath(target)
+  ) {
+    return [];
+  }
+  return [{ virtualTool: tool, filePath: resolvePath(target, cwd) }];
+}
+
+/** Reserved words that can come before `[[` in command position. */
+const TEST_COMMAND_PREFIXES: ReadonlySet<string> = new Set([
+  '!',
+  'if',
+  'elif',
+  'while',
+  'until',
+  'then',
+  'do',
+  'else',
+  'time',
+]);
+
+/**
+ * Whether `words[i]` opens a `[[ … ]]` test. `[[` is a test only as the
+ * command word and only when a `]]` closes it; elsewhere it is an argument.
+ */
+function opensTest(words: readonly ShellWord[], i: number): boolean {
+  const { text, quoting } = words[i]!;
+  return (
+    text === '[[' &&
+    quoting.every((how) => how === 'none') &&
+    words.slice(0, i).every((word) => TEST_COMMAND_PREFIXES.has(word.text)) &&
+    words.slice(i + 1).some(closesTest)
+  );
+}
+
+/**
+ * Whether `word` closes a `[[ … ]]` test: an unquoted `]]`, alone or with a
+ * redirection glued after it (`]]>out`), since bash ends a word at `<` / `>`.
+ */
+function closesTest({ text, quoting }: ShellWord): boolean {
+  const bare = (k: number) => quoting[k] === 'none';
+  return (
+    text.startsWith(']]') &&
+    bare(0) &&
+    bare(1) &&
+    (text.length === 2 || ((text[2] === '<' || text[2] === '>') && bare(2)))
+  );
+}
+
+/**
+ * Extract I/O redirections from a command's words.
+ *
+ * Handles every bash redirection form, with or without a space before the
+ * target and with any fd number: `>`, `>>`, `>|`, `<`, `<>`, `&>`, `&>>`,
+ * `>&file`, heredocs and here-strings. fd duplication and closing (`2>&1`,
+ * `>&-`) touch no file. Quoted `<` / `>` are plain text, and so are the
+ * comparison operators inside `[[ … ]]`.
+ */
+function extractRedirects(
+  words: readonly ShellWord[],
+  cwd: string,
+): RedirectResult {
+  const ops: ShellOperation[] = [];
+  const rest: string[] = [];
+  let inTest = false;
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
+    if (!inTest && opensTest(words, i)) inTest = true;
+    if (inTest) {
+      if (closesTest(word)) inTest = false;
+      // `]]>out` ends the test and redirects; split it below.
+      if (inTest || word.text === ']]') {
+        rest.push(word.text);
+        continue;
       }
     }
-    // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
-    else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
-      if (m) {
-        const op = m[1]!;
-        const target = m[2]!;
-        if (op.startsWith('<<')) {
-          toRemove.add(i);
-          continue;
-        }
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          if (op === '<') {
-            readFiles.push(resolvePath(target, cwd));
-          } else {
-            writeFiles.push(resolvePath(target, cwd));
-          }
-        }
-        toRemove.add(i);
+
+    const split = splitWordRedirects(word);
+    if (!split) {
+      rest.push(word.text);
+      continue;
+    }
+    if (split.before) rest.push(split.before);
+    let redirects = split.redirects;
+    while (redirects.length > 0) {
+      const [redirect, ...later] = redirects;
+      redirects = later;
+      const match = REDIRECT_RE.exec(redirect!);
+      if (!match) continue;
+      let target = match[3]!;
+      // A target written apart from its operator is the next word, which bash
+      // also splits at its own `<` / `>`: `> a>p.txt` writes `a`, then `p.txt`.
+      if (!target && later.length === 0 && i + 1 < words.length) {
+        i++;
+        const next = splitWordRedirects(words[i]!);
+        target = next ? (next.before ?? '') : words[i]!.text;
+        redirects = next?.redirects ?? [];
       }
+      if (target) ops.push(...redirectOps(match[2]!, target, cwd));
     }
   }
 
-  // Remove redirect tokens from the array in-place
-  const filtered = tokens.filter((_, idx) => !toRemove.has(idx));
-  tokens.length = 0;
-  tokens.push(...filtered);
-
-  return { readFiles, writeFiles };
+  return { ops, words: rest };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1881,7 +2071,86 @@ const PREFIX_COMMAND_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
     ]),
   ],
   ['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])],
+  [
+    'env',
+    new Set([
+      '-u',
+      '--unset',
+      '-C',
+      '--chdir',
+      '-S',
+      '--split-string',
+      '-a',
+      '--argv0',
+      '-P',
+      '-L',
+      '-U',
+    ]),
+  ],
 ]);
+
+/** An option given to a prefix command, with its value if it takes one. */
+interface PrefixOption {
+  name: string;
+  value?: string;
+}
+
+/**
+ * Read a prefix command's options from `tokens[start]` on, the way getopt
+ * does: short options group (`-Eu root` is `-E -u root`) and take their value
+ * glued or from the next word, long options as `--name=value` or from the next
+ * word, and `--` ends them. Returns the options, where the words after them
+ * start, and whether `--` ended them.
+ */
+function readPrefixOptions(
+  tokens: readonly string[],
+  start: number,
+  withValue: ReadonlySet<string>,
+): { options: PrefixOption[]; end: number; ended: boolean } {
+  const options: PrefixOption[] = [];
+  let i = start;
+  while (i < tokens.length) {
+    const word = tokens[i]!;
+    if (word === '--') return { options, end: i + 1, ended: true };
+    if (!word.startsWith('-') || word === '-') break;
+    i++;
+    if (word.startsWith('--')) {
+      const eq = word.indexOf('=');
+      const name = eq === -1 ? word : word.slice(0, eq);
+      const value =
+        eq !== -1
+          ? word.slice(eq + 1)
+          : withValue.has(name) && i < tokens.length
+            ? tokens[i++]
+            : undefined;
+      options.push({ name, value });
+      continue;
+    }
+    for (let k = 1; k < word.length; k++) {
+      const name = `-${word[k]}`;
+      if (!withValue.has(name)) {
+        options.push({ name });
+        continue;
+      }
+      const glued = word.slice(k + 1);
+      const value = glued || (i < tokens.length ? tokens[i++] : undefined);
+      options.push({ name, value });
+      break;
+    }
+  }
+  return { options, end: i, ended: false };
+}
+
+/** Write options back as words that read the same again. */
+function prefixOptionWords(options: readonly PrefixOption[]): string[] {
+  return options.flatMap(({ name, value }) =>
+    value === undefined
+      ? [name]
+      : name.startsWith('--')
+        ? [quoteShellWord(`${name}=${value}`)]
+        : [name, quoteShellWord(value)],
+  );
+}
 
 /**
  * Commands that act as transparent wrappers around the actual command.
@@ -1904,6 +2173,13 @@ const PREFIX_COMMANDS = new Set([
   'unbuffer',
   'stdbuf',
 ]);
+
+/** Quote a word so that tokenizing it again yields the same text. */
+function quoteShellWord(text: string): string {
+  return /^[A-Za-z0-9_./=:,+@%^-]+$/.test(text)
+    ? text
+    : `'${text.replace(/'/g, `'\\''`)}'`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main entry point
@@ -1929,99 +2205,116 @@ export function extractShellOperations(
   cwd: string,
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
+  // `(( … ))` is arithmetic: its `<` and `>` compare numbers. Without the
+  // closing `))`, as in `((cat .env); true)`, bash reads nested subshells.
+  if (/^\s*\(\([\s\S]*\)\)\s*$/.test(simpleCommand)) return [];
 
-  const tokens = tokenize(simpleCommand);
-  if (tokens.length === 0) return [];
+  const words = tokenizeCommand(simpleCommand);
+  if (words.length === 0) return [];
 
-  // Extract I/O redirections before dispatching to the command handler.
-  // This mutates `tokens` in-place by removing redirect tokens.
-  const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd);
+  // Remove redirections before dispatching to the command handler.
+  const { ops: redirectOps, words: tokens } = extractRedirects(words, cwd);
 
-  while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
-    tokens.shift();
-  }
-
-  const cmdName = tokens[0];
-  if (!cmdName) {
+  const commandStart = tokens.findIndex((t) => !isEnvAssignmentToken(t));
+  const cmdName = commandStart === -1 ? undefined : tokens[commandStart];
+  if (cmdName === undefined) {
     // Only assignments and/or redirections were present.
-    return [
-      ...redirectReads.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: p,
-      })),
-      ...redirectWrites.map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: p,
-      })),
-    ];
+    return redirectOps;
   }
+  const commandTokens = tokens.slice(commandStart);
 
   const ops: ShellOperation[] = [];
 
   // ── Transparent prefix commands ───────────────────────────────────────────
   if (PREFIX_COMMANDS.has(cmdName)) {
-    const flagsWithVal = PREFIX_COMMAND_FLAGS_WITH_VALUE.get(cmdName);
+    const flagsWithVal =
+      PREFIX_COMMAND_FLAGS_WITH_VALUE.get(cmdName) ?? new Set<string>();
     // Find where the actual command starts (after flags, flag-values, and env
     // variable assignments).  For example:
     //   sudo -u root cat /file  →  startIdx skips '-u' AND 'root'
+    const options: PrefixOption[] = [];
     let startIdx = 1;
-    while (startIdx < tokens.length) {
-      const t = tokens[startIdx]!;
-      if (t.startsWith('-')) {
-        // Skip the flag itself
-        startIdx++;
-        // If this flag takes a separate value argument, skip that too
-        if (
-          flagsWithVal?.has(t) &&
-          startIdx < tokens.length &&
-          !tokens[startIdx]!.startsWith('-')
-        ) {
-          startIdx++;
-        }
-      } else if (isEnvAssignmentToken(t)) {
-        // Environment variable assignment: skip
-        startIdx++;
+    for (;;) {
+      const read = readPrefixOptions(commandTokens, startIdx, flagsWithVal);
+      options.push(...read.options);
+      let next = read.end;
+      while (
+        next < commandTokens.length &&
+        isEnvAssignmentToken(commandTokens[next]!)
+      ) {
+        next++;
+      }
+      if (next === startIdx) break;
+      startIdx = next;
+      if (read.ended) break;
+    }
+
+    // Re-quote the inner command so its words survive tokenizing again,
+    // and walk it so a wrapped shell (`sudo bash -c '…'`) is unwrapped.
+    const quotedRest = (from: number) =>
+      commandTokens.slice(from).map(quoteShellWord);
+    let innerCommand: string[] | undefined;
+    let innerCwd = cwd;
+    let innerCwdUnknown = false;
+    if (cmdName === 'env') {
+      // `env -S STRING` splits STRING into more words for env itself, in
+      // place of the option: options, assignments and the command. Analyse
+      // that env command instead, which also applies its `-C`.
+      const at = options.findIndex(
+        (o) =>
+          (o.name === '-S' || o.name === '--split-string') &&
+          o.value !== undefined,
+      );
+      if (at !== -1) {
+        innerCommand = [
+          'env',
+          ...prefixOptionWords(options.slice(0, at)),
+          options[at]!.value!,
+          ...prefixOptionWords(options.slice(at + 1)),
+          ...quotedRest(startIdx),
+        ];
       } else {
-        break;
+        // `env -C DIR` runs the command in DIR; the last one wins.
+        for (const { name, value } of options) {
+          if ((name === '-C' || name === '--chdir') && value !== undefined) {
+            innerCwdUnknown = isDynamicShellPath(value);
+            innerCwd = innerCwdUnknown ? cwd : resolvePath(value, cwd);
+          }
+        }
       }
     }
     // `timeout DURATION command` — the duration is a numeric positional that
     // precedes the actual command.  Skip it.
     if (
       cmdName === 'timeout' &&
-      startIdx < tokens.length &&
-      /^\d/.test(tokens[startIdx]!)
+      startIdx < commandTokens.length &&
+      /^\d/.test(commandTokens[startIdx]!)
     ) {
       startIdx++;
     }
-    if (startIdx < tokens.length) {
-      // Reconstruct the inner command and recurse
-      const innerCommand = tokens.slice(startIdx).join(' ');
-      ops.push(...extractShellOperations(innerCommand, cwd));
+    if (!innerCommand && startIdx < commandTokens.length) {
+      innerCommand = quotedRest(startIdx);
+    }
+    if (innerCommand) {
+      ops.push(
+        ...walkCompoundCommand(
+          innerCommand.join(' '),
+          innerCwd,
+          1,
+          innerCwdUnknown,
+        ),
+      );
     }
   } else {
     // ── Dispatch to the known-command handler ─────────────────────────────
     const handler = COMMANDS[cmdName];
     if (handler) {
-      const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
+      ops.push(...handler(commandTokens.slice(1), cwd));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
 
-  // Append redirect-derived operations
-  ops.push(
-    ...redirectReads.map((p) => ({
-      virtualTool: 'read_file' as const,
-      filePath: p,
-    })),
-    ...redirectWrites.map((p) => ({
-      virtualTool: 'write_file' as const,
-      filePath: p,
-    })),
-  );
-
+  ops.push(...redirectOps);
   return ops;
 }
 
@@ -2063,8 +2356,7 @@ function resolveCdTargetCwd(
   cwd: string,
   cwdUnknown: boolean,
 ): CdResolution {
-  const words = tokenize(command);
-  extractRedirects(words, cwd);
+  const { words } = extractRedirects(tokenizeCommand(command), cwd);
 
   if (words[0] === 'popd') return { kind: 'dynamic' };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
