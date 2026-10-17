@@ -94,13 +94,17 @@ export class SseObserver {
               .map((line) => line.slice(5).trimStart())
               .join('\n');
             if (!data) continue;
+            const idRaw = lines
+              .find((line) => line.startsWith('id:'))
+              ?.slice(3)
+              .trim();
+            // Validate the cursor format before numeric conversion: a
+            // malformed id (1e0, 0x1, +2) coerces to a valid number and
+            // would mask the cursor-format regression the replay and
+            // continuity assertions rely on.
+            assert.match(idRaw ?? '', /^\d+$/);
             const frame = {
-              id: Number(
-                lines
-                  .find((line) => line.startsWith('id:'))
-                  ?.slice(3)
-                  .trim(),
-              ),
+              id: Number(idRaw),
               event:
                 lines
                   .find((line) => line.startsWith('event:'))
@@ -108,7 +112,6 @@ export class SseObserver {
                   .trim() ?? '',
               data: JSON.parse(data) as Record<string, unknown>,
             };
-            assert.match(String(frame.id), /^\d+$/);
             assert.equal(
               frame.id,
               frame.data['sequence'],

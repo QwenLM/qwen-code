@@ -88,8 +88,16 @@ final class HostedGateTestSupport {
             HarnessEventStream stream) implements AutoCloseable {
         @Override
         public void close() throws Exception {
-            stream.close();
-            client.close();
+            // Multi-resource semantics, preserved from the probes' nested
+            // try-with-resources: a failing stream close (a
+            // DaemonTransportException from the underlying input) must
+            // still close the client, or its scheduler, heartbeat and
+            // HTTP executors never shut down.
+            try {
+                stream.close();
+            } finally {
+                client.close();
+            }
         }
     }
 
