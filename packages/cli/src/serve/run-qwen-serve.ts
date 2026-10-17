@@ -2300,6 +2300,7 @@ async function loadServeRuntimeModules() {
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
     sessionExecutionEngineSelectorModule,
+    managedExecutionEngineModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -2315,6 +2316,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
     import('./session-execution-engine-selector.js'),
+    import('./managed-execution-engine.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -2347,6 +2349,8 @@ async function loadServeRuntimeModules() {
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
     createPairedExecutionEngines:
       sessionExecutionEngineSelectorModule.createPairedExecutionEngines,
+    createManagedExecutionEngine:
+      managedExecutionEngineModule.createManagedExecutionEngine,
   };
 }
 
@@ -5642,7 +5646,9 @@ async function runQwenServeImpl(
       generationGuard: primaryGenerationGuard,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
-    const channelFactory = runtime.createSpawnChannelFactory({
+    const channelFactoryOptions: NonNullable<
+      Parameters<typeof runtime.createSpawnChannelFactory>[0]
+    > = {
       processRegistry,
       childHeapPolicy,
       reclaimIdleChild: async (signal) => {
@@ -5665,7 +5671,10 @@ async function runQwenServeImpl(
       ...(acpChildExtraArgs(opts)
         ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
-    });
+    };
+    const channelFactory = runtime.createSpawnChannelFactory(
+      channelFactoryOptions,
+    );
     const statusProvider = runtime.createDaemonStatusProvider({
       env: runtimeEffectiveEnv,
     });
@@ -6215,6 +6224,17 @@ async function runQwenServeImpl(
           ? {
               executionEngines: runtime.createPairedExecutionEngines({
                 legacy: channelFactory,
+                managed: runtime.createManagedExecutionEngine({
+                  legacy: channelFactoryOptions,
+                  host: {
+                    workspaceCwd: boundWorkspace,
+                    workspaceTrusted: trustedWorkspace,
+                    environment: runtimeEffectiveEnv,
+                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    hasLiveMcpServers: () =>
+                      bridgeRef?.hasRuntimeMcpServers() === true,
+                  },
+                }),
                 runtimeBaseDir: primarySessionRuntimeBaseDir,
               }),
             }
