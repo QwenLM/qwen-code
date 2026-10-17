@@ -96,6 +96,7 @@ class ResidentWorkspaceProvisionerTest {
     @Test
     void logicalCloseIsAvailableOnlyForTheConfiguredResidentBinding() {
         var config = properties.getRuntimeBroker();
+        config.setPort(0);
         config.setProvisioner("kubernetes-workspace");
         config.setToken("inert-broker-token");
         config.setWorkspaceId("workspace");
