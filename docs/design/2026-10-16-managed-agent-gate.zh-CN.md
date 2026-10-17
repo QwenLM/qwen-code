@@ -48,6 +48,12 @@
 `event-transport-multi-node`。其他取值（包括不传）都运行全部检查项，因此发布与夜间
 路径不变。
 
+跳过 `mysql-integration` 也会跳过 Managed Agent Server 的 H2 单元测试，完整的这套
+测试只在该检查项里跑。fast 层中，Java 21 一条改为运行整个模块的单元测试，代替原来的
+Runtime Broker 子集。其中一部分测试要加载已构建的 Core 与 CLI JavaScript，所以这一条先执行与
+`mysql-integration` 相同的 workspace 安装。合计约多 16 分钟：ECS 池上安装约 5 分钟，
+测试约 11 分钟。
+
 ### 路径范围
 
 `.github/scripts/managed-agent-gate-scope.mjs` 匹配变更路径：

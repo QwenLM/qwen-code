@@ -109,12 +109,18 @@ describe('SDK Java self-hosted workflow guards', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
+    expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
       'mvn --batch-mode --no-transfer-progress clean test\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
         '            cd ../../managed-agent-server\n' +
-        `            mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        '            # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
+        '            if [ "${TIER}" = "fast" ]; then\n' +
+        '              mvn --batch-mode --no-transfer-progress clean test\n' +
+        '            else\n' +
+        `              mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        '            fi\n' +
         '          fi',
     );
   });
@@ -133,6 +139,39 @@ describe('SDK Java self-hosted workflow guards', () => {
       block.indexOf('clean test'),
     );
     expect(block).toContain(`'-Dtest=${brokerTestPattern}'`);
+    expect(block).toContain("TIER: '${{ inputs.tier }}'");
+    expect(hosted.run).toContain(
+      'if [ "${TIER}" = "fast" ]; then\n' +
+        '  mvn --batch-mode --no-transfer-progress clean test\n' +
+        'else\n' +
+        `  mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        'fi',
+    );
+  });
+
+  it('builds the JavaScript the full module suite loads before the fast tier runs it', () => {
+    const steps = parse(workflow).jobs.test.steps;
+    const names = steps.map((candidate) => candidate.name);
+    const build = steps.find(
+      (candidate) =>
+        candidate.name ===
+        'Build Managed Agent JavaScript prerequisites (fast tier)',
+    );
+    expect(build.if).toBe("${{ inputs.tier == 'fast' }}");
+    expect(build.run).toBe(
+      parse(workflow).jobs['mysql-integration'].steps.find(
+        (candidate) => candidate.name === 'Build native producer prerequisites',
+      ).run,
+    );
+    for (const later of [
+      'Run Java SDK tests (self-hosted)',
+      'Run Runtime Broker state tests',
+    ]) {
+      expect(names.indexOf(build.name)).toBeLessThan(names.indexOf(later));
+    }
+    expect(names.indexOf('Set up Node.js 22 (hosted)')).toBeLessThan(
+      names.indexOf(build.name),
+    );
   });
 
   it.skipIf(process.platform === 'win32').each([0, 23])(

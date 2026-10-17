@@ -186,6 +186,12 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
+      # The fast tier runs the full module suite below, which loads the built
+      # Core and CLI JavaScript, as mysql-integration's suite does.
+      - name: 'Build Managed Agent JavaScript prerequisites (fast tier)'
+        if: "${{ inputs.tier == 'fast' }}"
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
@@ -201,6 +207,7 @@ jobs:
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MATRIX_JAVA: '${{ matrix.java }}'
+          TIER: '${{ inputs.tier }}'
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
@@ -212,7 +219,12 @@ jobs:
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
             cd ../../managed-agent-server
-            mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+            # The fast tier skips mysql-integration, which owns the full H2 unit suite.
+            if [ "${TIER}" = "fast" ]; then
+              mvn --batch-mode --no-transfer-progress clean test
+            else
+              mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+            fi
           fi
 
       - name: 'Run Java SDK tests (hosted)'
@@ -228,9 +240,14 @@ jobs:
         shell: 'bash'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          TIER: '${{ inputs.tier }}'
         run: |-
           mvn --batch-mode --no-transfer-progress -f ../sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-          mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+          if [ "${TIER}" = "fast" ]; then
+            mvn --batch-mode --no-transfer-progress clean test
+          else
+            mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+          fi
 
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"

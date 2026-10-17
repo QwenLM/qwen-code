@@ -57,6 +57,13 @@ to the Linux Java 21 leg and skips `mysql-integration`, `hosted-harness-mysql`,
 including none, runs every lane, so the release and nightly paths are
 unchanged.
 
+Skipping `mysql-integration` would also skip the Managed Agent Server H2 unit
+suite, which only that lane runs in full. In the fast tier, the Java 21 leg
+runs the whole module suite in place of its Runtime Broker subset. Part of the
+suite loads the built Core and CLI JavaScript, so the leg first runs the same
+workspace install as `mysql-integration`. Together that adds about 16 minutes:
+5 for the install on the ECS pool, 11 for the tests.
+
 ### Path scope
 
 `.github/scripts/managed-agent-gate-scope.mjs` matches the changed paths:
