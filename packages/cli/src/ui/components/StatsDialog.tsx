@@ -44,6 +44,11 @@ const MAX_EMBEDDED_TOOL_ROWS = 5;
 // can't overestimate its available space and overflow the host view.
 const CODE_IMPACT_ROWS = 1;
 
+// Rows the dialog renders around the Session tab, subtracted from
+// sessionAvailableHeight: border (2) + padding (2) + tab bar (1) + two marginTops (2)
+// + hint row (1).
+const SESSION_CHROME_ROWS = 8;
+
 const StatsTabs: React.FC<{ activeTab: StatsTab; hint?: string }> = ({
   activeTab,
   hint,
@@ -122,6 +127,13 @@ interface StatsDialogProps {
    * Efficiency tab's model table is capped so it cannot overflow the host view.
    */
   availableHeight?: number;
+  /**
+   * Rows the host allows the whole dialog. When set, the Session tab clips to
+   * it and scrolls with up/down/pageup/pagedown. Separate from availableHeight
+   * so standalone /stats keeps the Efficiency tab uncapped, and unset for
+   * embedding hosts (the Settings dialog) that use the up key themselves.
+   */
+  sessionAvailableHeight?: number;
 }
 
 export const StatsDialog: React.FC<StatsDialogProps> = ({
@@ -129,6 +141,7 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
   width,
   isFocused = true,
   availableHeight,
+  sessionAvailableHeight,
 }) => {
   const [activeTab, setActiveTab] = useState<StatsTab>('session');
   const [rangeIndex, setRangeIndex] = useState(0);
@@ -251,7 +264,15 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
           />
 
           <Box marginTop={1}>
-            {activeTab === 'session' && <SessionTab />}
+            {activeTab === 'session' && (
+              <SessionTab
+                height={
+                  sessionAvailableHeight != null
+                    ? Math.max(3, sessionAvailableHeight - SESSION_CHROME_ROWS)
+                    : undefined
+                }
+              />
+            )}
             {activeTab !== 'session' && loading && (
               <Text color={theme.text.secondary}>{t('Loading stats...')}</Text>
             )}
