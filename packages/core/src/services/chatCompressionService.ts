@@ -25,7 +25,6 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -1336,22 +1335,21 @@ export class ChatCompressionService {
         // Since #14325 the composer folds these blocks (and the plan-mode /
         // subagent reminders) into the summary entry itself, so they live in
         // `extraHistory[0].parts[1..]` rather than in separate trailing
-        // entries. Measure them where they are: every part of the first entry
-        // except the summary text (already paid for by
-        // compressionOutputTokenCount), plus any entries after the ack. Do not
-        // infer "no attachments" from the entry count — both the composer and
-        // the degraded fallback above always emit 2 entries.
-        const [summaryEntry, , ...trailingEntries] = extraHistory;
+        // entries. The summary text itself is already paid for by
+        // compressionOutputTokenCount. A folded tool-call turn was subtracted
+        // with sideQueryBase only when its response was pending; otherwise its
+        // cost remains in originalTokenCount and adding it would count twice.
+        const [summaryEntry, ackEntry] = extraHistory;
         const restorationEntries: Content[] = [
           { role: 'user', parts: (summaryEntry?.parts ?? []).slice(1) },
-          ...trailingEntries,
+          ...(pendingToolResult
+            ? [{ role: 'model', parts: (ackEntry?.parts ?? []).slice(1) }]
+            : []),
         ];
-        const restorationChars = restorationEntries.reduce(
-          (acc, c) =>
-            acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
-          0,
+        newTokenCount += estimateContentTokens(
+          restorationEntries,
+          slimmingConfig.imageTokenEstimate,
         );
-        newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
       } else {
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(
           curatedHistory,

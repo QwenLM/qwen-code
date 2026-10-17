@@ -36,7 +36,7 @@ import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
-import { CHARS_PER_TOKEN, estimateContentTokens } from './tokenEstimation.js';
+import { estimateContentTokens } from './tokenEstimation.js';
 import {
   content,
   fnCall,
@@ -2788,11 +2788,9 @@ describe('ChatCompressionService.compress — folded post-compact shape (#14325)
     });
 
     const restorationTokens = (newHistory: Content[]) =>
-      Math.ceil(
-        slimmingModule.estimateContentChars(
-          { role: 'user', parts: (newHistory[0].parts ?? []).slice(1) },
-          0,
-        ) / CHARS_PER_TOKEN,
+      estimateContentTokens(
+        [{ role: 'user', parts: (newHistory[0].parts ?? []).slice(1) }],
+        0,
       );
 
     it('adds the folded restoration blocks to newTokenCount on the usage-reported path', async () => {
@@ -2825,6 +2823,62 @@ describe('ChatCompressionService.compress — folded post-compact shape (#14325)
       );
       expect(result.info.newTokenCount).toBeGreaterThan(181_000);
     });
+
+    it.each([false, true])(
+      'counts the folded tool call only when the side-query included it (pending result: %s)',
+      async (pending) => {
+        const trailingTurn = content(
+          'model',
+          { text: 'Writing the updated file.' },
+          fnCall(
+            'write_file',
+            { file_path: join(dir, 'big.ts'), content: 'x'.repeat(40_000) },
+            'write-14325',
+          ),
+        );
+        const pendingMessage = content(
+          'user',
+          fnResponse('write_file', { output: 'ok' }, 'write-14325'),
+        );
+        const spy = spySideQuery('SUMMARY 14325', usage(170_000, 500));
+        const result = await compressWith(
+          fakeChat([...history, userText('update it'), trailingTurn]),
+          fakeConfig({ extra: { getTargetDir: () => dir } }),
+          {
+            trigger: 'auto',
+            ...(pending ? { pendingUserMessage: pendingMessage } : {}),
+          },
+        );
+        expectCompressed(result);
+        const newHistory = result.newHistory!;
+        expect(JSON.stringify(newHistory[0])).toContain('MARKER_14325');
+        expect(newHistory[1].parts).toEqual([
+          { text: 'Got it. Thanks for the additional context!' },
+          ...trailingTurn.parts!,
+        ]);
+        const sideQueryParts = spy.mock.calls[0][1].contents.flatMap(
+          (turn) => turn.parts ?? [],
+        );
+        expect(
+          sideQueryParts.some(
+            (part) => part.functionCall?.id === 'write-14325',
+          ),
+        ).toBe(pending);
+        expect(estimateContentTokens([trailingTurn], 0)).toBeGreaterThan(
+          10_000,
+        );
+        const restored: Content[] = [
+          { role: 'user', parts: newHistory[0].parts!.slice(1) },
+          ...(pending ? [trailingTurn] : []),
+        ];
+        const pendingTokens = pending
+          ? estimateContentTokens([pendingMessage], 0)
+          : 0;
+        expect(result.info.newTokenCount).toBe(
+          11_500 + pendingTokens + estimateContentTokens(restored, 0),
+        );
+      },
+    );
   });
 
   it('keeps the narration text of a trailing model[text + functionCall] turn the side-query excluded (auto, no pending tool result)', async () => {
@@ -3120,6 +3174,9 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     expect(flat).toContain('<plan-mode-active>');
     expect(flat).toContain('<background-tasks>');
     expect(flat).toContain('agent-bg');
+    expect(result.newHistory![1].parts).toEqual([
+      { text: 'Got it. Thanks for the additional context!' },
+    ]);
   });
 });
 
