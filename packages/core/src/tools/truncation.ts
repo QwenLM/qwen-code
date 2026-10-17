@@ -506,7 +506,10 @@ export async function truncateLlmContent(
 export function isAlreadyTruncated(content: string): boolean {
   return (
     content.includes('... [CONTENT TRUNCATED] ...') ||
-    content.startsWith('<persisted-output>')
+    content.startsWith('<persisted-output>') ||
+    // A JSON-sample envelope leads with this sentinel and carries no
+    // `[CONTENT TRUNCATED]` marker. startsWith, not includes: see above.
+    content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)
   );
 }
 

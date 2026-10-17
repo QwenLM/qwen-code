@@ -10,6 +10,7 @@ import {
   truncateAndSaveToFile,
   truncateToolOutput,
   truncateLlmContent,
+  isAlreadyTruncated,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
   PREVIEW_SIZE_CHARS,
   persistAndTruncateToolResult,
@@ -258,6 +259,29 @@ describe('truncateAndSaveToFile', () => {
       content,
       expect.any(Object),
     );
+  });
+
+  it('reports a JSON-sample envelope as already truncated', async () => {
+    // The sample replaces both the head/tail preview and the description that
+    // carried the marker, so the scheduler's persistence gate — which keys off
+    // isAlreadyTruncated — has only the leading sentinel to go on. Without it
+    // the gate persists an already-bounded result a second time.
+    const content = JSON.stringify({
+      rows: Array.from({ length: 5000 }, (_, index) => ({ index })),
+    });
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'json-envelope',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      PREVIEW_SIZE_CHARS,
+    );
+
+    expect(result.content).not.toContain('... [CONTENT TRUNCATED] ...');
+    expect(isAlreadyTruncated(result.content)).toBe(true);
   });
 
   it('keeps a caller-requested JSON preview budget instead of a 2k sample', async () => {
