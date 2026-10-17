@@ -544,6 +544,7 @@ describe('SDK Java fast tier', () => {
     expect(skipped).toEqual([
       'event-transport-broker',
       'event-transport-multi-node',
+      'hosted-failover-e2e',
       'hosted-harness-mysql',
       'mysql-integration',
     ]);
