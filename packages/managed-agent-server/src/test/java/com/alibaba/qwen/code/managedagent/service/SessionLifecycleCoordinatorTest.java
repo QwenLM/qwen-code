@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
@@ -320,6 +321,43 @@ class SessionLifecycleCoordinatorTest {
         assertThatThrownBy(() -> transactions.execute(ignored -> world.store.beginChildClose("tenant", world.session,
                 world.child, "wrong-run", "actor", "spoof", "digest", true)))
                 .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
+    }
+
+    // #14387: a Turn parked by the recovery-blocked mark is evidence, not
+    // live work — the child's close admission must not refuse the Session
+    // for it, or the relay's blocked settlement could never land (P1
+    // review finding on #14461).
+    @Test
+    void childCloseAdmitsASessionWhoseOnlyTurnIsRecoveryBlocked() {
+        World world = closingWorld("blocked-close-");
+        var transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(world.jdbc.getDataSource()));
+        var turn = transactions.execute(ignored -> world.store
+                .insertTurnCommand("tenant", "SUBMIT_TURN", "blocked-turn",
+                        "digest-turn", world.child,
+                        List.of(Map.of("type", "text", "text", "work")),
+                        "digest-payload"));
+        transactions.execute(ignored -> world.store.claimTurn("tenant",
+                world.child, turn.turnId(), "owner", Duration.ofMinutes(1)));
+        Boolean marked = transactions.execute(ignored -> world.store
+                .markTurnRecoveryBlocked("tenant", world.child, turn.turnId(),
+                        "owner", AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                        "lost generation"));
+        assertThat(marked).isTrue();
+
+        var admitted = transactions.execute(ignored -> world.store
+                .beginChildClose("tenant", world.session, world.child,
+                        "run-1", "actor", "blocked-child-close", "digest",
+                        true));
+
+        assertThat(admitted.operation().sessionId()).isEqualTo(world.child);
+        assertThat(admitted.operation().state()).isEqualTo("PENDING");
+        // The mark still stands — the close exempts the parked Turn from
+        // its gate, it never rewrites it.
+        assertThat(world.store
+                .findTurn("tenant", world.child, turn.turnId()).get()
+                .errorCode())
+                .isEqualTo(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED);
     }
 
     private static void liveScope(World world, String resourceBody) {

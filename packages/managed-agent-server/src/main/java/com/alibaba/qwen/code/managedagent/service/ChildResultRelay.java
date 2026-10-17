@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
@@ -899,6 +900,20 @@ public class ChildResultRelay {
         String turnId = turn.turnId();
         long completedAt = turn.completedAt() == null ? 0L
                 : turn.completedAt();
+        // #14387: the coordinator refused to re-drive this workflow Turn —
+        // the Harness generation running it was lost and the in-process
+        // run's outcome stays unwitnessed. Settle the record blocked and
+        // classify unknown: never re-executed, never failed as if its
+        // outcome were observed. A CANCELLING Turn keeps its mark but is
+        // the coordinator's in-flight cancel — its real end is the user's
+        // cancel settlement, so the blocked branch waits it out.
+        if (!TERMINAL_TURNS.contains(status)
+                && !"CANCELLING".equals(status)
+                && AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(
+                        turn.errorCode())) {
+            settleRecoveryBlocked(row, now);
+            return;
+        }
         boolean journalTurn = false;
         Integer messageCount = null;
         if ("COMPLETED".equals(status) || "CANCELLED".equals(status)
@@ -1023,6 +1038,35 @@ public class ChildResultRelay {
                     now + HEARTBEAT_MS,
                     now + LEASE_MS, now);
         }
+    }
+
+    /**
+     * #14387: the workflow child whose Harness generation was lost. The
+     * execution's outcome is unwitnessed, so the record settles blocked —
+     * {@code recovery_blocked} over {@code outcome_unknown} — never
+     * re-executed, never failed as if observed. The close rides the same
+     * capability rules as a failure's, and the ledger classifies unknown:
+     * no result was ever proven.
+     */
+    private void settleRecoveryBlocked(RelayRow row, long now) {
+        boolean closed = closeFinishedChild(row, now);
+        // The workflow child shares the parent's workspace, so no merge is
+        // owed — but the check is the settlement's, not the kind's: a
+        // future isolated workflow child must wait for its discard here.
+        if (!childWorkspaceFinished(row, false)) {
+            awaitMerge(row, now);
+            return;
+        }
+        Map<String, Object> blocked = new LinkedHashMap<>();
+        blocked.put("operationId", UUID.randomUUID().toString());
+        blocked.put("kind", "recovery_blocked");
+        blocked.put("childRunId", row.childRunId());
+        blocked.put("childSessionId", row.childSessionId());
+        blocked.put("reason", "runtime_lost");
+        harness.runChildOperation(row.tenantId(), row.parentSessionId(),
+                blocked);
+        finishOrRetainDebt(row, row.childSessionId(), closed, "unknown",
+                "workflow Turn recovery blocked", now);
     }
 
     /**
