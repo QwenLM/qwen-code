@@ -104,20 +104,27 @@ class HostedHookFaultGatesIT {
         int generation = generation(session);
 
         replaceHarness();
-        // The replacement's load answers the dead Harness's call; the next
-        // prompt's admission reconciles the Hook record from the worker's
-        // receipt. While the command still holds, that admission is refused
-        // (409) exactly as the issue pins, so the probe must accept the
-        // refusal and then observe the settled record.
-        submitAllowingRefusal(session, "FG13_AFTER");
-        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
-        assertThat(hookExecution(session).path("resultRef").isNull()).isFalse();
-        assertThat(events("hook.call")).hasSize(1);
-        assertThat(running(hook)).isFalse();
-        assertThat(running(child)).isFalse();
-        assertHookUnitsEmpty();
+        // The public POST can be refused by the control plane's active-Turn
+        // check before it reaches the Harness, so it is a refusal probe, not
+        // the reconciliation trigger.
+        submitRefused(session, "FG13_AFTER");
+        waitFor(() -> assertThat(events("hook.allow")).hasSize(1));
+        waitFor(() -> assertThat(running(hook)).isFalse());
+        waitFor(() -> assertThat(running(child)).isFalse());
         assertThat(worker(session)).isEqualTo(worker);
         assertThat(generation(session)).isEqualTo(generation);
+        // The DELETE drains the Hook through the replacement Harness and
+        // settles the record from the original worker's receipt; it is the
+        // explicit reconciliation path the issue names.
+        JsonNode delete = api("DELETE", "/v1/agents/sessions/" + session, null, "delete", 202);
+        String operation = delete.path("id").asText();
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+                null, null, 200).path("status").asText()).isEqualTo("completed"));
+        assertThat(hookExecution(session).path("resultRef").isNull()).isFalse();
+        assertThat(events("hook.call")).hasSize(1);
+        assertThat(events("hook.allow")).hasSize(1);
+        assertHookUnitsEmpty();
         assertThat(modelFailure.get()).isNull();
     }
 
@@ -132,6 +139,7 @@ class HostedHookFaultGatesIT {
             assertThat(events("hook.call")).hasSize(1);
             assertThat(events("hook.child")).hasSize(1);
         });
+        assertThat(events("hook.allow")).isEmpty();
         JsonNode hook = events("hook.call").getFirst();
         JsonNode child = events("hook.child").getFirst();
         JsonNode worker = worker(session);
@@ -145,6 +153,7 @@ class HostedHookFaultGatesIT {
             assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
         });
         assertThat(events("hook.call")).hasSize(1);
+        assertThat(events("hook.allow")).isEmpty();
         // The worker loss is the accepted H2 limit: the command and its
         // descendant outlive the worker with no owner, receipt or timer.
         assertThat(running(hook)).isTrue();
@@ -300,10 +309,10 @@ class HostedHookFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202).path("turn_id").asText();
     }
 
-    /** The post-kill admission may be refused while the Hook still runs. */
-    private void submitAllowingRefusal(String session, String prompt) throws Exception {
+    /** The post-kill admission is refused while the Hook still runs. */
+    private void submitRefused(String session, String prompt) throws Exception {
         api("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message",
-                "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202, 409);
+                "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 409);
     }
 
     private JsonNode hookExecution(String session) {

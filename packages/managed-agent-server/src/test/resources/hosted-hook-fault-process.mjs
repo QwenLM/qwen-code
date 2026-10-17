@@ -69,7 +69,9 @@ if (mode === 'child') {
   if (Number.isFinite(holdMs) && holdMs >= 0) {
     await new Promise((resolve) => setTimeout(resolve, holdMs));
   } else {
-    setInterval(() => {}, 1000);
+    // An indefinite hold must suspend this branch: setInterval alone keeps
+    // the process alive but lets execution fall through to the allow.
+    await new Promise(() => setInterval(() => {}, 1000));
   }
   // The runner knows a finished command only when its unit is empty, so the
   // fixture's own descendant has to die before the allow is written.
@@ -77,6 +79,7 @@ if (mode === 'child') {
     child.kill('SIGKILL');
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
+  record('hook.allow');
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {
