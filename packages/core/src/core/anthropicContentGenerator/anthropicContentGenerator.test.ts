@@ -1615,6 +1615,91 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
+    it('fills an empty signature for unsigned history through a strict non-4.6 proxy', async () => {
+      // Pre-4.6 model through a non-native, non-DeepSeek proxy: the strict
+      // backend (verified against SGLang v0.5.19, #11772; llama.cpp/vLLM
+      // expected to behave the same but untested) accepts an empty
+      // signature, so we fill `signature: ''` instead of shipping a
+      // `thinking` block with no `signature` field (HTTP 400). Unlike 4.6+
+      // the block is NOT dropped, and unlike the native API it IS rewritten.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const request = (
+        await send(
+          nativeCfg('claude-opus-4-5', {
+            baseUrl: 'https://internal-proxy.example/anthropic',
+          }),
+          { contents: unsignedThinkingConversation },
+        )
+      ).req;
+
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'unsigned reasoning', signature: '' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('fills an empty signature for unsigned history when the request has thinking off', async () => {
+      // The #11772 repro shape: forked consumers (auto-memory extraction,
+      // prompt suggestions, skill review) send
+      // `thinkingConfig: { includeThoughts: false }`, so the outgoing
+      // request carries no `thinking` parameter at all — yet they replay
+      // history whose thinking blocks never got a signature. The fill must
+      // repair those blocks independent of the outgoing `thinking` config.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const request = (
+        await send(
+          nativeCfg('claude-opus-4-5', {
+            baseUrl: 'https://internal-proxy.example/anthropic',
+          }),
+          {
+            contents: unsignedThinkingConversation,
+            config: { thinkingConfig: { includeThoughts: false } },
+          },
+        )
+      ).req;
+
+      expect(request.thinking).toBeUndefined();
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'unsigned reasoning', signature: '' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('leaves unsigned history byte-identical for 4.6 through a proxy when thinking is off', async () => {
+      // 4.6+ quadrant with thinking off: the fill is excluded (that
+      // quadrant is owned by `dropUnsignedAssistantThinking`), and the drop
+      // does not run either (it requires the outgoing `thinking`) — so the
+      // block ships exactly as it did before this PR: unsigned. The two
+      // passes stay disjoint, so the 4.6+ wire shape never changes.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const request = (
+        await send(
+          nativeCfg('claude-opus-4-6', {
+            baseUrl: 'https://internal-proxy.example/anthropic',
+          }),
+          {
+            contents: unsignedThinkingConversation,
+            config: { thinkingConfig: { includeThoughts: false } },
+          },
+        )
+      ).req;
+
+      expect(request.thinking).toBeUndefined();
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'unsigned reasoning' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
     it('fails before sending an unsigned tool-use turn through a proxy', async () => {
       const toolUseConversation = [
         userText('Run tool'),
