@@ -68,6 +68,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   createDaemonTranscriptState,
+  findDaemonRewindUserBlock,
   DaemonHttpError,
   getSessionUpdatePayload,
   isDaemonTurnError,
@@ -767,6 +768,7 @@ interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  bindBlockId?: string;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -11648,6 +11650,7 @@ export function App({
       files?: PromptFile[],
       opts?: {
         optimisticUserMessage?: boolean;
+        bindBlockId?: string;
         retry?: boolean;
         // Skips prepareSubmit without daemon retry semantics; used
         // by the failed-prompt retry, whose user message was never
@@ -11941,6 +11944,7 @@ export function App({
             ? preparedInputAnnotations
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
+        ...(opts?.bindBlockId ? { bindBlockId: opts.bindBlockId } : {}),
         retry: opts?.retry,
         ...(opts?.beforeDispatch
           ? { beforeDispatch: opts.beforeDispatch }
@@ -12407,6 +12411,8 @@ export function App({
     let admissionStarted = false;
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
+      // The failed attempt appended this block but never got it bound.
+      bindBlockId: failed.messageId,
       skipPrepareSubmit: true,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
@@ -17006,9 +17012,18 @@ export function App({
             }
             const { snapshots } = await sessionActions.getRewindSnapshots();
             assertTarget();
-            const snapshot = snapshots.find(
-              (entry) => entry.turnIndex === turnIndex,
-            );
+            const current = getLatestUserBlock(store.getSnapshot().blocks);
+            const matches =
+              current?.promptId &&
+              findDaemonRewindUserBlock(
+                store.getSnapshot().blocks,
+                current.promptId,
+              )?.id === current.id
+                ? snapshots.filter(
+                    (entry) => entry.daemonPromptId === current.promptId,
+                  )
+                : [];
+            const snapshot = matches.length === 1 ? matches[0] : undefined;
             if (!snapshot) throw new Error(t('rewind.empty'));
             rewindStarted = true;
             await sessionActions.rewindSession(snapshot.promptId, {
@@ -18797,7 +18812,19 @@ export function App({
         // it reached the model has no snapshot of its own, and the newest one
         // then belongs to the turn before it.
         const newest = snapshots[snapshots.length - 1];
-        if (!newest || newest.turnIndex !== bareTurnIndex()) return;
+        const blocks = store.getSnapshot().blocks;
+        const current = getLatestUserBlock(blocks);
+        if (
+          bareTurnIndex() === undefined ||
+          !newest?.daemonPromptId ||
+          !current?.promptId ||
+          newest.daemonPromptId !== current.promptId ||
+          findDaemonRewindUserBlock(blocks, current.promptId)?.id !==
+            current.id ||
+          snapshots.filter((entry) => entry.daemonPromptId === current.promptId)
+            .length !== 1
+        )
+          return;
         target = newest.promptId;
         await sessionActions.rewindSession(target, {
           rewindFiles: false,

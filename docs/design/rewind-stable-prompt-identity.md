@@ -26,13 +26,14 @@ its model-facing prompt.
 - Return `-1` when the id is missing or duplicated on either side rather than
   guessing with positional alignment.
 - Name the cause of that refusal. An identified turn in the retained region
-  that does not resolve — for example after a retry, which re-sends the prompt
-  unmarked — reports that it no longer matches the model history, not that it
-  was compressed.
-- Retain the existing positional mapping only for legacy turns without an id.
+  that does not resolve reports that it no longer matches the model history,
+  not that it was compressed.
+- Recover a legacy turn's rewind identity from its source record, or refuse it;
+  do not align independently counted histories.
 
-The existing compression guard continues to reject turns that were absorbed
-by a marker-less compressed prefix.
+An absorbed turn has no matching identity after the compressed prefix and is
+rejected. A uniquely identified retained turn can still resolve without a UI
+compression marker.
 
 ## Identity lifecycle
 
@@ -64,6 +65,71 @@ A checkpoint written before this change has no such array: its file keys remain
 usable for file-only restore, but conversation rewind fails closed instead of
 applying positional alignment to identified turns.
 
+## Legacy compatibility (#9437)
+
+For an ordinary persisted user record without `promptId`, derive the rewind key
+`legacy-record:<uuid>` from its existing record UUID. Both resume projections
+use the same core routine. The visible item carries this key as `rewindId`,
+separate from `promptId`: a record UUID is not a file-checkpoint identity and
+must never authorize file restore. No transcript schema or new ID counter is
+needed. Persisted prompt IDs remain preferred.
+
+Resolve only a unique key in both retained representations. Missing source
+UUIDs, missing model metadata, and duplicated keys refuse before mutation.
+This also covers raw old compression/checkpoint snapshots that have no identity
+sidecar: do not infer which source record produced an entry from its text or
+position. Records appended after such a snapshot can still resolve. Existing
+compression/checkpoint sidecars preserve recovered keys when newly written.
+
+Hidden notifications, tool results, and synthetic continuations do not acquire
+an ordinary user record's key. Their text cannot move a linked target's cut.
+The compatibility check must include the genuine placeholder-text prompt that
+previously stayed in model history after the visible turn was removed.
+
+Ink resolves the recorded boundary independently by the same source key, not
+the visible turn count. An ordinary image-only record may have no visible user
+row but must not shift the retained recording branch. Missing or duplicated
+recorded associations refuse before mutation when recording is enabled.
+
+ACP selects targets by their snapshot identity, not a second classification of
+model text. It resolves the recorder's complete-branch boundary by that same
+prompt ID: retries can add snapshots without adding recorded user turns, so a
+snapshot index is not a recorder index. The derived association survives full
+and selective cold restore; missing or duplicated recorded identities refuse.
+When chat recording is disabled, no recorded boundary is required; the unique
+snapshot/model association still permits rewind without a recording write.
+Without snapshots, the model's retained turn ordinals cannot safely
+identify the recorder's complete-branch ordinals, so ACP conversation rewind
+refuses rather than guessing. Only the initial ordinary
+prompt send acquires its prompt identity; retry and interrupted-prompt resend
+reuse the sole identity of the entries actually stripped from history, while
+tool/automatic continuations do not acquire one.
+Unavailable or ambiguous associations refuse before changing conversation,
+files, or recording. Snapshot-list eligibility follows the same resolver.
+ACP history rollback carries each entry's `rewindId` through JSON and removes
+that transport metadata before restoring model content. Existing clients
+already echo the history array, so no new option or client-side counter is needed.
+
+Daemon-backed interfaces use the existing admitted `daemonPromptId` to associate
+each eligible snapshot with its visible user message. The catalog and rewind
+notification carry that association; `turnIndex` remains the raw snapshot
+position, including retry gaps and compressed prefixes. Recorder projections
+recover the association from existing records. With recording disabled, ACP
+retains it only for live file-history snapshots. Optimistic messages bind to
+their exact block when admission returns. WebShell and VS Code require a unique
+association before requesting rewind; missing or ambiguous associations are
+unavailable, not positional guesses. The SDK truncates the matching user block
+and its suffix, excluding injected owner-sharing rows. Legacy notifications
+without this association retain the old numeric interpretation for older
+producers; they are not used to authorize editing in the updated interfaces.
+
+Acceptance requires the same legacy fixture to cut at its source record,
+identified turns to keep resolving, unlinked/ambiguous targets to refuse, and
+resume/compression plus both live Ink and ACP entrances to obey these rules.
+OpenTUI's currently unconnected rewind selector is not wired by this change;
+its dormant positional helper is separate follow-up cleanup, not an authority
+for a live rewind operation.
+
 ## Scope
 
 This change supplies stable turn identity to TUI rewind and the persistence
@@ -76,11 +142,7 @@ OpenTUI seeds its prompt counter past identities claimed by a resumed
 transcript before minting a new id. Although OpenTUI has no rewind surface of
 its own, those ids are persisted and may later be consumed by Ink rewind.
 
-The change deliberately leaves out widening the seed past retained file-history
-snapshot keys. The refusal
-above fires only when two snapshots share a key. If a turn minted after
-resume re-wears the key of a snapshot that a conversation-only rewind left
-behind, and writes no files itself, a code restore of that turn resolves to
-the older snapshot. The seed that preceded this change counted user records
-only, so live turns already had this exposure; it is accepted as a residual
-risk and tracked in #11408.
+Seeding past retained file-history snapshot keys is handled separately by
+#13729 for #11408. That merged companion prevents a resumed turn from reusing
+a snapshot key left behind by conversation-only rewind; it is not duplicated
+in this change.

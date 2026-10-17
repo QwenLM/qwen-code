@@ -19,13 +19,12 @@ import type {
   GoalStateCause,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
-import {
-  getToolResponseDisplayText,
-  isGoalCheckpointBookkeepingRecord,
-  parseGoalStateRecordPayloadV2,
-  projectUserTranscriptForDisplay,
-  computeInitialTurnFromHistory,
-} from '@qwen-code/qwen-code-core';
+import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
+import { isGoalCheckpointBookkeepingRecord } from '@qwen-code/qwen-code-core/goals/goal-card.js';
+import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
+import { projectUserTranscriptForDisplay } from '@qwen-code/qwen-code-core/utils/transcript-records.js';
+import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
+import { getRecordRewindId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -272,6 +271,7 @@ function convertToHistoryItems(
       typeof record.promptId === 'string' && record.promptId.length > 0
         ? record.promptId
         : undefined;
+    const rewindId = promptId ? undefined : getRecordRewindId(record);
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -454,6 +454,7 @@ function convertToHistoryItems(
               type: 'user',
               text,
               ...(promptId ? { promptId } : {}),
+              ...(rewindId ? { rewindId } : {}),
             });
           }
 
@@ -492,6 +493,7 @@ function convertToHistoryItems(
             type: 'user',
             text,
             ...(promptId ? { promptId } : {}),
+            ...(rewindId ? { rewindId } : {}),
           });
         }
         break;
