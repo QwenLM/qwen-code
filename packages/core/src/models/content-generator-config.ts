@@ -280,8 +280,10 @@ function buildInheritedAgentContentGeneratorConfig(
     nextConfig.model !== parentConfig.model ||
     (authOverrides.baseUrl !== undefined &&
       authOverrides.baseUrl !== parentConfig.baseUrl)
-  )
+  ) {
     nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
+    nextConfig.autoCompactThreshold = undefined;
+  }
   nextConfig.baseUrl =
     authOverrides.baseUrl ??
     resolveCredentialField(
@@ -386,7 +388,8 @@ function applyResolvedModelConfig(
     if (
       registryValue !== undefined ||
       field === 'thinkingMandatory' ||
-      field === 'enableRequestMetadata'
+      field === 'enableRequestMetadata' ||
+      field === 'autoCompactThreshold'
     ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;

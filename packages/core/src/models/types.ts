@@ -64,6 +64,7 @@ export type ModelGenerationConfig = Pick<
   | 'extra_body'
   | 'thinkingMandatory'
   | 'contextWindowSize'
+  | 'autoCompactThreshold'
   | 'modalities'
   | 'splitToolMedia'
   | 'toolResultContentFormat'

@@ -1133,6 +1133,63 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getGenerationConfig().model).toBe('custom-model');
   });
 
+  it('replaces auto-compaction overrides across registered model switches', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          { id: 'large', generationConfig: { autoCompactThreshold: 0.25 } },
+          { id: 'small' },
+        ],
+        anthropic: [{ id: 'other-provider' }],
+      },
+    });
+
+    expect(
+      (await switchOpenAI(modelsConfig, 'large')).autoCompactThreshold,
+    ).toBe(0.25);
+    expect(
+      (await switchOpenAI(modelsConfig, 'small')).autoCompactThreshold,
+    ).toBeUndefined();
+    await switchOpenAI(modelsConfig, 'large');
+    await modelsConfig.switchModel(AuthType.USE_ANTHROPIC, 'other-provider');
+    expect(
+      modelsConfig.getGenerationConfig().autoCompactThreshold,
+    ).toBeUndefined();
+  });
+
+  it('clears a provider auto-compaction override when selecting a raw model', async () => {
+    const modelsConfig = openaiConfig([
+      { id: 'large', generationConfig: { autoCompactThreshold: 0.25 } },
+    ]);
+    await switchOpenAI(modelsConfig, 'large');
+
+    await modelsConfig.setModel('raw-model');
+
+    expect(
+      modelsConfig.getGenerationConfig().autoCompactThreshold,
+    ).toBeUndefined();
+    expect(
+      modelsConfig.getGenerationConfigSources()['autoCompactThreshold'],
+    ).toBeUndefined();
+  });
+
+  it('preserves an explicit auto-compaction setting across raw model switches', async () => {
+    const source = settingsSrc('model.generationConfig.autoCompactThreshold');
+    const modelsConfig = openaiConfig(
+      [],
+      { model: 'raw-a', autoCompactThreshold: 0.4 },
+      { autoCompactThreshold: source },
+    );
+
+    await modelsConfig.setModel('raw-b');
+
+    expect(modelsConfig.getGenerationConfig().autoCompactThreshold).toBe(0.4);
+    expect(
+      modelsConfig.getGenerationConfigSources()['autoCompactThreshold'],
+    ).toEqual(source);
+  });
+
   it('recomputes raw model modalities instead of carrying provider multimodal defaults', async () => {
     const modelsConfig = openaiConfig([
       entry(
@@ -1624,6 +1681,48 @@ describe('ModelsConfig', () => {
       expect(gc.samplingParams?.temperature).toBe(0.7);
       expect(gc.samplingParams?.max_tokens).toBe(2000);
     });
+
+    it.each([undefined, 0.6])(
+      'restores the runtime auto-compaction threshold %s and its source',
+      async (autoCompactThreshold) => {
+        const source = settingsSrc(
+          'model.generationConfig.autoCompactThreshold',
+        );
+        const modelsConfig = openaiConfig(
+          [{ id: 'large', generationConfig: { autoCompactThreshold: 0.25 } }],
+          {
+            model: 'runtime-model',
+            apiKey: 'runtime-key',
+            baseUrl: API_URL,
+            ...(autoCompactThreshold === undefined
+              ? {}
+              : { autoCompactThreshold }),
+          },
+          {
+            ...testSources(),
+            ...(autoCompactThreshold === undefined
+              ? {}
+              : { autoCompactThreshold: source }),
+          },
+        );
+        const snapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+        expect(snapshotId).toBe('$runtime|openai|runtime-model');
+        await switchOpenAI(modelsConfig, 'large');
+
+        await modelsConfig.switchToRuntimeModel(snapshotId!);
+
+        expect(modelsConfig.getGenerationConfig().autoCompactThreshold).toBe(
+          autoCompactThreshold,
+        );
+        expect(
+          modelsConfig.getGenerationConfigSources()['autoCompactThreshold'],
+        ).toEqual(autoCompactThreshold === undefined ? undefined : source);
+        await modelsConfig.setModel('another-raw-model');
+        expect(modelsConfig.getGenerationConfig().autoCompactThreshold).toBe(
+          autoCompactThreshold,
+        );
+      },
+    );
 
     it('should throw error when switching to non-existent runtime snapshot', async () => {
       const modelsConfig = new ModelsConfig({

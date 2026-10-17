@@ -7448,6 +7448,8 @@ export class Config {
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
+      this.contentGeneratorConfig.autoCompactThreshold =
+        config.autoCompactThreshold;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
       // Read by the DashScope metadata gate off this same object, so a
@@ -7501,6 +7503,10 @@ export class Config {
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
           sources['contextWindowSize'];
+      }
+      if ('autoCompactThreshold' in sources) {
+        this.contentGeneratorConfigSources['autoCompactThreshold'] =
+          sources['autoCompactThreshold'];
       }
       if ('splitToolMedia' in sources) {
         this.contentGeneratorConfigSources['splitToolMedia'] =
@@ -11441,10 +11447,17 @@ export class Config {
     return this.chatCompression;
   }
 
-  getAutoCompactThreshold(): number | undefined {
-    const threshold = this.autoCompactThreshold;
-    if (typeof threshold === 'number' && threshold > 0 && threshold <= 1) {
-      return threshold;
+  getAutoCompactThreshold(
+    generationConfig = this.getContentGeneratorConfig() ??
+      this.modelsConfig.getGenerationConfig(),
+  ): number | undefined {
+    for (const threshold of [
+      generationConfig.autoCompactThreshold,
+      this.autoCompactThreshold,
+    ]) {
+      if (typeof threshold === 'number' && threshold > 0 && threshold <= 1) {
+        return threshold;
+      }
     }
     return undefined;
   }

@@ -179,6 +179,8 @@ export type ContentGeneratorConfig = {
   // Context window size override. If set to a positive number, it will override
   // the automatic detection. Leave undefined to use automatic detection.
   contextWindowSize?: number;
+  // Local compaction preference; not a provider request parameter.
+  autoCompactThreshold?: number;
   // Custom HTTP headers to be sent with requests
   customHeaders?: Record<string, string>;
   // Extra body parameters to be merged into the request body

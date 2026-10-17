@@ -466,6 +466,13 @@ export class ModelsConfig {
    * support and send unsupported inline media.
    */
   private applyRawModelDerivedDefaults(modelId: string): void {
+    if (
+      this.generationConfigSources['autoCompactThreshold']?.kind ===
+      'modelProviders'
+    ) {
+      delete this._generationConfig.autoCompactThreshold;
+      delete this.generationConfigSources['autoCompactThreshold'];
+    }
     if (this.shouldUpdateModelDerivedDefault('modalities')) {
       this._generationConfig.modalities = defaultModalities(modelId);
       this.generationConfigSources['modalities'] = {
@@ -1394,6 +1401,14 @@ export class ModelsConfig {
       }
 
       // Apply generation config
+      this._generationConfig.autoCompactThreshold =
+        runtimeModelSnapshot.generationConfig?.autoCompactThreshold;
+      if (runtimeModelSnapshot.sources['autoCompactThreshold']) {
+        this.generationConfigSources['autoCompactThreshold'] =
+          runtimeModelSnapshot.sources['autoCompactThreshold'];
+      } else {
+        delete this.generationConfigSources['autoCompactThreshold'];
+      }
       if (runtimeModelSnapshot.generationConfig) {
         Object.assign(
           this._generationConfig,
