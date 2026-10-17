@@ -254,9 +254,14 @@ jobs:
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
       needs.authorize.outputs.should_review == 'true'
-    # Stays on hosted: the environment wait timer would otherwise idle a self-hosted ECS slot for the whole wait (GitHub allocates the runner before evaluating the environment timer).
-    runs-on: 'ubuntu-latest'
-    # Wait timer is configured in repo settings (Settings → Environments → qwen-pr-review-delay), currently 10 minutes.
+    # Checks out nothing, runs no repository code and holds only a read-only
+    # token, so the persistent ECS pool is safe and skips the saturated hosted
+    # queue. The environment wait timer below does not hold a runner: GitHub
+    # assigns one only once the timer elapses (run 38656917461: job created
+    # 23:54:53, set up 23:59:56, finished two seconds later).
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Wait timer is configured in repo settings (Settings → Environments → qwen-pr-review-delay), currently 5 minutes.
     environment:
       name: 'qwen-pr-review-delay'
       deployment: false

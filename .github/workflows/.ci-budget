@@ -1,9 +1,10 @@
 # PR-stage limits: jobs, declared timeout-minutes, jobs without fixed timeout, file.
 # Update the corresponding entry when intentionally increasing a budget.
 1 5 0 assign-pr-owner.yml
-8 180 5 ci.yml
+8 300 4 ci.yml
 4 90 1 live-host-release.yml
 1 30 0 live-host.yml
+3 15 1 managed-agent-gate.yml
 2 45 0 mobile-shell.yml
 1 20 0 pnpm-worktree-smoke.yml
 1 5 0 pr-force-push-reminder.yml

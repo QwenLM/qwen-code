@@ -21,7 +21,7 @@ const windowsRun = [
   `node -e "const r = require('./integration-tests/hosted-process-suite.json'); if (r.numTotalTests === 0 || r.numPassedTests !== r.numTotalTests) { console.error('::error::' + r.numPassedTests + ' of ' + r.numTotalTests + ' Hosted cases passed; Windows must run every case'); process.exit(1); }"`,
 ].join('\n');
 
-// One row per failover arm the Hosted MySQL job runs: step name, npm
+// One row per failover arm the Hosted failover job runs: step name, npm
 // script, and the runner flags that make the row a different arm.
 const failoverArms = [
   [
@@ -38,6 +38,11 @@ const failoverArms = [
     'Run session owner failover E2E',
     'test:e2e:managed-session-failover',
     ['--session-failover'],
+  ],
+  [
+    'Run long-answer persistence E2E',
+    'test:e2e:managed-big-output',
+    ['--big-output'],
   ],
   [
     'Run Harness-restart session failover E2E',
@@ -199,7 +204,7 @@ describe('Hosted real-process gates', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
-    expect(job.if).toBeUndefined();
+    expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
     expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
       /^mariadb:/,
     );
@@ -262,6 +267,21 @@ describe('Hosted real-process gates', () => {
     );
     expect(mariadbRun.run).toContain('-Pmysql-integration');
     expect(mariadbRun.run).not.toContain('-Dit.test');
+    // The H2 unit suite runs once, in the MariaDB job: the Hosted job's three
+    // Maven steps would each repeat it, and the MariaDB job must keep it.
+    const profile = (id) =>
+      pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
+    const skipsUnits =
+      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration><skipTests>true<\/skipTests><\/configuration>/;
+    for (const id of [
+      'hosted-harness-mysql',
+      'hosted-harness-gates',
+      'o4-mysql-gates',
+    ]) {
+      expect(profile(id), id).toMatch(skipsUnits);
+    }
+    expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
+    expect(mariadbRun.run).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
     // Those checks read only the command lines, so each job also compares
     // the reports of its run with the source tree, right after its last
     // integration-test step.
@@ -310,6 +330,16 @@ describe('Hosted real-process gates', () => {
     );
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
+    // The admission and O4 steps both run `clean verify` on the module, so
+    // an upload below either ships an empty artifact with only a warning.
+    for (const name of [
+      'Verify Hosted admission gates',
+      'Verify O4 filesystem process and capacity gates',
+    ]) {
+      const cleaning = job.steps.findIndex((step) => step.name === name);
+      expect(job.steps[cleaning].run, name).toContain('clean verify');
+      expect(job.steps.indexOf(upload), name).toBeLessThan(cleaning);
+    }
     // The FG7 lane moved its per-case evidence out of @TempDir into this
     // module-relative directory precisely so an artifact can carry it; the
     // writer and the upload path must not drift.
@@ -325,9 +355,15 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg9-cases/',
     );
+    // FG10 follows the same precedent: its per-case evidence lives in
+    // target/fg10-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg10-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
-    // path that upload-artifact drops silently without the flag.
-    const evidence = job.steps.find(
+    // path that upload-artifact drops silently without the flag. The arms
+    // that write it run in the failover job, so the upload lives there.
+    const evidence = java.jobs['hosted-failover-e2e'].steps.find(
       (step) => step.name === 'Upload G3 Step 3 gate evidence',
     );
     expect(evidence.if).toBe('always()');
@@ -370,18 +406,73 @@ describe('Hosted real-process gates', () => {
     expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
   });
 
-  it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
-    const job = java.jobs['hosted-harness-mysql'];
-    const summed = job.steps.reduce(
-      (total, step) => total + (step['timeout-minutes'] ?? 0),
-      0,
+  it.each([
+    // Step ceilings today (90 + 10 + 20 + 50): Verify, the Broker fault
+    // gates, admission and O4. The failover arms moved to their own job.
+    ['hosted-harness-mysql', 170, 185],
+    // Fifteen failover arms at 10 each.
+    ['hosted-failover-e2e', 150, 165],
+  ])(
+    'keeps the %s job ceiling above its summed step ceilings',
+    (name, steps, ceiling) => {
+      const job = java.jobs[name];
+      const summed = job.steps.reduce(
+        (total, step) => total + (step['timeout-minutes'] ?? 0),
+        0,
+      );
+      // The uncapped setup steps need their own allowance — the job
+      // comment estimates it at ~13, so the enforced floor moves with that
+      // estimate, not the older 10.
+      expect(summed).toBe(steps);
+      expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
+      expect(job['timeout-minutes']).toBe(ceiling);
+    },
+  );
+
+  it('runs the failover arms in their own job, apart from the Hosted MySQL verify', () => {
+    const hosted = java.jobs['hosted-harness-mysql'];
+    const job = java.jobs['hosted-failover-e2e'];
+    // A failing integration test in the Hosted MySQL job must not skip an
+    // arm, so no arm, MySQL binaries install or runner-only env stays there,
+    // and the failover job neither waits for it nor shares its services.
+    expect(
+      hosted.steps.filter((step) => / E2E$/.test(step.name ?? '')),
+    ).toEqual([]);
+    expect(hosted.env?.QWEN_E2E_REGISTER_STORAGE).toBeUndefined();
+    expect(job.needs).toBeUndefined();
+    // Its only condition is the fast-tier skip the Hosted MySQL job has.
+    expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
+    expect(job.services).toBeUndefined();
+    expect(job['runs-on']).toBe('ubuntu-latest');
+    expect(job.env.QWEN_E2E_REGISTER_STORAGE).toBe('1');
+    // Every arm the job runs has a row above, so none runs unpinned.
+    expect(
+      job.steps
+        .filter((step) => /^Run .* E2E$/.test(step.name ?? ''))
+        .map((step) => step.name)
+        .sort(),
+    ).toEqual(failoverArms.map(([name]) => name).sort());
+    // The arms run the bundle and the packaged jar the job builds itself.
+    const index = (pattern) =>
+      job.steps.findIndex((step) => pattern.test(step.run ?? ''));
+    const bundle = index(/corepack pnpm install --frozen-lockfile/);
+    const sdk = index(/-f packages\/sdk-java\/qwencode\/pom\.xml .* install$/);
+    const pack = index(
+      /-f packages\/managed-agent-server\/pom\.xml\s+-DskipTests package$/,
     );
-    // Step ceilings today (45 + 16x10 + 20 + 50); the uncapped setup steps
-    // need their own allowance — the job comment estimates it at ~13, so
-    // the enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(275);
-    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(290);
+    const install = job.steps.findIndex(
+      (step) => step.name === 'Install MySQL binaries for the failover E2E',
+    );
+    expect(bundle).toBeGreaterThan(-1);
+    expect(job.steps[bundle].run).not.toContain('--ignore-scripts');
+    expect(sdk).toBeGreaterThan(bundle);
+    expect(pack).toBeGreaterThan(sdk);
+    expect(install).toBeGreaterThan(pack);
+    for (const step of [bundle, sdk, pack, install]) {
+      expect(job.steps[step].if).toBeUndefined();
+      expect(job.steps[step]['continue-on-error']).toBeUndefined();
+    }
+    expect(job.steps[install].id).toBe('failover_prerequisites');
   });
 
   it('runs every failover arm with its own runner arguments', () => {
@@ -393,9 +484,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each(failoverArms)(
-    'pins the %s arm into the Hosted MySQL job',
+    'pins the %s arm into the Hosted failover job',
     (stepName, script, flags) => {
-      const job = java.jobs['hosted-harness-mysql'];
+      const job = java.jobs['hosted-failover-e2e'];
       const install = job.steps.find(
         (step) => step.name === 'Install MySQL binaries for the failover E2E',
       );
@@ -408,7 +499,11 @@ describe('Hosted real-process gates', () => {
       ).toBeGreaterThan(job.steps.indexOf(install));
       expect(step.run).toContain(`npm run ${script}`);
       expect(step['timeout-minutes'], stepName).toBe(10);
-      expect(step.if, stepName).toBeUndefined();
+      // An earlier arm's failure must not skip this one; a failed setup
+      // step still does, through the install step's outcome.
+      expect(step.if, stepName).toBe(
+        "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}",
+      );
       expect(step['continue-on-error'], stepName).toBeUndefined();
       // A renamed or deleted npm script would leave the step failing for
       // the wrong reason; pin that it drives the failover runner — with
@@ -433,6 +528,7 @@ describe('Hosted real-process gates', () => {
         '--freeze',
         '--frozen-control-plane',
         '--g3-verify',
+        '--big-output',
       ]) {
         if (!flags.some((entry) => entry.split(' ')[0] === flag)) {
           expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
@@ -464,7 +560,7 @@ describe('Hosted real-process gates', () => {
       // the main-CI failure analyzer can only file an undiagnosable
       // per-commit issue (#13503 for the Hosted verify step, #13684 for the
       // O4 gates). The ceiling must cover the fork plus the wrapped
-      // compile/surefire/spotbugs/checkstyle work — 600 s is the wrap both
+      // compile/spotbugs/checkstyle work — 600 s is the wrap both
       // steps actually carry, so a step trim or fork bump reddens this row.
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
@@ -473,15 +569,26 @@ describe('Hosted real-process gates', () => {
       // crash class, ~150 s of wall clock at 2x headroom; then the L4
       // recovery class's four real-process cuts, ~300 s more the FG7
       // sizing never covered — #14125's per-commit kill; the FG8
-      // monitor/run letters, ~310 s measured on the lane with real
-      // background processes and >16 MiB captures; and the FG9 session/
-      // relay letters, ~170 s measured locally, for which the budget
-      // moves 1800→2100 in the same diff that adds them): the relational
-      // check above tolerates anything up to step*60, so the value is
-      // pinned literally here — an unnoticed raise has no other red to
-      // land on.
+      // monitor/run letters grew to five letters / twenty-one cases in
+      // #14334, whose lane (run 38848525079 at fee23d2d3c) saw four
+      // letters finish by ~700 s into the fork while the old 1800 s
+      // budget killed the fork before the last letter reported, so the
+      // fork doubles to 3600 in the same diff; the FG9 session/relay
+      // letters, ~170 s measured locally for slice 1 and ~314 s for the
+      // class with slice 2, fit inside that same lane-measured envelope;
+      // and FG9 slice 3's store-failure and crash letters bring the class
+      // to ~557 s, which with FG8c and FG10a inside the healthy allowance
+      // no longer leaves one 600 s ceiling room in 3600, so the fork moves
+      // to 3990 and the Verify step to 80 minutes; the FG10b/FG10f
+      // workflow relay letters add ~82 s, so the fork moves to 4155 and
+      // the Verify step to 85 minutes; their slice 2 (FG10c/FG10e) brings
+      // the class to ~182 s, so the fork moves to 4353 and the Verify step
+      // to 90 minutes):
+      // the relational check above tolerates
+      // anything up to step*60, so the value is pinned literally here —
+      // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(2100);
+        expect(forkSeconds).toBe(4353);
       }
     },
   );
@@ -489,14 +596,29 @@ describe('Hosted real-process gates', () => {
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
   // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, the
-  // FG8 monitor/run letters add ~310s measured on the lane (~450s with CI
-  // headroom), and the FG9 session/relay letters add 166–175s measured
-  // locally on JDK 21 + MariaDB 10.11 across three acceptance runs (~300s
-  // budgeted at >1.7x the heaviest measured run); with the fork itself
-  // ~14s, 1400s covers them. A larger ceiling lets failsafe kill the fork mid-run,
-  // and the classes left unrun never report, failing the gate
-  // undiagnosably (#13780).
-  const hostedForkHealthySeconds = 1400;
+  // FG8 monitor/run letters grew from two letters / seven cases to five
+  // letters / twenty-one cases in #14334 — on that PR's lane (run
+  // 38848525079 at fee23d2d3c) four letters finished by ~700s into the
+  // fork, the fork was still killed at the old 1800s budget before the last
+  // letter reported, and the fork now sits at 3600s for the same 2×
+  // headroom — and the FG9 session/relay letters, six since slice 3,
+  // measure 528–557s for the class locally on JDK 21 + MySQL 8.4 across
+  // three acceptance runs (~950s budgeted at >1.7x the heaviest measured
+  // run, up from slice 2's ~534s; the class ran 310s on lane run
+  // 38957583765 with four letters, as locally) in the same envelope, the
+  // FG8c process-crash letter adds 144s measured locally on JDK 21 +
+  // MySQL 8.4.6 (~290s budgeted at 2x), and the FG10a workflow digest
+  // letter — four cases since #14390 — measures 15.9–16.2s for the letter
+  // locally on macOS JDK 26 + MySQL 8.4.6 across four acceptance runs
+  // (~33s budgeted at 2x), and the FG10b/c/e/f workflow relay letters
+  // (HostedWorkflowRelayFaultGatesIT, four letters since slice 2) measure
+  // 181.2–181.6s for the class locally on JDK 21 + MySQL 8.4.6 across
+  // three acceptance runs (~363s budgeted at 2x, as FG10a, up from slice
+  // 1's ~165s); with the fork itself ~14s, 3743s (3545s after slice 1,
+  // plus slice 2's ~198s) covers them.
+  // A larger ceiling lets failsafe kill the fork mid-run, and the classes
+  // left unrun never report, failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 3743;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -551,11 +673,37 @@ describe('Hosted real-process gates', () => {
     // Like the FG8 monitor/run letters, the FG9 session/relay letters are
     // independent fixtures sharing the fork — each letter boots its own
     // Spring application, Harness, and proxies under its own tenant
-    // prefix, so a stall in one letter leaves the other running — and one
+    // prefix, so a stall in one letter leaves the others running — and one
     // letter stalling to its @Timeout must still leave the fork enough
-    // healthy runtime and budget for the sibling letter to finish.
+    // healthy runtime and budget for the sibling letters to finish.
     const ceilings = ceilingsOf(
       hostedTestSource('HostedSessionRelayFaultGatesIT'),
+    );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedWorkflowFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG10 letters are independent fixtures sharing the fork, the same
+    // per-ceiling shape the FG8 letters are held to.
+    const ceilings = ceilingsOf(hostedTestSource('HostedWorkflowFaultGatesIT'));
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedWorkflowRelayFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG10b/FG10f letters boot their own Spring, Harness and proxies
+    // per letter, independent fixtures sharing the fork like FG10a's.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedWorkflowRelayFaultGatesIT'),
     );
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {

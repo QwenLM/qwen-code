@@ -197,3 +197,39 @@ fs.appendFileSync(${JSON.stringify(marker)}, fs.readFileSync(${JSON.stringify(jo
     expect(result.output[3]).toBe('joined\n');
   });
 });
+
+describe('exit evidence', () => {
+  const run = (script: string) => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(process.execPath, ['--eval', script], {});
+    return spawnSync(launch.executable, launch.args, {
+      env: launch.env,
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+  };
+
+  it('keeps the exit status of a command that exited', () => {
+    const result = run('process.exit(3)');
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(3);
+    expect(result.signal).toBeNull();
+  });
+
+  // The launcher's own end is the background supervisor's exit evidence: a
+  // command a signal killed must not read as one that exited nonzero.
+  it
+    .skipIf(process.platform === 'win32')
+    .each(['SIGKILL', 'SIGTERM', 'SIGUSR2'])(
+    'ends by the %s that ended its command',
+    (signal) => {
+      const result = run(`process.kill(process.pid, '${signal}')`);
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBeNull();
+      expect(result.signal).toBe(signal);
+    },
+  );
+});

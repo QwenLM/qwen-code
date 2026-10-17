@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -20,6 +21,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
@@ -386,24 +388,75 @@ public interface AgentStateStore {
         return List.of();
     }
 
-    /** Parked (recovery_blocked) task cancels due for reconciliation. */
-    default List<OperationTarget> findParkedTaskCancels(int limit) {
-        return List.of();
-    }
-
     /**
-     * Records a task cancel's outcome: {@code completed} with a receipt,
-     * {@code failed} or {@code recovery_blocked} with its code (the latter
-     * parked until {@code retryAt}). A leased claim ({@code owner} set)
-     * settles only while it is still current; a parked operation
-     * ({@code owner} null) only while it is still parked.
+     * Records a leased task cancel's outcome: {@code completed} with a
+     * receipt, {@code failed} or {@code recovery_blocked} with its code (the
+     * latter parked until {@code retryAt}), only while the claim is still
+     * current. A parked cancel is settled only by
+     * {@link #settleParkedOperation}.
      *
-     * @return false when the claim or the parking is no longer current
+     * @return false when the claim is no longer current
      */
     default boolean settleTaskCancel(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             TaskCancelOutcome outcome, long retryAt) {
         throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /**
+     * D7-2: operations parked recovery_blocked because their command's
+     * acceptance is unknown, due for reconciliation. No claim ever takes
+     * one; only the reconciler reads them.
+     */
+    default List<ParkedOperation> findParkedOperations(int limit) {
+        return List.of();
+    }
+
+    /**
+     * D7-2: settles a parked operation from its kind's evidence, only while
+     * it is still parked. Committed completes it with a receipt; not
+     * committed fails it with the proven code; unknown parks it again until
+     * {@code retryAt}.
+     *
+     * @return false when the operation is no longer parked
+     */
+    default boolean settleParkedOperation(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        throw new UnsupportedOperationException(
+                "Operation reconciliation is unavailable");
+    }
+
+    /**
+     * D7-2: what the Session journal proves about a parked Turn input whose
+     * submission no Harness answered: committed once the journal holds its
+     * prompt's admission, not committed once no writer can still commit it.
+     */
+    default AcceptanceVerdict turnInputAcceptance(String tenantId,
+            String sessionId, String operationId) {
+        return AcceptanceVerdict.unknown();
+    }
+
+    /**
+     * D7-2: what the Session journal proves about a parked Session title, or
+     * empty when its delivery is no longer parked: committed once the journal
+     * holds its revision's title, not committed once no writer can still
+     * commit it.
+     */
+    default Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
+        return Optional.of(AcceptanceVerdict.unknown());
+    }
+
+    /**
+     * D7-2: settles a parked Session title, only while it is still parked.
+     * Committed completes its command and shows the title; not committed
+     * fails it; unknown parks it again until {@code retryAt}.
+     *
+     * @return false when the title is no longer parked
+     */
+    default boolean settleParkedRename(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        throw new UnsupportedOperationException(
+                "Operation reconciliation is unavailable");
     }
 
     /** A task cancel's recorded outcome: its public status and code. */
@@ -634,6 +687,9 @@ public interface AgentStateStore {
     boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
+    boolean cancelUnadmittedTurn(String tenantId, String sessionId,
+            String turnId, String owner);
+
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
 
@@ -675,6 +731,9 @@ public interface AgentStateStore {
 
     void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message);
+
+    boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
+            String turnId, String owner, String message);
 
     void appendPublicEventIfAbsent(String tenantId, String sessionId,
             String turnId, String type, Map<String, Object> data,
