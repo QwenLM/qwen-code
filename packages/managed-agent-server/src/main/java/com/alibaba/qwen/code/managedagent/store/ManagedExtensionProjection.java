@@ -117,18 +117,18 @@ public final class ManagedExtensionProjection {
     public static final List<String> RUNTIME_STATES = List.of("unbound",
             "provisioning", "ready", "draining", "lost");
     /**
-     * H4f: the task kinds whose cancel reaches a durable stop request on
-     * their own record. Both child Session kinds ride the child_run stop
-     * request — set once on the record and honored by the relay's
-     * kind-blind stop arm; workflow joined in the H4f-b slice once its
-     * runtime (#13803) made the close cascade's stop of a workflow row a
-     * shipped path. Every other kind has no public cancel path yet: H3's
-     * Shell settles exited rather than stop_requested after a stop and
-     * Monitor carries no stop request, and an automation run has none
-     * either.
+     * H4f: the task kinds whose cancel reaches a stop their own record
+     * proves. Both child Session kinds ride the child_run stop request —
+     * set once on the record and honored by the relay's kind-blind stop
+     * arm; workflow joined in the H4f-b slice once its runtime (#13803)
+     * made the close cascade's stop of a workflow row a shipped path. The
+     * H3 kinds joined once their gates lifted (#13856): their cancel stops
+     * the process through the Broker, and the worker's stop-marked end
+     * settles the record {@code stop_requested} (A8). An automation run
+     * has no stop path yet.
      */
     public static final Set<String> CANCELLABLE_TASK_KINDS = Set.of(
-            "child_agent", "workflow");
+            "child_agent", "workflow", "background_shell", "monitor");
     /** Task states a cancel may still act on: the run has not ended and
      * is not waiting on recovery reconciliation. */
     private static final Set<String> CANCELLABLE_TASK_STATES = Set.of(
