@@ -103,7 +103,6 @@ export async function readHostedApprovalContinuation(
     !isDeepStrictEqual(plan.rootSnapshotRef, header.rootSnapshotRef) ||
     !Number.isSafeInteger(plan.round) ||
     plan.round < 0 ||
-    plan.round >= 16 ||
     !Array.isArray(plan.calls) ||
     plan.calls.length < 1 ||
     !Number.isSafeInteger(plan.approvalOrdinal) ||

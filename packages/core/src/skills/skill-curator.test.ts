@@ -18,6 +18,7 @@ import {
   setAutoSkillPinned,
 } from './skill-curator.js';
 import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -650,7 +651,7 @@ describe('auto-skill curator', () => {
     expect(status.lastRunAt).toBeDefined();
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports skippedErrors when rename fails transiently',
     async () => {
       await writeUsedSkill('auto-skill-err', plusDays(-100));

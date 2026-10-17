@@ -227,7 +227,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
- 'workspace_file_upload',
+ 'workspace_file_upload', 'workspace_file_delete', 'workspace_directory_create', 'workspace_directory_delete',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
@@ -328,7 +328,7 @@ The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` ad
 
 `session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. When both `session_organization` and `workspace_qualified_rest_core` are advertised, the workspace-qualified organization mutation `PATCH /workspaces/:workspace/session/:id/organization` is also available. The legacy mutation remains primary-workspace-only. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight these tags before showing the matching grouping or pinning UI.
 
-`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
+`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_archive_idle_guard` advertises the additive `requireIdle` archive option: the owning runtime checks that active work is confirmed idle immediately before it begins the close, and leaves the active transcript in place otherwise. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
 
 `workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability documents a narrower policy: `workspace_persisted_transcript` (read-only), or the trust grant mutation, which is accepted for a registered untrusted workspace whether or not `workspace_trust_grant` is advertised — that tag reports only whether trust hot-reload is wired, so a recorded decision can reach the running runtime without a daemon restart; it never reports whether the route is served. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
@@ -364,7 +364,11 @@ written into the workspace without ever overwriting — an occupied name is
 auto-numbered (`name (1).ext`, `name (2).ext`, ...). It is also a strict
 mutation route.
 
-When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, and `/workspaces/:workspace/file/upload`.
+`workspace_file_delete` covers only `POST /workspaces/:workspace/file/delete`; no legacy-primary `/file/delete` route exists. The JSON body is `{ "path": "relative/file.txt" }`, and success returns `{ "kind": "file_delete", "path": "relative/file.txt" }`. This strict mutation route permanently removes one regular file from the selected trusted local workspace. Directories and symlinks are rejected; unsupported factories (including SSH) return 422. The capability describes protocol support, not permission to delete in every workspace. Clients must also preflight `workspace_qualified_rest_core`.
+
+When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, `/workspaces/:workspace/file/upload`, and `/workspaces/:workspace/file/delete` (the last route additionally requires `workspace_file_delete`).
+
+`workspace_directory_create` and `workspace_directory_delete` independently advertise `POST /workspaces/:workspace/directory/create` and `POST /workspaces/:workspace/directory/delete`. Preflight the operation's tag alongside `workspace_qualified_rest_core`; older qualified daemons may lack these routes. Both are strict mutations owned by the trusted active selected local runtime, with no primary fallback or legacy-primary counterpart. Creation is exclusive under an existing parent; deletion is permanent and recursive.
 
 The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
 
@@ -2053,7 +2057,7 @@ treat `404` as unsupported.
 
 ### Workspace file routes
 
-All file paths are resolved through the daemon's primary workspace. Responses use
+Legacy file routes resolve paths through the primary workspace; `/workspaces/:workspace/...` routes resolve paths through the selected runtime's workspace. Responses use
 workspace-relative paths and never return absolute filesystem paths for normal
 success cases. Successful file responses include:
 
@@ -2327,6 +2331,52 @@ caller named the path. Success responses and audit events include
   "matchedIgnore": null
 }
 ```
+
+#### `POST /workspaces/:workspace/directory/create`
+
+Requires `workspace_qualified_rest_core` and `workspace_directory_create`, strict
+mutation authority, and a trusted active local workspace. Body:
+
+```json
+{ "path": "src/new-folder" }
+```
+
+The parent must exist. Creation is exclusive: an existing file or directory
+returns `409 file_already_exists`; a final symlink returns `400 symlink_escape`.
+Success is `201 { "kind": "directory_create", "path": "src/new-folder" }`.
+The SDK method is
+`WorkspaceDaemonClient.createWorkspaceDirectory(path, clientId?)`.
+
+#### `POST /workspaces/:workspace/directory/delete`
+
+Requires `workspace_qualified_rest_core` and `workspace_directory_delete` under
+the same strict mutation and trusted local-runtime policy. Body:
+
+```json
+{ "path": "src/old-folder" }
+```
+
+Deletes an empty or nonempty directory recursively. Workspace roots, regular
+files, and final symlinks are rejected; nested symlink entries are removed
+without following their targets. A missing target returns `404 path_not_found`.
+Success is `200 { "kind": "directory_delete", "path": "src/old-folder" }`.
+The SDK method is
+`WorkspaceDaemonClient.deleteWorkspaceDirectory(path, clientId?)`.
+
+Both directory routes preserve the lexical final name while resolving its
+parent inside the selected workspace. Paths must not end in a separator;
+suspicious path patterns return `400 path_outside_workspace`, while malformed
+leaf shapes return `400 parse_error`. Unsupported custom factories return `422`;
+SSH workspaces are rejected by the SSH boundary with `501`. Unknown,
+unavailable, removed, or untrusted owners never fall back to primary.
+
+Deletion is permanent and failures may leave partial removal. A concurrent
+writer can cause `ENOTEMPTY`, returned as `503 io_error`; retry the same
+operation after the writer stops. Per-path locks do not serialize a directory
+against every child write, and external directory replacement cannot be made
+atomic by portable path-based checks. Explicit ignored-directory mutations are
+allowed and audit events annotate `matchedIgnore` when applicable; creation
+records `sizeBytes: 0`.
 
 ### `GET /session/:id/context`
 
@@ -3217,7 +3267,7 @@ Archive one or more sessions. Archive is a state transition, not deletion: the J
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true, "requireIdle": true }
 ```
 
 `sessionIds` must be a non-empty string array with at most 100 ids. Duplicates are collapsed.
@@ -3235,6 +3285,8 @@ Response:
 ```
 
 `resolveConflicts` is optional and defaults to `false`. By default, active and archived files with the same id are reported in `errors`, and neither copy is moved, removed, or overwritten. Archiving a live session still performs the strict close described above before classifying the conflict, so that close may flush queued records to the active transcript. With `resolveConflicts: true`, archive repairs the conflict only when both copies are regular transcript files that the selected workspace may maintain, including owned empty or damaged transcripts. It keeps the archived copy, removes the active copy, and reports the id in both `archived` and `resolvedConflicts`. The option does not bypass ownership checks; mixed local/foreign or otherwise ambiguous ownership is reported in `errors`, and neither copy is moved. `errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`.
+
+`requireIdle` is optional and defaults to `false`. Clients must pre-flight `session_archive_idle_guard` before sending it. With `requireIdle: true`, a live owner whose active-work state is active, unknown, or unsupported returns that session in `errors`; the daemon does not close it or move its transcript. The check and transition into closing occur in one owning-runtime control-plane turn, so new work cannot enter between them. A persisted session whose live child has already been reaped remains eligible for archive.
 
 An archived-only session is returned in `alreadyArchived` after the daemon acquires a writer or maintenance lease to reconcile pending sidecar cleanup. If another process still holds the writer lease, the archived-only id is reported in `errors` until the lease becomes available.
 

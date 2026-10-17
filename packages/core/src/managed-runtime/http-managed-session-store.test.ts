@@ -128,70 +128,147 @@ describe('HTTP Managed Session store', () => {
     };
   }
 
-  it('includes digest-addressed instructions in the definition transaction closure', async () => {
-    const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'definition-closure-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
-      sessionKey: SESSION_KEY,
-      writerId: 'harness-a',
-      writerToken: TOKEN_A,
-      fetchFn: server.fetch,
-    });
-    const instructionsRef = await stores.resourceStore.publish(
-      'managed-agent-instructions',
-      Buffer.from('Definition instructions'),
-    );
-    const definitionRef = await stores.resourceStore.publish(
-      'managed-definition',
-      Buffer.from(
-        JSON.stringify({
-          engine: 'managed',
-          agentDefinition: {
-            agentId: `agent_${'a'.repeat(32)}`,
-            revision: '1',
-            digest: 'b'.repeat(64),
-            instructionsRef,
+  it.each(['instructions', 'skills', 'both'])(
+    'includes nested %s after the definition leaves the staged transaction closure',
+    async (extensions) => {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'definition-closure-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: server.fetch,
+      });
+      const instructionsBytes = Buffer.from('Definition instructions');
+      const skillsBytes = Buffer.from(
+        JSON.stringify([
+          { name: 'review', description: 'Review', body: 'Read the diff.' },
+        ]),
+      );
+      const instructionsRef = await stores.resourceStore.publish(
+        'managed-agent-instructions',
+        instructionsBytes,
+      );
+      const skillsRef = await stores.resourceStore.publish(
+        'managed-agent-skills',
+        skillsBytes,
+      );
+      const nested = [
+        ...(extensions !== 'skills' ? [instructionsRef] : []),
+        ...(extensions !== 'instructions' ? [skillsRef] : []),
+      ];
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-definition',
+        Buffer.from(
+          JSON.stringify({
+            engine: 'managed',
+            agentDefinition: {
+              agentId: `agent_${'a'.repeat(32)}`,
+              revision: '1',
+              digest: 'b'.repeat(64),
+              ...(extensions !== 'skills' ? { instructionsRef } : {}),
+              ...(extensions !== 'instructions' ? { skillsRef } : {}),
+            },
+          }),
+        ),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-root',
+        Buffer.from('{}'),
+      );
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+      });
+      expect(server.commits[0]?.['resources']).toEqual(
+        expect.arrayContaining(
+          nested.map((ref) => expect.objectContaining(ref)),
+        ),
+      );
+      const recoveryRef = await session.resources.publish(
+        'hosted-model-request',
+        Buffer.from(
+          JSON.stringify({
+            v: 1,
+            sessionKey: SESSION_KEY,
+            promptId: 'prompt',
+            definitionRef,
+            rootSnapshotRef,
+          }),
+        ),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'model.attempt',
+          commandId: 'model-1',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'e'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'model-1',
+          sessionKey: SESSION_KEY,
+          kind: 'model.attempt',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: session.activation.activationId,
+            ...session.activation,
+          },
+          payload: {
+            attemptId: 'prompt:main:0',
+            routeRef: rootSnapshotRef,
+            inputCheckpointRef: null,
+            state: 'started',
+            usageRef: null,
+            recoveryRef,
           },
         }),
-      ),
-    );
-    const rootSnapshotRef = await stores.resourceStore.publish(
-      'managed-root',
-      Buffer.from('{}'),
-    );
-    const session = await openManagedSession({
-      runtimeBaseDir,
-      sessionId: SESSION_KEY.sessionId,
-      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
-      sessionKey: SESSION_KEY,
-      cwd: '/workspace',
-      version: 'test',
-      workerId: 'harness-a',
-      activationLeaseDurationMs: 60000,
-      journalStore: stores.journalStore,
-      resourceStore: stores.resourceStore,
-      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
-    });
-    expect(await stores.resourceStore.read(instructionsRef)).toEqual(
-      Buffer.from('Definition instructions'),
-    );
-    await session.close();
-    const restored = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
-      sessionKey: SESSION_KEY,
-      writerId: 'harness-b',
-      writerToken: TOKEN_B,
-      fetchFn: server.fetch,
-    });
-    await restored.journalStore.open({ sessionKey: SESSION_KEY });
-    expect(await restored.resourceStore.read(instructionsRef)).toEqual(
-      Buffer.from('Definition instructions'),
-    );
-  });
+        { class: 'harness', activation: session.activation },
+      );
+      expect(server.commits.at(-1)?.['resources']).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining(definitionRef),
+          ...nested.map((ref) => expect.objectContaining(ref)),
+        ]),
+      );
+      for (const ref of [definitionRef, ...nested])
+        expect(
+          (
+            server.commits.at(-1)?.['resources'] as Array<
+              Record<string, unknown>
+            >
+          ).find((entry) => entry['resourceId'] === ref.resourceId),
+        ).not.toHaveProperty('bytesBase64');
+      await session.close();
+      const restored = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-b',
+        writerToken: TOKEN_B,
+        fetchFn: server.fetch,
+      });
+      await restored.journalStore.open({ sessionKey: SESSION_KEY });
+      for (const ref of nested)
+        expect(await restored.resourceStore.read(ref)).toEqual(
+          ref === instructionsRef ? instructionsBytes : skillsBytes,
+        );
+    },
+  );
 
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -204,6 +281,7 @@ describe('HTTP Managed Session store', () => {
 
   async function bootStoresAndSession(
     server: FakeManagedSessionStore,
+    requestTimeoutMs?: number,
   ): Promise<{
     stores: ReturnType<typeof createHttpManagedSessionStores>;
     session: Awaited<ReturnType<typeof openManagedSession>>;
@@ -220,6 +298,7 @@ describe('HTTP Managed Session store', () => {
       writerId: 'harness-a',
       writerToken: TOKEN_A,
       fetchFn: server.fetch,
+      ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
     });
     const definitionRef = await stores.resourceStore.publish(
       'managed-session-definition',
@@ -830,6 +909,128 @@ describe('HTTP Managed Session store', () => {
       await session.close();
     }
   });
+
+  it.each([
+    // The first refusal lands ~200 ms before the shared budget ends. A gate
+    // that infers the spend from wall-clock time alone throws here and the
+    // second fetch never happens (#13800 R2-2).
+    ['a contended refusal near the deadline', 'contended'],
+    // A stall that alone burns the whole request budget used to leave the
+    // earned restart with an already-expired timeout (#13800 R2-2).
+    ['a first attempt that stalls until its deadline', 'stall'],
+  ] as const)(
+    'restarts a publication commit after %s',
+    async (_label, firstAttempt) => {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'managed-http-store-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const requests: Array<Record<string, unknown>> = [];
+      let outcomeRef: ManagedSessionDurableRef;
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        requestTimeoutMs: 1_200,
+        fetchFn: async (input, init) => {
+          if (!new URL(requestUrl(input)).pathname.endsWith('/receipts/commit'))
+            return server.fetch(input, init);
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          requests.push(body);
+          if (requests.length === 1) {
+            if (firstAttempt === 'stall') {
+              // Never answers: only the request's own timeout ends it.
+              await abortableDelay(60_000, init?.signal);
+            }
+            await abortableDelay(1_000, init?.signal);
+            return jsonResponse(
+              { error: { code: 'tenant_guard_contended', message: 'held' } },
+              503,
+            );
+          }
+          // The restart honours its signal like a real fetch, so one issued
+          // with the spent shared deadline as its timeout aborts before this
+          // answer arrives.
+          await abortableDelay(100, init?.signal);
+          const committed = await server.fetch(
+            `http://127.0.0.1:8080/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+            init,
+          );
+          return jsonResponse({
+            ...(await committed.json()),
+            historyRevision: body['lastSequence'],
+            toolOutcomeRef: outcomeRef,
+          });
+        },
+      });
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-session-definition',
+        Buffer.from('{}'),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{}'),
+      );
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+      });
+      try {
+        outcomeRef = await session.resources.publish(
+          'managed-tool-outcome',
+          Buffer.from('{}'),
+        );
+        stores.publication.rememberAdmission('publication-a', outcomeRef);
+        await session.authority.appendExecutionEvent(
+          {
+            operation: 'recordToolResult',
+            commandId: 'receipt-a',
+            sessionKey: SESSION_KEY,
+            contentDigest: 'a'.repeat(64),
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: 'receipt:a',
+            sessionKey: SESSION_KEY,
+            kind: 'tool.receipt',
+            occurredAt: 1,
+            payload: {
+              executionCallId: 'execution-a',
+              toolOutcomeRef: outcomeRef,
+              resultRef: null,
+              resources: [],
+              historyRevision: sequence,
+            },
+          }),
+          { class: 'trusted_entry' },
+        );
+        expect(requests).toHaveLength(2);
+        expect(requests[1]).toEqual(requests[0]);
+        expect(
+          server.commits.filter(
+            (commit) => commit['operation'] === 'recordToolResult',
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   it.each([
     'uncommitted-503',
@@ -1810,6 +2011,67 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  // Regression for R1-38: a failed close-time seal must not keep the grant
+  // on the renewal cadence. The backend re-issues the same writer generation
+  // to a same-credential re-acquire during a live lease (the replay branch in
+  // ManagedSessionStore.acquireWriter), so a stale client still renewing
+  // would seal the journal out from under the freshly re-attached session.
+  // The grant simply lapses; a later close() still retries the seal, which
+  // the backend accepts without a live lease.
+  it('lets a same-credential re-attach keep writing after a close-time seal failure', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    const options = {
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    } as const;
+    const first = createHttpManagedSessionStores(options);
+    const second = createHttpManagedSessionStores(options);
+    try {
+      await first.journalStore.open({ sessionKey: SESSION_KEY });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(server.renewCount).toBe(1);
+
+      server.sealFailuresRemaining = 1;
+      await expect(first.close()).rejects.toThrow('backend down');
+      expect(server.sealCount).toBe(1);
+      expect(server.state).toBe('ACTIVE');
+      // `first` is the only writer in this window, so any renewal here is
+      // the failed close's cadence surviving; the later assertions cannot
+      // see it, because both stores share one writer identity (review round
+      // 2, R2-10).
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.renewCount).toBe(1);
+
+      // The broker redrives the attach with byte-identical credentials; the
+      // backend replays the live lease and hands over the same generation.
+      const secondJournal = await second.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(server.replayedGrants).toBe(1);
+
+      // No renewal cadence survives the failed close: nothing seals the
+      // journal from the stale client while the re-attached one works.
+      await vi.advanceTimersByTimeAsync(400_000);
+      expect(server.sealCount).toBe(1);
+      expect(server.state).toBe('ACTIVE');
+      await expect(secondJournal.read()).resolves.toBeDefined();
+
+      // The lapsed grant stays sealable by its own writer, so a caller that
+      // retries close() still converges the journal to SEALED.
+      await first.close();
+      expect(server.state).toBe('SEALED');
+    } finally {
+      await first.close().catch(() => undefined);
+      await second.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
   it('swallows a renewal the Store fences after its writer sealed', async () => {
     vi.useFakeTimers();
     const server = new FakeManagedSessionStore();
@@ -1968,6 +2230,176 @@ describe('HTTP Managed Session store', () => {
           requestUrl(input).includes('/restore?'),
         ),
       ).toHaveLength(9);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('keeps retrying a contended tenant guard past the attempt cap within one request budget', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 5;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?') && contended > 0) {
+        contended--;
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).resolves.toBeDefined();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(6);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('keeps the transient retry allowance after spending guard retries', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 4;
+    let dropped = 2;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?')) {
+        if (contended > 0) {
+          contended--;
+          return jsonResponse(
+            { error: { code: 'tenant_guard_contended', message: 'held' } },
+            503,
+          );
+        }
+        if (dropped > 0) {
+          dropped--;
+          throw new TypeError('fetch failed');
+        }
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      const started = Date.now();
+      await expect(handle.read()).resolves.toBeDefined();
+      const elapsedMs = Date.now() - started;
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(7);
+      // Four 250 ms guard pauses, then the two transient backoffs at
+      // their first and second steps (~200 ms and ~400 ms): about 1.7 s.
+      // Scaling the transient backoff by the total attempt count instead
+      // would sleep ~1.0 s and ~1.2 s there, about 3.3 s in all (#13800
+      // R2-6).
+      expect(elapsedMs).toBeLessThan(2_600);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a contended guard on a non-retryable POST because the store rolled it back', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 4;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/recovery:block') && contended > 0) {
+        contended--;
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await stores.assertWritable();
+      await handle.blockRecovery!({
+        status: 'BLOCKED_RESOURCE',
+        detailCode: 'managed_session_test',
+      });
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/recovery:block'),
+        ),
+      ).toHaveLength(5);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('gives up on a persistently contended guard at the request deadline', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+      requestTimeoutMs: 1_500,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      const started = Date.now();
+      await expect(handle.read()).rejects.toMatchObject({
+        status: 503,
+        remoteCode: 'tenant_guard_contended',
+      });
+      // The guard retries run until less than one 250 ms pause of the
+      // 1 500 ms budget remains, so the give-up lands at about 1 250 ms:
+      // pin it from below too, or a client that quits early stays green.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_200);
+      expect(Date.now() - started).toBeLessThan(1_500 + 1_000);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ).length,
+      ).toBeGreaterThan(3);
     } finally {
       await stores.close();
     }
@@ -3233,6 +3665,150 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it('spends one contention budget across the commit retries', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return jsonResponse(
+            { error: { code: 'tenant_guard_contended', message: 'held' } },
+            503,
+          );
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /POST \/transactions:commit failed after \d+ attempts: held/,
+    );
+    // Each of the commit's three attempts restarting its own 1 200 ms of
+    // guard retries would take ~3.6 s and ~15 fetches.
+    expect(Date.now() - started).toBeLessThan(1_200 + 1_000);
+    expect(attempts).toBeLessThanOrEqual(6);
+    // The failed commit latched the log shut, so closing cannot settle.
+    await session.close().catch(() => undefined);
+  });
+
+  it('lets a deadline abort after a slow guard answer close the shared commit budget', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    // The guard holds its answer for 500 ms, slower than an instant 503:
+    // the second attempt aborts at the shared deadline instead of
+    // returning a contended refusal the outer loop would recognize.
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(
+                jsonResponse(
+                  {
+                    error: { code: 'tenant_guard_contended', message: 'held' },
+                  },
+                  503,
+                ),
+              );
+            }, 500);
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal.reason as Error);
+            });
+          });
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /POST \/transactions:commit failed after \d+ attempts/,
+    );
+    const elapsedMs = Date.now() - started;
+    // The deadline abort arrives as a transport error, so the outer commit
+    // loop used to restart a fresh 1 200 ms attempt behind the spent budget
+    // (a third fetch at ~1 450 ms and the settle at ~1 950 ms). Once the
+    // shared deadline governs restarts, the loop stops at the first abort.
+    expect(elapsedMs).toBeGreaterThanOrEqual(1_000);
+    expect(elapsedMs).toBeLessThan(1_600);
+    expect(attempts).toBe(2);
+    await session.close().catch(() => undefined);
+  });
+
+  it('names a budget-closing slow guard after its earlier contended refusal', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server, 1_200);
+    const defaultImpl = server.fetch.getMockImplementation()!;
+    let attempts = 0;
+    // The first attempt answers contended inside the window; the second
+    // outlives the shared deadline and is aborted, so the terminal error
+    // used to arrive as a transport failure that renamed the guard
+    // contention an unavailable store (#13800 R1-7).
+    server.fetch.mockImplementation(async (input, init) => {
+      if (requestUrl(input).endsWith('/transactions:commit')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'message.commit') {
+          attempts++;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(
+                jsonResponse(
+                  {
+                    error: { code: 'tenant_guard_contended', message: 'held' },
+                  },
+                  503,
+                ),
+              );
+            }, 500);
+            const signal = init?.signal;
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal.reason as Error);
+            });
+          });
+        }
+      }
+      return defaultImpl(input, init);
+    });
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      MESSAGE_BODY,
+    );
+    const started = Date.now();
+    const rejection = appendMessage(session, 1, messageRef);
+    await expect(rejection).rejects.toMatchObject({
+      status: 503,
+      remoteCode: 'tenant_guard_contended',
+      contentionExhausted: true,
+    });
+    await expect(rejection).rejects.not.toThrow(
+      ManagedSessionStoreTransportError,
+    );
+    // Named at the deadline abort itself: the commit stops there instead
+    // of the outer loop restarting until a later attempt happens to end
+    // in the store's own refusal (four fetches, ~2.7 s).
+    expect(attempts).toBe(2);
+    expect(Date.now() - started).toBeLessThan(1_600);
+    await session.close().catch(() => undefined);
+  });
+
   it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
@@ -3371,6 +3947,87 @@ describe('HTTP Managed Session store', () => {
         Buffer.alloc(64 * 1024 + 1),
       ),
     ).rejects.toThrow(/OSS storage is not enabled/);
+  });
+
+  it('commits and reuses every part of a private outcome manifest after reopen', async () => {
+    const server = new FakeManagedSessionStore();
+    const open = await createSessionOpener(server);
+    const first = await open('harness-a', TOKEN_A);
+    const parts = [
+      await first.resources.publish(
+        'managed-tool-outcome-part',
+        Buffer.alloc(60 * 1024, 0x61),
+      ),
+      await first.resources.publish(
+        'managed-tool-outcome-part',
+        Buffer.alloc(20 * 1024, 0x62),
+      ),
+    ];
+    const ref = await first.resources.publish(
+      'managed-tool-outcome-chunks',
+      Buffer.from(JSON.stringify({ parts })),
+    );
+    async function receipt(session: typeof first, call: string) {
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: call,
+          sessionKey: SESSION_KEY,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${call}`,
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: call,
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+    }
+    try {
+      await receipt(first, 'first-call');
+      const uploaded = server.commits.at(-1)?.['resources'] as Array<
+        ManagedSessionDurableRef & { bytesBase64?: string }
+      >;
+      expect(uploaded.map((item) => item.resourceId).sort()).toEqual(
+        [ref, ...parts].map((item) => item.resourceId).sort(),
+      );
+      expect(
+        uploaded.every(
+          (item) =>
+            item.bytesBase64 !== undefined && item.byteLength <= 64 * 1024,
+        ),
+      ).toBe(true);
+    } finally {
+      await first.close();
+    }
+    const reopened = await open('harness-b', TOKEN_B);
+    try {
+      await receipt(reopened, 'second-call');
+      const reused = server.commits.at(-1)?.['resources'] as Array<
+        ManagedSessionDurableRef & { bytesBase64?: string }
+      >;
+      expect(reused.map((item) => item.resourceId).sort()).toEqual(
+        [ref, ...parts].map((item) => item.resourceId).sort(),
+      );
+      expect(reused.every((item) => item.bytesBase64 === undefined)).toBe(true);
+      for (const part of parts) {
+        expect((await reopened.resources.read(part)).byteLength).toBe(
+          part.byteLength,
+        );
+      }
+    } finally {
+      await reopened.close();
+    }
   });
 
   it('commits an oversized message as chunks and projects it after a cold reopen', async () => {
@@ -3519,6 +4176,8 @@ class FakeManagedSessionStore {
   readonly receiptOverrides: Record<string, unknown> = {};
   transactionReads = 0;
   sealCount = 0;
+  renewCount = 0;
+  sealFailuresRemaining = 0;
 
   editStoredTransaction(index: number, patch: Record<string, unknown>): void {
     Object.assign(this.transactions[index]!, patch);
@@ -3545,12 +4204,44 @@ class FakeManagedSessionStore {
         : 'application/json',
     );
     if (suffix === '/writers:acquire') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const token = headers.get('X-Qwen-Managed-Writer-Token');
+      // The real backend re-issues the same writer generation to a
+      // same-credential acquire while the lease is live
+      // (ManagedSessionStore.acquireWriter's replay branch); only a lapsed
+      // lease or a sealed head bumps the generation.
+      if (
+        this.state === 'ACTIVE' &&
+        Date.now() < this.leaseUntil &&
+        body['writerId'] === this.writerId &&
+        token === this.writerToken
+      ) {
+        this.replayedGrants++;
+        this.leaseUntil = Math.max(this.leaseUntil, Date.now() + 300_000);
+        return jsonResponse({ ...this.grant(), replayed: true });
+      }
       this.writerGeneration++;
       this.state = 'ACTIVE';
       this.leaseUntil = Date.now() + 300_000;
+      this.writerId = String(body['writerId']);
+      this.writerToken = token;
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:renew') {
+      // The real backend refuses to renew a lapsed lease
+      // (ManagedSessionStore.requireWriter with requireUnexpired); the seal
+      // endpoint below intentionally keeps accepting one.
+      if (Date.now() >= this.leaseUntil) {
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer lease has lapsed.',
+            },
+          },
+          409,
+        );
+      }
       if (this.state === 'SEALED')
         return jsonResponse(
           {
@@ -3562,11 +4253,19 @@ class FakeManagedSessionStore {
           },
           409,
         );
+      this.renewCount++;
       this.leaseUntil = Date.now() + 300_000;
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:seal') {
       this.sealCount++;
+      if (this.sealFailuresRemaining > 0) {
+        this.sealFailuresRemaining--;
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'backend down' } },
+          500,
+        );
+      }
       this.state = 'SEALED';
       return jsonResponse({
         writerGeneration: this.writerGeneration,
@@ -3718,9 +4417,12 @@ class FakeManagedSessionStore {
     );
   });
 
-  private state = 'SEALED';
+  state = 'SEALED';
+  replayedGrants = 0;
   private writerGeneration = 0;
   private leaseUntil = 0;
+  private writerId: string | undefined;
+  private writerToken: string | null = null;
   private committedSequence = 0;
   private lastCommitDigest: string | null = null;
   private activationEpoch = 0;
@@ -3784,6 +4486,23 @@ function refsDeclaredBy(recordBytesBase64: string): ManagedSessionDurableRef[] {
   return refs;
 }
 
+function abortableDelay(
+  ms: number,
+  signal?: AbortSignal | null,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason as Error);
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason as Error);
+    });
+  });
+}
+
 function requestUrl(input: URL | RequestInfo): string {
   if (typeof input === 'string') return input;
   if (input instanceof URL) return input.toString();
@@ -3811,6 +4530,82 @@ describe('collectNestedResourceRefs', () => {
       digest: createHash('sha256').update(bytes).digest('hex'),
     };
   }
+
+  it('includes private file history admission refs by walking only preparation', () => {
+    const ref = closureRef('managed-file_history', 'prepared');
+    const inputRef = closureRef('managed-tool-input', 'input');
+    const toolDefinitionRef = closureRef(
+      'managed-tool-definition',
+      'definition',
+    );
+    // A prepared record's previousRecordRef and preparation.intentRef denote
+    // one resource: SQL admission requires both to equal the predecessor's
+    // file-history ref, and reads that ref from this transaction.
+    const predecessorRef = closureRef('managed-file_history', 'predecessor');
+    const body = {
+      schemaVersion: 2,
+      profile: 'csi-files-retirement/1',
+      previousRecordRef: predecessorRef,
+      preparation: {
+        stage: 'prepared',
+        intentRef: predecessorRef,
+        invocations: [
+          { inputRef, toolDefinitionRef },
+          { inputRef, toolDefinitionRef },
+        ],
+      },
+    };
+    const nested = collectNestedResourceRefs(
+      ref,
+      Buffer.from(JSON.stringify(body)),
+    );
+    expect(nested).toHaveLength(3);
+    expect(nested).toEqual(
+      expect.arrayContaining([inputRef, toolDefinitionRef, predecessorRef]),
+    );
+    for (const ordinary of [
+      { snapshots: [] },
+      { ...body, preparation: null },
+      { ...body, schemaVersion: 1 },
+      { ...body, profile: 'ordinary' },
+    ]) {
+      expect(
+        collectNestedResourceRefs(ref, Buffer.from(JSON.stringify(ordinary))),
+      ).toEqual([]);
+    }
+  });
+
+  it('refuses a malformed file history record instead of collapsing its closure', () => {
+    const ref = closureRef('managed-file_history', 'malformed');
+    expect(() =>
+      collectNestedResourceRefs(ref, Buffer.from('null', 'utf8')),
+    ).toThrow(/file history must be an object/);
+    expect(() =>
+      collectNestedResourceRefs(ref, Buffer.from('{', 'utf8')),
+    ).toThrow(/record is not valid JSON/);
+  });
+
+  it('closes over every private outcome part and rejects malformed manifests', () => {
+    const ref = closureRef('managed-tool-outcome-chunks', 'manifest');
+    const parts = [
+      closureRef('managed-tool-outcome-part', 'first'),
+      closureRef('managed-tool-outcome-part', 'second'),
+    ];
+    expect(
+      collectNestedResourceRefs(ref, Buffer.from(JSON.stringify({ parts }))),
+    ).toEqual(parts);
+    for (const manifest of [
+      { parts: [] },
+      { parts: [parts[0]] },
+      { parts: Array(70).fill(parts[0]) },
+      { parts, foreign: true },
+      { parts: [parts[0], { ...parts[1], kind: 'managed-message-part' }] },
+    ]) {
+      expect(() =>
+        collectNestedResourceRefs(ref, Buffer.from(JSON.stringify(manifest))),
+      ).toThrow();
+    }
+  });
 
   it('closes over attachment refs embedded in a managed-input envelope (R8 P1)', () => {
     // The leak: the commit uploaded the envelope but never the attachment
