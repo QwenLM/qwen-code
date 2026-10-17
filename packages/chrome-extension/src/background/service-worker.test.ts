@@ -161,9 +161,7 @@ describe('service worker reconnect-backoff gates (#13966)', () => {
     expect(mocks.isBackingOff).toHaveBeenCalledTimes(1);
 
     harness.fireAlarm(KEEPALIVE_ALARM);
-    await vi.waitFor(() =>
-      expect(mocks.isBackingOff).toHaveBeenCalledTimes(2),
-    );
+    await vi.waitFor(() => expect(mocks.isBackingOff).toHaveBeenCalledTimes(2));
     expect(sockets).toHaveLength(0);
   });
 
