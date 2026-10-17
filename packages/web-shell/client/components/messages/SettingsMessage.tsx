@@ -879,7 +879,13 @@ export function SettingsMessage({
           } catch {
             // reload failure is non-fatal — the value was already saved
           }
-          if (result?.requiresRestart && key !== LANGUAGE_SETTING_KEY) {
+          // Loading phrases take effect immediately in the web shell via reactive
+          // settings subscription, so suppress the restart banner for this key.
+          if (
+            result?.requiresRestart &&
+            key !== LANGUAGE_SETTING_KEY &&
+            key !== 'ui.accessibility.enableLoadingPhrases'
+          ) {
             setRestartPending(true);
           }
         })

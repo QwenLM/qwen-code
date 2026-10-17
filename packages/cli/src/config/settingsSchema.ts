@@ -1283,7 +1283,7 @@ const SETTINGS_SCHEMA = {
             type: 'boolean',
             label: 'Enable Loading Phrases',
             category: 'UI',
-            requiresRestart: false,
+            requiresRestart: true,
             default: true,
             description: 'Enable loading phrases (disable for accessibility)',
             showInDialog: true,
