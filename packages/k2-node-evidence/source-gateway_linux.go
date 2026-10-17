@@ -108,7 +108,7 @@ func (g *sourceGateway) call(ctx context.Context, method, path string, body any,
 func (g *sourceGateway) current(ctx context.Context) (gatewayIdentity, error) {
 	var identity gatewayIdentity
 	err := g.call(ctx, http.MethodGet, "/v1/runtime", nil, &identity)
-	if err != nil || identity.Version != "qwen-k2-runtime-identity/1" || len(identity.Incarnation) != 32 || !hashString(identity.Incarnation+identity.Incarnation) || !bounded(identity.BootID) || identity.Peer.PID <= 0 || identity.Peer.StartTicks == 0 || !hashString(identity.Peer.Digest) {
+	if err != nil || identity.Version != "qwen-k2-runtime-identity/2" || len(identity.Incarnation) != 32 || !hashString(identity.Incarnation+identity.Incarnation) || !bounded(identity.BootID) || identity.Peer.PID <= 0 || identity.Peer.StartTicks == 0 || !hashString(identity.Peer.Digest) {
 		return gatewayIdentity{}, errors.New("original gateway identity unavailable")
 	}
 	return identity, nil

@@ -151,11 +151,12 @@ func matches(files map[string][]byte, name string, p pin) bool {
 }
 
 type Snapshot struct {
-	packedSHA    string
-	packedBytes  int
-	architecture string
-	paths        map[string]string
-	inputs       map[string][]byte
+	installationSHA string
+	packedSHA       string
+	packedBytes     int
+	architecture    string
+	paths           map[string]string
+	inputs          map[string][]byte
 }
 
 func (s *Snapshot) PackedSHA256() string { return s.packedSHA }
@@ -163,17 +164,10 @@ func (s *Snapshot) PackedBytes() int     { return s.packedBytes }
 func (s *Snapshot) Architecture() string { return s.architecture }
 
 func (s *Snapshot) Match(role, configurationPath string, configuration, shim, unit []byte) error {
-	if s == nil || !birth.Hash(s.packedSHA) || len(s.inputs) != 5 || len(s.paths) != 2 || role != "source" && role != "gateway" || s.paths[role] != configurationPath {
+	if s == nil || !birth.Hash(s.installationSHA) || !birth.Hash(s.packedSHA) || s.packedBytes < 1 || s.packedBytes > 8<<20 || s.architecture != "amd64" && s.architecture != "arm64" || len(s.inputs) != 5 || len(s.paths) != 2 || role != "source" && role != "gateway" || s.paths[role] != configurationPath {
 		return errors.New("actual role configuration path differs from the artifact")
 	}
-	name := role + "-config.json"
-	if role == "source" {
-		name = "source-config.installed.json"
-	}
-	unitName := "qwen-k2-runtime-gateway.service"
-	if role == "source" {
-		unitName = "qwen-k2-node-source.service"
-	}
+	name, unitName := roleInputs(role)
 	if !bytes.Equal(configuration, s.inputs[name]) || !bytes.Equal(shim, s.inputs["shim.json"]) || !bytes.Equal(unit, s.inputs[unitName]) {
 		return errors.New("actual role inputs differ from the installed artifact bytes")
 	}
@@ -289,7 +283,7 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 			return nil, errors.New("original service argv and configuration paths differ")
 		}
 	}
-	s := &Snapshot{packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, paths: p.Paths, inputs: make(map[string][]byte)}
+	s := &Snapshot{installationSHA: birth.SHA256(files["installation.json"]), packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, paths: p.Paths, inputs: make(map[string][]byte)}
 	for _, name := range []string{"source-config.installed.json", "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service"} {
 		s.inputs[name] = bytes.Clone(files[name])
 	}

@@ -234,4 +234,6 @@ k2-assemble-artifacts \
 
 两个真实服务入口持有工件目录及受保护祖先，经目录 FD 只打开固定子名字，禁止符号链接及跨 mount，并将自身配置/unit、shim 配置与快照比较。既有请求守卫持续复核原持有对象；source 还将 packed 摘要及长度与内核实际加载策略比较。gateway 不取得 source 专用策略 exporter 权限，两个角色都不打开另一角色的真实配置或私钥。目录清单与策略源码单独限制16 MiB，packed 策略8 MiB，完整快照64 MiB，既有出生/配置32 KiB上限不变。
 
-清单只证明字节一致性，不认证 systemd 有效设置、加载策略语义、runtime handler 选择、actor 排除、CSI 独占或安装 provenance。目前验证使用明确合成的编译数据和可移植字节测试，以及仅编译的 Linux 输出；组装器 CLI、真实受保护对象行为和现场安装尚未验收。source 第6版协议、物理释放权限和复用限制保持不变。
+gateway 现在返回第2版 runtime 身份，包含其实际匹配的自身配置、shim、unit 字节，以及完整原 installation manifest、架构和 packed 策略的观察。source 在创建 journal 前，将全部观察字段与自己独立验证快照中的 gateway 角色比较；后续检查保留完整原身份。旧第1版 runtime 身份、其他角色或任一不同字节身份均拒绝。两个角色均不打开对方的真实配置或凭据。
+
+清单只证明字节一致性，不认证 systemd 有效设置、加载策略语义、runtime handler 选择、actor 排除、CSI 独占或安装 provenance。目前验证使用明确合成的编译数据和可移植字节测试，以及仅编译的 Linux 输出；组装器 CLI、真实受保护对象行为和现场安装尚未验收。服务通道观察尚未进入持久 SOURCE_START/ARM 或 Java 独立期待值。source 第6版协议、物理释放权限和复用限制保持不变。

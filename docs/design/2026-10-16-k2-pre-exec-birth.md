@@ -150,6 +150,18 @@ does not acquire the source's kernel exporter permissions. Neither role reads
 the other role's live configuration or private key. Snapshot configuration
 copies contain only the closed configuration's paths and identities.
 
+The runtime identity protocol is version 2. Its gateway byte observation records
+the full original installation manifest digest, architecture, packed digest and
+length, role, actual own configuration path/digest, shim digest and fixed own
+unit path/digest. Construct it only after matching the actual retained inputs.
+The source compares every field with the gateway role in its independently
+validated snapshot before creating a journal. Existing request guards then
+compare the complete original gateway identity, including these comparable
+scalar fields. A different role, manifest byte or input refuses; there is no
+version-one fallback. This is service-channel byte association, not a durable
+installation identity: SOURCE_START/ARM and the Java expectation/reader still
+need a coordinated explicit protocol upgrade.
+
 This step binds actual retained runtime inputs to the generated artifact graph.
 It does not prove the effective daemon handler, loaded unit configuration,
 external actor exclusion, reciprocal host policy, exclusive CSI wiring or a

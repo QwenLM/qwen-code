@@ -91,6 +91,8 @@ version-2 artifact manifest 绑定两份原始镜像 digest、完整清单字节
 
 source 还须将安装 packed hash、长度与实际 kernel policy 测量比较；gateway 保留自身 confinement 检查，不取得 source 的 kernel exporter 权限。两个角色均不读取另一个角色的真实配置或私钥，快照配置副本只含闭合配置中的路径和身份。
 
+runtime 身份协议升级为第2版。gateway 字节观察包含完整原 installation manifest 摘要、架构、packed 摘要及长度、角色、实际自身配置路径/摘要、shim 摘要，以及固定自身 unit 路径/摘要；只有实际保留输入匹配后才能构造。source 在创建 journal 前，将全部字段与自己独立验证快照中的 gateway 角色比较。既有请求守卫随后比较完整原 gateway 身份，包括这些可比较的标量字段。角色、manifest 任一字节或输入不同即拒绝，不回退第1版。这是服务通道字节关联，尚不是持久安装身份；SOURCE_START/ARM 及 Java 期待值/读端仍须协调进行显式协议升级。
+
 此步将真实保留运行时输入与生成工件图关联，不证明 daemon 有效 handler、实际加载 unit 配置、外部 actor 排除、宿主反向策略、CSI 独占接线或无间隙生命周期；不创建安装 authority，不改变 source/6，不授予最终释放或放宽复用门。后续 producer/consumer 仍须将真实 live facts 绑定到持久来源协议。
 
 ## 来源与释放依赖
