@@ -64,7 +64,9 @@ public final class ManagedSchemaContract {
         WORKSPACE_RECOVERY,
         STORAGE_MIGRATION,
         CSI_RETIREMENT,
-        CHANNEL_INGRESS
+        CHANNEL_INGRESS,
+        SUBMIT_INPUT,
+        CANCEL
     }
 
     public enum ReceiptNamespace {
