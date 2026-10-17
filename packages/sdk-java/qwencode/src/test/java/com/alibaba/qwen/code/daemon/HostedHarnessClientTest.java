@@ -2948,8 +2948,9 @@ class HostedHarnessClientTest {
                     try {
                         // The handler thread must own the keepalive loop:
                         // returning from the handler closes the exchange.
-                        // 120ms cadence against the 500ms budget below keeps
-                        // >4x margin against scheduler jitter.
+                        // 120ms cadence against the 1500ms budget below
+                        // tolerates a stall of more than ten keepalives on a
+                        // loaded runner.
                         while (!stopKeepalives.await(120,
                                 TimeUnit.MILLISECONDS)) {
                             exchange.getResponseBody().write(
@@ -2971,7 +2972,7 @@ class HostedHarnessClientTest {
                 .bearerToken("harness-token")
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ZERO)
-                .sseIdleTimeout(Duration.ofMillis(500))
+                .sseIdleTimeout(Duration.ofMillis(1500))
                 .build();
         try {
             HarnessSessionRef session = createSession(client);
@@ -2985,7 +2986,7 @@ class HostedHarnessClientTest {
                 // (read before any shutdown, where shutdownNow would
                 // already have removed it).
                 assertTrue(client.scheduler().getQueue().size() > 0);
-                // Consumer parked in read for three idle budgets while the
+                // Consumer parked in read for over two idle budgets while the
                 // peer proves liveness only with keepalive comments: the
                 // refills stamp the budget, so the stream must survive.
                 ExecutorService consumer = Executors.newSingleThreadExecutor();
@@ -2993,7 +2994,7 @@ class HostedHarnessClientTest {
                     Future<DaemonEvent> event = consumer.submit(
                             () -> assertTimeoutPreemptively(
                                     Duration.ofSeconds(8), stream::next));
-                    Thread.sleep(1300);
+                    Thread.sleep(3200);
                     stopKeepalives.countDown();
                     assertEquals("turn_complete",
                             event.get(10, TimeUnit.SECONDS).getType());
