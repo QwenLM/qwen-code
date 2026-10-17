@@ -47,3 +47,19 @@ export const PENDING_PROMPT_STARTED_EVENT = 'pending_prompt_started';
  * carries the actual error detail.
  */
 export const PENDING_PROMPT_COMPLETED_EVENT = 'pending_prompt_completed';
+
+/**
+ * Published when the running turn's provider call failed recoverably and the
+ * core is backing off before the next attempt. Mirrors the retry countdown the
+ * interactive CLI and headless front ends already show, so daemon clients can
+ * tell "waiting on a retry" apart from "hung".
+ * `data: { sessionId, attempt, maxRetries, delayMs, message?, isContinuation? }`.
+ */
+export const RETRY_SCHEDULED_EVENT = 'retry_scheduled';
+
+/**
+ * Published when the running turn's model exhausted its retry budget and the
+ * core is switching to the next model in the fallback chain.
+ * `data: { sessionId, fromModel, toModel, statusCode?, fallbackIndex }`.
+ */
+export const MODEL_FALLBACK_EVENT = 'model_fallback';

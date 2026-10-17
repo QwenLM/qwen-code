@@ -29,12 +29,16 @@ import {
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  RETRY_SCHEDULED_EVENT,
+  MODEL_FALLBACK_EVENT,
 } from '@qwen-code/acp-bridge/daemonEventTypes';
 export {
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  RETRY_SCHEDULED_EVENT,
+  MODEL_FALLBACK_EVENT,
 };
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
@@ -54,6 +58,8 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
   PENDING_PROMPT_COMPLETED_EVENT,
+  RETRY_SCHEDULED_EVENT,
+  MODEL_FALLBACK_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -276,6 +282,25 @@ export interface DaemonModelSwitchFailedData {
   sessionId: string;
   requestedModelId: string;
   error: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonRetryScheduledData {
+  sessionId: string;
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+  message?: string;
+  isContinuation?: boolean;
+  [key: string]: unknown;
+}
+
+export interface DaemonModelFallbackData {
+  sessionId: string;
+  fromModel: string;
+  toModel: string;
+  statusCode?: number;
+  fallbackIndex: number;
   [key: string]: unknown;
 }
 
@@ -1013,6 +1038,14 @@ export type DaemonModelSwitchFailedEvent = DaemonEventEnvelope<
   'model_switch_failed',
   DaemonModelSwitchFailedData
 >;
+export type DaemonRetryScheduledEvent = DaemonEventEnvelope<
+  typeof RETRY_SCHEDULED_EVENT,
+  DaemonRetryScheduledData
+>;
+export type DaemonModelFallbackEvent = DaemonEventEnvelope<
+  typeof MODEL_FALLBACK_EVENT,
+  DaemonModelFallbackData
+>;
 export type DaemonSessionDiedEvent = DaemonEventEnvelope<
   'session_died',
   DaemonSessionDiedData
@@ -1219,6 +1252,8 @@ export type DaemonSessionEvent =
   | DaemonSessionUpdateEvent
   | DaemonModelSwitchedEvent
   | DaemonModelSwitchFailedEvent
+  | DaemonRetryScheduledEvent
+  | DaemonModelFallbackEvent
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
@@ -1681,6 +1716,14 @@ export function asKnownDaemonEvent(
     case 'model_switch_failed':
       return isModelSwitchFailedData(event.data)
         ? (event as DaemonModelSwitchFailedEvent)
+        : undefined;
+    case RETRY_SCHEDULED_EVENT:
+      return isRetryScheduledData(event.data)
+        ? (event as DaemonRetryScheduledEvent)
+        : undefined;
+    case MODEL_FALLBACK_EVENT:
+      return isModelFallbackData(event.data)
+        ? (event as DaemonModelFallbackEvent)
         : undefined;
     case 'session_died':
       return isSessionDiedData(event.data)
@@ -2254,6 +2297,8 @@ export function reduceDaemonSessionEvent(
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
     case PENDING_PROMPT_COMPLETED_EVENT:
+    case RETRY_SCHEDULED_EVENT: // transient in-flight turn feedback, no view state
+    case MODEL_FALLBACK_EVENT:
     case 'channel_delivery_result':
       return base;
     case 'session_rewound':
@@ -2669,6 +2714,34 @@ function isModelSwitchFailedData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['requestedModelId']) &&
     isNonEmptyString(value['error'])
+  );
+}
+
+function isRetryScheduledData(
+  value: unknown,
+): value is DaemonRetryScheduledData {
+  const message = isRecord(value) ? value['message'] : undefined;
+  const isContinuation = isRecord(value) ? value['isContinuation'] : undefined;
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    typeof value['attempt'] === 'number' &&
+    typeof value['maxRetries'] === 'number' &&
+    typeof value['delayMs'] === 'number' &&
+    (message === undefined || typeof message === 'string') &&
+    (isContinuation === undefined || typeof isContinuation === 'boolean')
+  );
+}
+
+function isModelFallbackData(value: unknown): value is DaemonModelFallbackData {
+  const statusCode = isRecord(value) ? value['statusCode'] : undefined;
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['fromModel']) &&
+    isNonEmptyString(value['toModel']) &&
+    (statusCode === undefined || typeof statusCode === 'number') &&
+    typeof value['fallbackIndex'] === 'number'
   );
 }
 
