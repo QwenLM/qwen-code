@@ -15222,6 +15222,81 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  // A fenced writer fails the refusal's cleanup as well: the seal, and with
+  // it possibly the activation release, reports the writer conflict. The load
+  // must still answer that self-healing 409, whose wait the coordinator does
+  // not charge to the retry budget, rather than the generic open failure.
+  it.each([
+    ['the seal fails', false],
+    ['both the release and the seal fail', true],
+  ])(
+    'answers a writer conflict when %s while refusing a load',
+    async (_label, releaseFails) => {
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      });
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        created.body.clientId as string,
+      );
+      const conflict = () =>
+        new ManagedSessionStoreHttpError(
+          409,
+          'managed_session_writer_conflict',
+          'Writer fenced',
+        );
+      const spies: Array<{ mockRestore(): void }> = [];
+      // Armed by the refusal itself, so only the refusal's close fails.
+      state.assertWritable.mockImplementationOnce(async () => {
+        if (releaseFails)
+          spies.push(
+            vi
+              .spyOn(
+                LocalManagedSessionAuthority.prototype,
+                'releaseActivation',
+              )
+              .mockRejectedValueOnce(conflict()),
+          );
+        spies.push(
+          vi
+            .spyOn(LocalManagedSessionAuthority.prototype, 'close')
+            .mockRejectedValueOnce(conflict()),
+        );
+        throw new Error('writer lost');
+      });
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      try {
+        const refused = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ managedSessionStore: store() });
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('managed_session_writer_conflict');
+        const lines = log.mock.calls.map(([line]) => String(line));
+        expect(
+          lines.some((line) => line.includes('close failed during open')),
+        ).toBe(releaseFails);
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+        log.mockRestore();
+      }
+      expect(state.model).not.toHaveBeenCalled();
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        loaded.body.clientId as string,
+      );
+    },
+  );
+
   it('clears predispatch partial intent file history before the cancelled terminal', async () => {
     let originalManaged: Awaited<ReturnType<typeof openManagedSession>>;
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
