@@ -11755,6 +11755,30 @@ function visibleRecapTexts(): string[] {
   );
 }
 
+function showSessionRecapSetting(effective: boolean): DaemonSettingDescriptor {
+  return {
+    key: 'general.showSessionRecap',
+    type: 'boolean',
+    label: 'Show Session Recap',
+    category: 'General',
+    requiresRestart: false,
+    default: false,
+    values: { effective },
+  };
+}
+
+function recapAwayThresholdSetting(effective: number): DaemonSettingDescriptor {
+  return {
+    key: 'general.sessionRecapAwayThresholdMinutes',
+    type: 'number',
+    label: 'Session Recap Away Threshold (minutes)',
+    category: 'General',
+    requiresRestart: false,
+    default: 5,
+    values: { effective },
+  };
+}
+
 async function triggerAutoRecap(): Promise<{
   recap: ReturnType<
     typeof deferred<{ sessionId: string; recap: string | null }>
@@ -11764,6 +11788,11 @@ async function triggerAutoRecap(): Promise<{
 }> {
   const recap = deferred<{ sessionId: string; recap: string | null }>();
   mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+  testState.settings = [
+    showSessionRecapSetting(true),
+    // The away jumps below use 3 minutes; the default threshold is 5.
+    recapAwayThresholdSetting(3),
+  ];
   testState.blocks = [{}, {}, {}, {}];
   let hidden = true;
   Object.defineProperty(document, 'hidden', {
@@ -25141,6 +25170,76 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('does not show an automatic recap when the Show Session Recap setting is off', async () => {
+    // The away jump satisfies the threshold, so only the setting gate can
+    // explain the recap not firing.
+    testState.settings = [
+      showSessionRecapSetting(false),
+      recapAwayThresholdSetting(3),
+    ];
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
+  it('does not show an automatic recap before the default away threshold', async () => {
+    // No threshold setting: the 5-minute default applies, so a 3-minute away
+    // cycle stays quiet.
+    testState.settings = [showSessionRecapSetting(true)];
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
+  it('keeps manual /recap working when the Show Session Recap setting is off', async () => {
+    const manual = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValueOnce(manual.promise);
+
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/recap';
+    await clickSubmit(container);
+
+    await act(async () => {
+      manual.resolve({ sessionId: 'session-1', recap: 'Manual recap' });
+      await manual.promise;
+    });
+
+    expect(visibleRecapTexts()).toEqual([
+      expect.stringContaining('Manual recap'),
+    ]);
+  });
+
   it('discards an automatic recap after a new turn starts in the same session', async () => {
     const { recap } = await triggerAutoRecap();
     testState.blocks = [
@@ -25292,12 +25391,35 @@ describe('App session callbacks', () => {
     expect(visibleRecapTexts()).toEqual([]);
   });
 
+  it('discards an automatic recap when Show Session Recap is turned off while the request is in flight', async () => {
+    const { recap, rerender } = await triggerAutoRecap();
+    // The recap call is pending. The user now disables the toggle.
+    testState.settings = [
+      showSessionRecapSetting(false),
+      recapAwayThresholdSetting(3),
+    ];
+    rerender();
+    await flush();
+
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'In-flight recap' });
+      await recap.promise;
+    });
+
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
   it('keeps only the newest automatic recap across away cycles', async () => {
     const first = deferred<{ sessionId: string; recap: string | null }>();
     const second = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
+    testState.settings = [
+      showSessionRecapSetting(true),
+      // The away jumps below use 3 minutes; the default threshold is 5.
+      recapAwayThresholdSetting(3),
+    ];
     testState.blocks = [{}, {}, {}, {}];
     let hidden = true;
     Object.defineProperty(document, 'hidden', {
@@ -25394,6 +25516,11 @@ describe('App session callbacks', () => {
     mockSessionActions.recapSession
       .mockReturnValueOnce(manual.promise)
       .mockReturnValueOnce(auto.promise);
+    testState.settings = [
+      showSessionRecapSetting(true),
+      // The away jump below uses 3 minutes; the default threshold is 5.
+      recapAwayThresholdSetting(3),
+    ];
 
     let hidden = false;
     Object.defineProperty(document, 'hidden', {

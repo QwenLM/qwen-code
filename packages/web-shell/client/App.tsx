@@ -14456,16 +14456,39 @@ export function App({
   const liveGoalSnapshot =
     goalSnapshot?.goal?.status === 'complete' ? null : goalSnapshot;
 
-  // Auto-recap: fire when the user returns after being away ≥ 3 minutes
+  // Auto-recap: fire when the user returns after being away for the configured
+  // threshold. Gated on the same "Show Session Recap" setting the terminal CLI
+  // honors, so disabling it there also silences the Web Shell. Manual `/recap`
+  // is exempt.
+  const autoRecapEnabled =
+    !workspaceSettingsState.error &&
+    workspaceSettingsState.status !== undefined &&
+    workspaceSettings.find(
+      (setting) => setting.key === 'general.showSessionRecap',
+    )?.values.effective === true;
+  const recapAwayThresholdEffective = workspaceSettings.find(
+    (setting) => setting.key === 'general.sessionRecapAwayThresholdMinutes',
+  )?.values.effective;
+  // Falsy / non-positive values fall back to the 5-minute default, matching
+  // the terminal CLI (useAwaySummary).
+  const recapAwayThresholdMinutes =
+    typeof recapAwayThresholdEffective === 'number' &&
+    recapAwayThresholdEffective > 0
+      ? recapAwayThresholdEffective
+      : 5;
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
   const autoRecapVersionRef = useRef(0);
+  // Kept in sync on every render so the in-flight promise callback can check
+  // the *current* toggle state, not the one captured when the call was made.
+  const autoRecapEnabledRef = useRef(autoRecapEnabled);
+  autoRecapEnabledRef.current = autoRecapEnabled;
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
     autoRecapVersionRef.current += 1;
   }, [logicalSessionKey]);
   useEffect(() => {
-    const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
+    const AWAY_THRESHOLD_MS = recapAwayThresholdMinutes * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
       if (document.hidden) {
@@ -14475,6 +14498,7 @@ export function App({
       const hiddenAt = hiddenAtRef.current;
       hiddenAtRef.current = null;
       if (hiddenAt === null) return;
+      if (!autoRecapEnabled) return;
       if (Date.now() - hiddenAt < AWAY_THRESHOLD_MS) return;
       if (sessionWriteBlocked) return;
       if (streamingStateRef.current !== 'idle') return;
@@ -14500,6 +14524,7 @@ export function App({
           // echoes the id back), not a real race; the epoch/connection checks
           // catch those. Kept so it is not simplified away as redundant.
           if (
+            !autoRecapEnabledRef.current ||
             autoRecapVersionRef.current !== version ||
             !owner.isCurrent() ||
             connectionRef.current.sessionId !== sessionId ||
@@ -14514,6 +14539,7 @@ export function App({
                 version: autoRecapVersionRef.current,
                 userBlockId: currentUserBlockId,
                 streamingState: streamingStateRef.current,
+                autoRecapEnabled: autoRecapEnabledRef.current,
               },
               result: result.sessionId,
             });
@@ -14535,7 +14561,9 @@ export function App({
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [
+    autoRecapEnabled,
     connection.sessionId,
+    recapAwayThresholdMinutes,
     sessionActions,
     sessionOwnerGuard,
     sessionWriteBlocked,
