@@ -6711,7 +6711,9 @@ async function runQwenServeImpl(
           ? { customIgnoreFiles: secondaryCustomIgnoreFiles }
           : {}),
       });
-      const secondaryChannelFactory = runtime.createSpawnChannelFactory({
+      const secondaryChannelFactoryOptions: NonNullable<
+        Parameters<typeof runtime.createSpawnChannelFactory>[0]
+      > = {
         processRegistry,
         childHeapPolicy,
         reclaimIdleChild: async (signal) => {
@@ -6734,7 +6736,10 @@ async function runQwenServeImpl(
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
-      });
+      };
+      const secondaryChannelFactory = runtime.createSpawnChannelFactory(
+        secondaryChannelFactoryOptions,
+      );
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
       // Wire sub-session support for the secondary workspace too — without
       // this, create_sub_session calls from sessions bound to a secondary
@@ -6843,6 +6848,17 @@ async function runQwenServeImpl(
           ? {
               executionEngines: runtime.createPairedExecutionEngines({
                 legacy: secondaryChannelFactory,
+                managed: runtime.createManagedExecutionEngine({
+                  legacy: secondaryChannelFactoryOptions,
+                  host: {
+                    workspaceCwd: workspaceInput.cwd,
+                    workspaceTrusted: secondaryTrusted,
+                    environment: secondaryEnv.effectiveEnv,
+                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    hasLiveMcpServers: () =>
+                      secondaryBridgeRef?.hasRuntimeMcpServers() === true,
+                  },
+                }),
                 runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
               }),
             }
@@ -7393,7 +7409,9 @@ async function runQwenServeImpl(
                 : {}),
             })
           : wsFsFactory;
-      const wsChannelFactory = runtime.createSpawnChannelFactory({
+      const wsChannelFactoryOptions: NonNullable<
+        Parameters<typeof runtime.createSpawnChannelFactory>[0]
+      > = {
         processRegistry,
         childHeapPolicy,
         reclaimIdleChild: async (signal) => {
@@ -7416,7 +7434,10 @@ async function runQwenServeImpl(
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
-      });
+      };
+      const wsChannelFactory = runtime.createSpawnChannelFactory(
+        wsChannelFactoryOptions,
+      );
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
       // eslint-disable-next-line prefer-const
       let wsBridgeRef:
@@ -7561,6 +7582,17 @@ async function runQwenServeImpl(
             ? {
                 executionEngines: runtime.createPairedExecutionEngines({
                   legacy: wsChannelFactory,
+                  managed: runtime.createManagedExecutionEngine({
+                    legacy: wsChannelFactoryOptions,
+                    host: {
+                      workspaceCwd: cwd,
+                      workspaceTrusted: trusted,
+                      environment: wsEnv.effectiveEnv,
+                      forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                      hasLiveMcpServers: () =>
+                        wsBridgeRef?.hasRuntimeMcpServers() === true,
+                    },
+                  }),
                   runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
                 }),
               }
