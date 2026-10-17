@@ -26,7 +26,13 @@ import java.util.UUID;
 @Repository
 public class SshWorkspaceStore {
     public static final String KIND = "SSH_LOCAL";
-    private static final String OPERATION = "WORKSPACE_CREATE";
+    public static final String OPERATION = "WORKSPACE_CREATE";
+    /**
+     * D7-2: how long a registration that may have reached its node parks
+     * before its node is read again. A register-storage still running on the
+     * node when its caller gave up finishes well within it.
+     */
+    static final long PARK_DELAY_MILLIS = 300_000;
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final TypeReference<LinkedHashMap<String, Object>> MAP = new TypeReference<>() { };
     private final JdbcTemplate jdbc;
@@ -44,6 +50,17 @@ public class SshWorkspaceStore {
     public record Intent(String operationId, String tenantId, String actorId,
             String nodeId, String path, String displayName, String workspaceId,
             String storageId, String registrationId, Map<String, Object> registration) {
+    }
+
+    /**
+     * D7-2: a registration parked recovery_blocked. Only a reserved one can
+     * have reached its node; its registration names the identity and the
+     * marker the node would hold.
+     */
+    public record Parked(Intent intent, String failureCode) {
+        public boolean reserved() {
+            return !intent.registration().isEmpty();
+        }
     }
 
     public Operation begin(String tenant, String actor, String key,
@@ -121,12 +138,16 @@ public class SshWorkspaceStore {
             if (updated != 1) {
                 return null;
             }
-            Map<String, Object> value = decode((String) rows.getFirst().get("request_json"));
-            Map<String, Object> registration = decode((String) rows.getFirst().get("result_json"));
-            return new Intent(id, tenant, actor, string(value, "nodeId"), string(value, "path"),
-                    string(value, "displayName"), string(value, "workspaceId"), string(value, "storageId"),
-                    string(value, "registrationId"), registration);
+            return intent(id, tenant, rows.getFirst());
         });
+    }
+
+    private static Intent intent(String id, String tenant, Map<String, Object> row) {
+        Map<String, Object> value = decode((String) row.get("request_json"));
+        Map<String, Object> registration = decode((String) row.get("result_json"));
+        return new Intent(id, tenant, string(value, "actorId"), string(value, "nodeId"), string(value, "path"),
+                string(value, "displayName"), string(value, "workspaceId"), string(value, "storageId"),
+                string(value, "registrationId"), registration);
     }
 
     public void reserve(Intent intent, String owner, Map<String, Object> registration) {
@@ -163,28 +184,140 @@ public class SshWorkspaceStore {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, intent.tenantId());
             requireClaim(intent, owner);
-            String alias = JdbcRuntimeBindingRepository.storageAliasKey(intent.tenantId(), intent.storageId());
-            var rows = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL' FOR UPDATE", alias);
-            if (rows.size() != 1) {
-                throw WorkspaceExecutionStore.unavailable();
-            }
-            jdbc.update("UPDATE ma_storage SET registration_state = 'REGISTERED', mount_revision = 1 WHERE alias_key = ?", alias);
-            jdbc.update("UPDATE ma_storage_owner SET mount_state = 'READY', mount_revision = 1,"
-                            + " mount_completed_operation_id = ?, mount_operation_id = NULL WHERE mount_registration_id = ? AND storage_kind = 'SSH_LOCAL'",
-                    intent.registrationId(), intent.registrationId());
-            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
-                            + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')", intent.tenantId(), intent.workspaceId(), intent.storageId(),
-                    intent.displayName(), WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
-                    intent.tenantId(), intent.workspaceId(), ManagedWorkspaceRegistry.actorKey(intent.tenantId(), intent.actorId()));
+            publish(intent);
             if (finish(intent, owner, "COMPLETED", null) != 1) {
                 throw new ApiException(HttpStatus.CONFLICT, "operation_claim_lost", "Registration claim expired.");
             }
         });
     }
 
+    /** Turns the reserved storage into the registered Workspace. */
+    private void publish(Intent intent) {
+        String alias = JdbcRuntimeBindingRepository.storageAliasKey(intent.tenantId(), intent.storageId());
+        var rows = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL' FOR UPDATE", alias);
+        if (rows.size() != 1) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        jdbc.update("UPDATE ma_storage SET registration_state = 'REGISTERED', mount_revision = 1 WHERE alias_key = ?", alias);
+        jdbc.update("UPDATE ma_storage_owner SET mount_state = 'READY', mount_revision = 1,"
+                        + " mount_completed_operation_id = ?, mount_operation_id = NULL WHERE mount_registration_id = ? AND storage_kind = 'SSH_LOCAL'",
+                intent.registrationId(), intent.registrationId());
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
+                        + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')", intent.tenantId(), intent.workspaceId(), intent.storageId(),
+                intent.displayName(), WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
+                intent.tenantId(), intent.workspaceId(), ManagedWorkspaceRegistry.actorKey(intent.tenantId(), intent.actorId()));
+    }
+
+    /**
+     * D7-2: a retryable failure returns to pending. Otherwise only a
+     * reservation can have reached the node, since register-storage runs
+     * after it: an unreserved registration never left Java, so its refusal
+     * is final, while a reserved one parks recovery_blocked until its node
+     * proves whether the marker landed.
+     */
     public void fail(Intent intent, String owner, String code, boolean retryable) {
-        transaction.executeWithoutResult(status -> finish(intent, owner, retryable ? "PENDING" : "RECOVERY_BLOCKED", code));
+        transaction.executeWithoutResult(status -> {
+            if (retryable) {
+                finish(intent, owner, "PENDING", code);
+                return;
+            }
+            String key = operationKey(intent.tenantId(), intent.operationId());
+            boolean reserved = !jdbc.queryForList("SELECT operation_key FROM ma_operation WHERE operation_key = ?"
+                    + " AND result_json IS NOT NULL FOR UPDATE", String.class, key).isEmpty();
+            if (!reserved) {
+                finish(intent, owner, "FAILED", code);
+                return;
+            }
+            jdbc.update("UPDATE ma_operation SET state = 'RECOVERY_BLOCKED', phase = 'RECOVERY_BLOCKED',"
+                            + " admission_stage = 'JAVA_DURABLE', delivery_state = 'BLOCKED', failure_code = ?,"
+                            + " available_at = " + ManagedSchemaTime.SQL_NOW + " + ?, claim_owner = NULL, claim_until = NULL,"
+                            + " gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND claim_owner = ?"
+                            + " AND state = 'RUNNING' AND claim_until > " + ManagedSchemaTime.SQL_NOW,
+                    code, PARK_DELAY_MILLIS, key, owner);
+        });
+    }
+
+    /** D7-2: parked registrations due for their node to be read again. */
+    public List<StoreModels.ParkedOperation> findParked(int limit) {
+        return WorkspaceOperations.rows(jdbc, "SELECT tenant_id, operation_id FROM ma_operation WHERE operation_kind ="
+                        + " 'WORKSPACE_CREATE' AND state = 'RECOVERY_BLOCKED' AND available_at <= "
+                        + ManagedSchemaTime.SQL_NOW + " ORDER BY available_at LIMIT ?", limit).stream()
+                .map(row -> new StoreModels.ParkedOperation(text(row.get("tenant_id")), null,
+                        text(row.get("operation_id")), OPERATION))
+                .toList();
+    }
+
+    /** A parked registration, or empty once it left the parked state. */
+    public java.util.Optional<Parked> parked(String tenant, String operationId) {
+        return parkedRow(tenant, operationId, false);
+    }
+
+    /**
+     * D7-2: its node holds the marker, so the registration landed: finish it
+     * as the original attempt would have, while it is still parked.
+     */
+    public boolean completeParked(String tenant, String operationId) {
+        return Boolean.TRUE.equals(transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
+            Parked parked = parkedRow(tenant, operationId, true).orElse(null);
+            if (parked == null || !parked.reserved()) {
+                return false;
+            }
+            publish(parked.intent());
+            return settleParked(tenant, operationId, "COMPLETED", null) == 1;
+        }));
+    }
+
+    /**
+     * D7-2: the registration can no longer land. Fail it and release what it
+     * reserved, the storage alias and the physical directory's owner, only
+     * while both are still this registration's unfinished reservation.
+     */
+    public boolean releaseParked(String tenant, String operationId, String code) {
+        return Boolean.TRUE.equals(transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
+            Parked parked = parkedRow(tenant, operationId, true).orElse(null);
+            if (parked == null) {
+                return false;
+            }
+            Intent intent = parked.intent();
+            if (parked.reserved()) {
+                jdbc.update("DELETE FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'"
+                                + " AND registration_state = 'FENCE_ONLY'",
+                        JdbcRuntimeBindingRepository.storageAliasKey(tenant, intent.storageId()));
+                jdbc.update("DELETE FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'SSH_LOCAL'"
+                                + " AND mount_registration_id = ? AND mount_state = 'UNVERIFIED'",
+                        physicalKey(object(intent.registration(), "identity")), intent.registrationId());
+            }
+            return settleParked(tenant, operationId, "FAILED", code) == 1;
+        }));
+    }
+
+    /** D7-2: nothing is proven yet; read the node again after the delay. */
+    public boolean reparkParked(String tenant, String operationId, long delayMillis) {
+        return jdbc.update("UPDATE ma_operation SET available_at = " + ManagedSchemaTime.SQL_NOW + " + ?,"
+                        + " attempt_count = attempt_count + 1, gmt_modified = " + ManagedSchemaTime.SQL_NOW
+                        + " WHERE operation_key = ? AND state = 'RECOVERY_BLOCKED'",
+                Math.max(0, delayMillis), operationKey(tenant, operationId)) == 1;
+    }
+
+    private java.util.Optional<Parked> parkedRow(String tenant, String operationId, boolean lock) {
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT * FROM ma_operation WHERE operation_key = ?"
+                        + " AND operation_kind = 'WORKSPACE_CREATE' AND tenant_id = ? AND state = 'RECOVERY_BLOCKED'"
+                        + (lock ? " FOR UPDATE" : ""),
+                operationKey(tenant, operationId), tenant);
+        return rows.isEmpty() ? java.util.Optional.empty()
+                : java.util.Optional.of(new Parked(intent(operationId, tenant, rows.getFirst()),
+                        (String) rows.getFirst().get("failure_code")));
+    }
+
+    private int settleParked(String tenant, String operationId, String state, String code) {
+        return jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, failure_code = ?,"
+                        + " delivery_state = CASE WHEN ? = 'COMPLETED' THEN 'CONFIRMED' ELSE 'BLOCKED' END,"
+                        + " gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", completed_at = " + ManagedSchemaTime.SQL_NOW
+                        + " WHERE operation_key = ? AND state = 'RECOVERY_BLOCKED'",
+                state, state, code, state, operationKey(tenant, operationId));
     }
 
     public SshRuntimeStorage runtimeStorage(RuntimeScope scope) {
@@ -243,7 +376,7 @@ public class SshWorkspaceStore {
 
     private int finish(Intent intent, String owner, String state, String code) {
         return jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, failure_code = ?, claim_owner = NULL, claim_until = NULL,"
-                        + " gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", completed_at = CASE WHEN ? = 'COMPLETED' THEN "
+                        + " gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", completed_at = CASE WHEN ? IN ('COMPLETED', 'FAILED') THEN "
                         + ManagedSchemaTime.SQL_NOW + " ELSE NULL END WHERE operation_key = ? AND claim_owner = ? AND state = 'RUNNING'"
                         + " AND claim_until > " + ManagedSchemaTime.SQL_NOW,
                 state, state, code, state,

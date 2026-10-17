@@ -190,7 +190,7 @@ class ManagedTurnCommandOperationTest {
         assertThat(parked.failureCode()).isEqualTo("submit_input_unconfirmed");
         assertThat(parked.receiptId()).isNull();
         ParkedOperation due = new ParkedOperation(TENANT, sessionId,
-                admitted.operationId(), OperationKind.SUBMIT_INPUT);
+                admitted.operationId(), "SUBMIT_INPUT");
         assertThat(store.findParkedOperations(50)).containsExactly(due);
         // No managed journal, then a live one without the commit: a writer
         // may still commit the admission, so nothing is proven.
@@ -238,7 +238,7 @@ class ManagedTurnCommandOperationTest {
         assertThat(acceptance(admitted)).isEqualTo(AcceptanceVerdict.unknown());
         jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 0");
         ParkedOperation due = new ParkedOperation(TENANT, sessionId,
-                admitted.operationId(), OperationKind.SUBMIT_INPUT);
+                admitted.operationId(), "SUBMIT_INPUT");
         assertThat(store.settleParkedOperation(due, acceptance(admitted), 0))
                 .isTrue();
         OperationRecord failed = operation(admitted.operationId());
@@ -283,6 +283,22 @@ class ManagedTurnCommandOperationTest {
         assertThat(raced).isTrue();
         assertThat(acceptance(admitted))
                 .isEqualTo(AcceptanceVerdict.committed());
+    }
+
+    @Test
+    void failsTheInputOperationWhenRecoveryFailsItsTurn() {
+        Admission admitted = submit("submit-1", "digest-1");
+        claim(admitted);
+        assertThat(store.failRecoveryBlockedTurn(TENANT, sessionId,
+                admitted.turnId(), OWNER, "blocked")).isTrue();
+        OperationRecord operation = operation(admitted.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode())
+                .isEqualTo("managed_runtime_recovery_blocked");
+        assertThat(store.failRecoveryBlockedTurn(TENANT, sessionId,
+                admitted.turnId(), OWNER, "blocked")).isFalse();
+        assertThat(operation(admitted.operationId()))
+                .usingRecursiveComparison().isEqualTo(operation);
     }
 
     @Test

@@ -3068,6 +3068,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<RuntimeMcpServerRemoveResult>;
 
   /**
+   * Whether this workspace runtime holds any MCP server that was added at
+   * runtime and is still registered. A paired Bridge reads it while it
+   * evaluates whether the Managed engine can reproduce the runtime's
+   * configuration: a Managed child starts without those servers, so a session
+   * must not select Managed while one is registered.
+   */
+  hasRuntimeMcpServers(): boolean;
+
+  /**
    * Add a runtime MCP server to one live session only. This does not mutate
    * workspace bootstrap state, affect sibling sessions, or emit a workspace
    * event.
