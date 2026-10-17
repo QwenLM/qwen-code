@@ -916,6 +916,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_display_name',
   'scratch_workspace_registration',
   'workspace_runtime_removal',
+  'workspace_pinning',
   'native_directory_picker',
   'workspace_runtime',
   'workspace_runtime_stop',
@@ -3915,6 +3916,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_pinning') {
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ persistentWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistentWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'scratch_workspace_registration') {
           expect(
             predicate({ scratchWorkspaceRegistrationAvailable: true }),
@@ -6067,6 +6086,8 @@ describe('createServeApp', () => {
           primary: true,
           trusted: true,
           workflowsEnabled: false,
+          registrationIds: [],
+          isPinned: false,
         },
       ]);
 

@@ -14,6 +14,7 @@ import {
   openNoFollow,
 } from '@qwen-code/qwen-code-core/noFollowOpen';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
 import {
   MAX_REGISTERED_WORKSPACES,
@@ -43,6 +44,7 @@ export interface WorkspaceRegistrationSnapshot {
   primaryWorkspace: string;
   workspaces: string[];
   displayNames?: Record<string, string>;
+  pinnedAts?: Record<string, string>;
 }
 
 export class WorkspaceDisplayNameValidationError extends Error {
@@ -273,11 +275,53 @@ function parseSnapshot(
       );
     }
   }
+  const rawPinnedAts = record['pinnedAts'];
+  let pinnedAts: Record<string, string> | undefined;
+  if (rawPinnedAts !== undefined) {
+    if (
+      typeof rawPinnedAts !== 'object' ||
+      rawPinnedAts === null ||
+      Array.isArray(rawPinnedAts)
+    ) {
+      throw new WorkspaceRegistrationStoreError(
+        'Workspace registration store pinnedAts must be an object',
+      );
+    }
+    const registrationIds = new Set(workspaces.map(workspaceRegistrationId));
+    for (const [registrationId, value] of Object.entries(rawPinnedAts)) {
+      if (!registrationIds.has(registrationId)) {
+        throw new WorkspaceRegistrationStoreError(
+          `Workspace registration store pinnedAts contains unknown registration id ${JSON.stringify(registrationId)}`,
+        );
+      }
+      if (typeof value !== 'string' || !value) {
+        writeStderrLine(
+          `qwen serve: skipping invalid pinnedAts[${JSON.stringify(registrationId)}]: not a non-empty string, got ${JSON.stringify(value)}`,
+        );
+        continue;
+      }
+      // Require the canonical UTC ISO-8601 form the writer emits
+      // (`new Date().toISOString()`), rejecting the looser strings
+      // `Date.parse` would otherwise accept (e.g. "2026", "1/1/2026").
+      if (
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ||
+        Number.isNaN(Date.parse(value))
+      ) {
+        writeStderrLine(
+          `qwen serve: skipping invalid pinnedAts[${JSON.stringify(registrationId)}]: not a valid ISO-8601 timestamp, got ${JSON.stringify(value)}`,
+        );
+        continue;
+      }
+      pinnedAts ??= {};
+      pinnedAts[registrationId] = value;
+    }
+  }
   return {
     schemaVersion: SCHEMA_VERSION,
     primaryWorkspace,
     workspaces,
     ...(displayNames ? { displayNames } : {}),
+    ...(pinnedAts ? { pinnedAts } : {}),
   };
 }
 
@@ -516,6 +560,83 @@ export class WorkspaceRegistrationStore {
     return matched;
   }
 
+  async setPinned(id: string, pinned: boolean): Promise<boolean> {
+    return this.update((snapshot) => {
+      const registrationId = id;
+      const exists = snapshot.workspaces.some(
+        (workspace) => workspaceRegistrationId(workspace) === registrationId,
+      );
+      if (!exists) return false;
+      if (pinned) {
+        if (snapshot.pinnedAts?.[registrationId]) return false;
+        snapshot.pinnedAts ??= {};
+        snapshot.pinnedAts[registrationId] = new Date().toISOString();
+        return true;
+      }
+      if (!snapshot.pinnedAts?.[registrationId]) return false;
+      delete snapshot.pinnedAts[registrationId];
+      if (Object.keys(snapshot.pinnedAts).length === 0) {
+        delete snapshot.pinnedAts;
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Pin/unpin every registration id that shares one logical workspace (alias
+   * paths) in a single atomic commit, stamping one shared timestamp so aliases
+   * never drift apart. `matched` distinguishes "the registration exists" from
+   * `changed` ("state actually flipped"), so the caller can answer 404 vs the
+   * current state without a second read. A committed-write race is treated as
+   * a successful commit (the mutation already landed), surfacing the captured
+   * outcome rather than throwing.
+   */
+  async setPinnedByIds(
+    ids: readonly string[],
+    pinned: boolean,
+  ): Promise<{ matched: number; changed: boolean; pinnedAt?: string }> {
+    const requested = new Set(ids);
+    if (requested.size === 0) return { matched: 0, changed: false };
+    const now = new Date().toISOString();
+    let matched = 0;
+    let changed = false;
+    try {
+      await this.update((snapshot) => {
+        matched = 0;
+        changed = false;
+        for (const workspace of snapshot.workspaces) {
+          const registrationId = workspaceRegistrationId(workspace);
+          if (!requested.has(registrationId)) continue;
+          matched++;
+          if (pinned) {
+            if (!snapshot.pinnedAts?.[registrationId]) {
+              snapshot.pinnedAts ??= {};
+              snapshot.pinnedAts[registrationId] = now;
+              changed = true;
+            }
+          } else if (snapshot.pinnedAts?.[registrationId]) {
+            delete snapshot.pinnedAts[registrationId];
+            changed = true;
+          }
+        }
+        if (
+          snapshot.pinnedAts &&
+          Object.keys(snapshot.pinnedAts).length === 0
+        ) {
+          delete snapshot.pinnedAts;
+        }
+        return changed;
+      });
+    } catch (err) {
+      if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
+        throw err;
+      }
+      // The mutation committed before the error surfaced; keep the outcome.
+    }
+    const pinnedAt = pinned && matched > 0 ? now : undefined;
+    return { matched, changed, ...(pinnedAt ? { pinnedAt } : {}) };
+  }
+
   async removeByIds(ids: readonly string[]): Promise<number> {
     const requested = new Set(ids);
     if (requested.size === 0) return 0;
@@ -533,6 +654,12 @@ export class WorkspaceRegistrationStore {
       snapshot.workspaces.splice(0, snapshot.workspaces.length, ...retained);
       for (const registrationId of removedIds) {
         setSnapshotDisplayName(snapshot, registrationId, undefined);
+        if (snapshot.pinnedAts?.[registrationId]) {
+          delete snapshot.pinnedAts[registrationId];
+          if (Object.keys(snapshot.pinnedAts).length === 0) {
+            delete snapshot.pinnedAts;
+          }
+        }
       }
       return true;
     });

@@ -11,6 +11,7 @@ import { createDaemonWorkspaceActions } from './actions.js';
 describe('workspace actions', () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('forwards workspace updates to the daemon client', async () => {
@@ -692,6 +693,42 @@ describe('workspace actions', () => {
 
     await expect(actions.pickWorkspaceDirectory()).rejects.toThrow(
       'Open directory picker failed: DaemonClient is not connected',
+    );
+  });
+
+  it('sends the workspace pin toggle with a JSON content type', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: 'reg-1',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({}) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: 'http://127.0.0.1:4173',
+    });
+
+    await expect(actions.updateWorkspacePin('reg-1', true)).resolves.toEqual({
+      id: 'reg-1',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [unknown, RequestInit];
+    // The daemon's JSON body parser only runs when the request carries a
+    // JSON content type; without it the pin toggle 400s with
+    // "isPinned must be a boolean" even though the body is correct.
+    expect(String(url)).toBe(
+      'http://127.0.0.1:4173/workspace-registrations/reg-1/pin',
+    );
+    expect(init.method).toBe('PATCH');
+    expect(init.body).toBe(JSON.stringify({ isPinned: true }));
+    expect(new Headers(init.headers).get('content-type')).toBe(
+      'application/json',
     );
   });
 });

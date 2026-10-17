@@ -130,6 +130,32 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async updateWorkspacePin(registrationId, isPinned) {
+      requireClient(getClient, 'Update workspace pin failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/workspace-registrations/${encodeURIComponent(registrationId)}/pin`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'PATCH',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify({ isPinned }),
+        }),
+        'Update workspace pin timed out',
+      );
+      if (!res.ok) {
+        const encodedId = encodeURIComponent(registrationId);
+        const route = `PATCH /workspace-registrations/${encodedId}/pin`;
+        throw new Error(await readDaemonError(res, route));
+      }
+      return (await res.json()) as {
+        id: string;
+        isPinned: boolean;
+        pinnedAt?: string;
+      };
+    },
+
     async deleteSession(sessionId: string) {
       const client = requireClient(getClient, 'Delete session failed');
       const result = await withActionTimeout(

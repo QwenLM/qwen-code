@@ -101,6 +101,14 @@
   border-radius: 4px;
 }
 
+.pinBadge {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  margin-inline-start: 4px;
+  opacity: 0.75;
+}
+
 /* Trusted sessions use the sidebar's shared row with its own left indent;
    read-only rows apply the same indent below. */
 .sessions {
