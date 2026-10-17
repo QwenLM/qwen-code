@@ -678,8 +678,8 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(install.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
     );
-    // The write-back closes the cache: 'maven' loop — the seed above only
-    // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
+    // The write-back closes the host-shared ~/.m2 loop — the seed above only
+    // reads that repository, so without it a pom key rotation leaves a
     // thin entry that never recaptures the managed-agent-server tree. The
     // excludes name the two in-house fixed release coordinates, not the
     // whole com/alibaba group, so third-party artifacts under it (druid)
@@ -688,6 +688,7 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     // has already passed, and pipefail keeps a failing left-hand tar from
     // being masked by the extractor's exit 0.
     expect(verify.run).toContain('set -o pipefail');
+    expect(verify.run).toContain('mkdir -p "${HOME}/.m2/repository"');
     expect(verify.run).toContain(
       'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
     );
@@ -923,5 +924,36 @@ describe('Java SDK release validation gate', () => {
     expect(guard).toBeLessThan(
       steps.findIndex((entry) => entry.name === 'Create and push release tag'),
     );
+  });
+});
+
+// An ECS host keeps ~/.m2 between jobs, and setup-java's post-job save tars
+// that whole shared repository before reserving the key: 14 to 37 minutes per
+// job on 2026-10-16, discarded when a parallel job wins the reservation.
+//
+// The corpus is derived, not listed: a lane joins the pool with a one-line
+// runs-on ternary (3bddf6e0bb moved three), and a closed file list stays
+// green through exactly that move. Only pool-capable lanes are pinned — a
+// hosted-literal runs-on never lands there, so release-sdk-java.yml keeps
+// cache: 'maven' and mobile-shell.yml declares no cache at all.
+describe('setup-java Maven cache stays on hosted runners', () => {
+  const hostedOnly =
+    "${{ runner.environment == 'github-hosted' && 'maven' || '' }}";
+  const sites = globSync('.github/workflows/*.{yml,yaml}').flatMap((file) =>
+    Object.entries(parse(readFileSync(file, 'utf8')).jobs).flatMap(
+      ([name, job]) =>
+        (job.steps ?? [])
+          .filter((s) => String(s.uses ?? '').startsWith('actions/setup-java'))
+          .map((s) => [`${file} ${name}`, s, job['runs-on']]),
+    ),
+  );
+  const poolCapable = sites.filter(([, , runsOn]) =>
+    String(runsOn ?? '').includes('self-hosted'),
+  );
+  it('finds every pool-capable setup-java step', () => {
+    expect(poolCapable.length).toBe(4);
+  });
+  it.each(poolCapable)('%s caches Maven only on hosted runners', (_, step) => {
+    expect(step.with?.cache).toBe(hostedOnly);
   });
 });
