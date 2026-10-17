@@ -4,7 +4,7 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded: user configuration can neither add to nor replace them, but an operator can disable them by pinning an empty model list under `qwen-oauth` in System, User, or SystemDefaults settings (a workspace-scope pin is ignored, and an active pin warns at load).
 
 > [!note]
 >
@@ -186,8 +186,12 @@ Use one of the built-in provider ids below, or map a custom id with `providerPro
 | `openai`           | OpenAI-compatible APIs. Defaults to Chat Completions; set a model's `wireApi` to `responses` for the Responses API.                             |
 | `anthropic`        | Anthropic Claude API                                                                                                                            |
 | `gemini`           | Google Gemini API                                                                                                                               |
-| `qwen-oauth`       | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
+| `qwen-oauth`       | Qwen OAuth (hard-coded models; entries under this id are never registered. An operator can disable the built-ins by pinning an empty list, see below) |
 | `vertex-ai`        | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`) |
+
+> [!note]
+>
+> **Qwen OAuth (`qwen-oauth`) is special:** its models are hard-coded, and `modelProviders` entries under this id — including ids mapped to `qwen-oauth` via `providerProtocol` — are never registered. An operator can disable the built-in Qwen OAuth (personal Qwen login) models by pinning an empty model list (`"qwen-oauth": []`) in System, User, or SystemDefaults settings; a workspace-scope pin is ignored, and an active pin warns at load. Because the Qwen OAuth endpoint is discovered dynamically at login, it cannot be listed in `model.allowedBaseUrls` — setting that allowlist also disables the built-in Qwen OAuth models.
 
 > [!note]
 > Vertex AI entries can authenticate with **Application Default Credentials**. Set `GOOGLE_CLOUD_PROJECT` (and optionally `GOOGLE_CLOUD_LOCATION`, which defaults to `global`) and leave `envKey` unset, along with every other key source the resolver reads: `GOOGLE_API_KEY`, `settings.security.auth.apiKey`, and the CLI key flags. Any API key value that reaches a Vertex entry switches the Google SDK to Vertex Express mode, which ignores the project, the location and your ADC credentials. An entry that declares an `envKey` is never routed to ADC, so a key that fails to be injected keeps failing on that variable instead of silently authenticating as a different principal.

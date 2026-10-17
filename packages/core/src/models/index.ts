@@ -25,6 +25,9 @@ export {
   tryResolveModelProtocol,
   validateModelProvidersConfig,
   resolveModelSelectionAuthType,
+  isBaseUrlAllowed,
+  validateAllowedBaseUrls,
+  isQwenOAuthBuiltinsPinnedEmpty,
 } from './modelRegistry.js';
 
 export { isImageGenerationCapable } from './image-generation-capability.js';

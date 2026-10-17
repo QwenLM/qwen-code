@@ -280,6 +280,9 @@ export function prepareSettingWrite(
       const models = new ModelsConfig({
         modelProvidersConfig: merged.modelProviders,
         providerProtocolConfig: merged.providerProtocol,
+        // Managed endpoint allowlist (issue #12805): undefined = no policy;
+        // never coerce to [].
+        allowedModelBaseUrls: merged.model?.allowedBaseUrls,
       });
       persistedValue = resolveAcpFastModelSelector(
         value,

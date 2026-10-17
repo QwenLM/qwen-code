@@ -342,6 +342,91 @@ describe('Live provider credentials', () => {
     });
   });
 
+  describe('managed allowlist gate (model.allowedBaseUrls)', () => {
+    const DASHSCOPE_ROUTE = {
+      id: 'qwen3.5-omni-plus-realtime',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      envKey: 'DASHSCOPE_API_KEY',
+      realtimeOnly: true,
+    };
+    const CORP = ['https://corp.example'];
+    const DASHSCOPE_ALLOWED = ['https://dashscope.aliyuncs.com'];
+
+    it('rejects a route endpoint that is off the allowlist and names the setting', () => {
+      const input = settings({
+        experimental: {
+          liveVoice: {
+            enabled: true,
+            model: DASHSCOPE_ROUTE.id,
+          },
+        },
+        modelProviders: { openai: [DASHSCOPE_ROUTE] },
+        model: { allowedBaseUrls: CORP },
+      });
+
+      expect(() =>
+        resolveLiveProviderCredential(input, {
+          env: { DASHSCOPE_API_KEY: 'env-secret' },
+        }),
+      ).toThrow(/is not in the managed allowlist 'model\.allowedBaseUrls'/);
+    });
+
+    it('resolves a route endpoint that is on the allowlist (wss judged in its https form)', () => {
+      const input = settings({
+        experimental: {
+          liveVoice: {
+            enabled: true,
+            model: DASHSCOPE_ROUTE.id,
+          },
+        },
+        modelProviders: { openai: [DASHSCOPE_ROUTE] },
+        model: { allowedBaseUrls: DASHSCOPE_ALLOWED },
+      });
+
+      const credential = resolveLiveProviderCredential(input, {
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      expect(credential.endpoint).toBe(
+        'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+      );
+    });
+
+    it('rejects a free-standing wss endpoint that is off the allowlist', () => {
+      const input = settings({
+        experimental: {
+          liveVoice: {
+            enabled: true,
+            apiKey: 'settings-secret',
+            endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+          },
+        },
+        model: { allowedBaseUrls: CORP },
+      });
+
+      expect(() => resolveLiveProviderCredential(input)).toThrow(
+        /is not in the managed allowlist 'model\.allowedBaseUrls'/,
+      );
+    });
+
+    it('resolves a free-standing wss endpoint that is on the allowlist', () => {
+      const input = settings({
+        experimental: {
+          liveVoice: {
+            enabled: true,
+            apiKey: 'settings-secret',
+            endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+          },
+        },
+        model: { allowedBaseUrls: DASHSCOPE_ALLOWED },
+      });
+
+      const credential = resolveLiveProviderCredential(input);
+      expect(credential.endpoint).toBe(
+        'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+      );
+    });
+  });
+
   it('connects a stored base URL through its Realtime endpoint', () => {
     const credential = resolveLiveProviderCredential(
       settings({
