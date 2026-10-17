@@ -634,6 +634,103 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong(), anyBoolean());
     }
 
+    // Issue #14387: a workflow Turn runs deterministically in-process under
+    // node:vm, and a Harness crash leaves no witness to its in-process
+    // subagents. The recovery must never re-drive it — the Turn stays
+    // unsettled, the relay classifies the record unknown/blocked, and the
+    // cold-load refusal keeps the child Session's reopen refused. Driving
+    // it again would re-run the script and re-dispatch the subagents,
+    // spending the work twice while the first run's outcome stayed
+    // unobserved. Found by the FG10d fault gate.
+    @Test
+    void neverRedrivesAWorkflowTurnOnARecoveryPath() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        // A workflow Turn that was being driven on a Harness that died:
+        // bound session (harnessBootId set), the Turn's input carries the
+        // workflow_launch block, and it was submitted and admitted.
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old", 1L,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null, null,
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        // The workflow Turn is never re-driven: no takeover, no re-submit,
+        // and it is never settled FAILED as if its outcome were observed.
+        verify(harness, never()).recoverManagedRuntime(anyString(),
+                anyString(), anyBoolean());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // The #14387 refusal keys on the recovery path alone. A workflow
+    // Turn's first launch rides an unbound Session — harness_boot_id is
+    // written only by the first attach (ManagedAgentStore.bindHarness; the
+    // creation INSERT has no such column) — so the refusal cannot fire and
+    // the launch is driven like any other Turn's.
+    @Test
+    void drivesAWorkflowTurnsFirstLaunchOnAnUnboundSession() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "RUNNING", false, null, null,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null, null,
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                unboundSessionRecord());
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        when(harness.createOrLoad("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", null, null, null));
+        when(harness.submit(eq("tenant"), eq("session"), eq("prompt"),
+                any(), anyString()))
+                .thenThrow(new IllegalStateException("response lost"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        // The launch was driven: attached through createOrLoad (never the
+        // takeover load) and submitted to the Harness.
+        verify(harness).createOrLoad("tenant", "session", false);
+        verify(harness).submit(eq("tenant"), eq("session"), eq("prompt"),
+                any(), anyString());
+        verify(harness, never()).recoverManagedRuntime(anyString(),
+                anyString(), anyBoolean());
+    }
+
     // `managed_session_writer_conflict` is the only wait that ends on its
     // own when the fenced predecessor's lease lapses, so a bound Session's
     // recovery attach escapes the pre-admission budget on that code.

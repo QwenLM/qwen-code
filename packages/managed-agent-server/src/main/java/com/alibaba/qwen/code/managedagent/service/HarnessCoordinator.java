@@ -372,6 +372,19 @@ public class HarnessCoordinator {
         // here wait on the prior generation's lease, a wait bounded by that
         // lease itself rather than by the pre-admission retry budget.
         recoveryPath.set(session.harnessBootId() != null);
+        // #14387: a workflow Turn is never re-driven. Its work is
+        // deterministic and in-process (node:vm), and a Harness crash
+        // leaves no witness to its in-process subagents — re-running the
+        // script would spend the work twice while the first run's outcome
+        // stays unobserved. The Turn stays unsettled: the relay classifies
+        // the record unknown/blocked, the cold-load refusal keeps the
+        // child Session's reopen refused — never re-executed, never failed
+        // as if its outcome were observed. A cancel still drives: settling
+        // the Turn cancelled is the cancel's own act, not a re-run.
+        if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
+                && isWorkflowLaunchTurn(claimed)) {
+            return false;
+        }
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
             if (!claimed.submissionAttempted()) {
                 // Before submission a Workspace-files outage holds the Turn
@@ -1280,6 +1293,19 @@ public class HarnessCoordinator {
 
     private static boolean isHarnessDisabled(RuntimeException error) {
         return error instanceof HarnessDisabledException;
+    }
+
+    // #14387: a workflow Turn's work is one deterministic in-process script
+    // — the only Turn kind whose input is a `workflow_launch` block (the
+    // Java creation arm mints it, ManagedAgentService). Identified by the
+    // block's type, never by re-reading the record or the prompt text.
+    private static boolean isWorkflowLaunchTurn(TurnRecord turn) {
+        for (Map<String, Object> block : turn.input()) {
+            if (block != null && "workflow_launch".equals(block.get("type"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String failureLabel(RuntimeException error) {
