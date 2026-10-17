@@ -499,6 +499,7 @@ const buildExtensionSkillStates = (
 };
 
 interface RegisterWorkspaceExtensionRoutesDeps {
+  managedExtensionsDir?: string;
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
@@ -557,6 +558,7 @@ export function registerWorkspaceExtensionRoutes(
           : undefined;
     return {
       boundWorkspace: ws,
+      managedExtensionsDir: deps.managedExtensionsDir,
       bridge: wsBridge,
       workspace: wsService,
       ...(isWorkspaceTrusted ? { isWorkspaceTrusted } : {}),
@@ -1469,7 +1471,7 @@ export function registerWorkspaceExtensionRoutes(
           let rejectRefreshOnAbort: (() => void) | undefined;
           try {
             await Promise.race([
-              extensionManager.refreshCache(),
+              extensionManager.refreshCache({ allowManagedHandBack: false }),
               new Promise<never>((_resolve, reject) => {
                 rejectRefreshOnAbort = () => reject(deadline.signal.reason);
                 deadline.signal.addEventListener(
@@ -1923,6 +1925,7 @@ export function registerWorkspaceExtensionRoutes(
             id: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             ...(extension.installMetadata?.type
               ? { installType: extension.installMetadata.type }
               : {}),
@@ -2432,6 +2435,7 @@ export function registerWorkspaceExtensionRoutes(
             extensionId: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             defaultActivation: activation.default,
             workspaceActivation:
               activation.workspace === 'inherit' ? null : activation.workspace,
@@ -2538,7 +2542,9 @@ export function registerWorkspaceExtensionRoutes(
             runtime.workspaceCwd,
             runtime.trusted,
           );
-          const snapshot = await manager.refreshCacheWithSnapshot();
+          const snapshot = await manager.refreshCacheWithSnapshot({
+            allowManagedHandBack: false,
+          });
           runtime.generationGuard?.assertOpen();
           const extension = extensionById(manager, extensionId);
           if (!extension) {

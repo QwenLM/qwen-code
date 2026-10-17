@@ -97,7 +97,7 @@ export const SourcesTab = ({
   const load = useCallback(async () => {
     if (!extensionManager) return;
     try {
-      await extensionManager.refreshCache();
+      await extensionManager.refreshCache({ allowManagedHandBack: false });
     } catch (error) {
       debugLogger.error('Failed to refresh extensions:', error);
     }

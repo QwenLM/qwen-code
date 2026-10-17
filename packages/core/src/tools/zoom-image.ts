@@ -205,6 +205,7 @@ export class ZoomImageTool extends BaseDeclarativeTool<
     if (!path.isAbsolute(params.file_path)) {
       return `File path must be absolute, but was relative: ${params.file_path}.`;
     }
+    params.file_path = path.resolve(params.file_path);
     if (params.x1 >= params.x2) {
       return 'x1 must be less than x2.';
     }

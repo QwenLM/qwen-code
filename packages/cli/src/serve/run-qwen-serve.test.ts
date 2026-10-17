@@ -13409,6 +13409,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
   }
 
   async function bootHandle(extra: {
+    managedExtensions?: string;
     serveWebShell?: boolean;
     token?: string;
     experimentalLsp?: boolean;
@@ -13482,6 +13483,22 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     const handle = await bootHandle({});
     try {
       expect(handle.resolvedToken).toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('pins the extension directory before spawning a child in another workspace', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    const launchRoot = process.cwd();
+    const handle = await bootHandle({
+      serveWebShell: false,
+      managedExtensions: '.',
+    });
+    try {
+      expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
+        extraArgs: ['--managed-extensions', launchRoot],
+      });
     } finally {
       await handle.close();
     }

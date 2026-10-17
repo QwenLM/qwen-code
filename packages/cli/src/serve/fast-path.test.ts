@@ -407,7 +407,20 @@ describe('CLI entry import boundary', () => {
 
     expect(fastPathSource).not.toContain('../config/settings.js');
     expect(fastPathSource).not.toContain('../config/environment.js');
-    expect(fastPathSource).not.toContain('@qwen-code/qwen-code-core');
+    // The fast path may depend only on the light core subpath it declares
+    // today: the root barrel, any other (heavy) subpath, or a dynamic
+    // import() of either would pull the full core into startup.
+    const fastPathCoreSpecifiers = [
+      ...fastPathSource.matchAll(
+        /import\s+(?!type\b)[^;]*?from\s+['"](@qwen-code\/qwen-code-core[^'"]*)['"]/g,
+      ),
+      ...fastPathSource.matchAll(
+        /import\(\s*['"](@qwen-code\/qwen-code-core[^'"]*)['"]/g,
+      ),
+    ].map((match) => match[1]);
+    expect(fastPathCoreSpecifiers).toEqual([
+      '@qwen-code/qwen-code-core/extension/managed-extension-dir.js',
+    ]);
     expect(fastPathSource).toContain('bootSettings: settings');
     expect(fastPathSource).toContain('resolveOnListen: true');
     expect(fastPathSource).toContain(
@@ -531,6 +544,46 @@ describe('CLI entry import boundary', () => {
 });
 
 describe('serve fast path argument parsing', () => {
+  it.each(['--managed-extensions .', '--managed-extensions=.'])(
+    'resolves the extension root consistently with yargs (%s)',
+    (flag) => {
+      const parsed = parseServeFastPathArgs(['serve', ...flag.split(' ')]);
+      expect(parsed.kind).toBe('serve');
+      if (parsed.kind !== 'serve') throw new Error('expected serve');
+      const full = buildServeCommandParser().parseSync(flag);
+      expect(parsed.options.managedExtensions).toBe(resolve('.'));
+      expect(full['managed-extensions']).toBe(parsed.options.managedExtensions);
+    },
+  );
+
+  it('does not accept the unpublished prototype flag as an alias', () => {
+    expect(parseServeFastPathArgs(['serve', '--extension-dir', '.'])).toEqual({
+      kind: 'fallback',
+    });
+    expect(() =>
+      buildServeCommandParser()
+        .strict()
+        .fail((message) => {
+          throw new Error(message);
+        })
+        .parseSync(['--extension-dir', '.']),
+    ).toThrow(/Unknown argument.*extension-dir/);
+  });
+
+  it('rejects an invalid managed root in both parsers', () => {
+    const missing = join(
+      os.tmpdir(),
+      'qwen-nonexistent-managed-root',
+      'missing',
+    );
+    expect(() =>
+      parseServeFastPathArgs(['serve', '--managed-extensions', missing]),
+    ).toThrow(/Invalid --managed-extensions/);
+    expect(() =>
+      buildServeCommandParser().parseSync(['--managed-extensions', missing]),
+    ).toThrow(/Invalid --managed-extensions/);
+  });
+
   it('parses the common daemon startup flags without loading the full CLI parser', () => {
     const parsed = parseServeFastPathArgs([
       'serve',
@@ -677,6 +730,7 @@ describe('serve fast path argument parsing', () => {
       (name) => name.length > 1 && !options.alias[name]?.length,
     );
     const sampleArgvByOption = new Map<string, string[]>([
+      ['managed-extensions', ['--managed-extensions', process.cwd()]],
       ['port', ['--port', '0']],
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],

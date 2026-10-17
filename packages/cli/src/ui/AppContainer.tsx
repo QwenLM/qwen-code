@@ -2415,6 +2415,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getContextRuleExcludes(),
         {
           loadReason: 'refresh',
+          extensionContextRoots: config.getExtensionContextRoots(),
           extensionRuleSources: config.getExtensionRuleSources(),
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),

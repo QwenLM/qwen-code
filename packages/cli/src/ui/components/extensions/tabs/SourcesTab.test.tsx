@@ -90,6 +90,9 @@ describe('SourcesTab', () => {
       />,
     );
     await waitFor(() => expect(manager.refreshCache).toHaveBeenCalled());
+    expect(manager.refreshCache).toHaveBeenCalledWith({
+      allowManagedHandBack: false,
+    });
 
     await act(async () => {
       activeKeypress()({ name: 'return' } as Key);

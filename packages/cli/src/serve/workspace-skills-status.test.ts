@@ -8,6 +8,12 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, lstat: vi.fn(actual.lstat) };
+});
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 vi.mock('../utils/stdioHelpers.js', () => ({
@@ -55,6 +61,67 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(review?.modelInvocable).toBe(true);
     expect(review?.argumentHint).toBeTruthy();
   });
+
+  it.each(['corrupt snapshot', 'previous snapshot', 'committed transaction'])(
+    'keeps bundled skills without a managed root despite a store-only %s',
+    async (state) => {
+      const storeDir = path.join(qwenHome, 'extension-store');
+      await fsp.mkdir(storeDir);
+      if (state === 'corrupt snapshot')
+        await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+      else if (state === 'previous snapshot')
+        await fsp.writeFile(path.join(storeDir, 'state.previous.json'), '{}');
+      else {
+        await fsp.mkdir(path.join(storeDir, 'transactions'));
+        await fsp.writeFile(
+          path.join(storeDir, 'transactions', 'pending.json'),
+          JSON.stringify({ phase: 'state_committed' }),
+        );
+      }
+      const before = await storeFingerprint(storeDir);
+      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+      expect(status.initialized).toBe(true);
+      expect(status.errors).toBeUndefined();
+      expect(status.skills).toContainEqual(
+        expect.objectContaining({ name: 'review', level: 'bundled' }),
+      );
+      expect(await storeFingerprint(storeDir)).toBe(before);
+      await expect(
+        fsp.stat(path.join(qwenHome, 'extensions')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it.each([false, true])(
+    'handles an unreadable store entry according to managed configuration: %s',
+    async (configured) => {
+      const storeDir = path.join(qwenHome, 'extension-store');
+      const managedExtensionsDir = path.join(qwenHome, 'deployment');
+      await fsp.mkdir(managedExtensionsDir);
+      const { lstat } =
+        await vi.importActual<typeof import('node:fs/promises')>(
+          'node:fs/promises',
+        );
+      vi.spyOn(fsp, 'lstat').mockImplementation((async (target, options) => {
+        if (String(target) === storeDir)
+          throw Object.assign(new Error('test-only store entry denied'), {
+            code: 'EACCES',
+          });
+        return lstat(target, options);
+      }) as typeof fsp.lstat);
+      const status = await createWorkspaceSkillsStatusProvider(
+        configured ? { managedExtensionsDir } : {},
+      )(qwenHome);
+      expect(status.initialized).toBe(!configured);
+      if (configured) expect(status.skills).toEqual([]);
+      else {
+        expect(status.errors).toBeUndefined();
+        expect(status.skills).toContainEqual(
+          expect.objectContaining({ name: 'review', level: 'bundled' }),
+        );
+      }
+    },
+  );
 
   it('reports the queried workspace path', async () => {
     const provider = createWorkspaceSkillsStatusProvider();
@@ -456,6 +523,389 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     }
     return directory;
   }
+
+  it('discovers managed skills before a fresh home has a user extension directory', async () => {
+    const managedExtensionsDir = path.join(qwenHome, 'prepared');
+    const skillDir = path.join(
+      managedExtensionsDir,
+      'bundle',
+      'skills',
+      'example',
+    );
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+      JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+    );
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: A managed example\n---\nBuiltin instructions',
+    );
+    await expect(
+      fsp.stat(path.join(qwenHome, 'extensions')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    const provider = createWorkspaceSkillsStatusProvider({
+      managedExtensionsDir: await fsp.realpath(managedExtensionsDir),
+    });
+    const status = await provider(qwenHome);
+    expect(status.initialized).toBe(true);
+    expect(status.skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'bundle:example',
+          level: 'extension',
+          status: 'ok',
+        }),
+      ]),
+    );
+  });
+
+  it('fails closed when the store exists but cannot be read instead of reporting managed defaults', async () => {
+    const managedExtensionsDir = path.join(qwenHome, 'prepared');
+    const skillDir = path.join(
+      managedExtensionsDir,
+      'bundle',
+      'skills',
+      'example',
+    );
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+      JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+    );
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: A managed example\n---\nBuiltin instructions',
+    );
+    // The store EXISTS, so activation preferences may exist — but it cannot
+    // be read. The store-free fallback answers with manifest defaults, which
+    // would report a managed package the user disabled as active.
+    const storeDir = path.join(qwenHome, 'extension-store');
+    await fsp.mkdir(storeDir, { recursive: true });
+    await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+    const provider = createWorkspaceSkillsStatusProvider({
+      managedExtensionsDir: await fsp.realpath(managedExtensionsDir),
+    });
+
+    const status = await provider(qwenHome);
+
+    expect(status.initialized).toBe(false);
+    expect(status.errors).toBeDefined();
+    expect(
+      status.skills.find((skill) => skill.name === 'bundle:example'),
+    ).toBeUndefined();
+  });
+
+  async function prepareStoreOnlyManagedSkill(
+    name = 'bundle',
+    identity = 'managed:bundle',
+  ) {
+    const managedExtensionsDir = path.join(qwenHome, 'prepared');
+    const skillDir = path.join(
+      managedExtensionsDir,
+      'bundle',
+      'skills',
+      'example',
+    );
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+      JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+    );
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: A managed example\n---\nInstructions',
+    );
+    const hash = (value: string) =>
+      createHash('sha256').update(value).digest('hex');
+    const snapshot = {
+      version: 2,
+      generation: 2,
+      legacyProjectionHash: hash('{}'),
+      extensions: {
+        [hash(identity)]: {
+          name,
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+          ...(identity.startsWith('managed:')
+            ? { managed: true, managedName: name }
+            : {}),
+        },
+      },
+    };
+    const storeDir = path.join(qwenHome, 'extension-store');
+    await fsp.mkdir(storeDir);
+    return {
+      managedExtensionsDir: await fsp.realpath(managedExtensionsDir),
+      storeDir,
+      snapshot,
+    };
+  }
+
+  async function storeFingerprint(directory: string): Promise<string> {
+    const entries = await fsp.readdir(directory, { withFileTypes: true });
+    const contents = await Promise.all(
+      entries
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(async (entry) => [
+          entry.name,
+          entry.isDirectory()
+            ? await storeFingerprint(path.join(directory, entry.name))
+            : await fsp.readFile(path.join(directory, entry.name), 'utf8'),
+        ]),
+    );
+    return JSON.stringify(contents);
+  }
+
+  it.each(['previous snapshot', 'committed transaction'])(
+    'defers a store-only activation read awaiting recovery from a %s',
+    async (recovery) => {
+      const { managedExtensionsDir, storeDir, snapshot } =
+        await prepareStoreOnlyManagedSkill();
+      if (recovery === 'previous snapshot') {
+        await fsp.writeFile(
+          path.join(storeDir, 'state.previous.json'),
+          JSON.stringify(snapshot),
+        );
+      } else {
+        await fsp.mkdir(path.join(storeDir, 'transactions'));
+        await fsp.writeFile(
+          path.join(storeDir, 'transactions', 'recovery.json'),
+          JSON.stringify({
+            version: 1,
+            transactionId: 'recovery',
+            operation: 'update',
+            phase: 'state_committed',
+            destinationDirectory: path.join(qwenHome, 'extensions', 'bundle'),
+            stagingDirectory: path.join(storeDir, 'staging', 'recovery'),
+            backupDirectory: path.join(storeDir, 'rollback', 'recovery'),
+            previousGeneration: 1,
+            targetGeneration: 2,
+            targetSnapshot: snapshot,
+          }),
+        );
+      }
+      const before = await storeFingerprint(storeDir);
+
+      const status = await createWorkspaceSkillsStatusProvider({
+        managedExtensionsDir,
+      })(qwenHome);
+
+      expect(status.initialized).toBe(false);
+      expect(status.skills).toEqual([]);
+      expect(await storeFingerprint(storeDir)).toBe(before);
+      await expect(
+        fsp.stat(path.join(qwenHome, 'extensions')),
+      ).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      const manager = new ExtensionManager({
+        managedExtensionsDir,
+        workspaceDir: qwenHome,
+        isWorkspaceTrusted: true,
+      });
+      await manager.refreshCacheWithSnapshot({
+        createDataDir: false,
+        allowManagedHandBack: false,
+      });
+      expect(manager.getLoadedExtensions()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'bundle', isActive: false }),
+        ]),
+      );
+    },
+  );
+
+  it.each([
+    ['recased name', 'Bundle', 'managed:bundle'],
+    ['retained user identity', 'bundle', 'bundle'],
+  ])(
+    'defers a store-only activation read requiring a %s migration',
+    async (_kind, name, identity) => {
+      const { managedExtensionsDir, storeDir, snapshot } =
+        await prepareStoreOnlyManagedSkill(name, identity);
+      await fsp.writeFile(
+        path.join(storeDir, 'state.json'),
+        JSON.stringify(snapshot),
+      );
+      const before = await storeFingerprint(storeDir);
+
+      const status = await createWorkspaceSkillsStatusProvider({
+        managedExtensionsDir,
+      })(qwenHome);
+
+      expect(status.initialized).toBe(false);
+      expect(status.skills).toEqual([]);
+      expect(await storeFingerprint(storeDir)).toBe(before);
+      await expect(
+        fsp.stat(path.join(qwenHome, 'extensions')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      const manager = new ExtensionManager({
+        managedExtensionsDir,
+        workspaceDir: qwenHome,
+        isWorkspaceTrusted: true,
+      });
+      await manager.refreshCacheWithSnapshot({
+        createDataDir: false,
+        allowManagedHandBack: false,
+      });
+      expect(manager.getLoadedExtensions()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'bundle', isActive: false }),
+        ]),
+      );
+    },
+  );
+
+  it.each([
+    ['matching disabled policy', 'bundle', 'managed:bundle', 'disabled'],
+    ['unrelated policy', 'other', 'other', 'ok'],
+    ['prepared empty store', 'bundle', 'managed:bundle', 'ok'],
+  ])(
+    'keeps a store-only read with a %s',
+    async (kind, name, identity, expectedStatus) => {
+      const { managedExtensionsDir, storeDir, snapshot } =
+        await prepareStoreOnlyManagedSkill(name, identity);
+      if (kind === 'prepared empty store') {
+        for (const directory of ['transactions', 'staging', 'rollback']) {
+          await fsp.mkdir(path.join(storeDir, directory));
+        }
+        await fsp.writeFile(path.join(storeDir, 'lock'), '');
+      } else {
+        await fsp.writeFile(
+          path.join(storeDir, 'state.json'),
+          JSON.stringify(snapshot),
+        );
+      }
+      const before = await storeFingerprint(storeDir);
+
+      const status = await createWorkspaceSkillsStatusProvider({
+        managedExtensionsDir,
+      })(qwenHome);
+
+      expect(status.initialized).toBe(true);
+      expect(
+        status.skills.find((skill) => skill.name === 'review'),
+      ).toBeDefined();
+      expect(
+        status.skills.find((skill) => skill.name === 'bundle:example'),
+      ).toMatchObject({ status: expectedStatus });
+      expect(await storeFingerprint(storeDir)).toBe(before);
+      await expect(
+        fsp.stat(path.join(qwenHome, 'extensions')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'answers a read-only home with managed skills and creates no state directories',
+    async () => {
+      // EACCES on mkdir is what a hardened container or read-only mount
+      // gives a status GET; chmod cannot model that on win32 or as root.
+      const managedExtensionsDir = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-catalog-managed-')),
+      );
+      const skillDir = path.join(
+        managedExtensionsDir,
+        'bundle',
+        'skills',
+        'example',
+      );
+      await fsp.mkdir(skillDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+        JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+      );
+      await fsp.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: example\ndescription: A managed example\n---\nBuiltin instructions',
+      );
+      await fsp.chmod(qwenHome, 0o555);
+      try {
+        const provider = createWorkspaceSkillsStatusProvider({
+          managedExtensionsDir,
+        });
+        const status = await provider(qwenHome);
+        expect(status.initialized).toBe(true);
+        expect(status.errors).toBeUndefined();
+        expect(status.skills).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: 'review', level: 'bundled' }),
+            expect.objectContaining({
+              name: 'bundle:example',
+              level: 'extension',
+            }),
+          ]),
+        );
+        await expect(
+          fsp.stat(path.join(qwenHome, 'extensions')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(
+          fsp.stat(path.join(qwenHome, 'extension-store')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await fsp.chmod(qwenHome, 0o755);
+        await fsp.rm(managedExtensionsDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'answers a read-only store-only home without creating state directories',
+    async () => {
+      const managedExtensionsDir = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-catalog-managed-')),
+      );
+      const skillDir = path.join(
+        managedExtensionsDir,
+        'bundle',
+        'skills',
+        'example',
+      );
+      await fsp.mkdir(skillDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+        JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+      );
+      await fsp.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: example\ndescription: A managed example\n---\nBuiltin instructions',
+      );
+      // The store-only layout: extension-store/ exists (a deployment that
+      // pre-seeds activation prefs, or a home whose extensions/ was cleaned)
+      // but extensions/ does not. The probe must read the store without
+      // materializing the missing directories.
+      const store = new ExtensionStore();
+      await store.ensureInitialized([]);
+      await fsp.rm(path.join(qwenHome, 'extensions'), {
+        recursive: true,
+        force: true,
+      });
+      await fsp.chmod(qwenHome, 0o555);
+      try {
+        const provider = createWorkspaceSkillsStatusProvider({
+          managedExtensionsDir,
+        });
+        const status = await provider(qwenHome);
+        expect(status.initialized).toBe(true);
+        expect(status.skills).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: 'review', level: 'bundled' }),
+            expect.objectContaining({
+              name: 'bundle:example',
+              level: 'extension',
+            }),
+          ]),
+        );
+        await expect(
+          fsp.stat(path.join(qwenHome, 'extensions')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await fsp.chmod(qwenHome, 0o755);
+        await fsp.rm(managedExtensionsDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('lists active and inactive extension Skills without a runtime Config', async () => {
     const active = await writeExtension('active', ['active-skill']);

@@ -88,6 +88,12 @@ export const QUERY_POSITIONAL = {
 } as const satisfies PositionalOptions;
 
 export const TOP_LEVEL_GLOBAL_OPTIONS = {
+  'managed-extensions': {
+    type: 'string' as const,
+    requiresArg: true,
+    description:
+      'Load deployment-managed extensions from the direct children of this directory.',
+  },
   telemetry: {
     type: 'boolean' as const,
     description:

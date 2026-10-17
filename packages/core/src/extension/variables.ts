@@ -22,6 +22,8 @@ export const EXTENSIONS_DIRECTORY_NAME = path.join(QWEN_DIR, 'extensions');
 export const EXTENSIONS_CONFIG_FILENAME = 'qwen-extension.json';
 export const INSTALL_METADATA_FILENAME = '.qwen-extension-install.json';
 export const EXTENSION_SETTINGS_FILENAME = '.env';
+export const EXTENSION_SECRET_WORKSPACES_DIRECTORY_NAME =
+  'extension-secret-workspaces';
 
 export type JsonObject = { [key: string]: JsonValue };
 export type JsonArray = JsonValue[];
@@ -49,14 +51,35 @@ export function validateVariables(
   }
 }
 
+// Match only schema variables: an open-ended /\${(.*?)}/ scan pairs the first
+// `${` with the first `}` on the line, so a `${TMPDIR:-${...}}` nest or an
+// earlier unbalanced `${` would swallow a known variable inside the span.
+const HYDRATABLE_VARIABLE = new RegExp(
+  `\\$\\{(${Object.keys(VARIABLE_SCHEMA)
+    .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')})\\}`,
+  'g',
+);
+
 export function hydrateString(str: string, context: VariableContext): string {
   validateVariables(context, VARIABLE_SCHEMA);
-  const regex = /\${(.*?)}/g;
-  return str.replace(regex, (match, key) =>
+  return str.replace(HYDRATABLE_VARIABLE, (match, key) =>
     context[key as keyof VariableContext] == null
       ? match
       : (context[key as keyof VariableContext] as string),
   );
+}
+
+export function hydrateExtensionText(
+  text: string,
+  extensionPath: string,
+): string {
+  return hydrateString(text, {
+    extensionPath,
+    CLAUDE_PLUGIN_ROOT: extensionPath,
+    '/': path.sep,
+    pathSeparator: path.sep,
+  });
 }
 
 export function recursivelyHydrateStrings(
@@ -104,10 +127,7 @@ export function substituteHookVariables(
         if (hookDef.hooks && Array.isArray(hookDef.hooks)) {
           for (const hook of hookDef.hooks) {
             if (hook.type === 'command' && hook.command) {
-              hook.command = hook.command.replace(
-                /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-                basePath,
-              );
+              hook.command = hydrateExtensionText(hook.command, basePath);
             }
           }
         }

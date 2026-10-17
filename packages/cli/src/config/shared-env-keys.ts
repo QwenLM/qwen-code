@@ -183,7 +183,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'XDG_CONFIG_HOME',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
-  // Whole-CLI sandbox selection and network controls remain operator inputs.
+  // Whole-CLI sandbox selection, flags, and network remain operator inputs.
   // QWEN_SANDBOX decides whether a legacy container/Seatbelt boundary runs,
   // QWEN_SANDBOX_IMAGE selects its image, and the proxy command can execute on
   // the host during launcher setup. The tool execution sandbox rejects these
@@ -194,6 +194,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_SANDBOX_IMAGE',
   'QWEN_SANDBOX_PROXY_COMMAND',
   'QWEN_SANDBOX_NET',
+  'SANDBOX_FLAGS',
   // Runtime markers come from the launcher, never from configuration files.
   // They also belong to the all-scope provenance gate below.
   'SANDBOX',

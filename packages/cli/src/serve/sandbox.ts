@@ -238,6 +238,11 @@ export async function start_sandbox(
   if (config.command === 'bwrap')
     throw new FatalSandboxError(BWRAP_MIGRATION_MESSAGE);
   if (config.command === 'sandbox-exec') {
+    if (cliConfig?.getManagedExtensionsDir()) {
+      throw new FatalSandboxError(
+        'Managed extensions cannot be used with macOS Seatbelt (sandbox-exec). Use QWEN_SANDBOX=docker or QWEN_SANDBOX=podman.',
+      );
+    }
     // disallow BUILD_SANDBOX
     if (process.env['BUILD_SANDBOX']) {
       throw new FatalSandboxError(
@@ -489,8 +494,27 @@ export async function start_sandbox(
   // allow access to host.docker.internal
   args.push('--add-host', 'host.docker.internal:host-gateway');
 
+  const bindMounts: Array<{
+    from: string;
+    to: string;
+    readOnly: boolean;
+    argumentIndex: number;
+  }> = [];
+  const addBindMount = (from: string, to: string, opts = '') => {
+    const options = opts.split(',');
+    const mount = {
+      from,
+      to: path.posix.resolve('/', to),
+      readOnly: options.includes('ro') && !options.includes('rw'),
+      argumentIndex: args.length,
+    };
+    args.push('--volume', `${from}:${to}${opts ? `:${opts}` : ''}`);
+    bindMounts.push(mount);
+    return mount;
+  };
+
   // mount current directory as working directory in sandbox (set via --workdir)
-  args.push('--volume', `${workdir}:${containerWorkdir}`);
+  addBindMount(workdir, containerWorkdir);
 
   // Mount user settings at /home/node/.qwen and at the canonical host path
   // used by QWEN_HOME, unless that host path is already covered by a broader
@@ -520,18 +544,12 @@ export async function start_sandbox(
   const runtimeSameAsUserSettings =
     runtimeCoveredByUserSettings && userSettingsCoveredByRuntime;
 
-  args.push(
-    '--volume',
-    `${userSettingsDirRealPath}:${userSettingsDirInSandbox}`,
-  );
+  addBindMount(userSettingsDirRealPath, userSettingsDirInSandbox);
   if (
     (!userSettingsCoveredByRuntime || runtimeSameAsUserSettings) &&
     userSettingsDirInSandbox !== userSettingsDirContainerPath
   ) {
-    args.push(
-      '--volume',
-      `${userSettingsDirRealPath}:${userSettingsDirContainerPath}`,
-    );
+    addBindMount(userSettingsDirRealPath, userSettingsDirContainerPath);
   }
 
   // Pass QWEN_HOME so the sandboxed CLI resolves the global qwen dir to the
@@ -543,46 +561,39 @@ export async function start_sandbox(
   // from the global qwen dir; otherwise the existing user-settings mount
   // already covers it.
   if (!runtimeCoveredByUserSettings) {
-    args.push(
-      '--volume',
-      `${runtimeBaseDirRealPath}:${runtimeBaseDirContainerPath}`,
-    );
+    addBindMount(runtimeBaseDirRealPath, runtimeBaseDirContainerPath);
   }
   if (!runtimeSameAsUserSettings) {
     args.push('--env', `QWEN_RUNTIME_DIR=${runtimeBaseDirContainerPath}`);
   }
 
   // mount os.tmpdir() as os.tmpdir() inside container
-  args.push('--volume', `${os.tmpdir()}:${getContainerPath(os.tmpdir())}`);
+  const containerTmpdir = getContainerPath(os.tmpdir());
+  addBindMount(os.tmpdir(), containerTmpdir);
 
   // mount gcloud config directory if it exists
   const gcloudConfigDir = path.join(os.homedir(), '.config', 'gcloud');
   if (fs.existsSync(gcloudConfigDir)) {
-    args.push(
-      '--volume',
-      `${gcloudConfigDir}:${getContainerPath(gcloudConfigDir)}:ro`,
-    );
+    const containerGcloudConfigDir = getContainerPath(gcloudConfigDir);
+    addBindMount(gcloudConfigDir, containerGcloudConfigDir, 'ro');
   }
 
   // mount ADC file if GOOGLE_APPLICATION_CREDENTIALS is set
   if (process.env['GOOGLE_APPLICATION_CREDENTIALS']) {
     const adcFile = process.env['GOOGLE_APPLICATION_CREDENTIALS'];
     if (fs.existsSync(adcFile)) {
-      args.push('--volume', `${adcFile}:${getContainerPath(adcFile)}:ro`);
-      args.push(
-        '--env',
-        `GOOGLE_APPLICATION_CREDENTIALS=${getContainerPath(adcFile)}`,
-      );
+      const containerAdcFile = getContainerPath(adcFile);
+      addBindMount(adcFile, containerAdcFile, 'ro');
+      args.push('--env', `GOOGLE_APPLICATION_CREDENTIALS=${containerAdcFile}`);
     }
   }
 
   // mount paths listed in SANDBOX_MOUNTS
   if (process.env['SANDBOX_MOUNTS']) {
-    for (let mount of process.env['SANDBOX_MOUNTS'].split(',')) {
+    for (const mount of process.env['SANDBOX_MOUNTS'].split(',')) {
       if (mount.trim()) {
         // parse mount as from:to:opts
         const { from, to, opts } = parseSandboxMountSpec(mount);
-        mount = `${from}:${to}:${opts}`;
         // check that from path is absolute
         if (!path.isAbsolute(from)) {
           throw new FatalSandboxError(
@@ -596,7 +607,7 @@ export async function start_sandbox(
           );
         }
         writeStderrLine(`SANDBOX_MOUNTS: ${from} -> ${to} (${opts})`);
-        args.push('--volume', mount);
+        addBindMount(from, to, opts);
       }
     }
   }
@@ -799,8 +810,134 @@ export async function start_sandbox(
     if (!fs.existsSync(sandboxVenvPath)) {
       fs.mkdirSync(sandboxVenvPath, { recursive: true });
     }
-    args.push('--volume', `${sandboxVenvPath}:${getContainerPath(virtualEnv)}`);
+    addBindMount(sandboxVenvPath, getContainerPath(virtualEnv));
     args.push('--env', `VIRTUAL_ENV=${getContainerPath(virtualEnv)}`);
+  }
+
+  // Apply protection after all generated mounts, including VIRTUAL_ENV.
+  // A host ancestor may also expose the root through a different container
+  // path (notably /home/node/.qwen), so protect each of those aliases too.
+  const managedExtensionsDir = cliConfig?.getManagedExtensionsDir();
+  if (managedExtensionsDir) {
+    const hostPath = os.platform() === 'win32' ? path.win32 : path;
+    const mounts = bindMounts.map((mount) => ({
+      ...mount,
+      from: fs.realpathSync.native(mount.from),
+      original: mount,
+    }));
+    const requireManagedSource = (mount: (typeof bindMounts)[number]) => {
+      if (config.command !== 'docker') return;
+      // Docker --volume creates missing bind sources, even with :ro. Use
+      // CSV --mount fields so an outage cannot manufacture empty deployment.
+      const fields = [
+        'type=bind',
+        `"source=${mount.from.replaceAll('"', '""')}"`,
+        `"target=${mount.to.replaceAll('"', '""')}"`,
+        'readonly',
+      ];
+      args[mount.argumentIndex] = '--mount';
+      args[mount.argumentIndex + 1] = fields.join(',');
+    };
+    for (const mount of mounts) {
+      if (mount.readOnly && isSubpath(managedExtensionsDir, mount.from)) {
+        requireManagedSource(mount.original);
+      }
+    }
+    const protectedDestinations = new Set<string>();
+    const protectManagedRoot = (destination: string) => {
+      const normalized = path.posix.resolve('/', destination);
+      if (protectedDestinations.has(normalized)) return;
+      const existing = mounts.filter((mount) => mount.to === normalized);
+      if (
+        existing.some(
+          (mount) => !mount.readOnly || mount.from !== managedExtensionsDir,
+        )
+      ) {
+        throw new FatalSandboxError(
+          `Cannot protect managed extensions '${managedExtensionsDir}': sandbox mount destination '${normalized}' is already in use. Choose separate mount paths.`,
+        );
+      }
+      if (existing.length === 0) {
+        requireManagedSource(
+          addBindMount(managedExtensionsDir, normalized, 'ro'),
+        );
+      }
+      protectedDestinations.add(normalized);
+    };
+
+    for (const mount of mounts) {
+      if (mount.readOnly) continue;
+      if (isSubpath(managedExtensionsDir, mount.from)) {
+        throw new FatalSandboxError(
+          `Cannot protect managed extensions '${managedExtensionsDir}': read-write sandbox mount '${mount.from}:${mount.to}' is inside the managed root. Choose a separate workspace or mount source.`,
+        );
+      }
+      if (isSubpath(mount.from, managedExtensionsDir)) {
+        const relative = hostPath
+          .relative(mount.from, managedExtensionsDir)
+          .split(hostPath.sep)
+          .join('/');
+        protectManagedRoot(path.posix.join(mount.to, relative));
+      }
+    }
+    protectManagedRoot(getContainerPath(managedExtensionsDir));
+    // The forwarded flag keeps its launch spelling, and the
+    // child canonicalizes it against the container's filesystem. When a
+    // parent component of that spelling is a symlink — macOS resolves /var
+    // and /tmp this way by default — the spelling diverges from the pinned
+    // canonical path above: inside the container it then resolves through a
+    // read-write mount (voiding the :ro guard) or fails to resolve at all.
+    // Cover every argv token that resolves to this same root with its own
+    // read-only mount. No flag grammar is parsed: yargs accepts more
+    // spellings than the two dashed ones (--managedExtensions included), and
+    // raw argv carries user content in value positions, so a hand-listed
+    // flag name both misses real spellings and misreads value-position
+    // tokens. A token that resolves somewhere else is skipped, so it can
+    // neither shadow container paths nor widen what the container sees.
+    for (const token of cliArgs) {
+      if (!token) continue;
+      // A `--flag=value` token carries the path in its value half; the
+      // separate-token form carries it as a token of its own.
+      const candidates = token.includes('=')
+        ? [token, token.slice(token.indexOf('=') + 1)]
+        : [token];
+      for (const candidate of candidates) {
+        const resolvedCandidate = path.resolve(workdir, candidate);
+        let resolved: string;
+        try {
+          resolved = fs.realpathSync.native(resolvedCandidate);
+        } catch {
+          continue;
+        }
+        if (resolved !== managedExtensionsDir) continue;
+        const containerSpelling = getContainerPath(resolvedCandidate);
+        protectManagedRoot(containerSpelling);
+      }
+    }
+
+    for (const mount of mounts) {
+      for (const destination of protectedDestinations) {
+        if (!mount.to.startsWith(`${destination}/`)) continue;
+        let compatibleReadOnlySource = false;
+        if (mount.readOnly) {
+          const relative = path.posix.relative(destination, mount.to);
+          try {
+            compatibleReadOnlySource =
+              fs.realpathSync.native(
+                hostPath.join(managedExtensionsDir, ...relative.split('/')),
+              ) === mount.from;
+          } catch {
+            // A missing subtree cannot establish the overlay's provenance.
+          }
+        }
+        if (!compatibleReadOnlySource) {
+          throw new FatalSandboxError(
+            `Cannot protect managed extensions '${managedExtensionsDir}': sandbox mount '${mount.from}:${mount.to}' overlays protected destination '${destination}'. Choose separate mount paths.`,
+          );
+        }
+        requireManagedSource(mount.original);
+      }
+    }
   }
 
   // copy additional environment variables from SANDBOX_ENV

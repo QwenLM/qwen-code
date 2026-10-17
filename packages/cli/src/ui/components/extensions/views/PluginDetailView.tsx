@@ -116,8 +116,13 @@ export const PluginDetailView = ({
         value: 'uninstall',
       },
     ];
-    return items;
-  }, [isActive, isFavorite, hasUpdateAvailable, showFavorite]);
+    return ext.source === 'managed'
+      ? items.filter(
+          (item) =>
+            !['mark-update', 'update', 'uninstall'].includes(item.value),
+        )
+      : items;
+  }, [isActive, isFavorite, hasUpdateAvailable, showFavorite, ext.source]);
 
   // Cursor seed, resolved ONCE per mount against the rows offered at that
   // moment: the index of `initialAction`, or the first row when it is absent
@@ -150,6 +155,9 @@ export const PluginDetailView = ({
           </Text>
           {isFavorite ? <Text color={theme.status.warning}> ★</Text> : null}
         </InfoRow>
+        {ext.source === 'managed' && (
+          <InfoRow label={t('Source:')}>managed</InfoRow>
+        )}
         {ext.installMetadata && (
           <InfoRow label={t('Source:')}>
             {redactUrlCredentials(ext.installMetadata.source)}

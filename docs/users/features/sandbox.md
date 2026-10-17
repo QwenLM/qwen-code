@@ -88,6 +88,8 @@ Your ideal method of sandboxing may differ depending on your platform and your p
 
 Lightweight, built-in sandboxing using `sandbox-exec`.
 
+Seatbelt cannot be combined with `--managed-extensions`, including custom profiles. Qwen Code refuses to launch this combination because the current Seatbelt integration cannot guarantee that deployment-managed packages remain read-only when containing directories move. Use `QWEN_SANDBOX=docker` or `QWEN_SANDBOX=podman` instead; this environment variable takes precedence over `--sandbox`. On macOS, automatic selection with `--sandbox` or `QWEN_SANDBOX=true` can select Seatbelt, so choose the container backend explicitly when using managed extensions.
+
 **Default profile**: `permissive-open` - restricts writes outside the project directory, but allows most other operations and outbound network access.
 
 **Best for**: Fast, no Docker required, strong guardrails for file writes.

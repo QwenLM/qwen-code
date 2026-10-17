@@ -16,6 +16,12 @@ describe('acpChildExtraArgs', () => {
     ).toBeUndefined();
   });
 
+  it('forwards the deployment directory as one argument, including spaces', () => {
+    expect(
+      acpChildExtraArgs({ managedExtensions: '/opt/prepared extensions' }),
+    ).toEqual(['--managed-extensions', '/opt/prepared extensions']);
+  });
+
   it('merges lsp and restore flags in spawn order', () => {
     expect(acpChildExtraArgs({ experimentalLsp: true })).toEqual([
       '--experimental-lsp',

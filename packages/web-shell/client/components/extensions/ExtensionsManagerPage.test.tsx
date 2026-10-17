@@ -196,6 +196,34 @@ afterEach(async () => {
 });
 
 describe('ExtensionsManagerPage activation refresh', () => {
+  it('labels managed packages and keeps activation available without artifact actions or absolute paths', async () => {
+    const status = await state.actions.loadExtensionsStatus();
+    status.extensions[0] = {
+      ...status.extensions[0],
+      extensionSource: 'managed',
+      path: '/deployment/extensions/demo',
+    };
+    state.actions.loadExtensionsStatus.mockResolvedValue(status);
+    await renderPage();
+    await act(async () => {
+      container.querySelector<HTMLElement>('[aria-label="Demo"]')!.click();
+    });
+    expect(container.textContent).toContain('Managed');
+    expect(container.textContent).not.toContain('/deployment/extensions/demo');
+    expect(container.querySelector('[aria-haspopup="menu"]')).toBeNull();
+    const controls =
+      container.querySelectorAll<HTMLButtonElement>('[role="combobox"]');
+    expect(controls).toHaveLength(2);
+    expect(Array.from(controls).every((control) => !control.disabled)).toBe(
+      true,
+    );
+    await chooseActivation('user', 'Disabled');
+    expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      'disabled',
+    );
+  });
+
   it('submits a workspace refresh without polling or blocking the page', async () => {
     // A refresh that never settles keeps the page busy if it is awaited.
     state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(
@@ -815,6 +843,68 @@ describe('ExtensionsManagerPage lazy details', () => {
     expect(container.querySelector('[role="tablist"]')?.textContent).toContain(
       'Skills 1',
     );
+  });
+
+  it('keeps managed actions and paths hidden while loading selected resources', async () => {
+    enableSummaries();
+    const managedSummary = {
+      ...summary,
+      extensionSource: 'managed',
+      path: '/deployment/extensions/demo',
+      source: '/deployment/extensions/demo',
+    };
+    const managedDetails = {
+      ...details,
+      ...managedSummary,
+      details: {
+        ...details.details,
+        contextFiles: [
+          '/deployment/extensions/demo/QWEN.md',
+          '/deployment/extensions/demo/context/memory.md',
+        ],
+      },
+    };
+    state.actions.loadExtensionSummaries.mockResolvedValue({
+      extensions: [managedSummary],
+    });
+    let resolveDetails!: (value: typeof managedDetails) => void;
+    state.actions.loadExtensionDetails.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDetails = resolve;
+      }),
+    );
+    await renderPage();
+    expect(state.actions.loadExtensionDetails).not.toHaveBeenCalled();
+    await selectDemo();
+    expect(container.textContent).toContain('Managed');
+    expect(container.textContent).not.toContain('/deployment/extensions/demo');
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      'Loading',
+    );
+    expect(container.querySelector('[aria-haspopup="menu"]')).toBeNull();
+    const controls =
+      container.querySelectorAll<HTMLButtonElement>('[role="combobox"]');
+    expect(controls).toHaveLength(2);
+    expect(Array.from(controls).every((control) => !control.disabled)).toBe(
+      true,
+    );
+    await act(async () => resolveDetails(managedDetails));
+    expect(container.textContent).not.toContain('/deployment/extensions/demo');
+    expect(container.querySelector('[aria-haspopup="menu"]')).toBeNull();
+    await act(async () => {
+      findButton('Context files 2').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(container.textContent).toContain('QWEN.md');
+    expect(container.textContent).toContain('context/memory.md');
+    expect(container.textContent).not.toContain('/deployment/extensions/demo');
+    await chooseActivation('user', 'Disabled');
+    expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      'disabled',
+    );
+    expect(state.actions.loadExtensionsStatus).not.toHaveBeenCalled();
   });
 
   it('shows detail failures and retries without discarding the list', async () => {

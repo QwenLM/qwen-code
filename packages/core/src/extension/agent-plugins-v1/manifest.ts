@@ -30,7 +30,11 @@ const MANIFEST_FIELDS = new Set([
 ]);
 const AUTHOR_FIELDS = new Set(['name', 'email', 'url']);
 
-export type AgentPluginSchemaStatus = 'supported' | 'unsupported' | 'unrelated';
+export type AgentPluginSchemaStatus =
+  | 'supported'
+  | 'unsupported'
+  | 'unrelated'
+  | 'unreadable';
 
 export interface AgentPluginExtensionConfig {
   name: string;
@@ -61,7 +65,13 @@ export function getAgentPluginSchemaStatus(
       fs.readFileSync(resolvedManifestPath, 'utf8'),
     ) as unknown;
   } catch {
-    return 'unrelated';
+    // A manifest that exists but cannot be statted, read, or parsed is a
+    // failing package, not an unrelated directory: callers that probe the
+    // governing manifest must treat this as a load failure (keeping the
+    // name reservation and its warning) rather than skip the entry
+    // silently. 'unrelated' stays reserved for a well-formed manifest
+    // without the agent-plugins $schema.
+    return 'unreadable';
   }
   if (!isRecord(value) || typeof value['$schema'] !== 'string') {
     return 'unrelated';

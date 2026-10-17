@@ -16,10 +16,18 @@ import {
   ExtensionDirectoryLockedError,
   ExtensionStore,
   ExtensionStoreCorruptError,
+  getManagedSecretNames,
   type ExtensionIdentity,
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
 } from './extension-store.js';
+import {
+  ExtensionSettingScope,
+  hasStoredExtensionSecrets,
+  updateSetting,
+} from './extensionSettings.js';
+import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
+import type { ExtensionConfig } from './extensionManager.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
   INSTALL_METADATA_FILENAME,
@@ -102,6 +110,23 @@ describe('ExtensionStore', () => {
   const makeStore = () =>
     new ExtensionStore({ extensionsDir, storeDir, enablementPath });
 
+  beforeEach(() => {
+    // The adoption gate probes the user-scope secret backend; keep it on the
+    // file backend inside the test root so no real keychain is touched.
+    vi.stubEnv('QWEN_HOME', path.join(root, 'qwen-home'));
+    vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+    vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
+      false,
+    );
+    vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+      null,
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
   const newStore = (id: string, name = 'demo') => ({
     store: makeStore(),
     identity: { id, name },
@@ -112,6 +137,116 @@ describe('ExtensionStore', () => {
     const initial = await store.ensureInitialized([identity]);
     return { store, identity, initial };
   };
+
+  it.each([
+    'default',
+    'workspace',
+    'scope',
+    'skill',
+    'legacy',
+    'inherit',
+    'bulk default',
+    'bulk workspace',
+    'bulk inherit',
+  ])(
+    'rejects a user-source %s write against retained managed ownership under the lock',
+    async (operation) => {
+      const store = makeStore();
+      const user = {
+        id: 'a'.repeat(64),
+        name: 'returning',
+        source: 'user' as const,
+      };
+      const sibling = {
+        id: 'b'.repeat(64),
+        name: 'ordinary',
+        source: 'user' as const,
+      };
+      await store.ensureInitialized([user, sibling]);
+      const before = await store.ensureInitialized([
+        { ...user, source: 'managed' },
+        sibling,
+      ]);
+      const beforeCommit = vi.fn();
+      const workspace = workspacePath('activation-ownership');
+      const mutate = () => {
+        switch (operation) {
+          case 'default':
+            return store.setDefaultActivation(user, 'disabled');
+          case 'workspace':
+            return store.setWorkspaceActivation(user, workspace, 'disabled');
+          case 'scope':
+            return store.setActivationScope(user, { scope: 'user' });
+          case 'skill':
+            return store.setSkillWorkspaceOverrides(
+              user,
+              workspace,
+              { review: false },
+              0,
+              beforeCommit,
+            );
+          case 'legacy':
+            return store.setLegacyPathActivation(user, workspace, 'disabled');
+          case 'inherit':
+            return store.clearWorkspaceActivation(user, workspace);
+          case 'bulk default':
+            return store.setDefaultActivations([sibling, user], 'disabled');
+          case 'bulk workspace':
+            return store.setWorkspaceActivations(
+              [sibling, user],
+              workspace,
+              'disabled',
+            );
+          default:
+            return store.clearWorkspaceActivations([sibling, user], workspace);
+        }
+      };
+      await expect(mutate()).rejects.toThrow(ExtensionConflictError);
+      expect(beforeCommit).not.toHaveBeenCalled();
+      expect(await store.readSnapshot()).toEqual(before);
+    },
+  );
+
+  it.each(['single', 'bulk'] as const)(
+    'rejects a stale managed-source %s write after hand-back',
+    async (mode) => {
+      const store = makeStore();
+      const managed = {
+        id: 'c'.repeat(64),
+        name: 'returned',
+        source: 'managed' as const,
+      };
+      await store.ensureInitialized([managed]);
+      const before = await store.ensureInitialized(
+        [{ ...managed, source: 'user' }],
+        { managedAbsenceProven: true },
+      );
+      expect(before.extensions[managed.id]!.managed).toBeUndefined();
+      await expect(
+        mode === 'single'
+          ? store.setDefaultActivation(managed, 'disabled')
+          : store.setDefaultActivations([managed], 'disabled'),
+      ).rejects.toThrow(ExtensionConflictError);
+      expect(await store.readSnapshot()).toEqual(before);
+    },
+  );
+
+  it('rejects a bulk declaration that resolves by name to retained managed ownership', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'd'.repeat(64),
+      name: 'retained',
+      source: 'managed' as const,
+    };
+    const before = await store.ensureInitialized([managed]);
+    await expect(
+      store.setDefaultActivations(
+        [{ id: 'e'.repeat(64), name: 'retained', source: 'user' }],
+        'disabled',
+      ),
+    ).rejects.toThrow(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+  });
 
   const firstAndSecond = (
     a: string,
@@ -286,6 +421,39 @@ describe('ExtensionStore', () => {
     );
   };
 
+  it('refuses a cross-name rename of a stable user id until retained managed ownership is handed back', async () => {
+    const store = makeStore();
+    const user = {
+      id: 'e1'.repeat(32),
+      name: 'original',
+      source: 'user' as const,
+    };
+    const managed = {
+      id: 'e2'.repeat(32),
+      name: 'original',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([user]);
+    await store.ensureInitialized([managed]);
+    const retained = await store.ensureInitialized([user]);
+    expect(retained.extensions[user.id].managed).toBe(true);
+    const bytes = await fsp.readFile(path.join(storeDir, 'state.json'), 'utf8');
+    await expect(
+      store.ensureInitialized([{ ...user, name: 'renamed' }]),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await fsp.readFile(path.join(storeDir, 'state.json'), 'utf8')).toBe(
+      bytes,
+    );
+    expect(await store.readSnapshot()).toEqual(retained);
+    await store.ensureInitialized([user], { managedAbsenceProven: true });
+    const renamed = await store.ensureInitialized([
+      { ...user, name: 'renamed' },
+    ]);
+    expect(renamed.extensions[user.id].name).toBe('renamed');
+    expect(renamed.extensions[user.id].managed).toBeUndefined();
+    expect(await store.readSnapshot()).toEqual(renamed);
+  });
+
   it('derives a stable contained Agent Plugin data directory', () => {
     const store = makeStore();
     const extensionId = 'a'.repeat(64);
@@ -296,6 +464,498 @@ describe('ExtensionStore', () => {
     expect(() => store.agentPluginDataRoot('../escape')).toThrow(
       'Invalid extension id',
     );
+  });
+
+  it.each([false, 'managed', 1, null, {}, []])(
+    'rejects invalid managed policy markers %#',
+    async (managed) => {
+      const store = makeStore();
+      const identity = { id: 'ab'.repeat(32), name: 'managed' };
+      const initial = await store.ensureInitialized([
+        { ...identity, source: 'managed' },
+      ]);
+      await fsp.writeFile(
+        path.join(storeDir, 'state.json'),
+        JSON.stringify({
+          ...initial,
+          extensions: {
+            [identity.id]: { ...initial.extensions[identity.id], managed },
+          },
+        }),
+      );
+      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionStoreCorruptError,
+      );
+    },
+  );
+
+  it('clears managed ownership when updating a user-owned artifact without another discovery', async () => {
+    const store = makeStore();
+    const identity = { id: 'ac'.repeat(32), name: 'transition' };
+    const destination = path.join(extensionsDir, identity.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      initialActivation: { scope: 'user' },
+    });
+    await store.setDefaultActivation(identity, 'disabled');
+    const discovered = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(discovered.extensions[identity.id]).toMatchObject({
+      managed: true,
+      artifactGeneration: installed.extensions[identity.id].artifactGeneration,
+    });
+    const update = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(update, 'qwen-extension.json'), '{}');
+    const updated = await store.commitArtifact({
+      operation: 'update',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: update,
+      expectedArtifactGeneration:
+        installed.extensions[identity.id].artifactGeneration,
+    });
+    expect(updated.extensions[identity.id]).not.toHaveProperty('managed');
+    expect(updated.extensions[identity.id].defaultActivation).toBe('disabled');
+    await fsp.rm(destination, { recursive: true });
+    const missing = await store.setDefaultActivations([identity], 'enabled');
+    expect(missing.extensions[identity.id].declarationOnly).toBe(true);
+  });
+
+  it('restores the pre-managed stash instead of spending it on a plain update', async () => {
+    const store = makeStore();
+    const identity = { id: 'af'.repeat(32), name: 'updated' };
+    const destination = path.join(extensionsDir, identity.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      initialActivation: { scope: 'user' },
+    });
+    // The claim stashes the user's pre-managed baseline...
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]?.preservedDefaultActivation).toBe(
+      'enabled',
+    );
+    // ...and the episode-era disable belongs to the managed package.
+    await store.setDefaultActivation(identity, 'disabled', {
+      clearLegacyPathRules: true,
+    });
+
+    const update = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(update, 'qwen-extension.json'), '{}');
+    const updated = await store.commitArtifact({
+      operation: 'update',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: update,
+      expectedArtifactGeneration:
+        installed.extensions[identity.id].artifactGeneration,
+    });
+
+    // Nothing was adopted and the deployment never proved a withdrawal, so
+    // the commit hands the pre-managed baseline back rather than keeping the
+    // managed-era disable.
+    const policy = updated.extensions[identity.id]!;
+    expect(policy.managed).toBeUndefined();
+    expect(policy.defaultActivation).toBe('enabled');
+    expect(policy).not.toHaveProperty('preservedDefaultActivation');
+    expect(policy).not.toHaveProperty('preservedWorkspaceOverrides');
+  });
+
+  it.each(['same-id', 'different-id'] as const)(
+    'clears managed ownership when an installer adopts a %s policy',
+    async (mode) => {
+      const store = makeStore();
+      const identity = { id: 'ad'.repeat(32), name: 'adopted' };
+      const destination = path.join(extensionsDir, identity.name);
+      await store.setDefaultActivations([identity], 'disabled');
+      await fsp.mkdir(destination);
+      await store.ensureInitialized([identity]);
+      await fsp.rm(destination, { recursive: true });
+      const managed = await store.ensureInitialized([
+        { ...identity, source: 'managed' },
+      ]);
+      expect(managed.extensions[identity.id]).toMatchObject({
+        managed: true,
+        preserveActivationOnNextInstall: true,
+      });
+      const userIdentity = {
+        ...identity,
+        id: mode === 'same-id' ? identity.id : 'ae'.repeat(32),
+      };
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      const installed = await store.commitArtifact({
+        operation: 'install',
+        identity: userIdentity,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+      });
+      expect(installed.extensions[userIdentity.id]).not.toHaveProperty(
+        'managed',
+      );
+      expect(installed.extensions[userIdentity.id]).toMatchObject({
+        defaultActivation: 'disabled',
+        artifactGeneration: installed.generation,
+      });
+      expect(installed.extensions[userIdentity.id]).not.toHaveProperty(
+        'preserveActivationOnNextInstall',
+      );
+      await fsp.rm(destination, { recursive: true });
+      const missing = await store.setDefaultActivations(
+        [userIdentity],
+        'enabled',
+      );
+      expect(missing.extensions[userIdentity.id].declarationOnly).toBe(true);
+    },
+  );
+
+  it.each([
+    {
+      managed: true,
+      allowAdoption: true,
+      artifactExists: false,
+      succeeds: true,
+    },
+    {
+      managed: true,
+      allowAdoption: false,
+      artifactExists: false,
+      succeeds: false,
+    },
+    {
+      managed: false,
+      allowAdoption: true,
+      artifactExists: false,
+      succeeds: false,
+    },
+    {
+      managed: true,
+      allowAdoption: true,
+      artifactExists: true,
+      succeeds: false,
+    },
+  ])(
+    'limits retained managed policy adoption to a confirmed vacant managed source: %j',
+    async ({ managed, allowAdoption, artifactExists, succeeds }) => {
+      const store = makeStore();
+      const identity = { id: 'af'.repeat(32), name: 'retained' };
+      const userIdentity = { ...identity, id: 'b0'.repeat(32) };
+      const previousDirectory = path.join(extensionsDir, 'previous-user-copy');
+      if (artifactExists) {
+        await fsp.mkdir(previousDirectory);
+        await fsp.writeFile(
+          path.join(previousDirectory, 'untouched'),
+          'User artifact',
+        );
+        await store.ensureInitialized([
+          { ...identity, name: 'previous-user-copy', source: 'user' },
+        ]);
+      }
+      await store.ensureInitialized([
+        { ...identity, source: managed ? 'managed' : 'user' },
+      ]);
+      await store.setDefaultActivation(identity, 'disabled');
+      await store.setWorkspaceActivation(
+        identity,
+        workspacePath('kept'),
+        'enabled',
+      );
+      await store.setSkillWorkspaceOverrides(
+        identity,
+        workspacePath('kept'),
+        { helper: false },
+        0,
+      );
+      const before = await store.readSnapshot();
+      const destination = path.join(extensionsDir, identity.name);
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      const commit = store.commitArtifact({
+        operation: 'install',
+        identity: userIdentity,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: allowAdoption,
+      });
+      if (succeeds) {
+        const after = await commit;
+        // An explicit install adopts the retained managed-era activation
+        // as-is; the pre-managed stash is spent and leaves with the episode.
+        const expectedPolicy = {
+          ...before.extensions[identity.id],
+          artifactGeneration: after.generation,
+        };
+        delete expectedPolicy.managed;
+        delete expectedPolicy.managedName;
+        delete expectedPolicy.managedSecretNames;
+        delete expectedPolicy.managedDirectory;
+        delete expectedPolicy.preservedDefaultActivation;
+        delete expectedPolicy.preservedWorkspaceOverrides;
+        expect(after.extensions).toEqual({ [userIdentity.id]: expectedPolicy });
+      } else {
+        await expect(commit).rejects.toBeInstanceOf(ExtensionConflictError);
+        expect(await store.readSnapshot()).toEqual(before);
+        expect(
+          await fsp.readFile(path.join(staging, 'qwen-extension.json'), 'utf8'),
+        ).toBe('{}');
+        if (artifactExists)
+          expect(
+            await fsp.readFile(
+              path.join(previousDirectory, 'untouched'),
+              'utf8',
+            ),
+          ).toBe('User artifact');
+      }
+    },
+  );
+
+  it.each(['empty directory', 'settings only'] as const)(
+    'adopts a withdrawn managed %s without losing its settings',
+    async (contents) => {
+      const store = makeStore();
+      const managed = {
+        id: 'b1'.repeat(32),
+        name: 'configured',
+        source: 'managed' as const,
+      };
+      const user = { id: 'b2'.repeat(32), name: managed.name };
+      await store.ensureInitialized([managed]);
+      await store.setDefaultActivation(managed, 'disabled');
+      const destination = path.join(extensionsDir, managed.name);
+      await fsp.mkdir(destination);
+      if (contents === 'settings only')
+        await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      const after = await store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      });
+      expect(after.extensions[user.id]).toMatchObject({
+        defaultActivation: 'disabled',
+        artifactGeneration: after.generation,
+      });
+      expect(after.extensions[managed.id]).toBeUndefined();
+      if (contents === 'settings only')
+        expect(
+          await fsp.readFile(path.join(destination, '.env'), 'utf8'),
+        ).toContain('SAVED=old\n');
+    },
+  );
+
+  it('adopts a withdrawn managed settings directory whose casing differs from the retained policy name', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'b9'.repeat(32),
+      name: 'Configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'bf'.repeat(32), name: managed.name };
+    await store.ensureInitialized([managed]);
+    await store.setDefaultActivation(managed, 'disabled');
+    // The retained policy names one casing while the directory on disk —
+    // and the incoming install's destination — uses another. The sibling
+    // artifact lookup already matches case-insensitively; the adoption
+    // identity check must agree or the install dead-ends in a conflict.
+    const destination = path.join(extensionsDir, managed.name.toLowerCase());
+    await fsp.mkdir(destination);
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const after = await store.commitArtifact({
+      operation: 'install',
+      identity: user,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      initialActivation: { scope: 'user' },
+      allowManagedPolicyAdoption: true,
+    });
+    expect(after.extensions[user.id]).toMatchObject({
+      defaultActivation: 'disabled',
+      artifactGeneration: after.generation,
+    });
+    expect(after.extensions[managed.id]).toBeUndefined();
+    expect(
+      await fsp.readFile(path.join(destination, '.env'), 'utf8'),
+    ).toContain('SAVED=old\n');
+  });
+
+  it.each([
+    'notes.txt',
+    'qwen-extension.json',
+    '.qwen-extension-install.json',
+    '.qwen-extension-settings.json',
+    'subdirectory',
+    'env symlink',
+    'directory symlink',
+  ])(
+    'does not adopt a managed settings directory containing %s',
+    async (extra) => {
+      const store = makeStore();
+      const managed = {
+        id: 'b3'.repeat(32),
+        name: 'configured',
+        source: 'managed' as const,
+      };
+      const user = { id: 'b4'.repeat(32), name: managed.name };
+      const before = await store.ensureInitialized([managed]);
+      const destination = path.join(extensionsDir, managed.name);
+      const outside = path.join(root, 'outside');
+      await fsp.mkdir(outside);
+      await fsp.writeFile(path.join(outside, '.env'), 'OUTSIDE=untouched\n');
+      if (extra === 'directory symlink') {
+        await fsp.symlink(
+          outside,
+          destination,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } else {
+        await fsp.mkdir(destination);
+        if (extra === 'env symlink')
+          await fsp.symlink(
+            path.join(outside, '.env'),
+            path.join(destination, '.env'),
+          );
+        else {
+          await fsp.writeFile(
+            path.join(destination, '.env'),
+            'SAVED=untouched\n',
+          );
+          if (extra === 'subdirectory')
+            await fsp.mkdir(path.join(destination, 'subdirectory'));
+          else await fsp.writeFile(path.join(destination, extra), '{}');
+        }
+      }
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      await expect(
+        store.commitArtifact({
+          operation: 'install',
+          identity: user,
+          destinationDirectory: destination,
+          stagingDirectory: staging,
+          initialActivation: { scope: 'user' },
+          allowManagedPolicyAdoption: true,
+        }),
+      ).rejects.toBeInstanceOf(ExtensionConflictError);
+      expect(await store.readSnapshot()).toEqual(before);
+      expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+        extra.includes('symlink') ? 'OUTSIDE=untouched\n' : 'SAVED=untouched\n',
+      );
+      expect(await fsp.readFile(path.join(outside, '.env'), 'utf8')).toBe(
+        'OUTSIDE=untouched\n',
+      );
+      expect(
+        await fsp.readFile(path.join(staging, 'qwen-extension.json'), 'utf8'),
+      ).toBe('{}');
+    },
+  );
+
+  it('rolls back the original settings directory and managed policy after a failed adoption commit', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'b5'.repeat(32),
+      name: 'configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'b6'.repeat(32), name: managed.name };
+    await store.ensureInitialized([managed]);
+    const before = await store.setDefaultActivation(managed, 'disabled');
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination);
+    const originalEnv = 'SAVED=original\n';
+    await fsp.writeFile(path.join(destination, '.env'), originalEnv);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await fsp.writeFile(path.join(staging, '.env'), 'SAVED=new\n');
+    const internals = store as unknown as {
+      writeSnapshotUnlocked(snapshot: unknown): Promise<void>;
+    };
+    vi.spyOn(internals, 'writeSnapshotUnlocked').mockRejectedValueOnce(
+      new Error('adoption state write failed'),
+    );
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toThrow('adoption state write failed');
+    expect(await fsp.readdir(destination)).toEqual(['.env']);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      originalEnv,
+    );
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readdir(path.join(storeDir, 'transactions'))).toEqual([]);
+  });
+
+  it('does not infer a user artifact directory from managed name changes', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'af'.repeat(32),
+      name: 'External',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([managed]);
+    const renamed = await store.ensureInitialized([
+      { ...managed, name: 'external' },
+    ]);
+    expect(renamed.extensions[managed.id]).not.toHaveProperty(
+      'artifactDirectory',
+    );
+    const user = {
+      id: 'ba'.repeat(32),
+      name: 'EXTERNAL',
+      source: 'user' as const,
+    };
+    const destination = path.join(extensionsDir, user.name);
+    await fsp.mkdir(destination);
+    await fsp.writeFile(path.join(destination, 'qwen-extension.json'), '{}');
+    const discovered = await store.ensureInitialized([user], {
+      // Proven withdrawal: the caller sees the root and the managed package
+      // is gone, so the hand-back de-manages the claimed policy.
+      managedAbsenceProven: true,
+    });
+    expect(discovered.extensions[user.id]).not.toHaveProperty(
+      'artifactDirectory',
+    );
+    expect(discovered.extensions[user.id]).not.toHaveProperty('managed');
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(
+      path.join(staging, 'qwen-extension.json'),
+      '{"version":"2"}',
+    );
+    await store.commitArtifact({
+      operation: 'update',
+      identity: user,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      expectedArtifactGeneration: 0,
+    });
+    expect(
+      await fsp.readFile(path.join(destination, 'qwen-extension.json'), 'utf8'),
+    ).toBe('{"version":"2"}');
   });
 
   it('imports V1 rules without materializing workspace overrides', async () => {
@@ -2085,6 +2745,1189 @@ describe('ExtensionStore', () => {
       expect(await readProjection()).toEqual({});
     },
   );
+
+  it('retains all managed spellings across restarts without adding a user spelling', async () => {
+    const managedId = 'd1'.repeat(32);
+    const names = ['demo', 'Demo', 'DEMO'];
+    for (const name of names) {
+      await makeStore().ensureInitialized([
+        { id: managedId, name, source: 'managed', managedDirectory: 'bundle' },
+      ]);
+    }
+    const store = makeStore();
+    const before = await store.readSnapshot();
+    expect(before.extensions[managedId]?.managedSecretNames).toEqual(names);
+    const repeated = await store.ensureInitialized([
+      {
+        id: managedId,
+        name: 'DEMO',
+        source: 'managed',
+        managedDirectory: 'bundle',
+      },
+    ]);
+    expect(repeated).toEqual(before);
+
+    const user = { id: 'd2'.repeat(32), name: 'dEmO', source: 'user' as const };
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managedSecretNames).toEqual(names);
+    const handedBackNames: string[] = [];
+    const released = await makeStore().ensureInitialized([user], {
+      managedAbsenceProven: true,
+      onManagedHandBack: (name) => handedBackNames.push(name),
+    });
+    expect(handedBackNames).toEqual(names);
+    expect(released.extensions[user.id]?.managedSecretNames).toBeUndefined();
+    expect(released.extensions[user.id]?.managedDirectory).toBeUndefined();
+    expect(released.extensions[user.id]?.managed).toBeUndefined();
+  });
+
+  it('uses the latest observed managed directory for hand-back and read projection', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'd3'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([
+      { ...managed, managedDirectory: 'bundle old' },
+    ]);
+    const current = await store.ensureInitialized([
+      { ...managed, managedDirectory: 'bundle 新版本' },
+    ]);
+    expect(current.extensions[managed.id]?.managedDirectory).toBe(
+      'bundle 新版本',
+    );
+    expect(await makeStore().readSnapshot()).toEqual(current);
+    await store.setDefaultActivation(managed, 'disabled');
+    const user = { id: 'd4'.repeat(32), name: 'demo', source: 'user' as const };
+    const onManagedHandBack = vi.fn();
+    const retained = await store.ensureInitialized([user], {
+      managedAbsenceProven: true,
+      unprovenManagedNames: new Set(['bundle 新版本']),
+      onManagedHandBack,
+    });
+    expect(retained.extensions[user.id]?.managed).toBe(true);
+    expect(onManagedHandBack).not.toHaveBeenCalled();
+    expect(
+      store.projectManagedHandBackSnapshot(retained, [user], {
+        managedAbsenceProven: true,
+        unprovenManagedNames: new Set(['bundle 新版本']),
+      }),
+    ).toBe(retained);
+    const ambiguous = await store.ensureInitialized([user], {
+      managedAbsenceProven: true,
+      unprovenManagedNames: new Set(['bundle old', 'assets']),
+      onManagedHandBack,
+    });
+    expect(ambiguous.extensions[user.id]?.managed).toBe(true);
+    expect(ambiguous.extensions[user.id]?.defaultActivation).toBe('disabled');
+    expect(ambiguous.extensions[user.id]?.preservedDefaultActivation).toBe(
+      'enabled',
+    );
+    expect(onManagedHandBack).not.toHaveBeenCalled();
+    expect(
+      store.projectManagedHandBackSnapshot(ambiguous, [user], {
+        managedAbsenceProven: true,
+        unprovenManagedNames: new Set(['never-observed-provider']),
+      }),
+    ).toBe(ambiguous);
+    const released = await store.ensureInitialized([user], {
+      managedAbsenceProven: true,
+      onManagedHandBack,
+    });
+    expect(released.extensions[user.id]?.managed).toBeUndefined();
+    expect(onManagedHandBack).toHaveBeenCalledExactlyOnceWith('demo');
+  });
+
+  it('upgrades legacy first/current spellings before a user re-key', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'd5'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([managed]);
+    const legacy = await store.ensureInitialized([
+      { ...managed, name: 'DEMO' },
+    ]);
+    delete legacy.extensions[managed.id].managedSecretNames;
+    await fsp.writeFile(
+      path.join(storeDir, 'state.json'),
+      JSON.stringify(legacy),
+    );
+    const user = { id: 'd6'.repeat(32), name: 'dEmO', source: 'user' as const };
+    const upgraded = await makeStore().ensureInitialized([user]);
+    expect(upgraded.extensions[user.id]?.managedSecretNames).toEqual([
+      'demo',
+      'DEMO',
+    ]);
+    expect(await makeStore().ensureInitialized([user])).toEqual(upgraded);
+    expect(upgraded.extensions[user.id]?.managedDirectory).toBeUndefined();
+  });
+
+  it.each([
+    { field: 'managedSecretNames', value: [] },
+    { field: 'managedSecretNames', value: ['demo', 1] },
+    { field: 'managedSecretNames', value: ['../demo'] },
+    { field: 'managedSecretNames', value: ['another-extension'] },
+    { field: 'managedName', value: 'another-extension' },
+    ...['', '.', '..', 'nested/bundle', 'nested\\bundle', 'nul\0bundle'].map(
+      (value) => ({ field: 'managedDirectory', value }),
+    ),
+  ])(
+    'rejects invalid managed metadata $field=$value',
+    async ({ field, value }) => {
+      const store = makeStore();
+      const identity = {
+        id: 'd7'.repeat(32),
+        name: 'demo',
+        source: 'managed' as const,
+      };
+      const snapshot = await store.ensureInitialized([identity]);
+      Object.assign(snapshot.extensions[identity.id], { [field]: value });
+      const invalid = JSON.stringify(snapshot);
+      await fsp.writeFile(path.join(storeDir, 'state.json'), invalid);
+      await fsp.writeFile(path.join(storeDir, 'state.previous.json'), invalid);
+      await expect(makeStore().readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionStoreCorruptError,
+      );
+    },
+  );
+
+  it('waits for an asynchronous release guard before changing persisted state', async () => {
+    const store = makeStore();
+    const identity = { id: 'd6'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const before = await fsp.readFile(statePath, 'utf8');
+    const writes = vi.spyOn(
+      store as unknown as {
+        writeSnapshotUnlocked: (
+          snapshot: ExtensionStoreSnapshot,
+        ) => Promise<void>;
+      },
+      'writeSnapshotUnlocked',
+    );
+    let finishGuard!: () => void;
+    let enterGuard!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enterGuard = resolve;
+    });
+    const guard = new Promise<void>((resolve) => {
+      finishGuard = resolve;
+    });
+    const onRemoved = vi.fn();
+    const removing = store.removePolicy(identity, {
+      beforeRemove: async () => {
+        enterGuard();
+        await guard;
+      },
+      onRemoved,
+    });
+    await entered;
+    try {
+      expect(writes).not.toHaveBeenCalled();
+      expect(await fsp.readFile(statePath, 'utf8')).toBe(before);
+      expect(onRemoved).not.toHaveBeenCalled();
+    } finally {
+      finishGuard();
+      await removing;
+    }
+    const released = await removing;
+    expect(released.extensions[identity.id]).toBeUndefined();
+    expect(onRemoved).toHaveBeenCalledOnce();
+  });
+
+  it('leaves persisted state untouched when an asynchronous release guard rejects', async () => {
+    const store = makeStore();
+    const identity = { id: 'd6'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const before = await fsp.readFile(statePath, 'utf8');
+    const error = new Error('Deployment returned');
+    const onRemoved = vi.fn();
+    await expect(
+      store.removePolicy(identity, {
+        beforeRemove: () => {
+          const rejected = Promise.reject(error);
+          void rejected.catch(() => undefined);
+          return rejected;
+        },
+        onRemoved,
+      }),
+    ).rejects.toBe(error);
+    expect(await fsp.readFile(statePath, 'utf8')).toBe(before);
+    expect(onRemoved).not.toHaveBeenCalled();
+  });
+
+  it('captures the actual removed policy after the release is committed', async () => {
+    const store = makeStore();
+    const identity = {
+      id: 'd8'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([identity]);
+    const oldPolicy = (await store.readSnapshot()).extensions[identity.id];
+    for (const name of ['Demo', 'DEMO', 'demo']) {
+      await makeStore().ensureInitialized([{ ...identity, name }]);
+    }
+    expect(getManagedSecretNames(oldPolicy)).toEqual(['demo']);
+    const captured: string[][] = [];
+    const released = await store.removePolicy(identity, {
+      onRemoved: (policy) => {
+        const persisted = JSON.parse(
+          fs.readFileSync(path.join(storeDir, 'state.json'), 'utf8'),
+        );
+        expect(persisted.extensions[identity.id]).toBeUndefined();
+        captured.push(getManagedSecretNames(policy));
+      },
+    });
+    expect(captured).toEqual([['demo', 'Demo', 'DEMO']]);
+    expect(released.extensions[identity.id]).toBeUndefined();
+    const onMissing = vi.fn();
+    await store.removePolicy(identity, { onRemoved: onMissing });
+    expect(onMissing).not.toHaveBeenCalled();
+  });
+
+  it.each(['install', 'update'] as const)(
+    'refuses %s when only an intermediate managed spelling holds credentials',
+    async (operation) => {
+      const store = makeStore();
+      const managedId = 'd9'.repeat(32);
+      for (const name of ['demo', 'Demo', 'DEMO']) {
+        await makeStore().ensureInitialized([
+          { id: managedId, name, source: 'managed' },
+        ]);
+      }
+      await updateSetting(
+        {
+          name: 'Demo',
+          version: '1.0.0',
+          settings: [
+            {
+              name: 'Token',
+              description: 'token',
+              envVar: 'TOKEN',
+              sensitive: true,
+            },
+          ],
+        },
+        managedId,
+        'TOKEN',
+        async () => 'test-only-middle-spelling',
+        ExtensionSettingScope.USER,
+      );
+      const user = {
+        id: 'da'.repeat(32),
+        name: 'dEmO',
+        source: 'user' as const,
+      };
+      const before = await store.ensureInitialized([user]);
+      const destination = path.join(extensionsDir, user.name);
+      if (operation === 'update') await fsp.mkdir(destination);
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      await expect(
+        store.commitArtifact({
+          operation,
+          identity: user,
+          destinationDirectory: destination,
+          stagingDirectory: staging,
+          ...(operation === 'install'
+            ? {
+                initialActivation: { scope: 'user' as const },
+                allowManagedPolicyAdoption: true,
+              }
+            : {}),
+          adoptionProbeManagedId: managedId,
+        }),
+      ).rejects.toThrow(/stored credentials/);
+      expect(await store.readSnapshot()).toEqual(before);
+      expect(await hasStoredExtensionSecrets('Demo', managedId)).toBe(true);
+    },
+  );
+
+  it('hands back the stored spelling when the returning user copy differs only in case', async () => {
+    const store = makeStore();
+    const managedId = 'a9'.repeat(32);
+    await store.ensureInitialized([
+      { id: managedId, name: 'MyExt', source: 'managed' },
+    ]);
+
+    // The package is withdrawn and a same-name user copy with a different
+    // case is discovered in the same refresh: the stale-entry migration
+    // re-keys and renames the policy before the hand-back runs, while the
+    // managed episode's secrets still live under the stored spelling.
+    const handedBackNames: string[] = [];
+    const userId = 'b8'.repeat(32);
+    const handedBack = await store.ensureInitialized(
+      [{ id: userId, name: 'myext', source: 'user' }],
+      {
+        managedAbsenceProven: true,
+        onManagedHandBack: (name) => {
+          handedBackNames.push(name);
+        },
+      },
+    );
+
+    expect(handedBack.extensions[userId]?.name).toBe('myext');
+    expect(handedBack.extensions[userId]?.managed).toBeUndefined();
+    expect(handedBackNames).toEqual(['MyExt']);
+  });
+
+  it('hands back the stored spelling when the re-key happened in an earlier refresh', async () => {
+    const store = makeStore();
+    const managedId = 'f8'.repeat(32);
+    const userId = 'f9'.repeat(32);
+    await store.ensureInitialized([
+      { id: managedId, name: 'MyExt', source: 'managed' },
+    ]);
+    // Absence unproven: the policy is re-keyed onto the same-name user copy
+    // and keeps its marker, and the per-call spelling record does not
+    // survive into the next refresh.
+    await store.ensureInitialized([
+      { id: userId, name: 'myext', source: 'user' },
+    ]);
+
+    const handedBackNames: string[] = [];
+    const handedBack = await store.ensureInitialized(
+      [{ id: userId, name: 'myext', source: 'user' }],
+      {
+        managedAbsenceProven: true,
+        onManagedHandBack: (name) => {
+          handedBackNames.push(name);
+        },
+      },
+    );
+
+    expect(handedBack.extensions[userId]?.managed).toBeUndefined();
+    expect(handedBackNames).toEqual(['MyExt']);
+  });
+
+  it('hands back the stored spelling when a late legacy import rewrites the policy in the same refresh', async () => {
+    const store = makeStore();
+    const managedId = 'fa'.repeat(32);
+    const userId = 'fb'.repeat(32);
+    await store.ensureInitialized([{ id: userId, name: 'myext' }]);
+    // The managed package claims the user policy; the episode's secrets are
+    // stored under its spelling.
+    await store.ensureInitialized([
+      { id: managedId, name: 'MyExt', source: 'managed' },
+    ]);
+    // A legacy projection written after the claim (an older CLI process, or
+    // a hand edit of the enablement file) is newer than the state snapshot,
+    // so the withdrawal refresh re-imports it; the import rename must not
+    // lose the stored spelling.
+    const rule = `!${legacyWorkspaceRule(workspacePath())}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ myext: { overrides: [rule] } }),
+    );
+    const future = new Date(Date.now() + 10_000);
+    await fsp.utimes(enablementPath, future, future);
+
+    const handedBackNames: string[] = [];
+    const handedBack = await store.ensureInitialized(
+      [{ id: userId, name: 'myext', source: 'user' }],
+      {
+        managedAbsenceProven: true,
+        onManagedHandBack: (name) => {
+          handedBackNames.push(name);
+        },
+      },
+    );
+
+    expect(handedBack.extensions[userId]?.managed).toBeUndefined();
+    expect(handedBackNames).toEqual(['MyExt']);
+  });
+
+  it('restores a pre-managed default disable when the managed identity is withdrawn', async () => {
+    const store = makeStore();
+    const identity = { id: 'c1'.repeat(32), name: 'claimed' };
+    // The user's own disable predates the managed episode and is recorded as
+    // the default activation rather than a legacy path rule.
+    await store.setDefaultActivations([identity], 'disabled');
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+    });
+
+    // Enabling the managed package is an episode-local choice; the hand-back
+    // must not let it re-enable the user's own package.
+    await store.setDefaultActivation(identity, 'enabled', {
+      clearLegacyPathRules: true,
+    });
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(handedBack.extensions[identity.id]?.defaultActivation).toBe(
+      'disabled',
+    );
+    expect(
+      handedBack.extensions[identity.id]?.preservedDefaultActivation,
+    ).toBeUndefined();
+  });
+
+  it.each(['same-id', 're-keyed-hand-back', 're-keyed-install'] as const)(
+    'preserves restored declaration activation on the next install: %s',
+    async (mode) => {
+      const store = makeStore();
+      const identity = { id: 'c1'.repeat(32), name: 'claimed' };
+      const managed = {
+        ...identity,
+        id: mode === 're-keyed-hand-back' ? 'c2'.repeat(32) : identity.id,
+        source: 'managed' as const,
+      };
+      const user = {
+        ...identity,
+        id: mode === 're-keyed-install' ? 'c3'.repeat(32) : identity.id,
+      };
+      const legacyRule = `!${legacyWorkspaceRule(workspacePath('legacy'))}*`;
+      await writeProjection({ [identity.name]: rules(legacyRule) });
+      await store.setDefaultActivations([identity], 'disabled');
+      const declared = await store.setWorkspaceActivations(
+        [identity],
+        workspacePath('a'),
+        'disabled',
+      );
+      expect(declared.extensions[identity.id].declarationOnly).toBe(true);
+
+      const claimed = await store.ensureInitialized([managed]);
+      expect(claimed.extensions[managed.id].declarationOnly).toBeUndefined();
+      expect(
+        claimed.extensions[managed.id].preserveActivationOnNextInstall,
+      ).toBeUndefined();
+      await store.setDefaultActivation(managed, 'enabled', {
+        clearLegacyPathRules: true,
+      });
+      await store.setWorkspaceActivation(
+        managed,
+        workspacePath('a'),
+        'enabled',
+      );
+      const handedBack = await store.ensureInitialized([identity], {
+        managedAbsenceProven: true,
+      });
+      expect(handedBack.extensions[identity.id].managed).toBeUndefined();
+      const restored = {
+        defaultActivation: 'disabled',
+        workspaceOverrides: { [workspacePath('a')]: 'disabled' },
+        legacyPathRules: [legacyRule],
+      };
+      expect(handedBack.extensions[identity.id]).toMatchObject(restored);
+
+      const installed = await install(makeStore(), user);
+      expect(installed.extensions).toEqual({
+        [user.id]: {
+          name: user.name,
+          artifactGeneration: installed.generation,
+          ...restored,
+        },
+      });
+      await expect(
+        fsp.readFile(
+          path.join(extensionsDir, user.name, 'qwen-extension.json'),
+          'utf8',
+        ),
+      ).resolves.toBe('{}');
+    },
+  );
+
+  it('keeps a returning artifact protected when restoring future install activation', async () => {
+    const store = makeStore();
+    const identity = { id: 'c1'.repeat(32), name: 'claimed' };
+    const previousName = 'previous-user-copy';
+    const previousDirectory = path.join(extensionsDir, previousName);
+    await mkdirWithVersion(previousDirectory, 'untouched');
+    await store.ensureInitialized([{ ...identity, name: previousName }]);
+    await store.ensureInitialized([identity]);
+    await store.ensureInitialized([{ ...identity, source: 'managed' }]);
+    const handedBack = await store.ensureInitialized([identity], {
+      managedAbsenceProven: true,
+    });
+    expect(handedBack.extensions[identity.id]).toMatchObject({
+      artifactDirectory: previousName,
+      preserveActivationOnNextInstall: true,
+    });
+    expect(handedBack.extensions[identity.id].declarationOnly).toBeUndefined();
+
+    await expect(
+      install(store, { ...identity, id: 'c2'.repeat(32) }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(handedBack);
+    expect(await readVersion(previousDirectory)).toBe('untouched');
+    expect(fs.existsSync(path.join(extensionsDir, identity.name))).toBe(false);
+
+    await store.commitArtifact({
+      operation: 'uninstall',
+      identity,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+    });
+    expect(fs.existsSync(previousDirectory)).toBe(false);
+  });
+
+  it('restores the whole pre-managed activation surface when the managed identity is withdrawn', async () => {
+    const store = makeStore();
+    const identity = { id: 'c2'.repeat(32), name: 'surfaced' };
+    // The user's own disable predates the managed episode.
+    await store.setDefaultActivations([identity], 'disabled');
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]).toMatchObject({
+      managed: true,
+      defaultActivation: 'disabled',
+    });
+
+    // Episode-era toggles belong to the managed package: getActivation
+    // consults workspaceOverrides before the default, so restoring only the
+    // default would leave the user's own package enabled in this workspace.
+    await store.setWorkspaceActivation(identity, workspacePath('a'), 'enabled');
+    await store.setSkillWorkspaceOverrides(
+      identity,
+      workspacePath('a'),
+      { helper: false },
+      0,
+    );
+
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
+    const policy = handedBack.extensions[identity.id]!;
+    expect(policy.managed).toBeUndefined();
+    expect(policy.workspaceOverrides).toEqual({});
+    expect(policy.skillWorkspaceOverrides).toBeUndefined();
+    expect(policy.preservedWorkspaceOverrides).toBeUndefined();
+    expect(policy.preservedSkillWorkspaceOverrides).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'surfaced',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'disabled', source: 'default' });
+  });
+
+  it('restores a pre-managed workspace override cleared during the managed episode', async () => {
+    const store = makeStore();
+    const identity = { id: 'c3'.repeat(32), name: 'mirror' };
+    await store.ensureInitialized([identity]);
+    await store.setWorkspaceActivation(identity, workspacePath('a'), 'enabled');
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(
+      claimed.extensions[identity.id]?.preservedWorkspaceOverrides,
+    ).toEqual({ [workspacePath('a')]: 'enabled' });
+
+    await store.clearWorkspaceActivation(identity, workspacePath('a'));
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'mirror',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'enabled', source: 'workspace_override' });
+  });
+
+  it('applies the stashed legacy rules over episode-era writes at hand-back', async () => {
+    const store = makeStore();
+    const identity = { id: 'c4'.repeat(32), name: 'rules' };
+    const preManaged = `!${legacyWorkspaceRule(workspacePath('pre'))}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ rules: { overrides: [preManaged] } }),
+    );
+    await store.ensureInitialized([identity]);
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]?.preservedLegacyPathRules).toEqual([
+      preManaged,
+    ]);
+
+    // A legacy-rule write during the episode belongs to the managed package:
+    // the hand-back applies the stash rather than silently discarding it.
+    await store.setLegacyPathActivation(
+      identity,
+      workspacePath('episode'),
+      'disabled',
+    );
+    // Retire the projection so the hand-back can only draw on the stash.
+    await fsp.rm(enablementPath);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
+    expect(handedBack.extensions[identity.id]?.legacyPathRules).toEqual([
+      preManaged,
+    ]);
+    expect(
+      handedBack.extensions[identity.id]?.preservedLegacyPathRules,
+    ).toBeUndefined();
+  });
+
+  it('hands a policy born managed back to its birth default when the managed identity is withdrawn', async () => {
+    const store = makeStore();
+    const identity = { id: 'c5'.repeat(32), name: 'born' };
+    // Born managed: the fresh-snapshot path never passes the claim-time
+    // stash, so the pre-managed baseline must be stamped at birth.
+    const born = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(born.extensions[identity.id]).toMatchObject({
+      managed: true,
+      defaultActivation: 'enabled',
+    });
+
+    await store.setDefaultActivation(identity, 'disabled', {
+      clearLegacyPathRules: true,
+    });
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(handedBack.extensions[identity.id]?.defaultActivation).toBe(
+      'enabled',
+    );
+
+    // A re-claim after the hand-back stashes the restored baseline, not a
+    // managed-era value that leaked into the policy.
+    const reclaimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(reclaimed.extensions[identity.id]?.preservedDefaultActivation).toBe(
+      'enabled',
+    );
+  });
+
+  it('stashes legacy rules that reach a managed policy inside a batch mutation', async () => {
+    const store = makeStore();
+    const identity = { id: 'e1'.repeat(32), name: 'batched' };
+    await store.ensureInitialized([{ ...identity, source: 'managed' }]);
+    // The legacy projection arrives late — written after the state snapshot —
+    // so the batch mutation imports and clears it inside the same call.
+    const rule = `!${legacyWorkspaceRule(workspacePath())}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ batched: { overrides: [rule] } }),
+    );
+    const future = new Date(Date.now() + 10_000);
+    await fsp.utimes(enablementPath, future, future);
+
+    const cleared = await store.setDefaultActivations([identity], 'enabled', {
+      clearLegacyPathRulesForManaged: true,
+    });
+    expect(cleared.extensions[identity.id]?.legacyPathRules).toBeUndefined();
+    expect(cleared.extensions[identity.id]?.preservedLegacyPathRules).toEqual([
+      rule,
+    ]);
+
+    // Retire the projection so the hand-back can only draw on the stash.
+    await fsp.rm(enablementPath);
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
+    expect(handedBack.extensions[identity.id]?.managed).toBeUndefined();
+    expect(handedBack.extensions[identity.id]?.legacyPathRules).toEqual([rule]);
+    expect(
+      handedBack.extensions[identity.id]?.preservedLegacyPathRules,
+    ).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'batched',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'disabled', source: 'legacy_path_rule' });
+  });
+
+  it('keeps the preserved pre-managed stash through a managed-era scope change', async () => {
+    const store = makeStore();
+    const identity = { id: 'd1'.repeat(32), name: 'scoped' };
+    const rule = `!${legacyWorkspaceRule(workspacePath())}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ scoped: { overrides: [rule] } }),
+    );
+    await store.ensureInitialized([identity]);
+    // A pre-claim workspace override joins the stash the same way.
+    await store.setWorkspaceActivation(
+      identity,
+      workspacePath('a'),
+      'disabled',
+    );
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]?.preservedLegacyPathRules).toEqual([
+      rule,
+    ]);
+    expect(
+      claimed.extensions[identity.id]?.preservedWorkspaceOverrides,
+    ).toEqual({ [workspacePath('a')]: 'disabled' });
+
+    await store.setDefaultActivations([identity], 'enabled', {
+      clearLegacyPathRulesForManaged: true,
+    });
+    // The scope decision is made about the *managed* package, so it re-bases
+    // the managed-era surface only; the user package's pre-claim baseline
+    // must survive to the hand-back, or withdrawing the deployment would
+    // re-enable a package the user explicitly disabled.
+    await store.setActivationScope(identity, { scope: 'user' });
+
+    const handedBack = await store.ensureInitialized([identity], {
+      // The caller can see the deployment root, so the absent managed
+      // identity is a proven withdrawal and the hand-back fires.
+      managedAbsenceProven: true,
+    });
+    const policy = handedBack.extensions[identity.id]!;
+    expect(policy.managed).toBeUndefined();
+    expect(policy.legacyPathRules).toEqual([rule]);
+    expect(policy.workspaceOverrides).toEqual({
+      [workspacePath('a')]: 'disabled',
+    });
+    // The stash is spent by the restore, not dropped by the scope change.
+    expect(policy.preservedLegacyPathRules).toBeUndefined();
+    expect(policy.preservedWorkspaceOverrides).toBeUndefined();
+    expect(policy.preservedSkillWorkspaceOverrides).toBeUndefined();
+    expect(
+      store.getActivation(
+        handedBack,
+        identity.id,
+        'scoped',
+        workspacePath('a'),
+      ),
+    ).toMatchObject({ effective: 'disabled' });
+  });
+
+  it('refuses to adopt a managed settings directory while the backend still holds its secrets', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'e5'.repeat(32),
+      name: 'configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'e6'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination, { recursive: true });
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    // `settings set` stores a sensitive value under the managed identity
+    // without writing selector metadata, so the directory alone looks
+    // adoptable even though it is secret-bearing.
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      'SAVED=old\n',
+    );
+  });
+
+  it('refuses to adopt a managed settings directory while the backend holds workspace-scope secrets', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'e7'.repeat(32),
+      name: 'ws-configured',
+      source: 'managed' as const,
+    };
+    const user = { id: 'e8'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination, { recursive: true });
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    // A workspace-scope sensitive setting lands under a different service
+    // name (the base name plus the working directory) and writes no selector
+    // file, so a user-scope-only probe would miss it: the adoption would
+    // re-key the policy and strand the value in the backend.
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'workspace-secret-value',
+      ExtensionSettingScope.WORKSPACE,
+    );
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      'SAVED=old\n',
+    );
+  });
+
+  it('probes the named workspace cwds, not just the commit cwd, when adopting a secret-bearing managed policy', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'eb'.repeat(32),
+      name: 'elsewhere',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ec'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    await fsp.mkdir(destination, { recursive: true });
+    await fsp.writeFile(path.join(destination, '.env'), 'SAVED=old\n');
+    // The workspace-scope service name folds the *writing* process's cwd,
+    // and the committing process (e.g. a daemon route) is not necessarily
+    // it: write the secret from a different workspace than the commit runs
+    // under. A probe limited to the commit's own cwd would miss it.
+    const writingCwd = path.join(root, 'writing-workspace');
+    await fsp.mkdir(writingCwd);
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(writingCwd);
+    try {
+      await updateSetting(
+        {
+          name: managed.name,
+          settings: [
+            {
+              name: 'Token',
+              description: 'token',
+              envVar: 'API_TOKEN',
+              sensitive: true,
+            },
+          ],
+        } as unknown as ExtensionConfig,
+        managed.id,
+        'API_TOKEN',
+        async () => 'workspace-secret-value',
+        ExtensionSettingScope.WORKSPACE,
+      );
+    } finally {
+      cwdSpy.mockRestore();
+    }
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+        adoptionProbeWorkspaceCwds: [writingCwd],
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await fsp.readFile(path.join(destination, '.env'), 'utf8')).toBe(
+      'SAVED=old\n',
+    );
+  });
+
+  it('refuses to adopt a retained managed policy with stored secrets and no settings directory', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'e9'.repeat(32),
+      name: 'directoryless',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ea'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    // No settings directory under extensionsDir: `settings set` wrote the
+    // sensitive value straight to the backend, which is the common
+    // withdrawal layout — the gate must not wait for a directory to exist.
+    const destination = path.join(extensionsDir, managed.name);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    expect(await fsp.stat(destination).catch(() => undefined)).toBeUndefined();
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+  });
+
+  it('fails closed when an available secret backend cannot be enumerated during adoption', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'eb'.repeat(32),
+      name: 'unenumerable',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ec'.repeat(32), name: managed.name };
+    const before = await store.ensureInitialized([managed]);
+    const destination = path.join(extensionsDir, managed.name);
+    // An available backend whose enumeration fails is an unknown, not an
+    // empty: the gate must treat it as secret-bearing rather than adopt and
+    // orphan credentials it cannot see.
+    const isAvailable = vi
+      .spyOn(KeychainTokenStorage.prototype, 'isAvailable')
+      .mockResolvedValue(true);
+    const listSecrets = vi
+      .spyOn(KeychainTokenStorage.prototype, 'listSecrets')
+      .mockRejectedValue(new Error('findCredentials failed'));
+    try {
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      await expect(
+        store.commitArtifact({
+          operation: 'install',
+          identity: user,
+          destinationDirectory: destination,
+          stagingDirectory: staging,
+          initialActivation: { scope: 'user' },
+          allowManagedPolicyAdoption: true,
+        }),
+      ).rejects.toBeInstanceOf(ExtensionConflictError);
+      expect(await store.readSnapshot()).toEqual(before);
+    } finally {
+      isAvailable.mockRestore();
+      listSecrets.mockRestore();
+    }
+  });
+
+  it('refuses to adopt a re-keyed managed policy whose secrets live under the managed id', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'ed'.repeat(32),
+      name: 'rekeyed',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ee'.repeat(32), name: managed.name };
+    await store.ensureInitialized([managed]);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    // A run that cannot prove the withdrawal re-keys the retained managed
+    // policy onto the same-name user identity, keeping the marker: probing
+    // only the record's current key would miss the managed-era credential.
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managed).toBe(true);
+    expect(rekeyed.extensions[managed.id]).toBeUndefined();
+    const before = await store.readSnapshot();
+
+    const destination = path.join(extensionsDir, managed.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+        adoptionProbeManagedId: managed.id,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+  });
+
+  it('refuses to adopt a re-keyed managed policy whose secrets live under the managed-era spelling', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'f4'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    const user = { id: 'f5'.repeat(32), name: 'Demo' };
+    await store.ensureInitialized([managed]);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    // Absence unproven: the retained managed policy is re-keyed AND re-cased
+    // onto the user identity, keeping the marker. The keychain service name
+    // embeds the episode-era spelling case-sensitively, so probing only the
+    // record's current name misses the credential.
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managed).toBe(true);
+    expect(rekeyed.extensions[managed.id]).toBeUndefined();
+    const before = await store.readSnapshot();
+
+    const destination = path.join(extensionsDir, user.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+        adoptionProbeManagedId: managed.id,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+  });
+
+  it('fails closed when a non-adopting update would drop the managed marker over stored secrets', async () => {
+    const store = makeStore();
+    const managed = {
+      id: '10'.repeat(32),
+      name: 'updated-managed',
+      source: 'managed' as const,
+    };
+    const user = { id: '11'.repeat(32), name: 'Updated-Managed' };
+    await store.ensureInitialized([managed]);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    // Absence unproven: the retained policy is re-keyed onto the same-name
+    // user identity with the marker kept — and re-cased, so the probe must
+    // cover the managed-era spelling the credentials were written under.
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managed).toBe(true);
+
+    const destination = path.join(extensionsDir, user.name);
+    await fsp.mkdir(destination, { recursive: true });
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const before = await store.readSnapshot();
+    // An update commit carries no adoption semantics and no cleanup for the
+    // managed episode's secrets — every cleanup path keys on the marker, so
+    // the commit must fail closed rather than orphan the credentials.
+    await expect(
+      store.commitArtifact({
+        operation: 'update',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        adoptionProbeManagedId: managed.id,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await hasStoredExtensionSecrets(managed.name, managed.id)).toBe(
+      true,
+    );
+  });
 
   it('fails closed when current and previous state are corrupt', async () => {
     const { store, identity } = await initStore('f3'.repeat(32));

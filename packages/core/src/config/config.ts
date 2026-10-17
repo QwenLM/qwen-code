@@ -283,6 +283,7 @@ import {
 
 // Local config modules
 import type { FileFilteringOptions } from '../utils/file-filtering-options.js';
+import { resolveManagedExtensionsDir } from '../extension/managed-extension-dir.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
@@ -1475,6 +1476,7 @@ export interface ConfigParameters {
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
+  managedExtensionsDir?: string;
   /** Locale code for resolving localizable extension fields (e.g., 'en', 'zh'). */
   locale?: string;
   allowedMcpServers?: string[];
@@ -2235,6 +2237,8 @@ function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
 export interface ConfigInitializeOptions {
   /** Cancels request-scoped initialization without becoming a session signal. */
   signal?: AbortSignal;
+  /** Read-only command initialization must retain managed ownership and secrets. */
+  allowManagedHandBack?: boolean;
   /**
    * Callback for sending MCP messages to SDK servers via control plane.
    * Required for SDK MCP server support in SDK mode.
@@ -3090,6 +3094,7 @@ export class Config {
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
+  private readonly managedExtensionsDir?: string;
 
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
@@ -3610,6 +3615,11 @@ export class Config {
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
+    this.managedExtensionsDir = resolveManagedExtensionsDir(
+      params.managedExtensionsDir,
+      undefined,
+      { alreadyResolved: true },
+    );
     this.noBrowser = params.noBrowser ?? false;
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
@@ -3859,6 +3869,7 @@ export class Config {
     this.extensionManager = new ExtensionManager({
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
+      managedExtensionsDir: this.managedExtensionsDir,
       isWorkspaceTrusted: this.isTrustedFolder(),
       locale: params.locale,
       usageStatisticsEnabled: this.usageStatisticsEnabled,
@@ -4172,7 +4183,9 @@ export class Config {
       !this.isSafeMode() &&
       !this.getBareMode()
     ) {
-      await this.extensionManager.refreshCache();
+      await this.extensionManager.refreshCache({
+        allowManagedHandBack: options?.allowManagedHandBack,
+      });
     } else if (
       !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
@@ -4181,6 +4194,7 @@ export class Config {
     ) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
+        allowManagedHandBack: options?.allowManagedHandBack,
       });
     }
     recordStartupEvent('config_initialize_extensions_initial_end');
@@ -4628,7 +4642,9 @@ export class Config {
       !this.getBareMode() &&
       !this.isSafeMode()
     ) {
-      await this.extensionManager.refreshCache();
+      await this.extensionManager.refreshCache({
+        allowManagedHandBack: options?.allowManagedHandBack,
+      });
     }
     recordStartupEvent('config_initialize_extensions_final_end');
     options?.signal?.throwIfAborted();
@@ -5424,6 +5440,7 @@ export class Config {
       this.contextRuleExcludes,
       {
         explicitOnly: this.getBareMode(),
+        extensionContextRoots: this.getExtensionContextRoots(),
         loadReason,
         onInstructionsLoaded: createInstructionsLoadedCallback(
           () => this.hookSystem,
@@ -9623,6 +9640,14 @@ export class Config {
   }
 
   /**
+   * The deployment-managed extension root, already resolved and validated at
+   * construction; undefined when the process runs without one.
+   */
+  getManagedExtensionsDir(): string | undefined {
+    return this.managedExtensionsDir;
+  }
+
+  /**
    * The plans-directory state (`plansDirectoryConfigured` / `plansDir`) is
    * installed by the canonical Config constructor and inherited by derived
    * Configs through the prototype chain. Derived agent/worktree profiles
@@ -10863,6 +10888,18 @@ export class Config {
 
   getUsageStatisticsEnabled(): boolean {
     return this.usageStatisticsEnabled;
+  }
+
+  getExtensionContextRoots(): ReadonlyMap<string, string> {
+    return new Map(
+      this.getActiveExtensions()
+        .filter((extension) => extension.source === 'managed')
+        .flatMap((extension) =>
+          extension.contextFiles.map(
+            (file) => [path.resolve(file), extension.path] as const,
+          ),
+        ),
+    );
   }
 
   /**

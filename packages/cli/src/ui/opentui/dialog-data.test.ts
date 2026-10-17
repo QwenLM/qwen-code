@@ -1253,6 +1253,28 @@ describe('mcp and extension feeds', () => {
     ]);
   });
 
+  it('identifies managed extension rows without install metadata', () => {
+    const rows = buildExtensionRows(
+      stubConfig({
+        getExtensions: (() => [
+          {
+            name: 'managed',
+            path: '/deployment/extensions/managed',
+            isActive: true,
+            source: 'managed',
+            version: '1.0.0',
+          },
+        ]) as unknown as Config['getExtensions'],
+      } as Partial<Config>),
+    );
+    expect(rows[0]).toMatchObject({
+      key: 'managed',
+      extensionSource: 'managed',
+      source: 'managed',
+      version: '1.0.0',
+    });
+  });
+
   it('enriches extension rows with favorites, scopes and components', () => {
     const manager = {
       getFavorites: () => ['fav-ext'],
@@ -1779,7 +1801,7 @@ describe('extension management actions (audit 01 G-4)', () => {
       true,
     );
     expect(manager.disableExtension).toHaveBeenCalledWith('ext-a', 'User');
-    expect(manager.refreshCache).toHaveBeenCalled();
+    expect(manager.refreshCache).toHaveBeenCalledWith();
     expect(result).toEqual({
       message: '"ext-a" disabled.',
       changed: true,
@@ -1849,7 +1871,7 @@ describe('extension management actions (audit 01 G-4)', () => {
       'ext-a',
     );
     expect(manager.uninstallExtension).toHaveBeenCalledWith('ext-a', false);
-    expect(manager.refreshCache).toHaveBeenCalled();
+    expect(manager.refreshCache).toHaveBeenCalledWith();
     expect(result).toMatchObject({ changed: true, level: 'success' });
     expect(result.message).toContain('Uninstalled');
   });
@@ -1866,6 +1888,7 @@ describe('extension management actions (audit 01 G-4)', () => {
       workspacePath: process.cwd(),
     });
     expect(manager.setExtensionScope).toHaveBeenCalledWith('ext-a', 'project');
+    expect(manager.refreshCache).toHaveBeenCalledWith();
     expect(result).toMatchObject({ changed: true, level: 'success' });
     expect(result.message).toContain('Project');
   });

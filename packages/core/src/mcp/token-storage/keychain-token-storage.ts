@@ -302,14 +302,12 @@ export class KeychainTokenStorage extends BaseTokenStorage {
     if (!keytar) {
       throw new Error('Keytar module not available');
     }
-    try {
-      const credentials = await keytar.findCredentials(this.serviceName);
-      return credentials
-        .filter((cred) => cred.account.startsWith(SECRET_PREFIX))
-        .map((cred) => cred.account.substring(SECRET_PREFIX.length));
-    } catch (error) {
-      debugLogger.error(`Failed to list secrets from keychain: ${error}`);
-      return [];
-    }
+    // Unlike listServers, an enumeration failure here must not degrade to
+    // an empty list: the extension-settings gates treat "no secrets" as
+    // proof a cleanup or adoption is safe, so an unknown answer propagates.
+    const credentials = await keytar.findCredentials(this.serviceName);
+    return credentials
+      .filter((cred) => cred.account.startsWith(SECRET_PREFIX))
+      .map((cred) => cred.account.substring(SECRET_PREFIX.length));
   }
 }

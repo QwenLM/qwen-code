@@ -57,6 +57,7 @@ describe('LSTool', () => {
       storage: {
         getUserSkillsDirs: () => [userSkillsBase],
       },
+      getManagedExtensionsDir: () => undefined,
     } as unknown as Config;
 
     lsTool = new LSTool(mockConfig);
@@ -101,6 +102,80 @@ describe('LSTool', () => {
       const invocation = lsTool.build({ path: '/tmp' });
       expect(await invocation.getDefaultPermission()).toBe('ask');
     });
+
+    it('should return allow for paths within the managed extensions directory', async () => {
+      // Outside every workspace dir: without the managed-root allowlist entry
+      // this listing would need a confirmation prompt. The root is realpath'd
+      // because the production boundary pins the canonical path.
+      const managedRoot = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-managed-')),
+      );
+      try {
+        const managedTool = new LSTool({
+          ...mockConfig,
+          getManagedExtensionsDir: () => managedRoot,
+        } as unknown as Config);
+        const invocation = managedTool.build({
+          path: path.join(managedRoot, 'demo'),
+        });
+        const permission = await invocation.getDefaultPermission();
+        expect(permission).toBe('allow');
+      } finally {
+        await fs.rm(managedRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('should return ask after the managed root becomes unavailable', async () => {
+      const managedRoot = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-managed-missing-')),
+      );
+      try {
+        const managedTool = new LSTool({
+          ...mockConfig,
+          getManagedExtensionsDir: () => managedRoot,
+        } as unknown as Config);
+        const invocation = managedTool.build({
+          path: path.join(managedRoot, 'demo'),
+        });
+        expect(await invocation.getDefaultPermission()).toBe('allow');
+        await fs.rm(managedRoot, { recursive: true });
+        expect(await invocation.getDefaultPermission()).toBe('ask');
+        await fs.writeFile(managedRoot, 'not a directory');
+        expect(await invocation.getDefaultPermission()).toBe('ask');
+      } finally {
+        await fs.rm(managedRoot, { recursive: true, force: true });
+      }
+    });
+
+    // Windows cannot create directory symlinks without extra privileges.
+    it.skipIf(process.platform === 'win32')(
+      'should return ask for a symlink inside the managed extensions directory that points outside',
+      async () => {
+        // execute() follows symlinks, so the permission check must classify
+        // the link by its target, not by where it sits.
+        const managedRoot = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-managed-')),
+        );
+        const outsideDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-outside-')),
+        );
+        try {
+          await fs.symlink(outsideDir, path.join(managedRoot, 'link'), 'dir');
+          const managedTool = new LSTool({
+            ...mockConfig,
+            getManagedExtensionsDir: () => managedRoot,
+          } as unknown as Config);
+          const invocation = managedTool.build({
+            path: path.join(managedRoot, 'link'),
+          });
+          const permission = await invocation.getDefaultPermission();
+          expect(permission).toBe('ask');
+        } finally {
+          await fs.rm(managedRoot, { recursive: true, force: true });
+          await fs.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
   });
 
   describe('execute', () => {

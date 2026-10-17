@@ -5636,6 +5636,46 @@ describe('Server Config (config.ts)', () => {
       await expect(config.initialize()).rejects.toThrow(ALREADY_INITIALIZED);
     });
 
+    it.each([false, true])(
+      'retains managed ownership during read-only initialization (bare=%s)',
+      async (bareMode) => {
+        const refresh = vi
+          .spyOn(ExtensionManager.prototype, 'refreshCache')
+          .mockResolvedValue(undefined);
+        const config = makeConfig({
+          bareMode,
+          ...(bareMode ? { overrideExtensions: ['managed-example'] } : {}),
+        });
+        await config.initialize({
+          ...SKIP_ALL_INIT,
+          allowManagedHandBack: false,
+        });
+        expect(refresh).toHaveBeenCalledTimes(bareMode ? 1 : 2);
+        for (const [options] of refresh.mock.calls) {
+          expect(options?.allowManagedHandBack).toBe(false);
+        }
+        if (bareMode) {
+          expect(refresh).toHaveBeenCalledWith({
+            names: ['managed-example'],
+            allowManagedHandBack: false,
+          });
+        }
+        refresh.mockRestore();
+      },
+    );
+
+    it('keeps lifecycle hand-back enabled during ordinary initialization', async () => {
+      const refresh = vi
+        .spyOn(ExtensionManager.prototype, 'refreshCache')
+        .mockResolvedValue(undefined);
+      await makeConfig().initialize(SKIP_ALL_INIT);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      for (const [options] of refresh.mock.calls) {
+        expect(options?.allowManagedHandBack).toBeUndefined();
+      }
+      refresh.mockRestore();
+    });
+
     it('should skip implicit startup discovery in bare mode', async () => {
       const extensionRefreshSpy = vi
         .spyOn(ExtensionManager.prototype, 'refreshCache')

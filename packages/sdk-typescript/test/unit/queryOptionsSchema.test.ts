@@ -103,6 +103,14 @@ describe('QueryOptionsSchema', () => {
     '--add-dir',
     '--extensions',
     '-e',
+    '--managed-extensions',
+    '--managedExtensions',
+    '--managed--extensions',
+    '-e/tmp/attached-value',
+    '-=y',
+    '-=s=v',
+    '-=e',
+    '--allowedMcpServerNames',
     '--sandbox',
     '-s',
     '--no-sandbox',
@@ -125,6 +133,35 @@ describe('QueryOptionsSchema', () => {
     if (!result.success) {
       expect(result.error.issues[0]?.message).toContain('reserved flag');
     }
+  });
+
+  it.each(
+    [...'ceimoprsy'].flatMap((alias) => [
+      `-=${alias}`,
+      `-=${alias}=value`,
+      `-=d${alias}`,
+    ]),
+  )('rejects reserved short aliases in leading-equals groups: %s', (flag) => {
+    const result = QueryOptionsSchema.safeParse({ extraArgs: [flag, 'value'] });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toContain('reserved flag');
+    }
+  });
+
+  it.each([
+    '--verbose',
+    '-x',
+    '-x=s',
+    '--some-flag=value',
+    '-dl',
+    '-=x=s',
+    '-==y',
+    '-=d',
+  ])('preserves permitted extraArgs spellings: %s', (flag) => {
+    expect(QueryOptionsSchema.safeParse({ extraArgs: [flag] }).success).toBe(
+      true,
+    );
   });
 
   it('accepts all new option fields together', () => {
@@ -209,6 +246,15 @@ describe('QueryOptionsSchema', () => {
     '--approval-mode=yolo',
     '--insecure=true',
     '--proxy=http://localhost:8080',
+    '--managed-extensions=/tmp/attacker',
+    '--managedExtensions=/tmp/attacker',
+    '--managed--extensions=/tmp/attacker',
+    // yargs camel-case-expansion also splits on underscores, and
+    // dot-notation binds the first segment (which alias-propagates) — all
+    // three spellings bind a reserved option under the real parser.
+    '--_managed-extensions=/tmp/attacker',
+    '--allowed_mcp-server-names=evil',
+    '--m.naged-extensions=/tmp/attacker',
   ])('rejects extraArgs with --flag=value syntax: %s', (flag) => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);

@@ -381,6 +381,29 @@ describe('mcp reconnect command', () => {
     });
   });
 
+  it.each([false, true])(
+    'keeps every extension refresh read-only while reconnecting (all=%s)',
+    async (all) => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: { 'test-server': { command: '/path/to/server' } },
+        },
+      });
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all });
+      expect(mockExtensionManager.refreshCache).toHaveBeenCalledTimes(2);
+      for (const [options] of mockExtensionManager.refreshCache.mock.calls) {
+        expect(options).toEqual({ allowManagedHandBack: false });
+      }
+      expect(mockConfig.initialize).toHaveBeenCalledWith({
+        skipMcpDiscovery: true,
+        allowManagedHandBack: false,
+      });
+    },
+  );
+
   describe('process scope (issue #9944)', () => {
     it('initializes the throwaway config without background MCP discovery', async () => {
       // The command runs its own targeted `discoverToolsForServer`; the
@@ -401,6 +424,7 @@ describe('mcp reconnect command', () => {
 
       expect(mockConfig.initialize).toHaveBeenCalledWith({
         skipMcpDiscovery: true,
+        allowManagedHandBack: false,
       });
     });
 

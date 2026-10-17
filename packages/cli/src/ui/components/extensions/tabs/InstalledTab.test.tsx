@@ -79,6 +79,9 @@ describe('InstalledTab', () => {
     );
 
     await waitFor(() => expect(manager.refreshCache).toHaveBeenCalledOnce());
+    expect(manager.refreshCache).toHaveBeenCalledWith({
+      allowManagedHandBack: false,
+    });
     // refreshCache fires at the start of load(), before items are set; wait for
     // the loaded row to render so the handler grabbed below closes over
     // populated items instead of the initial empty-items render (flaky under

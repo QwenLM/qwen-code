@@ -104,6 +104,7 @@ export interface ChannelWorkerGroup {
 }
 
 export interface ChannelWorkerGroupSharedOptions {
+  managedExtensions?: string;
   cliEntryPath: string;
   daemonUrl: string;
   daemonToken?: string;
@@ -235,6 +236,7 @@ export function createChannelWorkerGroup(
     });
     const supervisor = opts.createSupervisor({
       cliEntryPath: opts.shared.cliEntryPath,
+      managedExtensions: opts.shared.managedExtensions,
       daemonUrl: opts.shared.daemonUrl,
       ...(opts.shared.daemonToken
         ? { daemonToken: opts.shared.daemonToken }

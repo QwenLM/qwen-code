@@ -52,6 +52,7 @@ const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
 
 export interface AcpBridgeOptions {
+  managedExtensions?: string;
   cliEntryPath: string;
   cwd: string;
   model?: string;
@@ -134,6 +135,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       cliEntryPath,
       '--acp',
     ];
+    if (this.options.managedExtensions) {
+      args.push('--managed-extensions', this.options.managedExtensions);
+    }
     if (this.options.model) {
       args.push('--model', this.options.model);
     }
