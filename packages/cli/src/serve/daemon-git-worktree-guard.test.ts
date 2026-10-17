@@ -417,6 +417,333 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  // Same PR-body idiom, but the body carries `)` characters (checklists,
+  // emoticons): the substitution scan must read the heredoc instead of
+  // letting the first body paren close the substitution early.
+  it.runIf(bashSemanticsLane)(
+    'allows a heredoc body whose lines carry closing parens',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n## Checklist\n1) run npm test\n2) open the preview\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\nlgtm :)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      // A quoted delimiter keeps the body inert even when it carries a
+      // substitution-shaped line: bash never expands it, so the guard must
+      // not start denying it either.
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n1) item\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      // Unquoted delimiter, but the body stays free of expansions: bash runs
+      // nothing extra, so the strip is safe and the idiom stays allowed.
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<HEREDOC\n1) item\nplain text\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // The hostile flip side: with an unquoted delimiter bash expands the body
+  // at read time, so a stripped body line can run commands no later stage
+  // ever sees. Those shapes must fail closed.
+  it.runIf(bashSemanticsLane)(
+    'fails closed when an unquoted heredoc body hides a substitution behind a closing paren',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<HEREDOC\n1) item\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<HEREDOC\nlgtm :)\n\`git -C ${cmdPath(outsideRepo)} reset --hard\`\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  // No substitution wrapper needed: a top-level unquoted body can carry a
+  // `${GIT_DIR=…}` assignment. With an external receiver (`cat`) bash expands
+  // the body in the forked child and the assignment dies with it, but with a
+  // builtin receiver (`read`, `while read`) the shell reading the body IS the
+  // current shell, so the value persists — and a `GIT_DIR` already carrying
+  // the export attribute, or a later `export GIT_DIR`, arms the mutating
+  // command that follows. The body is stripped before the tracked
+  // environment ever sees the assignment, so the shape fails closed.
+  it.runIf(bashSemanticsLane)(
+    'fails closed on an unquoted heredoc body carrying an assigning expansion',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<HEREDOC\n\${GIT_DIR=${cmdPath(outsideRepo)}/.git}\nHEREDOC\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+      // The realistic chain: builtin receiver, export attribute stuck on the
+      // name from an earlier export, mutation last.
+      await expect(
+        guard(
+          request(
+            `export GIT_DIR\nread -r line <<HEREDOC\n\${GIT_DIR=${cmdPath(outsideRepo)}/.git}\nHEREDOC\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+      await expect(
+        guard(
+          request(
+            `read -r line <<HEREDOC\n\${GIT_DIR:=${cmdPath(outsideRepo)}/.git}\nHEREDOC\nexport GIT_DIR\ngit reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+    },
+  );
+
+  // A double-quoted delimiter is inert exactly like a single-quoted one.
+  it.runIf(bashSemanticsLane)(
+    'allows a double-quoted heredoc body',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<"HEREDOC"\n1) item\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // bash joins a live backslash-newline pair in an unquoted body before
+  // expanding it, so `$\<LF>(…)` executes even though no single body line
+  // spells `$(`. The strip must reproduce the join before scanning.
+  it.runIf(bashSemanticsLane)(
+    'fails closed on an unquoted heredoc body whose substitution hides behind a line continuation',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<HEREDOC\n$\\\n(git -C ${cmdPath(outsideRepo)} reset --hard)\nHEREDOC`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+    },
+  );
+
+  // Value-only expansions execute nothing: an escaped `\$(…)` stays a
+  // literal, plain `${HOME}` and `${X:-default}` only read, and `$((…))`
+  // arithmetic without a nested substitution only computes.
+  it.runIf(bashSemanticsLane)(
+    'allows an unquoted heredoc body whose expansions cannot execute',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<HEREDOC\nprice: \\$(date)\nhome: \${HOME}\nmissing: \${UNSET_VAR:-fallback}\nmath: $((1 + 2))\nHEREDOC`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // …but a substitution nested anywhere inside `${…}` still executes, and an
+  // arithmetic subscript can hold one.
+  it.runIf(bashSemanticsLane)(
+    'fails closed on an unquoted heredoc body whose parameter expansion nests a substitution',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<HEREDOC\n\${X:-$(git -C ${cmdPath(outsideRepo)} reset --hard)}\nHEREDOC`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+      await expect(
+        guard(
+          request(
+            `cat <<HEREDOC\n$((a[$(git -C ${cmdPath(outsideRepo)} reset --hard)]))\nHEREDOC`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+    },
+  );
+
+  // The marker scan reads quoting and comments: a `<<` inside a quoted
+  // string or a comment opens no heredoc, so the following lines are real
+  // commands and must stay visible to the later stages (which then deny the
+  // substitution on line two). A herestring's word is data, not a delimiter.
+  it.runIf(bashSemanticsLane)(
+    'does not take a quoted, commented or herestring << for a heredoc marker',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(`echo "a <<EOF b"`))).resolves.toEqual({
+        allowed: true,
+      });
+      await expect(guard(request(`echo $((1 << 2))`))).resolves.toEqual({
+        allowed: true,
+      });
+      await expect(guard(request(`cat <<< "hello"`))).resolves.toEqual({
+        allowed: true,
+      });
+      await expect(
+        guard(
+          request(
+            `echo hi # <<EOF\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nEOF`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(
+          request(
+            `cat <<<EOF\n$(git -C ${cmdPath(outsideRepo)} reset --hard)\nEOF`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  // Measured false positives from the old leftmost-match regex: a decoy
+  // `<<WORD` inside a quoted string must not latch when the line's real
+  // heredoc is quoted, and documentation or grep text about heredocs is not
+  // a marker at all.
+  it.runIf(bashSemanticsLane)(
+    'ignores decoy << spellings in favour of the real heredoc on the line',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(request(`echo "<<EOF"; cat <<'REAL'\nhello $(echo world)\nREAL`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`printf 'Usage: cat <<EOF then EOF'\necho "\${HOME}"`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`read -r x <<<hello\ngit status \${FLAG}`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`grep -rn "cat <<EOF" docs/\necho "\${DONE}"`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // The delimiter is the whole word, not a prefix of it: `<<EOF.txt` wants
+  // an `EOF.txt` line, and CRLF input carries the carriage return into every
+  // line. Misreading either drops the tail of the command from every later
+  // stage while bash still runs it.
+  it.runIf(bashSemanticsLane)(
+    'keeps the commands after a dotted or CRLF heredoc visible',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<EOF.txt\nsome body\nEOF.txt\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+      await expect(
+        guard(
+          request(
+            `cat <<EOF\r\nsome body\r\nEOF\r\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+      // Control: a trailing SPACE on the terminator line makes bash swallow
+      // the tail as body after its end-of-file warning, so allowing the
+      // stripped shape is correct here, not a hole.
+      await expect(
+        guard(request(`cat <<EOF\nsome body\nEOF \ngit status`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // A body that never reaches its delimiter is what bash feeds to the
+  // receiver after its end-of-file warning: the remaining lines are stdin
+  // data, never commands, so stripping them hides nothing. An UNQUOTED
+  // partial body still expands at read time, which the scan gates.
+  it.runIf(bashSemanticsLane)(
+    'strips an unterminated heredoc body but still gates its expansion',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // bash swallows `git reset --hard` as cat's stdin here; it never runs.
+      await expect(
+        guard(request(`cat <<EOF\nline one\ngit reset --hard`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(
+          request(`cat <<EOF\n$(git -C ${cmdPath(outsideRepo)} reset --hard)`),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
+      });
+    },
+  );
+
   it('fails closed on an unterminated command substitution', async () => {
     const guard = createDaemonToolGuard();
 
