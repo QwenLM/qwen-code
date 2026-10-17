@@ -214,7 +214,7 @@ class ManagedSchemaConfigurationTest {
     }
 
     @Test
-    void upgradesPublishedV3ThroughV4V5V6V7ToV8WithoutChangingHistory() {
+    void upgradesPublishedV3ThroughV4V5V6V7V8ToV9WithoutChangingHistory() {
         var source = source();
         Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
                 .target("3").load().migrate();
@@ -225,11 +225,11 @@ class ManagedSchemaConfigurationTest {
                 .hasRootCauseMessage("The canonical V3 catalog requires the application's V4 migration");
         new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(
                 Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load());
-        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(8);
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(9);
         assertThat(jdbc.queryForList("SELECT * FROM \"flyway_schema_history\" WHERE \"version\" IN ('1', '2', '3') ORDER BY \"installed_rank\""))
                 .isEqualTo(published);
         assertThat(jdbc.queryForList("SELECT \"version\" FROM \"flyway_schema_history\" WHERE \"version\" IS NOT NULL ORDER BY \"installed_rank\"", String.class))
-                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
         ManagedSchema.validate(source);
     }
 
