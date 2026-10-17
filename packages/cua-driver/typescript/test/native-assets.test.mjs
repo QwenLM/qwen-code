@@ -85,6 +85,7 @@ test("native installer verifies and extracts the matching release archive", asyn
   writeFileSync(join(destination, target.library), "uncommitted-library")
   writeFileSync(join(destination, target.runtime), "uncommitted-runtime")
   const env = {
+    HTTP_PROXY: "invalid proxy ignored by injected fetch",
     QWEN_CUA_SDK_CACHE_DIR: cache,
     QWEN_CUA_SDK_RELEASE_BASE_URL: "https://release.invalid/tag",
   }
