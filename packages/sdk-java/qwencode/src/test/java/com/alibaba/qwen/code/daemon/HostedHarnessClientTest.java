@@ -31,6 +31,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -4918,14 +4919,19 @@ class HostedHarnessClientTest {
     }
 
     private static void awaitSchedulerDrained(HostedHarnessClient client)
-            throws InterruptedException {
+            throws Exception {
+        // A periodic task is off the queue while it runs, so the queue is
+        // read on the single scheduler thread, where no heartbeat task can
+        // be running and a live one must be queued.
+        ScheduledThreadPoolExecutor scheduler = client.scheduler();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (!client.scheduler().getQueue().isEmpty()
+        boolean drained;
+        while (!(drained = scheduler.submit(
+                () -> scheduler.getQueue().isEmpty()).get())
                 && System.nanoTime() < deadline) {
             Thread.sleep(10);
         }
-        assertTrue(client.scheduler().getQueue().isEmpty(),
-                "the scheduler queue never drained");
+        assertTrue(drained, "the scheduler queue never drained");
     }
 
     @Test
