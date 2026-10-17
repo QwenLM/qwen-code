@@ -489,6 +489,82 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void boundSessionIsolationSwitchesTheResolvedScope() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        assertThat(resolver(session, root).resolve(session.sessionId()).scope().getIsolationClass())
+                .isEqualTo("session");
+        var properties = properties(List.of(new WorkspaceMount(session.tenantId(),
+                session.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        assertThat(resolver.resolve(session.sessionId()).scope().getIsolationClass()).isEqualTo("workspace");
+    }
+
+    @Test
+    void sharedPlacementResolvesTheHarnessSessionSeparatelyFromTheEmptyIsolationKey() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        var properties = properties(List.of(new WorkspaceMount(session.tenantId(),
+                session.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        var resolved = resolver.resolve(session.sessionId());
+        assertThat(resolved.scope().getIsolationClass()).isEqualTo("workspace");
+        var local = mock(RuntimeProvisioner.class);
+        when(local.kind()).thenReturn("local-process");
+        when(local.createRequest(any(), any())).thenAnswer(invocation -> new RuntimeProvisionRequest(
+                invocation.getArgument(0), invocation.getArgument(1), "local-process"));
+        var provisioner = new WorkspaceRuntimeProvisioner(local, resolver, authority);
+        // Before the fix the empty isolation key resolved the Session and failed
+        // workspace_unavailable; the Harness Session id must travel on its own.
+        var request = provisioner.createRequest(resolved.scope(), null, session.sessionId());
+        assertThat(request.getIsolationKey()).isNull();
+        assertThat(request.getStorageId()).isEqualTo("storage");
+        assertThat(request.getScope()).isEqualTo(resolved.scope());
+    }
+
+    @Test
+    void boundSessionsConvergeOnOneSharedWorkspaceBinding() throws Exception {
+        SessionRecord first = createSession("storage", ".");
+        SessionRecord second = sessions.findSessionById(sessions.insertWorkspaceSessionCommand(first.tenantId(),
+                "actor", "create-2", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", ".")).sessionId()).orElseThrow();
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        var properties = properties(List.of(new WorkspaceMount(first.tenantId(),
+                first.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        var local = mock(RuntimeProvisioner.class);
+        when(local.kind()).thenReturn("local-process");
+        when(local.createRequest(any(), any())).thenAnswer(invocation -> new RuntimeProvisionRequest(
+                invocation.getArgument(0), invocation.getArgument(1), "local-process"));
+        var provisioner = new WorkspaceRuntimeProvisioner(local, resolver, authority);
+        var firstRequest = provisioner.createRequest(resolver.resolve(first.sessionId()).scope(), null,
+                first.sessionId());
+        var secondRequest = provisioner.createRequest(resolver.resolve(second.sessionId()).scope(), null,
+                second.sessionId());
+        // The shared placement carries no per-Session key, so both Sessions place identically.
+        assertThat(secondRequest).isEqualTo(firstRequest);
+        var bindings = bindings();
+        assertThat(bindings.findOrCreate(secondRequest).getBindingId())
+                .isEqualTo(bindings.findOrCreate(firstRequest).getBindingId());
+    }
+
+    @Test
+    void sharedPlacementReadyCheckValidatesTheWorkspaceMount() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        var properties = properties(List.of(new WorkspaceMount(session.tenantId(),
+                session.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        var scope = resolver.resolve(session.sessionId()).scope();
+        resolver.requireMountCurrent(scope, "storage");
+        assertUnavailable(() -> resolver.requireMountCurrent(scope, "other-storage"));
+    }
+
+    @Test
     void serializesIndependentSqlClientsByStorageAndFencesStaleRelease() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var binding = session.workspace();

@@ -1425,6 +1425,11 @@ class QwenHostedHarnessConnectorTest {
         assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID,
                 Map.of("kind", "submit_input")))
                 .hasMessageContaining("Workspace execution authority is unavailable");
+        // A delivery's public task cancel (#13746 F3) rides the same route,
+        // so the same check refuses it before anything is forwarded.
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID,
+                Map.of("kind", "cancel_delivery", "deliveryId", "delivery-1")))
+                .hasMessageContaining("Workspace execution authority is unavailable");
         verify(client, never()).runChannelOperation(any(), any());
 
         doNothing().when(execution).authorize(session);
