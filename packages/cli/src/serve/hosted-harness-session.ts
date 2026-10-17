@@ -86,6 +86,7 @@ import {
   type ManagedSessionLifecycleAuthority,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
+  ManagedSessionCloseError,
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -5927,9 +5928,20 @@ export function registerHostedHarnessSessionRoutes(
           brokerOptions,
           !!committedModelOutput,
         );
-    } catch (cause) {
+    } catch (thrown) {
       await managed?.close().catch(() => undefined);
       await stores.close().catch(() => undefined);
+      // A refusal's close that failed both to release the activation and to
+      // seal the writer rejects with both. The seal failure says what the
+      // writer was left as, so the answer is classified on it: a fenced
+      // writer must still answer its self-healing 409, not the generic 503.
+      if (thrown instanceof ManagedSessionCloseError) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} close failed during open: ${sanitizeDaemonLogLine(String(thrown))}`,
+        );
+      }
+      const cause =
+        thrown instanceof ManagedSessionCloseError ? thrown.sealError : thrown;
       if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
       } else if (

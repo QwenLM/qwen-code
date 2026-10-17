@@ -311,7 +311,7 @@ const EN: Messages = {
   'managed.newWorkspaceCreate': 'Create workspace',
   'managed.newWorkspaceCreating': 'Creating workspace…',
   'managed.newWorkspaceUncertain':
-    'The creation is not yet confirmed. Retry to check the same workspace.',
+    'The creation is not yet confirmed. Retry to check the same workspace, or abandon local confirmation to start again. Abandoning does not delete a workspace that may already exist.',
   'managed.newWorkspaceResume': 'Resume workspace creation',
   'managed.newWorkspaceClose': 'Close',
   'managed.workspaceUnsupported':
@@ -4687,7 +4687,8 @@ const ZH: Messages = {
     '名称需为 1–128 个字符，不能包含控制字符。',
   'managed.newWorkspaceCreate': '创建工作区',
   'managed.newWorkspaceCreating': '正在创建工作区…',
-  'managed.newWorkspaceUncertain': '创建结果尚未确认，重试将查询同一个工作区。',
+  'managed.newWorkspaceUncertain':
+    '创建结果尚未确认。重试将查询同一个工作区，也可放弃本地确认后重新开始。放弃不会删除可能已经创建的工作区。',
   'managed.newWorkspaceResume': '继续确认工作区创建',
   'managed.newWorkspaceClose': '关闭',
   'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',

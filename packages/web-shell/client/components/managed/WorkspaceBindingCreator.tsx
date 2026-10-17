@@ -1365,6 +1365,26 @@ export function WorkspaceBindingCreator({
               >
                 {t('managed.newWorkspaceClose')}
               </Button>
+              {pendingWorkspace && !workspaceCreating && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    try {
+                      sessionStorage.removeItem(workspacePendingKey);
+                      pendingWorkspaceRef.current = undefined;
+                      setPendingWorkspace(undefined);
+                      setWorkspaceError(undefined);
+                    } catch {
+                      setWorkspaceError(
+                        t('managed.workspaceStorageUnavailable'),
+                      );
+                    }
+                  }}
+                >
+                  {t('managed.workspaceAbandon')}
+                </Button>
+              )}
               <Button
                 type="submit"
                 disabled={

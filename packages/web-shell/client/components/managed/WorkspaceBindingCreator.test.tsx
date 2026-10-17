@@ -559,6 +559,28 @@ describe('WorkspaceBindingCreator', () => {
     });
   }
 
+  async function submitDirectory(path: string) {
+    await click('Choose existing directory');
+    await act(async () => {
+      const input = document.querySelector<HTMLInputElement>(
+        '#add-workspace-path',
+      )!;
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, path);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      document
+        .querySelector('[role="dialog"] form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      await flush();
+    });
+  }
+
   function approvalSelection() {
     const createSession = directCreation();
     const getSessionOptions = vi.fn().mockResolvedValue({
@@ -1110,6 +1132,94 @@ describe('WorkspaceBindingCreator', () => {
       container.querySelector<HTMLInputElement>('#managed-workspace-cwd')
         ?.value,
     ).toBe('old/project');
+  });
+
+  it.each([false, true])(
+    'allows correcting a refused directory after abandoning local confirmation (refresh %s)',
+    async (refresh) => {
+      const createWorkspace = workspaceCreation()
+        .mockRejectedValueOnce(
+          new JavaManagedAgentHttpError(
+            409,
+            'workspace_unavailable',
+            'Missing directory',
+          ),
+        )
+        .mockResolvedValueOnce({
+          ...workspace,
+          workspaceId: 'ws-project',
+          defaultCwdRelative: 'project',
+        });
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        directories: vi.fn().mockResolvedValue({
+          root: '/linux/projects',
+          cwdRelative: '.',
+          directories: [{ name: 'project', cwdRelative: 'project' }],
+          truncated: false,
+        }),
+        list: vi.fn().mockResolvedValue({
+          data: [{ ...workspace, canSelectDirectory: true }],
+          supported: true,
+          canCreateWorkspace: true,
+          canSelectDirectory: true,
+        }),
+      };
+      await render();
+      await openWorkspaceCreation();
+      await submitDirectory('/linux/projects/missing');
+      const key = `qwen-managed-workspace-registration:${provider.storageKey}`;
+      const original = JSON.parse(sessionStorage.getItem(key)!);
+      if (refresh) {
+        await act(async () => root.render(null));
+        await render();
+      }
+      expect(
+        document.querySelector<HTMLInputElement>('#managed-new-workspace-name')
+          ?.disabled,
+      ).toBe(true);
+      await click('Abandon local confirmation');
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(
+        document.querySelector<HTMLInputElement>('#managed-new-workspace-name')
+          ?.disabled,
+      ).toBe(false);
+      await submitDirectory('/linux/projects/project');
+      expect(createWorkspace).toHaveBeenCalledTimes(2);
+      expect(createWorkspace.mock.calls[1][0]).toMatchObject({
+        sourceWorkspaceId: 'ws-a',
+        cwdRelative: 'project',
+      });
+      expect(createWorkspace.mock.calls[1][1].idempotencyKey).not.toBe(
+        original.idempotencyKey,
+      );
+      expect(editorMocks.clearText).not.toHaveBeenCalled();
+    },
+  );
+
+  it('allows empty Workspace creation after abandoning a persisted directory selection', async () => {
+    const createWorkspace = workspaceCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Missing',
+        sourceWorkspaceId: 'ws-a',
+        cwdRelative: 'missing',
+        idempotencyKey: 'refused-directory',
+      }),
+    );
+    await render();
+    await click('Abandon local confirmation');
+    expect(createWorkspace).not.toHaveBeenCalled();
+    await nameWorkspace('New empty');
+    await click('Create workspace');
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'New empty' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(createWorkspace.mock.calls[0][1].idempotencyKey).not.toBe(
+      'refused-directory',
+    );
   });
 
   it('freezes an uncertain creation across close and retry without issuing another operation', async () => {

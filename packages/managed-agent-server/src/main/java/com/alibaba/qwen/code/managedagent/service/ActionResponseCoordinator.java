@@ -174,7 +174,12 @@ public class ActionResponseCoordinator {
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
             Response current = actions.response(tenant, session, operation);
-            if (settled(op, current)) {
+            // One read of the Action serves both the settle check and the
+            // expiry check below, so the verdict is taken against a single
+            // row version and an answered row that keeps failing costs one
+            // query per attempt rather than two (review round 2, R2-11).
+            Action currentAction = action(op, current);
+            if (settled(op, current, currentAction)) {
                 return;
             }
             // The answer is durable, not per-attempt: an answered attempt
@@ -194,7 +199,7 @@ public class ActionResponseCoordinator {
             // false here (the Harness did answer), so an expired decision
             // records its own. It stays java_durable: with no projection
             // there is nothing the Harness confirmed that Java could certify.
-            if (answered && decisionExpired(tenant, session, current.actionId())) {
+            if (answered && decisionExpired(currentAction)) {
                 LOG.error(
                         "Action response outlived its Action tenant={} session={}"
                                 + " operation={} attempts={}",
@@ -284,17 +289,20 @@ public class ActionResponseCoordinator {
     // absent is therefore not a deadline but a row this code should not
     // judge: absent a positive expiry the wait continues rather than
     // recording a terminal invented from a missing field.
-    private boolean decisionExpired(String tenant, String session, String actionId) {
-        long expiresAt =
-                actions.find(tenant, session, actionId)
-                        .map(action -> action.options().path("expiresAt").asLong())
-                        .orElse(0L);
+    private boolean decisionExpired(Action action) {
+        long expiresAt = action.options().path("expiresAt").asLong();
         return expiresAt > 0 && clock.millis() >= expiresAt;
     }
 
+    private Action action(OperationRecord op, Response response) {
+        return actions.find(op.tenantId(), op.sessionId(), response.actionId()).orElseThrow();
+    }
+
     private boolean settled(OperationRecord op, Response response) {
-        Action action =
-                actions.find(op.tenantId(), op.sessionId(), response.actionId()).orElseThrow();
+        return settled(op, response, action(op, response));
+    }
+
+    private boolean settled(OperationRecord op, Response response, Action action) {
         if ("requested".equals(action.state())) {
             return false;
         }

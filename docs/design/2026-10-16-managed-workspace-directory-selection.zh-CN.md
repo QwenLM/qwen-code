@@ -16,7 +16,7 @@ New workspace 在创建空目录之外增加已有目录模式。用户选择已
 
 ## API 与权限
 
-仅限 WebShell 的 `workspaces/directories/query` 接口接受 `workspaceId` 和 `cwdRelative`，返回已授权的 canonical 根目录和当前目录、有界的直接真实子目录列表，以及截断标志。该接口属于持久 Workspace 范围；读取文件系统前必须检查 tenant、actor、ACTIVE ROOT 状态、OWNER 授权、已配置 mount、native identity 和 marker。路径通过现有相对路径契约规范化。路径穿越、软链接、保留维护目录、不可访问目录和不支持的 storage 均关闭准入。目录发现不会回退到普通 daemon。SSH 和 CSI storage 不会出现在本地目录候选中，并在解析本地文件系统之前被拒绝；SSH 注册继续使用独立的 node/path 检查及操作接口。OpenAPI v1.53 为本地浏览请求使用单独名称，与 v1.52 的 SSH 目录检查请求区分。
+仅限 WebShell 的 `workspaces/directories/query` 接口接受 `workspaceId` 和 `cwdRelative`，返回已授权的 canonical 根目录和当前目录、有界的直接真实子目录列表，以及截断标志。该接口属于持久 Workspace 范围；读取文件系统前必须检查 tenant、actor、ACTIVE ROOT 状态、OWNER 授权、已配置 mount、native identity 和 marker。路径通过现有相对路径契约规范化。路径穿越、软链接、保留维护目录、不可访问目录和不支持的 storage 均关闭准入。目录发现不会回退到普通 daemon。SSH 和 CSI storage 不会出现在本地目录候选中，并在解析本地文件系统之前被拒绝；SSH 注册继续使用独立的 node/path 检查及操作接口。OpenAPI v1.54 为本地浏览请求使用单独名称，与 v1.52 的 SSH 目录检查请求区分。
 
 现有创建请求增加可选的 `sourceWorkspaceId` 和 `cwdRelative` 字段，二者必须同时提供。缺省时保持创建空目录的行为。提供时验证源 Workspace 和目录，使用源 storage、配置和策略发布新的逻辑 Workspace，不再创建或注册 physical root。receipt 固定源身份及 generation，并在发布前再次检查。源身份发生变化或权限被撤销后，待完成请求不能继续成功。
 
@@ -24,7 +24,7 @@ New workspace 在创建空目录之外增加已有目录模式。用户选择已
 
 ## 浏览器集成
 
-复用共享目录浏览对话框及其过期响应保护。目录请求走 Java Managed provider。浏览器在提交前保留待完成请求的名称、源、目录和幂等 key；结果不确定时，用完全相同的请求重试。选择、刷新或新建 Workspace 时，从持久化默认目录初始化输入框，不改变草稿或模型。
+复用共享目录浏览对话框及其过期响应保护。目录请求走 Java Managed provider。浏览器在提交前保留待完成请求的名称、源、目录和幂等 key；结果不确定时，用完全相同的请求重试。显式“放弃本地确认”操作仅删除浏览器持久化记录，并恢复目录和名称编辑，刷新后同样可用。界面说明工作区可能已存在，放弃不会删除它；新的创建使用新的 key。浏览器存储操作失败时，保留冻结请求。选择、刷新或新建 Workspace 时，从持久化默认目录初始化输入框，不改变草稿或模型。
 
 ## 涉及范围
 
