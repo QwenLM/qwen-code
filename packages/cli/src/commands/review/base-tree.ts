@@ -70,6 +70,8 @@ import {
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath, REVIEW_TMP_DIR } from './lib/paths.js';
 import {
+  checkoutFilterCommands,
+  describeFilterScreen,
   filterBlankEnv,
   filterScreenForTree,
   resolvedContentTransformForTree,
@@ -295,9 +297,8 @@ function gitOutWith(
  * darkened every CI checkout `actions/checkout` had left an `includeIf` in
  * (see `FilterScreen.dangling` for the measurement).
  *
- * The screen is repo-local by design, but the spawn resolves the whole
- * stack, so the env also cuts the global and system scopes at the source
- * (`NO_USER_CONFIG_ENV`) — see `statusFilterBlanks` below.
+ * The env cuts native global/system slots at the source. User config reached
+ * through repo-local includes still needs its reached filter keys blanked.
  */
 function unseenConfigNote(baseSha: string, reason: string): string {
   return (
@@ -321,19 +322,13 @@ function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
       'with nothing to blank it'
     );
   }
-  // The screen sees REPO-LOCAL config only, but the spawn below resolves the
-  // whole stack: a `filter.<driver>.clean` in the reviewer's GLOBAL or system
-  // config is just as executable, and the tree's own attacker-writable
-  // `.gitattributes` is what selects the driver. Those names cannot be
-  // enumerated to this screen's read-to-the-bottom standard — and must not
-  // feed the checkout gate's refuse-on-any-hit list — so instead of blanking
-  // them by name the measurement reads no user config AT ALL: what git never
-  // reads, no attribute can select, and no normalizing global driver can
-  // quietly map a rewrite back onto the indexed blob. The honest half of the
-  // trade is `settleCheckoutIndex`'s: its trigger covers the full stack, so a
-  // filter that lives only in `~/.gitconfig` (git-lfs installed the default
-  // way) still gets its stat-fresh index first.
-  return { ...NO_USER_CONFIG_ENV, ...filterBlankEnv(screen.filters) };
+  // Suppressing native slots does not suppress explicit repo-local includes
+  // of those files. Blank their reached keys too, so status compares on-disk
+  // bytes without running a normalizing or unavailable required driver.
+  return {
+    ...NO_USER_CONFIG_ENV,
+    ...filterBlankEnv([...screen.filters, ...screen.reachedExempt]),
+  };
 }
 
 /**
@@ -355,8 +350,8 @@ function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
  * refresh compares only what CHANGED — and compares raw bytes for it, which is
  * stricter.
  *
- * This runs filters, deliberately and only here: the ones the repository's own
- * config defines, on the tree `worktree add` has just checked out through those
+ * This runs the trusted user filters admitted by the pre-checkout screen,
+ * on the tree `worktree add` has just checked out through those
  * very filters, before the build opens the window — the exposure the
  * checkout's own smudge already has. What the wait itself opens is closed the
  * way the reuse arm closes its window: the screen and the pointer are asked
@@ -1694,15 +1689,13 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         // `gitOut`'s `-c` pins blank the two FIXED-KEY execution channels,
         // `core.fsmonitor` and `core.hooksPath`. The third is
         // `filter.<driver>.clean|process`, whose key is not fixed — the
-        // repo-local names are enumerated by the screen and blanked on this
-        // spawn by name, while the global and system scopes are not read by
-        // the spawn AT ALL (`NO_USER_CONFIG_ENV`): a driver defined there is
-        // just as executable, the tree's own `.gitattributes` selects it,
-        // and its names cannot be screened to the read-to-the-bottom
-        // standard. The refusal is still only for repo-local config the
-        // screen could not read to the bottom. The repo-local half is what
-        // the sibling `worktreeResidue` does on the identical `status`
-        // refresh. (For one round this arm REFUSED on any filter instead,
+        // repo-local and reached user-origin names are enumerated by the
+        // screen and blanked on this spawn. Native global/system slots are
+        // suppressed by NO_USER_CONFIG_ENV, but explicit repo-local includes
+        // can still reach user files. Unread config remains a refusal. The
+        // reached-key blanking is what the sibling `worktreeResidue` uses on
+        // the identical `status` refresh. (For one round this arm REFUSED on
+        // any filter instead,
         // and a repository with git-lfs installed `--local` then got a base
         // tree only on the ask that built it.)
         //
@@ -1967,7 +1960,29 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       if (untrusted !== null) {
         throw new Error(`refusing to create a base tree: ${untrusted}`);
       }
-      git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
+      const filters = checkoutFilterCommands(worktree);
+      if (filters.length > 0) {
+        throw new Error(
+          `refusing to create a base tree with unscreened filters: ${describeFilterScreen(filters)}`,
+        );
+      }
+      git(
+        worktree,
+        'worktree',
+        'add',
+        '--no-checkout',
+        '--detach',
+        tree,
+        baseSha,
+      );
+      // Conditional user includes can activate only in the new gitdir.
+      const destinationFilters = checkoutFilterCommands(tree);
+      if (destinationFilters.length > 0) {
+        throw new Error(
+          `refusing to check out a base tree with unscreened filters: ${describeFilterScreen(destinationFilters)}`,
+        );
+      }
+      git(tree, 'checkout', '--force', '--detach', baseSha);
     } catch (e) {
       return unavailable(
         worktreeCreateFailureDetail('base', e, String(sweep?.stderr ?? '')),
