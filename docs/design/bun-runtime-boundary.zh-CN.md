@@ -161,7 +161,7 @@ Windows 跳过可捕获 SIGTERM 用例；缺少 Bun 二进制时跳过 Bun 腿�
 
 - `packages/core/src/utils/runtime-info.test.ts` —— manifest 解析、回退、记忆化。
 - `packages/core/src/utils/runtime-boundary.node-bun.test.ts` —— 上述同一 fixture 覆盖；无 Bun 二进制时 Bun 腿跳过，跳过不代表兼容性通过。
-- `packages/core/src/utils/bun-pty.node-bun.test.ts` —— PTY 行：在真实 Bun 下经 `getPty()` 完成 spawn、输出、resize、kill 及有界保持/写队列上限；无 Bun 二进制时跳过。
+- `packages/core/src/utils/bun-pty.node-bun.test.ts` —— PTY 行：在真实 Bun 下经 `getPty()` 完成 spawn、输出、resize、kill 及有界保持上限；无 Bun 二进制时跳过。
 - S2/S3 以上述清单表为迁移检查清单；S5 按 MYWO-8 验收协议在真实归档上重跑矩阵。
 
 ## 遗留问题

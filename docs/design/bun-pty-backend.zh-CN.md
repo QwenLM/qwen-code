@@ -56,8 +56,10 @@
   把 exit 事件挂起，等泵结束（先冲出 `StringDecoder` 尾巴）再触发，并以
   500 ms 兜底——对应 wrapper 的 200 ms socket-destroy 兜底。每一条生命
   终点路径（泵看到 `EIO`/`EBADF`、500 ms 兜底触发、原生回调晚于泵结束）
-  都执行同一套收尾：decoder 冲刷、重试定时器清理、master fd 关闭，然后
-  恰好一次 `onExit`。兜底定时器刻意不 `unref`——exit 的投递不能依赖一个
+  都执行同一套收尾：重试定时器清理、master fd 逻辑关闭、decoder 冲刷及一次
+  真实 `onExit`。物理关闭等待在途 read/write 完成；`onExit` 不证明 close 系统
+  调用已经完成或成功。关闭异常仍被吞掉，相关验证缺口保留。
+  兜底定时器刻意不 `unref`——exit 的投递不能依赖一个
   运行时随时可以丢弃的定时器。
 - POSIX `IPty` 契约逐一镜像，包括消费者依赖的细节：`pid`、`cols`/`rows`、
   `process` 标题（含 darwin 的 `kernel_task`/`spawn_helper` 回退）、
@@ -98,7 +100,8 @@ FD 残留报告同源于此，因为 `handleFlowControl: true` 下 XOFF 就是�
 字节/逐行对照的回归钉住（2 万行洪流中 500 次无间隔 pause/resume 风暴；
 约 1.7 MB 洪流全程在暂停中产生——两者都逐字节复原，且暂停中洪流后退
 出的子进程，其 exit 照常上报）。自然生命终点处保持区被丢弃、暂停中的
-decoder 尾巴被跳过，与 wrapper 对齐：onExit 仍恰好一次、fd 被释放，
+decoder 尾巴被跳过，与 wrapper 对齐：onExit 仍恰好一次、fd 请求关闭
+（物理关闭等待在途操作完成），
 退出后 resume 不会重放任何内容。
 
 触及上限**绝不是静默丢弃，也绝不会自动恢复**：该 pty 被显式终止——
@@ -138,15 +141,21 @@ termios 输出处理（ONLCR）计入后，连续排空与滴读两条臂在 Nod
   `exitCode`/`signal` 为 `null` 的结果——一次可见的失败，不伪造原生
   退出码，工具结果绝不会是 `success`。Node 后端从不产生这些 code，
   Node 行为不变；自然退出路径仍只由 `onExit` 收敛。被活跃 pty 上限
-  拒绝的 spawn 走既有的 spawn 失败路径（显式错误结果）。
+  拒绝的 spawn 返回显式错误，原生 exit/signal 为 null、执行方式为 `none`；
+  不通过 child_process fallback 绕过上限。
 - **Web Terminal（`web-terminal-registry` + `serve` 路由）**：registry
   订阅后端 `error` 事件，把会话标记为 failed，并释放 PTY（不再向已被
   杀死的进程树重复发信号）。路由转发显式 `{type: 'error'}` 控制帧
   （客户端以红色渲染），以 4001 关闭 socket（客户端视为不可重试），
   `readSnapshot` 携带 `failed`/`failureMessage`；failed 会话上的
   write/resize 会被拒绝。
-- **意外 PTY 错误**保持既有行为（前台 throw；registry 监听器中原样
-  re-throw）——与本次改动之前一致。
+- **意外 PTY 错误**按消费者区分：前台监听器 throw；registry 忽略 EIO/EAGAIN，
+  其他非限额错误交给 `debugLogger.warn`。warn 不代表会话 failed 或收尾已完成，
+  没有活动 debug 会话时也可能不留盘。
+
+空闲终端的首条输入不受 registry 累计输入门禁限制。超过后端未变的 1 MiB
+写队列上限时，会显式使会话失败；输入不会拆分、重放或被静默接受。这是预算
+失败契约，不是无损背压。后续若要增加输入预准入政策，须另行决策。
 
 探针钉住的参考行为（Node wrapper，pause → 子进程以 code 7 退出）：经
 socket-destroy 兜底在子进程死后约 200 ms 恰好触发一次 `onExit`，此后

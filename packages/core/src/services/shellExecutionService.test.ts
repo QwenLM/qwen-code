@@ -980,6 +980,40 @@ describe('ShellExecutionService', () => {
       expect(result.aborted).toBe(false);
     });
 
+    it('settles a limit failure after an output consumer rejects', async () => {
+      mockIsBinary.mockReturnValueOnce(true);
+      onOutputEventMock.mockImplementation((event) => {
+        if (event.type === 'binary_detected') throw new Error('consumer boom');
+      });
+      const error = Object.assign(new Error('resource limit reached'), {
+        code: 'QWEN_PTY_WRITE_LIMIT',
+      });
+      const { result } = await simulateExecution('echo binary', async () => {
+        ptyData(Buffer.from([0, 1, 2]));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        mockPtyProcess.emit('error', error);
+        ptyExit({ exitCode: 7, signal: 0 });
+      });
+      expect(result.error).toBe(error);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+    });
+
+    it('reports pre-spawn capacity refusal without fallback or a native exit', async () => {
+      const error = Object.assign(new Error('capacity reached'), {
+        code: 'QWEN_PTY_ACTIVE_LIMIT',
+      });
+      mockPtySpawn.mockImplementationOnce(() => {
+        throw error;
+      });
+      const { result } = await simulateExecution('never-run', () => {});
+      expect(result.error).toBe(error);
+      expect(result.exitCode).toBeNull();
+      expect(result.signal).toBeNull();
+      expect(result.executionMethod).toBe('none');
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+    });
+
     it('should ignore ioctl EBADF message-only resize race errors', async () => {
       mockPtyProcess.resize.mockImplementationOnce(() => {
         throw new Error('ioctl(2) failed, EBADF');

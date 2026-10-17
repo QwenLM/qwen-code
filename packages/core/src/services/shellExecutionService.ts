@@ -2266,6 +2266,16 @@ export class ShellExecutionService {
                 }
               }),
           );
+          // Observe rejection in the same turn, before exit needs to drain it.
+          processingChain = processingChain.catch((error) => {
+            try {
+              debugLogger.warn(
+                `PTY output processing failed: ${getErrorMessage(error)}`,
+              );
+            } catch {
+              // Diagnostics must not reject the drain again.
+            }
+          });
         };
 
         // Capture the IDisposables that node-pty returns so the
@@ -2470,11 +2480,14 @@ export class ShellExecutionService {
 
         // Give any last onData callbacks a chance to run before finalizing.
         // onExit can arrive slightly before late PTY data is processed.
+        let settling = false;
         const settleResult = (
           exitCode: number | null,
           signal: number | null,
           failureError: Error | null,
         ) => {
+          if (settling) return;
+          settling = true;
           exited = true;
           abortSignal.removeEventListener('abort', abortHandler);
           const flushChain = () => processingChain.then(() => {});
@@ -2485,7 +2498,10 @@ export class ShellExecutionService {
             new Promise<void>((res) => setImmediate(res)).then(flushChain);
 
           void Promise.race([
-            flushChain().then(drain).then(drain),
+            flushChain()
+              .then(drain)
+              .then(drain)
+              .catch(() => undefined),
             deadline,
           ]).then(() => {
             void finalizeResult(exitCode, signal, failureError);
@@ -3039,6 +3055,23 @@ export class ShellExecutionService {
       };
     } catch (e) {
       const error = e as Error;
+      if (!ptySpawned && getErrnoCode(error) === 'QWEN_PTY_ACTIVE_LIMIT') {
+        // Capacity refusal did not run a command. Keep the failure explicit,
+        // with no native status, and never bypass the cap via fallback.
+        return {
+          pid: undefined,
+          result: Promise.resolve({
+            error,
+            rawOutput: Buffer.from(''),
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            pid: undefined,
+            executionMethod: 'none',
+          }),
+        };
+      }
       if (!ptySpawned && useBundledConpty) {
         // The bundled ConPTY backend (useConptyDll above) adds throw sites
         // node-pty reaches synchronously out of spawn — the conpty.dll it

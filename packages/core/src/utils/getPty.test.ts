@@ -39,9 +39,9 @@ function markBunRuntime(): () => void {
 }
 
 // The Bun PTY backend is POSIX-only (bun-pty.ts); Windows stays gated under
-// Bun until ConPTY is validated there. Tests that assert the Bun arm loads
-// pin a POSIX platform so they exercise the same branch on every host,
-// including Windows runners.
+// Bun until ConPTY is validated there. The real-load test is host-gated;
+// interleaving tests pin POSIX to exercise that branch on every host.
+// Neither a spoofed platform nor a skipped real-load test validates Windows.
 function markPosix(): () => void {
   const original = Object.getOwnPropertyDescriptor(process, 'platform');
 

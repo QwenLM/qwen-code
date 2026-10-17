@@ -939,10 +939,19 @@ export class BunPtyProcess extends EventEmitter {
       try {
         listener(payload);
       } catch (error) {
-        this.reportError(
-          new Error(`pty data listener threw: ${getErrorMessage(error)}`),
-        );
+        this.reportListenerError('data', error);
       }
+    }
+  }
+
+  private reportListenerError(kind: 'data' | 'exit', error: unknown): void {
+    try {
+      this.reportError(
+        new Error(`pty ${kind} listener threw: ${getErrorMessage(error)}`),
+      );
+    } catch {
+      // An error subscriber (or the fallback sink) can itself throw. It must
+      // not interrupt delivery, pause-ledger refunds, or real exit cleanup.
     }
   }
 
@@ -998,8 +1007,9 @@ export class BunPtyProcess extends EventEmitter {
     for (const listener of [...this.exitListeners]) {
       try {
         listener({ exitCode, signal });
-      } catch {
+      } catch (error) {
         // A throwing exit listener must not break the others.
+        this.reportListenerError('exit', error);
       }
     }
   }

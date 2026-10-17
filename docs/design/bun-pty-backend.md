@@ -68,8 +68,11 @@ New backend `packages/core/src/utils/bun-pty.ts`, selected only under Bun:
   counterpart of the wrapper's 200 ms socket-destroy fallback. Every
   end-of-life path (pump saw `EIO`/`EBADF`, the 500 ms fallback fires, or the
   native callback lands after the pump already ended) runs the same cleanup:
-  decoder flush, retry-timer teardown, master-fd close, then exactly one
-  `onExit`. The fallback timer is deliberately not `unref`'d — exit delivery
+  retry-timer teardown, logical master-fd closure, decoder flush and one real
+  `onExit`. Physical close is deferred until in-flight reads/writes settle;
+  `onExit` is not proof that the close syscall has completed or succeeded.
+  Close exceptions are still swallowed and remain a verification gap.
+  The fallback timer is deliberately not `unref`'d — exit delivery
   must not depend on a timer the runtime is free to drop.
 - The observable POSIX `IPty` contract is mirrored 1:1, including details the
   consumers rely on: `pid`, `cols`/`rows`, `process` title (with the darwin
@@ -118,7 +121,8 @@ entirely while paused — both reproduce the stream exactly, and the pump
 still reports the exit of a child that floods while paused and then exits).
 On natural end of life the hold is discarded and the decoder tail is
 skipped while paused, matching the wrapper: `onExit` still arrives exactly
-once, the fd is released, and resume-after-exit replays nothing.
+once, fd closure is requested (physical close waits for in-flight operations),
+and resume-after-exit replays nothing.
 
 Reaching a cap is **never a silent drop and never an auto-resume**: the pty
 is explicitly terminated — the child process tree is killed by real
@@ -167,8 +171,9 @@ with a loud, structured failure past it.
   failure carrying no fabricated native exit code; the tool result is never
   `success`. Node backends never emit these codes, so Node behaviour is
   unchanged, and the natural-exit path still resolves from `onExit` only.
-  A spawn rejected by the active-pty cap surfaces through the existing
-  spawn-failure handling (explicit error result).
+  A spawn rejected by the active-pty cap returns an explicit error with null
+  native exit/signal and execution method `none`; it does not bypass the cap
+  through child_process fallback.
 - **Web Terminal (`web-terminal-registry` + `serve` route)**: the registry
   subscribes to the backend `error` event, marks the session failed, and
   releases the PTY without signalling the already-killed tree again. The
@@ -177,8 +182,16 @@ with a loud, structured failure past it.
   code for the client — and `readSnapshot` carries
   `failed`/`failureMessage`; writes and resizes on a failed session are
   rejected.
-- **Unexpected PTY errors** keep their existing behaviour (foreground
-  throw; re-thrown from the registry listener) — unchanged from before.
+- **Unexpected PTY errors** differ by consumer: the foreground listener
+  throws; the registry ignores EIO/EAGAIN and sends other non-limit errors to
+  `debugLogger.warn`. A warn is not a failed session or proof of cleanup, and
+  may not persist without an active debug session.
+
+An idle terminal's first input is not capped by the registry's accumulated
+input gate. Above the backend's unchanged 1 MiB write-queue cap, it explicitly
+fails the session; input is not split, replayed or silently accepted. This is
+a budget-failure contract, not lossless backpressure. A future pre-admission
+input policy requires a separate decision.
 
 Reference behaviour pinned by probe (Node wrapper, pause → child exits with
 code 7): `onExit` exactly once ~200 ms after child death via the

@@ -9,6 +9,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '@xterm/headless';
 
 const { Terminal } = pkg;
+const { warn } = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag: string) => ({
+      ...actual.createDebugLogger(tag),
+      warn,
+    }),
+  };
+});
 
 const { spawn, loadPty, spawnSync, osPlatform, loadXtermHeadless } = vi.hoisted(
   () => ({
@@ -169,6 +181,9 @@ describe('WebTerminalRegistry', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Every test is isolated from host PIDs, including release fixtures that
+    // deliberately model a live POSIX process/group with pid 42.
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
     write = vi.fn();
     resize = vi.fn();
     kill = vi.fn();
@@ -185,6 +200,7 @@ describe('WebTerminalRegistry', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('runs an explicit SSH command with the existing terminal lifecycle', async () => {
@@ -588,6 +604,7 @@ describe('WebTerminalRegistry', () => {
     expect(() =>
       errorListeners[0]!(Object.assign(new Error('boom'), { code: 'EPIPE' })),
     ).not.toThrow();
+    expect(warn).toHaveBeenCalledWith('web terminal pty error: boom');
     // The session is not failed by a non-limit error: the exit path owns
     // teardown, and the limit path converges on handleFailure.
     expect(
@@ -744,8 +761,14 @@ describe('WebTerminalRegistry', () => {
     // emitter itself, not a Disposable. Storing it made release() call
     // `.dispose()` on the emitter and crash the host (real `qwen serve` under
     // Bun exited 1 with the WS closing 1006). Detach must go through `off`.
+    const registered: Array<(err: Error) => void> = [];
     const emitter = {
-      on: vi.fn(function (this: unknown, _event: string) {
+      on: vi.fn(function (
+        this: unknown,
+        event: string,
+        listener: (err: Error) => void,
+      ) {
+        if (event === 'error') registered.push(listener);
         return this;
       }),
       off: vi.fn(() => undefined),
@@ -769,9 +792,10 @@ describe('WebTerminalRegistry', () => {
     });
     const registry = await start('terminal:emitter-release');
 
+    expect(vi.isMockFunction(process.kill)).toBe(true);
     expect(() => registry.release('terminal:emitter-release')).not.toThrow();
     expect(emitter.on).toHaveBeenCalledWith('error', expect.any(Function));
-    expect(emitter.off).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(emitter.off).toHaveBeenCalledWith('error', registered[0]);
   });
 
   it('detaches the error subscription through removeListener on release', async () => {
@@ -804,6 +828,7 @@ describe('WebTerminalRegistry', () => {
     });
     const registry = await start('terminal:remove-listener-release');
 
+    expect(vi.isMockFunction(process.kill)).toBe(true);
     expect(() =>
       registry.release('terminal:remove-listener-release'),
     ).not.toThrow();
