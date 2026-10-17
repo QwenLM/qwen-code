@@ -243,6 +243,9 @@ class SurfaceAdmissionAcceptanceTest {
         var claim = sshWorkspaces.claim(tenant, OWNER,
                 registration.operationId(), "fixture");
         assertThat(claim).isNotNull();
+        // D7-2: only a reserved registration may have reached its node, so
+        // only a reserved one parks recovery_blocked.
+        sshWorkspaces.reserve(claim, "fixture", reservedRegistration(claim, tenant));
         sshWorkspaces.fail(claim, "fixture", "ssh_runtime_identity_mismatch", false);
         registrationOperation = registration.operationId();
     }
@@ -318,6 +321,25 @@ class SurfaceAdmissionAcceptanceTest {
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "b".repeat(64));
+        // The task view reads a child task's committed body for its child
+        // Session link (#13746 F2), so the list probes need one.
+        String scope = com.alibaba.qwen.code.managedagent.store
+                .ManagedSessionStore.sessionScopeKey(tenant, session);
+        byte[] body = "{\"childSessionId\":null}".getBytes(
+                StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key,"
+                        + " session_scope_key, tenant_id, workspace_id,"
+                        + " session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind, inline_bytes,"
+                        + " publish_command_id, state, gmt_create) VALUES (?,"
+                        + " ?, ?, 'ws', ?, 'resource-settled',"
+                        + " 'managed-child_run', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                        + " 'command', 'REFERENCED', 1)",
+                com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaKeys.key(scope, "resource-settled"),
+                scope, tenant, session, body.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
+                body);
         return "task_" + recordKey;
     }
 
@@ -559,6 +581,21 @@ class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted());
+    }
+
+    // The admitted list probes only prove "not refused": pin that a
+    // reader's task list really serves the child task whose committed body
+    // the view reads for its child Session link (#13746 F2).
+    @Test
+    void aReadersTaskListServesTheChildTaskThroughItsBody() throws Exception {
+        mvc.perform(get("/v1/agents/sessions/" + bound + "/tasks")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, READER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[?(@.id == '" + settledTask
+                        + "')].kind").value("child_agent"))
+                .andExpect(jsonPath("$.data[?(@.id == '" + settledTask
+                        + "')].child_session_id").isEmpty());
     }
 
     @Test
@@ -1574,6 +1611,7 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
             case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
@@ -1843,5 +1881,18 @@ class SurfaceAdmissionAcceptanceTest {
                             acceptancePublicationData),
                     properties);
         }
+    }
+
+    static java.util.Map<String, Object> reservedRegistration(
+            com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Intent intent, String tenant) {
+        java.util.Map<String, Object> identity = java.util.Map.of("root", "/work/project",
+                "hostId", "host-" + tenant, "device", "1", "inode", "2", "birthTime", "3");
+        var marker = new java.util.LinkedHashMap<String, Object>(identity);
+        marker.put("version", 2);
+        marker.put("tenantId", intent.tenantId());
+        marker.put("storageId", intent.storageId());
+        marker.put("registrationId", intent.registrationId());
+        return java.util.Map.of("nodeId", intent.nodeId(), "identity", identity, "marker", marker,
+                "qwenVersion", "0.25.1");
     }
 }

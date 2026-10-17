@@ -146,6 +146,37 @@ class HarnessEventProjectorTest {
     }
 
     @Test
+    void projectsToolResultLifecycleWithoutPublishingThePrivateRecord() {
+        ProjectedEvent event = projector.project(new SourceEvent(6L,
+                "managed_journal_event", Map.of(
+                        "record", Map.of("text", "private output"),
+                        "update", Map.of("sessionUpdate", "tool_call_update",
+                                "toolCallId", "model-call", "name", "read_file",
+                                "status", "completed")),
+                "prompt", Map.of()), "turn-1");
+
+        assertThat(event.type()).isEqualTo("item.tool_call.updated");
+        assertThat(event.data()).containsEntry("toolCallId", "model-call")
+                .containsEntry("status", "completed");
+        assertThat(event.data().toString()).doesNotContain("private output")
+                .doesNotContain("record");
+    }
+
+    @Test
+    void projectsConfiguredRoundLimitWithASafeActionableMessage() {
+        ProjectedEvent event = projector.project(new SourceEvent(4L,
+                "turn_error", Map.of("code", "hosted_turn_limit_exceeded",
+                        "message", "token=secret path=/private/workspace"),
+                "prompt", Map.of()), "turn-1");
+
+        assertThat(event.errorCode()).isEqualTo("hosted_turn_limit_exceeded");
+        assertThat(event.errorMessage()).isEqualTo(
+                "The Hosted Harness Turn reached its configured model round limit.");
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("/private/workspace");
+    }
+
+    @Test
     void projectsDeadlineExpiryAsAClassifiedFailure() {
         ProjectedEvent event = projector.project(new SourceEvent(4L,
                 "turn_error", Map.of("code", "hosted_turn_deadline_exceeded",

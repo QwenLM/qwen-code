@@ -118,15 +118,17 @@ final class WorkspaceCreationRoots {
             createDirectory(tenantRoot);
             Path root = tenantRoot.resolve(receiptKey);
             createDirectory(root);
-            // OpenJDK's native guard refuses birth time equal to mtime; this is our new owned root.
-            Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+            if (!"Mac OS X".equals(System.getProperty("os.name"))) {
+                // OpenJDK's native guard refuses birth time equal to mtime; this is our new owned root.
+                Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+            }
             return root;
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailable(error);
         }
     }
 
-    Details details(String resultJson, String receiptKey) {
+    static Details details(String resultJson, String receiptKey) {
         try {
             Details value = JSON.readValue(resultJson, Details.class);
             UUID.fromString(value.registrationId());
@@ -134,7 +136,13 @@ final class WorkspaceCreationRoots {
                     || value.displayName().length() > 128
                     || value.displayName().codePoints().anyMatch(Character::isISOControl)
                     || !("workspace-" + receiptKey).equals(value.workspaceId())
-                    || !("created-" + receiptKey).equals(value.storageId())) {
+                    || value.sourceWorkspaceId() == null && (!("created-" + receiptKey).equals(value.storageId())
+                        || value.sourceGeneration() != null || value.cwdRelative() != null)
+                    || value.sourceWorkspaceId() != null && (StringUtils.isBlank(value.sourceWorkspaceId())
+                        || value.sourceGeneration() == null || value.sourceGeneration() < 1
+                        || StringUtils.isBlank(value.storageId()) || value.cwdRelative() == null
+                        || !value.cwdRelative().equals(com.alibaba.qwen.code.runtimebroker.managedworkspace
+                            .WorkspaceRelativePath.normalize(value.cwdRelative())))) {
                 throw new IllegalArgumentException();
             }
             return value;
@@ -168,5 +176,10 @@ final class WorkspaceCreationRoots {
         }
     }
 
-    record Details(String workspaceId, String storageId, String displayName, String registrationId) {}
+    record Details(String workspaceId, String storageId, String displayName, String registrationId,
+            String sourceWorkspaceId, Long sourceGeneration, String cwdRelative) {
+        Details(String workspaceId, String storageId, String displayName, String registrationId) {
+            this(workspaceId, storageId, displayName, registrationId, null, null, null);
+        }
+    }
 }

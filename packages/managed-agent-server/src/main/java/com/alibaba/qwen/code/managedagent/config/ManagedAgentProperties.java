@@ -209,6 +209,17 @@ public class ManagedAgentProperties implements EnvironmentAware {
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
         }
+        String boundSessionIsolation = runtimeBroker.getBoundSessionIsolationClass();
+        if (!"session".equals(boundSessionIsolation) && !"workspace".equals(boundSessionIsolation)) {
+            throw new IllegalStateException("Bound-Session isolation must be session or workspace");
+        }
+        if ("workspace".equals(boundSessionIsolation)
+                && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
+                        || !runtimeBroker.isDurableLocalProcess()
+                        || runtimeBroker.isChildWorkspacesEnabled())) {
+            throw new IllegalStateException("Workspace-isolated bound Sessions require a durable"
+                    + " local-process Broker and cannot combine with child Workspaces");
+        }
         if (!runtimeBroker.getWorkspaceCreationRoot().isBlank()
                 && (!harness.isWorkspaceFilesEnabled()
                         || !runtimeBroker.isDurableLocalProcess()
@@ -974,6 +985,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String residentKubernetesCaFile = "";
         private String workspaceCreationRoot = "";
         private String isolationClass = "session";
+        private String boundSessionIsolationClass = "session";
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
         private boolean trustedLocalRebootRecovery = true;
@@ -981,6 +993,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
+        private Map<String, String> previousCredentialKeys =
+                new LinkedHashMap<>();
         private String nodeExecutable = "";
         private String workerEntry = "";
         private String staticEndpoint = "";
@@ -1109,6 +1123,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public String getIsolationClass() {
             return isolationClass;
+        }
+
+        public String getBoundSessionIsolationClass() {
+            return boundSessionIsolationClass;
+        }
+
+        public void setBoundSessionIsolationClass(String boundSessionIsolationClass) {
+            this.boundSessionIsolationClass = boundSessionIsolationClass;
         }
 
         public List<WorkspaceMount> getWorkspaceMounts() {
@@ -1260,6 +1282,15 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCredentialKey(String credentialKey) {
             this.credentialKey = credentialKey;
+        }
+
+        public Map<String, String> getPreviousCredentialKeys() {
+            return previousCredentialKeys;
+        }
+
+        public void setPreviousCredentialKeys(
+                Map<String, String> previousCredentialKeys) {
+            this.previousCredentialKeys = previousCredentialKeys;
         }
 
         public String getNodeExecutable() {
