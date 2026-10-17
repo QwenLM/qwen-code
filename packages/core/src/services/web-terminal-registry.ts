@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
 import {
@@ -117,6 +118,8 @@ interface SpawnedWebTerminalPty extends WebTerminalPty {
   off?(event: 'error', listener: (err: Error) => void): unknown;
   removeListener?(event: 'error', listener: (err: Error) => void): unknown;
 }
+
+const debugLogger = createDebugLogger('WEB_TERMINAL_REGISTRY');
 
 const getPtyLimitMessage = (err: unknown): string | undefined => {
   const code = (err as { code?: unknown }).code;
@@ -275,7 +278,7 @@ export class WebTerminalRegistry {
       };
     }
     const liveSessions = [...this.sessions.values()].filter(
-      (session) => !session.exited,
+      (session) => !session.exited && !session.failure,
     ).length;
     if (liveSessions + this.creating.size >= MAX_CONCURRENT_WEB_TERMINALS) {
       return { error: 'Web terminal limit reached', retryable: true };
@@ -476,12 +479,19 @@ export class WebTerminalRegistry {
       exitDisposable = spawned.onExit(handleExit);
       errorDisposable = subscribeToPtyError(spawned, (err: Error) => {
         const message = getPtyLimitMessage(err);
-        if (message === undefined) {
-          // Preserve the pre-subscription behavior for unexpected pty errors:
-          // without a listener they escaped the EventEmitter as unhandled.
-          throw err;
+        if (message !== undefined) {
+          handleFailure(message);
+          return;
         }
-        handleFailure(message);
+        const code = (err as { code?: unknown }).code;
+        // EIO/EAGAIN on a dead child is the expected teardown race node-pty
+        // deliberately swallows; the session converges through the exit path.
+        if (code === 'EIO' || code === 'EAGAIN') return;
+        // Anything else must not escape this emit either: a throw here leaves
+        // the backend's fs callback as an uncaught exception and kills the
+        // whole serve daemon. Route it to the diagnostic sink — the same
+        // fallback the backend itself uses when nobody listens.
+        debugLogger.warn(`web terminal pty error: ${getErrorMessage(err)}`);
       });
       proc = {
         pid: spawned.pid,
@@ -684,7 +694,7 @@ export class WebTerminalRegistry {
     }
     this.clearReclaim(session);
     this.sessions.delete(terminalId);
-    if (!session.exited) {
+    if (!session.exited && !session.failure) {
       for (const listener of session.exitListeners) {
         listener({ exitCode: 143, signal: 15 });
       }

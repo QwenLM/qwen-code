@@ -194,7 +194,7 @@ while paused **under the cap**, minus the 200 ms latency (its pump sees
 - **`packages/cli/src/agent-view/pty-host.ts`** — agent view keeps its own
   Bun gate this change; wiring it to `qwen-bun-pty` is a small follow-up and
   is not part of the S2 deliverables.
-- **Release smoke** — `desktop/scripts/smoke-runtime.js` exercises the PTY
+- **Release smoke** — `packages/desktop/scripts/smoke-runtime.js` exercises the PTY
   round-trip through the bundled Node; a Bun-leg PTY smoke belongs to S5
   acceptance on the real archives.
 

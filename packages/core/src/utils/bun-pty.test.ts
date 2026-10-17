@@ -16,13 +16,82 @@
  */
 
 import * as fs from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { MAX_CONCURRENT_WEB_TERMINALS } from '../services/web-terminal-registry.js';
 import {
   getPtyBudgetStats,
   processPtyBudget,
   PtyLimitError,
   spawn,
 } from './bun-pty.js';
+
+type FsReadCallback = (
+  err: NodeJS.ErrnoException | null,
+  bytesRead: number,
+  buffer: Buffer,
+) => void;
+type FsWriteCallback = (
+  err: NodeJS.ErrnoException | null,
+  written: number,
+  buffer: Buffer,
+) => void;
+
+// The fd-lifetime tests decide exactly when an in-flight libuv op settles.
+// node:fs is an ESM namespace (its exports cannot be redefined for
+// vi.spyOn), so the module is mocked with a passthrough that captures read
+// and write callbacks — and records closeSync — only while a test arms it.
+const fsCapture = vi.hoisted(() => ({
+  armed: false,
+  reads: [] as Array<{
+    buffer: Buffer;
+    callback: (err: NodeJS.ErrnoException | null, bytesRead: number) => void;
+  }>,
+  writes: [] as Array<{
+    callback: (err: NodeJS.ErrnoException | null, written: number) => void;
+  }>,
+  closes: [] as number[],
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    read: (...args: unknown[]) => {
+      const callback = args[args.length - 1];
+      if (
+        fsCapture.armed &&
+        args.length === 6 &&
+        typeof callback === 'function'
+      ) {
+        const buffer = args[1] as Buffer;
+        fsCapture.reads.push({
+          buffer,
+          callback: (err, bytesRead) => {
+            (callback as FsReadCallback)(err, bytesRead, buffer);
+          },
+        });
+        return undefined;
+      }
+      return (actual.read as (...a: unknown[]) => unknown)(...args);
+    },
+    write: (...args: unknown[]) => {
+      const callback = args[args.length - 1];
+      if (fsCapture.armed && typeof callback === 'function') {
+        fsCapture.writes.push({
+          callback: (err, written) => {
+            (callback as FsWriteCallback)(err, written, Buffer.alloc(0));
+          },
+        });
+        return undefined;
+      }
+      return (actual.write as (...a: unknown[]) => unknown)(...args);
+    },
+    closeSync: (fd: number) => {
+      if (fsCapture.armed) fsCapture.closes.push(fd);
+      actual.closeSync(fd);
+    },
+  };
+});
 
 const POSIX = process.platform !== 'win32';
 
@@ -481,12 +550,22 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
 
     expect(pty.stats.resourceFailed).toBe(true);
     expect(pty.stats.writeQueuedBytes).toBe(0);
-    expectFdClosed(pty);
+    // The close is deferred until the in-flight write settles, so it lands
+    // asynchronously here — never synchronously at the cap trip.
+    expect(await waitForFdClosed(pty)).toBe(true);
     expect(await waitForChildGone(pty)).toBe(true);
 
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(exits).toBe(0);
   }, 20_000);
+
+  it('leaves spawn headroom over the web-terminal admission cap', () => {
+    // A full house of legitimate web terminals must not exhaust the
+    // process-wide pty budget and starve the shell tool's spawns.
+    expect(processPtyBudget.maxActivePtys).toBeGreaterThan(
+      MAX_CONCURRENT_WEB_TERMINALS,
+    );
+  });
 
   it('admits ptys up to the process-wide cap and frees the slot on close', async () => {
     const original = processPtyBudget.maxActivePtys;
@@ -550,4 +629,202 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       ),
     ).toBe(true);
   }, 30_000);
+});
+
+describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
+  const armFsCapture = (): (() => void) => {
+    fsCapture.armed = true;
+    fsCapture.reads = [];
+    fsCapture.writes = [];
+    fsCapture.closes = [];
+    return () => {
+      fsCapture.armed = false;
+      fsCapture.reads = [];
+      fsCapture.writes = [];
+      fsCapture.closes = [];
+    };
+  };
+
+  const deliverOutput = (
+    read: (typeof fsCapture.reads)[number],
+    text: string,
+  ) => {
+    const bytes = Buffer.from(text, 'utf8');
+    bytes.copy(read.buffer);
+    read.callback(null, bytes.byteLength);
+  };
+
+  const eio = () => Object.assign(new Error('read EIO'), { code: 'EIO' });
+
+  const spawnAndTripWriteCap = () => {
+    const pty = spawn('/bin/sh', ['-c', 'sleep 30'], {
+      limits: { writeQueueBytes: 64 * 1024 },
+    });
+    const errors: Error[] = [];
+    pty.on('error', (error: Error) => errors.push(error));
+    // A synchronous burst cannot interleave with the async write drain, so
+    // the queue grows until the cap rejects it — with the first fs.write
+    // held by the capture, terminateResourceFailure runs while writeActive.
+    const chunk = Buffer.alloc(4096, 0x57);
+    for (let i = 0; i < 40; i += 1) pty.write(chunk);
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as PtyLimitError).code).toBe('QWEN_PTY_WRITE_LIMIT');
+    return pty;
+  };
+
+  it('defers the fd close while a write is still owned by the threadpool', () => {
+    const disarm = armFsCapture();
+    const baseline = getPtyBudgetStats().activePtys;
+    try {
+      const pty = spawnAndTripWriteCap();
+      const fd = fdOf(pty);
+      expect(pty.stats.writeActive).toBe(true);
+      expect(pty.stats.readInFlight).toBe(true);
+
+      // fdClosed flipped and the admission slot is already released, but the
+      // real close is deferred: closeSync must not run against a live op —
+      // the recycled descriptor number would take the next open() instead.
+      expect(getPtyBudgetStats().activePtys).toBe(baseline);
+      const closesOf = () =>
+        fsCapture.closes.filter((closed) => closed === fd).length;
+      expect(closesOf()).toBe(0);
+
+      // Settling the held read first must not close: the write is still
+      // outstanding.
+      fsCapture.reads.shift()!.callback(eio(), 0);
+      expect(closesOf()).toBe(0);
+
+      // The last outstanding op performs the close, exactly once.
+      fsCapture.writes.shift()!.callback(null, 4096);
+      expect(closesOf()).toBe(1);
+      expectFdClosed(pty);
+    } finally {
+      disarm();
+    }
+  });
+
+  it('defers the fd close while a read is still owned by the threadpool', () => {
+    const disarm = armFsCapture();
+    const baseline = getPtyBudgetStats().activePtys;
+    try {
+      const pty = spawnAndTripWriteCap();
+      const fd = fdOf(pty);
+
+      expect(getPtyBudgetStats().activePtys).toBe(baseline);
+      const closesOf = () =>
+        fsCapture.closes.filter((closed) => closed === fd).length;
+      expect(closesOf()).toBe(0);
+
+      // Settling the held write first must not close: the read is still
+      // outstanding.
+      fsCapture.writes.shift()!.callback(null, 4096);
+      expect(closesOf()).toBe(0);
+
+      // The read settling performs the close, exactly once.
+      fsCapture.reads.shift()!.callback(eio(), 0);
+      expect(closesOf()).toBe(1);
+      expectFdClosed(pty);
+    } finally {
+      disarm();
+    }
+  });
+
+  it('keeps pumping when a data-listener failure is re-thrown by an error listener', () => {
+    const disarm = armFsCapture();
+    try {
+      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const delivered: string[] = [];
+      let throwOnce = true;
+      pty.onData((data) => {
+        if (throwOnce) {
+          throwOnce = false;
+          throw new Error('data listener boom');
+        }
+        delivered.push(String(data));
+      });
+      const reported: Error[] = [];
+      pty.on('error', (error: Error) => {
+        reported.push(error);
+        throw error;
+      });
+
+      // The data listener throws on the first chunk; reportError re-emits
+      // through the throwing error listener. The pump must still re-arm —
+      // otherwise output stalls forever and no exit is ever detected.
+      expect(fsCapture.reads).toHaveLength(1);
+      expect(() =>
+        deliverOutput(fsCapture.reads.shift()!, 'chunk-one'),
+      ).toThrow(/data listener boom/);
+      expect(reported).toHaveLength(1);
+      expect(fsCapture.reads).toHaveLength(1);
+      expect(pty.stats.readInFlight).toBe(true);
+
+      // Delivery resumes on the next chunk.
+      deliverOutput(fsCapture.reads.shift()!, 'chunk-two');
+      expect(delivered).toEqual(['chunk-two']);
+      expect(pty.stats.readInFlight).toBe(true);
+
+      fsCapture.reads.shift()!.callback(eio(), 0);
+      expectFdClosed(pty);
+      pty.kill();
+    } finally {
+      disarm();
+    }
+  });
+
+  it('treats a write EIO as the expected teardown race and reports nothing', () => {
+    const disarm = armFsCapture();
+    try {
+      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const errors: Error[] = [];
+      pty.on('error', (error: Error) => errors.push(error));
+      pty.write('keystroke');
+      expect(fsCapture.writes).toHaveLength(1);
+      expect(pty.stats.writeActive).toBe(true);
+
+      // The child is gone; the write queue is dropped and nothing is
+      // reported — the pump's read side owns the teardown, matching the
+      // wrapper's swallowed EIO.
+      fsCapture.writes
+        .shift()!
+        .callback(Object.assign(new Error('write EIO'), { code: 'EIO' }), 0);
+      expect(errors).toHaveLength(0);
+      expect(pty.stats.writeQueuedBytes).toBe(0);
+      expect(pty.stats.writeActive).toBe(false);
+
+      fsCapture.reads.shift()!.callback(eio(), 0);
+      expectFdClosed(pty);
+      pty.kill();
+    } finally {
+      disarm();
+    }
+  });
+
+  it('reports a non-teardown write error with its errno code preserved', () => {
+    const disarm = armFsCapture();
+    try {
+      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const errors: Error[] = [];
+      pty.on('error', (error: Error) => errors.push(error));
+      pty.write('keystroke');
+
+      fsCapture.writes
+        .shift()!
+        .callback(
+          Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+          0,
+        );
+      // Every downstream classifier keys on `code`; rewrapping without it
+      // escapes isExpectedPtyRaceError and becomes an uncaught exception.
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.message).toContain('pty write failed:');
+      expect((errors[0] as NodeJS.ErrnoException).code).toBe('EPIPE');
+
+      fsCapture.reads.shift()!.callback(eio(), 0);
+      expectFdClosed(pty);
+      pty.kill();
+    } finally {
+      disarm();
+    }
+  });
 });

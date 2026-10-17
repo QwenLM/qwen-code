@@ -557,7 +557,11 @@ describe('WebTerminalRegistry', () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
-  it('re-throws unexpected backend errors from the error event', async () => {
+  it('does not re-throw unexpected backend errors from the error event', async () => {
+    // A throw here leaves the backend's fs callback as an uncaught exception
+    // and kills the whole serve daemon. Non-limit errors go to the
+    // diagnostic sink instead — the same fallback the backend itself uses
+    // when nobody listens.
     const errorListeners: Array<(err: Error) => void> = [];
     spawn.mockReturnValueOnce({
       pid: 42,
@@ -583,10 +587,156 @@ describe('WebTerminalRegistry', () => {
 
     expect(() =>
       errorListeners[0]!(Object.assign(new Error('boom'), { code: 'EPIPE' })),
-    ).toThrow('boom');
+    ).not.toThrow();
+    // The session is not failed by a non-limit error: the exit path owns
+    // teardown, and the limit path converges on handleFailure.
     expect(
       registry.readSnapshot('terminal:unexpected')?.failed,
     ).toBeUndefined();
+  });
+
+  it('swallows the expected EIO/EAGAIN teardown races on an EventEmitter-shaped backend', async () => {
+    // The Bun backend is an EventEmitter (`on` returns the emitter, detach
+    // goes through `off`); the shape must not change the outcome. EIO/EAGAIN
+    // are the races node-pty deliberately swallows on a dead child — and a
+    // non-limit error must not escape the emit either.
+    const errorListeners: Array<(err: Error) => void> = [];
+    const emitter = {
+      on: vi.fn(function (
+        this: unknown,
+        event: string,
+        listener: (err: Error) => void,
+      ) {
+        if (event === 'error') errorListeners.push(listener);
+        return this;
+      }),
+      off: vi.fn(() => undefined),
+    };
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      ...emitter,
+    });
+    const registry = await start('terminal:emitter-race');
+
+    expect(() =>
+      errorListeners[0]!(Object.assign(new Error('read EIO'), { code: 'EIO' })),
+    ).not.toThrow();
+    expect(() =>
+      errorListeners[0]!(
+        Object.assign(new Error('read EAGAIN'), { code: 'EAGAIN' }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      errorListeners[0]!(Object.assign(new Error('boom'), { code: 'EPIPE' })),
+    ).not.toThrow();
+    // The session stays live and readable through all three.
+    expect(
+      registry.readSnapshot('terminal:emitter-race')?.failed,
+    ).toBeUndefined();
+    expect(registry.write('terminal:emitter-race', 'x')).toBe('written');
+  });
+
+  it('does not count failed sessions against the admission cap', async () => {
+    // A limit-failed session's pty is already dead and released, so it must
+    // not keep one of the admission slots until the idle reclaim — otherwise
+    // eight failures inside the window lock out every new terminal.
+    const errorListeners: Array<(err: Error) => void> = [];
+    spawn.mockImplementation(() => ({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    }));
+    const registry = new WebTerminalRegistry();
+    for (let i = 0; i < MAX_CONCURRENT_WEB_TERMINALS; i += 1) {
+      await expect(create(registry, `terminal:fail-${i}`)).resolves.toEqual({
+        terminalId: `terminal:fail-${i}`,
+      });
+    }
+    for (const listener of errorListeners) {
+      listener(
+        Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+          code: 'QWEN_PTY_OUTPUT_LIMIT',
+        }),
+      );
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let i = 0; i < MAX_CONCURRENT_WEB_TERMINALS; i += 1) {
+      expect(registry.readSnapshot(`terminal:fail-${i}`)?.failed).toBe(true);
+    }
+
+    await expect(create(registry, 'terminal:after-limit')).resolves.toEqual({
+      terminalId: 'terminal:after-limit',
+    });
+  });
+
+  it('does not fabricate an exit frame when releasing a failed session', async () => {
+    // The failure frame was the session's terminal event; release() must not
+    // synthesize an exit code on top of it — the kill guard right below
+    // already treats failure and exit as distinct states.
+    const errorListeners: Array<(err: Error) => void> = [];
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    });
+    const registry = await start('terminal:failed-release');
+    errorListeners[0]!(
+      Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+        code: 'QWEN_PTY_OUTPUT_LIMIT',
+      }),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(registry.readSnapshot('terminal:failed-release')?.failed).toBe(true);
+
+    const exitEvents: Array<{ exitCode: number; signal?: number }> = [];
+    registry.addExitListener('terminal:failed-release', (e) => {
+      exitEvents.push(e);
+    });
+    expect(registry.release('terminal:failed-release')).toBe(true);
+    expect(exitEvents).toHaveLength(0);
   });
 
   it('survives an EventEmitter-shaped error subscription on release', async () => {

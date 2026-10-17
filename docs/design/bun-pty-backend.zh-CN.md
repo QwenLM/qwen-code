@@ -160,7 +160,7 @@ fd 报 `EBADF`，尾部输出不投递。对"在预算之内、暂停中死亡"�
   ConPTY（`useConptyDll`）。
 - **`packages/cli/src/agent-view/pty-host.ts`** — agent view 本次仍保留
   自身 Bun 门控；接入 `qwen-bun-pty` 是一个小型后续项，不属于 S2 交付物。
-- **发布冒烟** — `desktop/scripts/smoke-runtime.js` 通过打包的 Node 验证
+- **发布冒烟** — `packages/desktop/scripts/smoke-runtime.js` 通过打包的 Node 验证
   PTY round-trip；Bun 一侧的 PTY 冒烟属于 S5 在真实产物上的验收工作。
 
 ## 打包

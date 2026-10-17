@@ -39,7 +39,24 @@ function markBunRuntime(): () => void {
 }
 
 // The Bun PTY backend is POSIX-only (bun-pty.ts); Windows stays gated under
-// Bun until ConPTY is validated there.
+// Bun until ConPTY is validated there. Tests that assert the Bun arm loads
+// pin a POSIX platform so they exercise the same branch on every host,
+// including Windows runners.
+function markPosix(): () => void {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform');
+
+  Object.defineProperty(process, 'platform', {
+    value: 'linux',
+    configurable: true,
+  });
+
+  return () => {
+    if (original) {
+      Object.defineProperty(process, 'platform', original);
+    }
+  };
+}
+
 function markWin32(): () => void {
   const original = Object.getOwnPropertyDescriptor(process, 'platform');
 
@@ -121,12 +138,14 @@ describe('getPty', () => {
     const failing = loadPty();
     await new Promise((resolve) => setImmediate(resolve));
     const restoreBun = markBunRuntime();
+    const restorePlatform = markPosix();
 
     try {
       const bun = await loadPty();
       expect(bun.impl?.name).toBe('qwen-bun-pty');
       expect(bun.loadError).toBeNull();
     } finally {
+      restorePlatform();
       restoreBun();
     }
 
@@ -141,11 +160,13 @@ describe('getPty', () => {
 
   it("does not reuse a previous call's result for a later failure", async () => {
     const restoreBun = markBunRuntime();
+    const restorePlatform = markPosix();
 
     try {
       const bun = await loadPty();
       expect(bun.impl?.name).toBe('qwen-bun-pty');
     } finally {
+      restorePlatform();
       restoreBun();
     }
 

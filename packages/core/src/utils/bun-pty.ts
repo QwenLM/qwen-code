@@ -160,9 +160,16 @@ export interface PtyBudgetLimits {
  * The process-wide budget, shared by every pty this module spawns. Production
  * code never mutates it; tests and probes may adjust and restore the values
  * to exercise the process-level caps with small numbers.
+ *
+ * `maxActivePtys` leaves headroom over the web-terminal admission cap
+ * (`MAX_CONCURRENT_WEB_TERMINALS` = 8): a full house of legitimate terminals
+ * must not starve the shell tool's spawns. The byte totals are the real
+ * process-wide memory ceilings: per-pty caps fire first while up to eight
+ * ptys are admitted, and once more are, the shared total can engage — the
+ * pty whose own growth trips it is the one terminated.
  */
 export const processPtyBudget: PtyBudgetLimits = {
-  maxActivePtys: 8,
+  maxActivePtys: 64,
   totalPausedHoldBytes: 32 * 1024 * 1024,
   totalWriteQueueBytes: 8 * 1024 * 1024,
 };
@@ -401,6 +408,7 @@ export class BunPtyProcess extends EventEmitter {
   private exited = false;
   private exitFired = false;
   private fdClosed = false;
+  private closePending = false;
   private resourceFailed = false;
   private nativeExitRecord: { exitCode: number; signal: number } | null = null;
   private pendingExit: {
@@ -678,6 +686,7 @@ export class BunPtyProcess extends EventEmitter {
       null,
       (error, bytesRead) => {
         this.readInFlight = false;
+        this.settleCloseAfterOp();
         if (!this.pumpActive) return;
         if (error) {
           if (error.code === 'EAGAIN') {
@@ -698,12 +707,20 @@ export class BunPtyProcess extends EventEmitter {
         // fd is already closed, so the bytes must neither be delivered nor
         // re-charged to the (already released) hold budget.
         if (this.resourceFailed) return;
-        if (this.paused) {
-          this.holdPaused(chunk);
-        } else {
-          this.emitData(chunk);
+        // A throwing error listener must not strand the pump: emitData
+        // reports listener failures through reportError, whose 'error'
+        // subscribers can themselves throw, and without the finally that
+        // throw escapes this fs.read callback with no read outstanding and
+        // no retry armed — output stalls and no exit is ever detected.
+        try {
+          if (this.paused) {
+            this.holdPaused(chunk);
+          } else {
+            this.emitData(chunk);
+          }
+        } finally {
+          this.pump();
         }
-        this.pump();
       },
     );
   }
@@ -875,6 +892,7 @@ export class BunPtyProcess extends EventEmitter {
     this.writeActive = true;
     fs.write(this.fd, task.buffer, task.offset, (error, written) => {
       this.writeActive = false;
+      this.settleCloseAfterOp();
       if (error) {
         if (error.code === 'EAGAIN') {
           setImmediate(() => this.drainWriteQueue());
@@ -882,9 +900,19 @@ export class BunPtyProcess extends EventEmitter {
         }
         this.clearWriteQueue();
         if (!this.resourceFailed && !this.fdClosed) {
-          this.reportError(
-            new Error(`pty write failed: ${getErrorMessage(error)}`),
-          );
+          // EIO/EBADF on a write is the expected teardown race — the child
+          // is gone and the pump's read side ends the session — so it is not
+          // reported, matching the wrapper's swallowed EIO. Any other failure
+          // keeps its errno `code`: every downstream classifier
+          // (isExpectedPtyRaceError, getPtyLimitMessage) keys on it.
+          if (error.code !== 'EIO' && error.code !== 'EBADF') {
+            this.reportError(
+              Object.assign(
+                new Error(`pty write failed: ${getErrorMessage(error)}`),
+                { code: error.code },
+              ),
+            );
+          }
         }
         return;
       }
@@ -979,11 +1007,35 @@ export class BunPtyProcess extends EventEmitter {
   private closeFd(): void {
     if (this.fdClosed) return;
     this.fdClosed = true;
+    // The admission slot is released now, not at the real close: a deferred
+    // close must not hold one of the process-wide slots for the extra window.
     budget.activePtys -= 1;
+    // Never close while a libuv read or write still owns the fd: POSIX hands
+    // the freed number to the next open(), and the outstanding op would then
+    // hit a recycled descriptor — a queued write would inject this session's
+    // input into an unrelated one. The last settling callback performs the
+    // close. No new op can be dispatched in between: pump() is gated on
+    // fdClosed, write() returns early on it, and every closeFd() caller
+    // cleared the write queue first.
+    if (this.readInFlight || this.writeActive) {
+      this.closePending = true;
+      return;
+    }
+    this.closeFdNow();
+  }
+
+  private closeFdNow(): void {
     try {
       fs.closeSync(this.fd);
     } catch {
       // Already closed.
+    }
+  }
+
+  private settleCloseAfterOp(): void {
+    if (this.closePending && !this.readInFlight && !this.writeActive) {
+      this.closePending = false;
+      this.closeFdNow();
     }
   }
 }

@@ -222,7 +222,12 @@ export interface ShellExecutionResult {
    * clean-exit signal of 0 is normalized to null at the service boundary.
    */
   signal: number | null;
-  /** An error object if the process failed to spawn. */
+  /**
+   * An error object if the process failed to spawn. Also set when a spawned
+   * process was terminated by a pty resource limit (bounded hold / write
+   * queue): then exitCode and signal stay null and no native exit is
+   * fabricated.
+   */
   error: Error | null;
   /** A boolean indicating if the command was aborted by the user. */
   aborted: boolean;
@@ -246,7 +251,12 @@ export interface ShellExecutionResult {
   /** The process ID of the spawned shell. */
   pid: number | undefined;
   /** The method used to execute the shell command. */
-  executionMethod: 'lydell-node-pty' | 'node-pty' | 'child_process' | 'none';
+  executionMethod:
+    | 'lydell-node-pty'
+    | 'node-pty'
+    | 'qwen-bun-pty'
+    | 'child_process'
+    | 'none';
 }
 
 /** A handle for an ongoing shell execution. */
@@ -2451,8 +2461,7 @@ export class ShellExecutionService {
               error: failureError,
               aborted: abortSignal.aborted,
               pid: ptyProcess.pid,
-              executionMethod:
-                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+              executionMethod: ptyInfo?.name ?? 'node-pty',
             });
           } finally {
             disposeForegroundPtyResources();
@@ -2872,8 +2881,7 @@ export class ShellExecutionService {
               aborted: false,
               promoted: true,
               pid: ptyProcess.pid,
-              executionMethod:
-                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+              executionMethod: ptyInfo?.name ?? 'node-pty',
             });
           } finally {
             try {
