@@ -10,20 +10,22 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('CONPTY_HOST');
 
 /**
- * The `WindowsPtyAgent` internals `releaseConPtyHost` needs, at
+ * The `WindowsPtyAgent` internals used for host cleanup and input queues, at
  * `@lydell/node-pty` 1.2.0-beta.10 (the exact pin in `packages/core/package.json`).
  *
- * The JS field names below were re-checked on 1.2.0-beta.15 and are unchanged.
+ * The cleanup JS field names below were re-checked on 1.2.0-beta.15 and are
+ * unchanged. Input queue verification is documented in pty-input-queue.ts.
  * The NATIVE teardown semantics were **not** verified there and do differ:
  * from 1.2.0-beta.14 upstream erases the pty baton with an unconditional
  * `std::erase_if` rather than under `assert`. A bump therefore has to be
  * re-checked against `src/win/conpty.cc`, not only against the JS shape.
  *
- * Every field is optional and the release degrades to a no-op if the shape ever
+ * Every cleanup field is optional and release degrades to a no-op if its shape
  * changes, so a bump can only bring the leak back — never a kill we did not
  * intend.
  */
-interface WindowsPtyAgentInternals {
+export interface WindowsPtyAgentInternals {
+  inSocket?: { writableLength?: number };
   _pty?: number;
   _useConptyDll?: boolean;
   _ptyNative?: { kill?: (pty: number, useConptyDll: boolean) => void };

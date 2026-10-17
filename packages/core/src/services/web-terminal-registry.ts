@@ -9,12 +9,19 @@ import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
+import {
+  getPtyInputQueueBytes,
+  type PtyInputQueueInternals,
+} from './pty-input-queue.js';
 import {
   disposeConoutWorker,
   noteConPtyHostReleased,
   releaseConPtyHost,
 } from './conpty-host.js';
+
+const debugLogger = createDebugLogger('WEB_TERMINAL_REGISTRY');
 
 /**
  * Minimal PTY surface used by the web terminal registry. Backed by node-pty.
@@ -89,14 +96,9 @@ interface PtySession {
   ptyResourcesReleased: boolean;
 }
 
-interface SpawnedWebTerminalPty extends WebTerminalPty {
+interface SpawnedWebTerminalPty extends WebTerminalPty, PtyInputQueueInternals {
   write(data: string | Buffer): void;
   _isReady?: boolean;
-  _socket?: { writableLength?: number };
-  _agent?: { inSocket?: { writableLength: number } };
-  _writeStream?: {
-    _writeQueue: Array<{ buffer: Buffer; offset: number }>;
-  };
   onData(callback: (data: string) => void): { dispose(): void } | undefined;
   onExit(
     callback: (e: { exitCode: number; signal?: number }) => void,
@@ -364,6 +366,7 @@ export class WebTerminalRegistry {
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
     let deferredInputBytes = 0;
+    let warnedInputQueue = false;
     const spawnPty = (useBundled: boolean) =>
       ptyImpl.module.spawn(file, args, {
         name: 'xterm-256color',
@@ -469,18 +472,16 @@ export class WebTerminalRegistry {
       buffer: [],
       bufferBytes: 0,
       bufferedInputBytes: () => {
-        // node-pty's public write() has no drain signal. Inspect the actual
-        // input queue: stdout can be unrelated to consumed input (no-echo/raw
-        // programs), and Windows queues writes before its first output byte.
         if (spawned._isReady === false) return deferredInputBytes;
         deferredInputBytes = 0;
-        if (spawned._writeStream) {
-          return spawned._writeStream._writeQueue.reduce(
-            (bytes, task) => bytes + task.buffer.length - task.offset,
-            0,
+        const bytes = getPtyInputQueueBytes(spawned);
+        if (bytes === undefined && !warnedInputQueue) {
+          warnedInputQueue = true;
+          debugLogger.warn(
+            `Web terminal ${terminalId}: cannot inspect ${ptyImpl.name} input queue; expected _writeStream._writeQueue, _agent.inSocket.writableLength, or _socket.writableLength. Input admission is unavailable.`,
           );
         }
-        return (spawned._agent?.inSocket ?? spawned._socket)?.writableLength;
+        return bytes;
       },
       exited: false,
       outputListeners: new Set(),
