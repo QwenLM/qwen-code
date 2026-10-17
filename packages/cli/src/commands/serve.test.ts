@@ -749,6 +749,75 @@ describe('serve rate limit env parsing', () => {
     expect(mockQr.generate).not.toHaveBeenCalled();
   });
 
+  it('marks --local-control-address as the operator explicit opt-in (#14136)', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://203.0.113.10:4170/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --local-control-address 203.0.113.10',
+    );
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    // The flag is what distinguishes the operator's explicit pick from an
+    // HTTP-posted string; the service records it as the standing grant.
+    expect(enable).toHaveBeenCalledWith({
+      address: '203.0.113.10',
+      allowExplicitAddress: true,
+    });
+  });
+
+  it('points a no-LAN-interface failure at --local-control-address (#14136)', async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // No private candidate exists; the escape hatch is exactly the flag the
+    // CLI must name. The shared error message stays client-neutral, so the
+    // hint is added here and not in NoLanInterfaceError itself.
+    const enable = vi.fn().mockRejectedValue(
+      Object.assign(new Error('No private IPv4 address is available.'), {
+        code: 'no_lan_interface',
+      }),
+    );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain('No private IPv4 address is available.');
+    expect(stderr).toContain('--local-control-address');
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('passes normalized named channels to runQwenServe', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',

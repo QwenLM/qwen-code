@@ -78,16 +78,32 @@ async function startLocalControl(
   }
   let status;
   try {
-    status = await service.enable(address ? { address } : {});
+    status = await service.enable(
+      // The flag is the operator's explicit opt-in: record the named address
+      // as the daemon's standing grant so the HTTP enable route (and the Web
+      // Shell card) can re-enable it, while ungranted non-candidate POSTs
+      // keep failing with unknown_lan_interface.
+      address ? { address, allowExplicitAddress: true } : {},
+    );
   } catch (err) {
     // The service reports ambiguity to its caller rather than picking for
     // them; in a terminal the way to answer is a flag, which only this caller
-    // knows about.
+    // knows about. The same holds for the no-candidate failure: its message
+    // is rendered verbatim to browser clients, so the CLI-only remedy hint
+    // belongs here, not in the shared error.
     if (
       err instanceof Error &&
       (err as { code?: string }).code === 'ambiguous_lan_interface'
     ) {
       throw new Error(`${err.message}. Pass --local-control-address <ip>.`);
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'no_lan_interface'
+    ) {
+      throw new Error(
+        `${err.message} If this host's usable address is outside private/link-local space, or sits on a VPN/tunnel interface, name it: --local-control-address <ip>.`,
+      );
     }
     throw err;
   }

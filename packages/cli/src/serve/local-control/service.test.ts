@@ -10,7 +10,14 @@ import type { AddressInfo } from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MutableOriginAllowlist } from '../auth.js';
 import { CredentialStore } from './credentials.js';
+import {
+  isLanIpv4,
+  isSoftwareNetwork,
+  listLanCandidates,
+  selectLanAddress,
+} from './lan-interfaces.js';
 import { LocalControlService } from './service.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const sleep = vi.hoisted(() => ({ release: vi.fn() }));
 const sleepInhibitorMock = vi.hoisted(() => ({
@@ -22,13 +29,24 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   sleepInhibitor: sleepInhibitorMock,
 }));
 
-vi.mock('./lan-interfaces.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./lan-interfaces.js')>()),
-  selectLanAddress: vi.fn(() => ({
-    interfaceName: 'en0',
-    address: '127.0.0.1',
-  })),
-}));
+vi.mock('./lan-interfaces.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lan-interfaces.js')>();
+  return {
+    ...actual,
+    isLanIpv4: vi.fn(actual.isLanIpv4),
+    isSoftwareNetwork: vi.fn(actual.isSoftwareNetwork),
+    listLanCandidates: vi.fn(() => []),
+    selectLanAddress: vi.fn(() => ({
+      interfaceName: 'en0',
+      address: '127.0.0.1',
+    })),
+  };
+});
+
+const { isLanIpv4: realIsLanIpv4, isSoftwareNetwork: realIsSoftwareNetwork } =
+  await vi.importActual<typeof import('./lan-interfaces.js')>(
+    './lan-interfaces.js',
+  );
 
 // The mock above selects a loopback address, which trips the out-of-private-
 // space warning on every enable; keep the warning out of the test output.
@@ -49,6 +67,13 @@ describe('LocalControlService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sleepInhibitorMock.isRunning.mockReturnValue(true);
+    vi.mocked(isLanIpv4).mockImplementation(realIsLanIpv4);
+    vi.mocked(isSoftwareNetwork).mockImplementation(realIsSoftwareNetwork);
+    vi.mocked(listLanCandidates).mockReturnValue([]);
+    vi.mocked(selectLanAddress).mockReturnValue({
+      interfaceName: 'en0',
+      address: '127.0.0.1',
+    });
   });
 
   it('serializes lifecycle changes and fully revokes state on disable', async () => {
@@ -157,6 +182,11 @@ describe('LocalControlService', () => {
     expect(service.active).toBe(false);
     expect(attachWebSocket).not.toHaveBeenCalled();
     expect(origins.allows(`http://127.0.0.1:${port}`)).toBe(false);
+    // The exposure warning belongs to a listener that actually came up; a
+    // rejected enable must not record one.
+    expect(vi.mocked(writeStderrLine)).not.toHaveBeenCalledWith(
+      expect.stringContaining('outside RFC 1918'),
+    );
   });
 
   it('reports sleep inhibition only when the inhibitor is running', async () => {
@@ -204,6 +234,9 @@ describe('LocalControlService', () => {
     await expect(service.enable()).rejects.toThrow();
     expect(service.active).toBe(false);
     expect(attached).toHaveLength(1);
+    expect(vi.mocked(writeStderrLine)).not.toHaveBeenCalledWith(
+      expect.stringContaining('outside RFC 1918'),
+    );
 
     // Node attaches its own internal 'listening' listener during listen(), so
     // compare against a control server that failed the same way without any of
@@ -217,6 +250,202 @@ describe('LocalControlService', () => {
       control.listenerCount('listening'),
     );
 
+    await new Promise<void>((resolve) => blocker.close(() => resolve()));
+  });
+
+  it('warns once when an explicit out-of-private-space pick is enabled', async () => {
+    // The default selectLanAddress stand-in picks 127.0.0.1, which is outside
+    // RFC 1918/3927 — the warning is the opt-in's one loud signal and must
+    // fire exactly once per transition into active.
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    await service.enable();
+    // An enable on an already-active session is a no-op and must not re-warn.
+    await service.enable();
+
+    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledOnce();
+    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledWith(
+      expect.stringContaining('outside RFC 1918'),
+    );
+    await service.disable();
+  });
+
+  it('warns when the explicit pick sits on a VPN/tunnel or virtual interface', async () => {
+    // A private-range address on a software-named interface passes isLanIpv4
+    // but is exactly the VPN case the opt-in exists for — it must warn too.
+    // 127.0.0.1 stands in for the private address so the bind succeeds on any
+    // host; isLanIpv4/isSoftwareNetwork are stubbed to the tunnel scenario.
+    vi.mocked(isLanIpv4).mockReturnValue(true);
+    vi.mocked(isSoftwareNetwork).mockImplementation(
+      (name) => name === 'docker0',
+    );
+    vi.mocked(selectLanAddress).mockReturnValue({
+      interfaceName: 'docker0',
+      address: '127.0.0.1',
+    });
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    await service.enable();
+
+    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledOnce();
+    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledWith(
+      expect.stringContaining('docker0'),
+    );
+    await service.disable();
+  });
+
+  it('does not warn for an ordinary automatic candidate', async () => {
+    vi.mocked(isLanIpv4).mockReturnValue(true);
+    vi.mocked(isSoftwareNetwork).mockReturnValue(false);
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    await service.enable();
+
+    expect(vi.mocked(writeStderrLine)).not.toHaveBeenCalled();
+    await service.disable();
+  });
+
+  it('records an out-of-candidate CLI pick as the standing explicit grant', async () => {
+    // listLanCandidates is mocked empty: 127.0.0.1 stands in for an address
+    // the automatic filter refuses (public range or tunnel) while remaining
+    // bindable on every host.
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    expect(service.grantedExplicitCandidate).toBeUndefined();
+    await service.enable({
+      address: '127.0.0.1',
+      allowExplicitAddress: true,
+    });
+    expect(service.grantedExplicitCandidate).toEqual({
+      interfaceName: 'en0',
+      address: '127.0.0.1',
+    });
+    // The grant is the daemon-start decision, not the session's: it survives
+    // disable so the Web Shell card can re-enable the same address.
+    await service.disable();
+    expect(service.grantedExplicitCandidate).toEqual({
+      interfaceName: 'en0',
+      address: '127.0.0.1',
+    });
+  });
+
+  it('records no grant without the CLI opt-in flag', async () => {
+    // The HTTP enable path never sets the flag, so a posted address — even
+    // one outside the candidate list — must not mint a grant.
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    await service.enable({ address: '127.0.0.1' });
+
+    expect(service.grantedExplicitCandidate).toBeUndefined();
+    await service.disable();
+  });
+
+  it('records no grant for an ordinary automatic candidate', async () => {
+    // Disambiguating among candidates needs no grant: the address is already
+    // reachable through the normal candidate path.
+    vi.mocked(listLanCandidates).mockReturnValue([
+      { interfaceName: 'en0', address: '127.0.0.1' },
+    ]);
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    await service.enable({
+      address: '127.0.0.1',
+      allowExplicitAddress: true,
+    });
+
+    expect(service.grantedExplicitCandidate).toBeUndefined();
+    await service.disable();
+  });
+
+  it('records no grant when the enable fails', async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve) =>
+      blocker.listen(0, '127.0.0.1', resolve),
+    );
+    const busyPort = (blocker.address() as AddressInfo).port;
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => busyPort,
+    });
+
+    await expect(
+      service.enable({ address: '127.0.0.1', allowExplicitAddress: true }),
+    ).rejects.toThrow();
+
+    expect(service.grantedExplicitCandidate).toBeUndefined();
     await new Promise<void>((resolve) => blocker.close(() => resolve()));
   });
 });

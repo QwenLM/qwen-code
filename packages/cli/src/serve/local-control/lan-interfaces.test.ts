@@ -177,4 +177,37 @@ describe('selectLanAddress', () => {
       }),
     ).toThrow(AmbiguousLanInterfaceError);
   });
+
+  it('commits to a named address when several automatic candidates exist', () => {
+    // The Web Shell's disambiguation recovery posts the picked address back;
+    // the ambiguity throw must not pre-empt that commit, and the named
+    // candidate must win.
+    const interfaces = {
+      en0: [ipv4('192.168.1.10')],
+      en1: [ipv4('192.168.2.10')],
+    };
+    expect(selectLanAddress('192.168.2.10', interfaces)).toEqual({
+      interfaceName: 'en1',
+      address: '192.168.2.10',
+    });
+    expect(() => selectLanAddress('192.168.9.9', interfaces)).toThrow(
+      UnknownLanInterfaceError,
+    );
+  });
+
+  it('refuses reserved-range addresses even when a non-loopback interface holds them', () => {
+    // `internal` comes from the interface's loopback flag, so a reserved
+    // address on a non-loopback interface would otherwise be accepted:
+    // 0.0.0.0 would bind EVERY interface, and multicast/reserved ranges can
+    // never pair a phone.
+    expect(() =>
+      selectLanAddress('0.0.0.0', { dummy0: [ipv4('0.0.0.0')] }),
+    ).toThrow(UnknownLanInterfaceError);
+    expect(() =>
+      selectLanAddress('224.0.0.5', { dummy0: [ipv4('224.0.0.5')] }),
+    ).toThrow(UnknownLanInterfaceError);
+    expect(() =>
+      selectLanAddress('127.0.0.53', { dummy0: [ipv4('127.0.0.53')] }),
+    ).toThrow(UnknownLanInterfaceError);
+  });
 });

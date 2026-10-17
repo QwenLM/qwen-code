@@ -111,26 +111,36 @@ export class UnknownLanInterfaceError extends Error {
   constructor(requested: string) {
     super(
       `${requested} is not an IPv4 address this host can expose right now. ` +
-        'The network may have changed since the list was fetched.',
+        'It must be a usable address this host currently has; the network ' +
+        'may have changed since the list was fetched.',
     );
     this.name = 'UnknownLanInterfaceError';
   }
 }
+
+// Reserved shapes an explicit name may never legitimately pick: 0/8 is the
+// unspecified address — binding it would listen on EVERY interface, the
+// opposite of the singled-out pick the operator named — while 127/8
+// off-loopback and 224/4 and up (multicast/reserved, 255.255.255.255
+// included) can never pair a phone. The `info.internal` skip alone cannot
+// catch these: it comes from the interface's loopback flag, not the address.
+const REFUSED_EXPLICIT = /^(0|127|22[4-9]|2[3-5]\d)\./;
 
 /**
  * An explicit operator opt-in for addresses `isLanIpv4` refuses (#14136):
  * some enterprise intranets number their LANs from public ranges they
  * control, and an address the operator names with `--local-control-address`
  * carries the intent the automatic filter cannot. The address must still be
- * one the host actually has — matching against live interface state, not the
- * string's shape, is what keeps `0.0.0.0`, multicast, and typo'd literals
- * refused. The enable path logs a loud warning for any address accepted this
- * way.
+ * one the host actually has — matching against live interface state is what
+ * keeps typo'd and absent literals refused — and must not be a reserved
+ * shape (REFUSED_EXPLICIT). The enable path logs a loud warning for any
+ * address accepted this way.
  */
-function findExplicitCandidate(
+export function findExplicitCandidate(
   address: string,
   interfaces: ReturnType<typeof networkInterfaces>,
 ): LanCandidate | undefined {
+  if (REFUSED_EXPLICIT.test(address)) return undefined;
   for (const [interfaceName, addresses] of Object.entries(interfaces)) {
     // isSoftwareNetwork() is deliberately not consulted here: the tunnel
     // exclusion exists to stop AUTOMATIC advertising from pointing a QR at
@@ -158,6 +168,12 @@ function findExplicitCandidate(
  * before the no-candidate failure — a host whose only address is a
  * public-range one has no automatic candidates, yet the explicit pick must
  * still be honored.
+ *
+ * The escape hatch is granted by provenance, not by the string's shape:
+ * callers are the CLI's `--local-control-address` path or an HTTP enable
+ * request that the route admitted only because the address is a current
+ * automatic candidate or the operator's CLI-granted pick (see
+ * workspace-local-control.ts).
  */
 export function selectLanAddress(
   preferredAddress?: string,
@@ -165,6 +181,9 @@ export function selectLanAddress(
 ): LanCandidate {
   const candidates = listLanCandidates(interfaces);
   if (preferredAddress !== undefined) {
+    // Checked before the explicit walk so a dual-assigned address keeps its
+    // physical interfaceName: findExplicitCandidate neither sorts nor skips
+    // software networks, so it would report the tunnel instead.
     const match = candidates.find((c) => c.address === preferredAddress);
     if (match) return match;
     const explicit = findExplicitCandidate(preferredAddress, interfaces);

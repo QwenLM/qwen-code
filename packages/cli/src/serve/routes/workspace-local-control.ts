@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { networkInterfaces } from 'node:os';
 import type { Application, Request, Response, RequestHandler } from 'express';
 import {
   AmbiguousLanInterfaceError,
+  findExplicitCandidate,
   listLanCandidates,
   NoLanInterfaceError,
   UnknownLanInterfaceError,
@@ -36,7 +38,10 @@ export interface RegisterWorkspaceLocalControlRoutesDeps {
   trustedLoopbackMode?: boolean;
 }
 
-async function withUiData(status: LocalControlStatus) {
+async function withUiData(
+  status: LocalControlStatus,
+  service: LocalControlService,
+) {
   let qrText: string | undefined;
   if (status.url) {
     // QR rendering is best-effort and must never fail the request. The pairing
@@ -57,7 +62,21 @@ async function withUiData(status: LocalControlStatus) {
       qrText = undefined;
     }
   }
-  return { ...status, qrText, interfaces: listLanCandidates() };
+  // Surface the operator's CLI-granted explicit address (#14136) as its own
+  // field — never inside `interfaces`, which is the automatic-candidate list
+  // the QR button resolves against listLanCandidates(). The card renders it
+  // as a labelled row and re-posts it on re-enable; omitting it once the
+  // host stops holding the address is what lets the card drop a stale grant.
+  const grant = service.grantedExplicitCandidate;
+  const explicitCandidate = grant
+    ? findExplicitCandidate(grant.address, networkInterfaces())
+    : undefined;
+  return {
+    ...status,
+    qrText,
+    interfaces: listLanCandidates(),
+    explicitCandidate,
+  };
 }
 
 /**
@@ -112,7 +131,7 @@ export function registerWorkspaceLocalControlRoutes(
       .json(
         presentStatus(
           req,
-          await withUiData(deps.service.status()),
+          await withUiData(deps.service.status(), deps.service),
           trustedLoopbackMode,
         ),
       );
@@ -157,6 +176,23 @@ export function registerWorkspaceLocalControlRoutes(
         address?: unknown;
         target?: unknown;
       };
+      // The explicit opt-in is granted by provenance, not by the shape of a
+      // caller-supplied string: an HTTP-posted address must be a current
+      // automatic candidate or the address the operator granted with
+      // `--local-control-address` (recorded on the service). Anything else
+      // keeps failing closed with the pre-#14136 unknown_lan_interface 409 —
+      // otherwise any local process could move the listener onto an address
+      // the operator never named and walk away with the pairing credential.
+      if (typeof body.address === 'string') {
+        const candidates = listLanCandidates();
+        if (
+          !candidates.some((c) => c.address === body.address) &&
+          body.address !== deps.service.grantedExplicitCandidate?.address
+        ) {
+          sendEnableError(res, new UnknownLanInterfaceError(body.address));
+          return;
+        }
+      }
       try {
         const ui = await withUiData(
           await deps.service.enable({
@@ -164,6 +200,7 @@ export function registerWorkspaceLocalControlRoutes(
               typeof body.address === 'string' ? body.address : undefined,
             target: typeof body.target === 'string' ? body.target : undefined,
           }),
+          deps.service,
         );
         if (!requestHasOperatorAuthority(req, trustedLoopbackMode) && ui.url) {
           // The response below has the secret removed; the operator still
@@ -201,7 +238,7 @@ export function registerWorkspaceLocalControlRoutes(
         .json(
           presentStatus(
             req,
-            await withUiData(await deps.service.disable()),
+            await withUiData(await deps.service.disable(), deps.service),
             trustedLoopbackMode,
           ),
         );
