@@ -43,6 +43,11 @@ const CONTEXT_LENGTH_PATTERNS = [
   // llama.cpp: "request (279935 tokens) exceeds the available context size
   // (262144 tokens), try increasing it" (#13415).
   /\bexceeds the available context size\b/i,
+  // vLLM: "The decoder prompt (length 40000) is longer than the maximum model
+  // length of 32768." from the engine, and "The engine prompt length 40000
+  // exceeds the max_model_len 32768." from the Responses endpoint.
+  /\bis longer than the maximum model length\b/i,
+  /\bexceeds the max_model_len\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -122,6 +127,37 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(llamaCppMatch[1]!),
       limitTokens: parseInteger(llamaCppMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+
+  // vLLM names the prompt length and its limit. For a decoder prompt that
+  // limit is `max_model_len`, the server's real window and often smaller than
+  // the one inferred from the id. For an encoder prompt both numbers count
+  // encoder input (such as image or audio tokens) against the encoder cache
+  // budget, so neither says how big the chat history is and no counts are
+  // returned. The gap is bounded so a huge error body cannot make the lazy
+  // scan quadratic.
+  const vllmPromptMatch = text.match(
+    /\b(\w+) prompt \(length[^\S\n]*(\d[\d,]*)\)[^\n]{0,120}?longer than the maximum model length of[^\S\n]*(\d[\d,]*)/i,
+  );
+  if (vllmPromptMatch) {
+    if (vllmPromptMatch[1]!.toLowerCase() === 'encoder') {
+      return {};
+    }
+    return {
+      actualTokens: parseInteger(vllmPromptMatch[2]!),
+      limitTokens: parseInteger(vllmPromptMatch[3]!),
+      limitKind: 'total',
+    };
+  }
+  const vllmResponsesMatch = text.match(
+    /prompt length[^\S\n]*(\d[\d,]*)[^\S\n]*exceeds the max_model_len[^\S\n]*(\d[\d,]*)/i,
+  );
+  if (vllmResponsesMatch) {
+    return {
+      actualTokens: parseInteger(vllmResponsesMatch[1]!),
+      limitTokens: parseInteger(vllmResponsesMatch[2]!),
       limitKind: 'total',
     };
   }
