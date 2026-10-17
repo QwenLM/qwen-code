@@ -30,7 +30,33 @@ describe('package.json command metadata', () => {
       (item) => item.command === 'qwen-code.focusChat',
     );
 
-    expect(command?.title).toBe('Qwen Code: Focus Chat View');
+    expect(command?.title).toBe('%qwen-code.focusChat.title%');
+    const english = JSON.parse(
+      readFileSync(resolve(import.meta.dirname, '../package.nls.json'), 'utf8'),
+    ) as Record<string, string>;
+    expect(english['qwen-code.focusChat.title']).toBe(
+      'Qwen Code: Focus Chat View',
+    );
+  });
+
+  it('resolves every command title in English and Simplified Chinese', () => {
+    const manifest = readManifest();
+    const english = JSON.parse(
+      readFileSync(resolve(import.meta.dirname, '../package.nls.json'), 'utf8'),
+    ) as Record<string, string>;
+    const chinese = JSON.parse(
+      readFileSync(
+        resolve(import.meta.dirname, '../package.nls.zh-cn.json'),
+        'utf8',
+      ),
+    ) as Record<string, string>;
+
+    for (const command of manifest.contributes.commands) {
+      expect(command.title).toMatch(/^%[^%]+%$/);
+      const key = command.title.slice(1, -1);
+      expect(english[key]).toEqual(expect.stringMatching(/\S/));
+      expect(chinese[key]).toEqual(expect.stringMatching(/[\u3400-\u9fff]/));
+    }
   });
 
   it('keeps the Activity Bar chat entry visible without runtime context', () => {

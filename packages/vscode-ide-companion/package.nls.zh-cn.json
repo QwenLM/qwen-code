@@ -1,5 +1,14 @@
 {
   "qwen-code.copyMessage.title": "复制消息",
   "qwen-code.copyAllMessages.title": "复制全部消息",
-  "qwen-code.copyLastReply.title": "复制最后回复"
+  "qwen-code.copyLastReply.title": "复制最后回复",
+  "qwen.diff.accept.title": "Qwen Code: 接受当前差异",
+  "qwen.diff.cancel.title": "Qwen Code: 关闭差异编辑器",
+  "qwen-code.runQwenCode.title": "Qwen Code: 运行",
+  "qwen-code.showNotices.title": "Qwen Code: 查看第三方声明",
+  "qwen-code.openChat.title": "Qwen Code: 打开",
+  "qwen-code.auth.title": "Qwen Code: 身份验证",
+  "qwen-code.focusChat.title": "Qwen Code: 聚焦聊天视图",
+  "qwen-code.newConversation.title": "Qwen Code: 新建对话",
+  "qwen-code.showLogs.title": "Qwen Code: 显示日志"
 }
