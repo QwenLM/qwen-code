@@ -7591,6 +7591,12 @@ export function registerHostedHarnessSessionRoutes(
                 ? { childSessionId: blockedChildSessionId }
                 : {}),
             });
+            // The blocked settlement of a background child is a committed
+            // notification — kick the parent like the accept arm does, or
+            // an idle Session's scheduler (which exits on an empty next())
+            // never delivers it. Fires on a replay too: the kick is the
+            // delivery, idempotent by the scheduler's own dedupe.
+            session.monitorWake?.kick();
             break;
           }
           case 'close_scope': {
