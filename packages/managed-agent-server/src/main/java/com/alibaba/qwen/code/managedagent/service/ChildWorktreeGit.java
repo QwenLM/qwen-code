@@ -668,12 +668,15 @@ public final class ChildWorktreeGit {
                 throw ChildWorkspaceException.diverged("The parent's tree changed outside the lease at " + path);
             }
         }
-        for (String path : unkept(root, repository, parentTree, recorded)) {
-            if (toWrite.containsKey(path)) {
-                throw ChildWorkspaceException.diverged("The parent no longer keeps the content deleted at " + path);
-            }
-        }
         if (!toWrite.isEmpty()) {
+            // A resume that owes nothing spawns no Git for a probe whose
+            // answer it could never use, so no fault there can block it.
+            for (String path : unkept(root, repository, parentTree, recorded)) {
+                if (toWrite.containsKey(path)) {
+                    throw ChildWorkspaceException.diverged(
+                            "The parent no longer keeps the content deleted at " + path);
+                }
+            }
             write(root, repository, working, toWrite);
         }
         String written = snapshotTree(root, repository.top(), owed.keySet());
