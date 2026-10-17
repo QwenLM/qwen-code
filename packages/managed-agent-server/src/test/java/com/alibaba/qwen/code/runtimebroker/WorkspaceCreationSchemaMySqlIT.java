@@ -54,7 +54,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(8, ManagedSchema.schemaVersion(source));
+            assertEquals(9, ManagedSchema.schemaVersion(source));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_session"))
                     .usingRecursiveComparison().isEqualTo(session);
             assertThat(jdbc.queryForMap("SELECT * FROM ma_turn"))
@@ -87,7 +87,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(8, ManagedSchema.schemaVersion(source));
+            assertEquals(9, ManagedSchema.schemaVersion(source));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
                     .usingRecursiveComparison().isEqualTo(existing);
             operation(jdbc, "created", "WORKSPACE_CREATE");
@@ -121,7 +121,7 @@ class WorkspaceCreationSchemaMySqlIT {
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
-            assertEquals(8, ManagedSchema.schemaVersion(source));
+            assertEquals(9, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement();
                     var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
@@ -130,6 +130,7 @@ class WorkspaceCreationSchemaMySqlIT {
                         "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
                 statement.execute("ALTER TABLE ma_request_receipt ADD "
                         + baselineCheck(baseline, "ck_ma_request_namespace"));
+                statement.execute("DROP INDEX ix_ma_runtime_session_harness ON ma_runtime_session");
                 statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
                 statement.execute("ALTER TABLE ma_operation ADD "
                         + baselineCheck(baseline, "ck_ma_operation_kind"));
@@ -162,7 +163,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(8, ManagedSchema.schemaVersion(source));
+            assertEquals(9, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(
