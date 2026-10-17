@@ -903,6 +903,7 @@ it('resolves a durable execution status for recovery reports', async () => {
   }));
   await expect(broker.status('execution')).resolves.toEqual({
     state: 'settled',
+    executionStatus: 'success',
   });
 });
 
