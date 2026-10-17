@@ -269,8 +269,8 @@ class HostedWorkflowFaultGatesIT {
         String sessionId = session.get("sessionId").toString();
         String name = session.get("name").toString();
         assertThat(report.path("case").asText()).isEqualTo(name);
-        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
-                "child_run");
+        JsonNode record = HostedGateTestSupport.extensionRecord(jdbc,
+                tenant, sessionId, "child_run");
         // The workflow kind's identity: the record names the kind, and the
         // pin is the launch's own digest — computed over the script the
         // driver authored, never re-resolved from anywhere later.
@@ -346,23 +346,6 @@ class HostedWorkflowFaultGatesIT {
             }
             default -> throw new IllegalArgumentException(name);
         }
-    }
-
-    private JsonNode extensionRecord(JdbcTemplate jdbc, String tenant,
-            String sessionId, String domain) throws Exception {
-        var rows = jdbc.queryForList(
-                "SELECT record_resource_id FROM"
-                        + " ma_session_record WHERE"
-                        + " tenant_id = ? AND session_id = ? AND domain = ?",
-                tenant, sessionId, domain);
-        assertThat(rows).as(domain + " records").hasSize(1);
-        var resources = jdbc.queryForList(
-                "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " ma_resource WHERE tenant_id = ?"
-                        + " AND session_id = ? AND resource_id = ?", tenant,
-                sessionId, rows.getFirst().get("record_resource_id"));
-        assertThat(resources).hasSize(1);
-        return json.readTree(resources.getFirst().get("body").toString());
     }
 
     private static void deleteRecursively(Path root) throws java.io.IOException {
