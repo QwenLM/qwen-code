@@ -9,6 +9,7 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.util.List;
@@ -36,10 +37,18 @@ public final class ApiModels {
             JsonNode workspace) {
     }
 
+    // D7-3: admission_profile asks a Turn input or cancel for the
+    // java_durable admission view; absent means harness_confirmed.
     public record SessionEventRequest(@NotBlank String type,
             @Size(max = 100) List<@Valid InputBlock> input,
-            @JsonProperty("turn_id") String turnId) {
+            @JsonProperty("turn_id") String turnId,
+            @Pattern(regexp = ADMISSION_PROFILES)
+            @JsonProperty("admission_profile") String admissionProfile) {
     }
+
+    /** The admission profiles a Turn input or cancel may ask for (D7-3). */
+    public static final String ADMISSION_PROFILES =
+            "harness_confirmed|java_durable";
 
     public record UpdateSessionRequest(
             // Single policy owner: ManagedAgentService.validRenameTitle
@@ -54,7 +63,14 @@ public final class ApiModels {
             @JsonProperty("session_id") String sessionId,
             @JsonProperty("turn_id") String turnId,
             String status,
-            boolean replayed) {
+            boolean replayed,
+            @JsonProperty("operation_id") String operationId,
+            @JsonProperty("admission_stage") String admissionStage,
+            @JsonProperty("delivery_state") String deliveryState) {
+        public CommandAdmission(String sessionId, String turnId,
+                String status, boolean replayed) {
+            this(sessionId, turnId, status, replayed, null, null, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -91,7 +107,8 @@ public final class ApiModels {
             @JsonProperty("session_archive") boolean sessionArchive,
             @JsonProperty("session_unarchive") boolean sessionUnarchive,
             @JsonProperty("session_delete") boolean sessionDelete,
-            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("durable_operations") Boolean durableOperations) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
@@ -99,7 +116,8 @@ public final class ApiModels {
             boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -285,17 +303,20 @@ public final class ApiModels {
     public record WebShellSubmitRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
             @Size(max = 100) List<@Valid InputBlock> input,
-            Map<String, Object> metadata) {
+            Map<String, Object> metadata,
+            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
     }
 
     public record WebShellCancelRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
-            @NotBlank String turnId) {
+            @NotBlank String turnId,
+            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellAdmission(String sessionId, String turnId,
-            String status, boolean replayed) {
+            String status, boolean replayed, String operationId,
+            String admissionStage, String deliveryState) {
     }
 
     public record WebShellLifecycleRequest(@NotBlank String sessionId,
