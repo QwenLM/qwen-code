@@ -12,7 +12,7 @@ import java.util.List;
 /** JDBC logical Runtime Session repository. */
 public final class JdbcRuntimeSessionRepository
         implements RuntimeSessionRepository {
-    private static final String SESSION_COLUMNS = String.join(", ",
+    static final String SESSION_COLUMNS = String.join(", ",
             "scope_key", "runtime_session_id", "tenant_id", "workspace_id",
             "workspace_generation", "canonical_cwd", "capability_digest",
             "isolation_class", "harness_session_id", "turn_kind",
@@ -273,6 +273,38 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
+    public List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId, String harnessSessionId,
+            RuntimeSessionRecord after, int limit) {
+        BrokerValues.requireId(tenantId, "tenantId");
+        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Release batch must contain 1-100 Sessions");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeSessionRecord> result = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
+                    + " FROM ma_runtime_session WHERE harness_session_id = ? AND tenant_id = ?"
+                    + " AND session_state NOT IN ('RELEASED', 'FAILED')"
+                    + " AND (scope_key > ? OR scope_key = ? AND runtime_session_id > ?)"
+                    + " ORDER BY scope_key, runtime_session_id LIMIT ?")) {
+                String afterScope = after == null ? "" : JdbcRepositorySupport.scopeKey(after.getSession().getScope());
+                JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
+                JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+                statement.setString(3, afterScope);
+                statement.setString(4, afterScope);
+                JdbcRepositorySupport.setIdentity(statement, 5, after == null ? "" : after.getRuntimeSessionId());
+                statement.setInt(6, limit);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        result.add(mapSession(rows));
+                    }
+                }
+            }
+            return List.copyOf(result);
+        });
+    }
+
+    @Override
     public long countActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");
@@ -363,7 +395,7 @@ public final class JdbcRuntimeSessionRepository
         }
     }
 
-    private static RuntimeSessionRecord mapSession(ResultSet result)
+    static RuntimeSessionRecord mapSession(ResultSet result)
             throws SQLException {
         RuntimeScope scope = new RuntimeScope(result.getString("tenant_id"),
                 result.getString("workspace_id"),

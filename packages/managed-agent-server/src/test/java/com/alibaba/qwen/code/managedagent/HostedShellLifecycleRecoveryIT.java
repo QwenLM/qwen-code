@@ -471,6 +471,10 @@ class HostedShellLifecycleRecoveryIT {
             var properties = new LinkedHashMap<String, Object>();
             properties.put("server.address", "127.0.0.1");
             properties.put("server.port", springPort);
+            properties.put("spring.mvc.log-request-details", false);
+            properties.put("logging.level.org.springframework.web.servlet.DispatcherServlet", "DEBUG");
+            properties.put("logging.level.org.springframework.web.servlet.mvc.method.annotation."
+                    + "ExceptionHandlerExceptionResolver", "DEBUG");
             properties.put("spring.datasource.url", required("mysql.url"));
             properties.put("spring.datasource.driver-class-name", "com.mysql.cj.jdbc.Driver");
             properties.put("spring.datasource.username", required("mysql.user"));
@@ -646,9 +650,12 @@ class HostedShellLifecycleRecoveryIT {
             } finally {
                 Path evidence = Path.of("target/l4-shell-lifecycle", cut);
                 Files.createDirectories(evidence);
-                try (var files = Files.list(root)) {
-                    for (Path file : files.filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
-                        Files.copy(file, evidence.resolve(file.getFileName()), StandardCopyOption.REPLACE_EXISTING);
+                // Walk, not list: the daemon log sits under runtime/debug/daemon/.
+                try (var files = Files.walk(root)) {
+                    for (Path file : files.filter(Files::isRegularFile).filter(file -> file.toString().endsWith(".log") || file.getFileName().toString().equals("evidence.json")).toList()) {
+                        Path target = evidence.resolve(root.relativize(file).toString());
+                        Files.createDirectories(target.getParent());
+                        Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING);
                     }
                 }
             }
