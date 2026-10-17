@@ -257,6 +257,18 @@ describe('rateLimit', () => {
       },
     );
 
+    it.each([
+      '/sessions/live-state',
+      '/sessions/live-state/',
+      '/SESSIONS/LIVE-STATE',
+    ])('charges %s to the read quota', (path) => {
+      const next = vi.fn();
+      limiter.middleware(mockReq({ path }), mockRes(), next);
+      const res = mockRes();
+      limiter.middleware(mockReq({ path }), res, vi.fn());
+      expect(res.body).toMatchObject({ tier: 'read' });
+    });
+
     it('keeps neighboring catalog paths in the mutation tier', () => {
       const path = '/sessions/catalog/extra';
       limiter.middleware(mockReq({ path }), mockRes(), vi.fn());
