@@ -342,6 +342,9 @@ public final class WorkspaceMigrationStore {
                 + " ON t.tenant_id = s.tenant_id AND t.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')") == 0,
                 "migration_work_unsettled");
+        // A parked task cancel counts here although it holds no lifecycle
+        // hostage: its acceptance is unknown and its task may still use this
+        // storage, so the move waits for the reconciler (D7-2).
         check(count("SELECT COUNT(*) FROM ma_session s JOIN ma_operation o"
                 + " ON o.session_scope_key = s.session_scope_key AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL') AND o.state NOT IN ('COMPLETED', 'FAILED')") == 0,
