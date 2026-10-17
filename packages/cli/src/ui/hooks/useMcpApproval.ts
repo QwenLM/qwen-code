@@ -83,15 +83,20 @@ export const useMcpApproval = (config: Config) => {
     const servers = config.getMcpServers() ?? {};
     const approvals = loadMcpApprovals();
     const root = config.getWorkingDir();
-    return Object.entries(servers)
-      .filter(([, c]) => isGatedMcpScope(c.scope))
-      .filter(([name, c]) => approvals.getState(root, name, c) === 'pending')
-      .map(([name, c]) => ({
-        name,
-        config: c,
-        summary: summarize(c),
-        source: sourceLabel(c.scope),
-      }));
+    return (
+      Object.entries(servers)
+        .filter(([, c]) => isGatedMcpScope(c.scope))
+        // An excluded / disabled server cannot connect, so approving it would
+        // persist a decision that does nothing; `getMcpServers()` keeps it listed.
+        .filter(([name]) => !config.isMcpServerDisabled(name))
+        .filter(([name, c]) => approvals.getState(root, name, c) === 'pending')
+        .map(([name, c]) => ({
+          name,
+          config: c,
+          summary: summarize(c),
+          source: sourceLabel(c.scope),
+        }))
+    );
   }, [config]);
 
   // Initial queue at startup.
