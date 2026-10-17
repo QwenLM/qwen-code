@@ -1322,12 +1322,18 @@ describe('Hosted Harness no-tool session', () => {
         .set('X-Qwen-Client-Id', clientId)
         .send(body);
     const idle = () =>
-      vi.waitFor(async () => {
-        const result = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(result.body.hasActivePrompt).toBe(false);
-      });
+      vi.waitFor(
+        async () => {
+          const result = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(result.body.hasActivePrompt).toBe(false);
+        },
+        // The turn's settle crosses fsync-backed journal commits before the
+        // active flag clears; the default 1s waitFor window flaked on a loaded
+        // CI runner (#14101, #13219).
+        { timeout: 10_000 },
+      );
     await send().expect(202);
     await idle();
     expect(state.model.mock.calls[0][0].modelSelection).toEqual(
