@@ -7858,17 +7858,16 @@ export function registerHostedHarnessSessionRoutes(
           break;
         }
         case 'answered': {
+          let parsedReply: SessionCommandReply;
           try {
-            await commands.answered(
-              commandId,
-              parseSessionCommandReply(body?.['reply']),
-            );
+            parsedReply = parseSessionCommandReply(body?.['reply']);
           } catch (cause) {
             if (cause instanceof ManagedSessionRecordError) {
               return error(res, 400, 'invalid_command_operation');
             }
             throw cause;
           }
+          await commands.answered(commandId, parsedReply);
           break;
         }
         case 'cancelled':
