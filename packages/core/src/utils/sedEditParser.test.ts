@@ -197,6 +197,39 @@ describe('sedEditParser', () => {
     expect(applySed("sed -i 's/a$-/X/g' file.txt", 'a$- a')).toBe('X a');
   });
 
+  // GNU sed anchors ^ right after \( or \|, and $ right before \) or \|.
+  // Measured against GNU sed 4.9: s/\(^foo\)/Z/ on "xxfoo\nfoo\n" writes
+  // "xxfoo\nZ\n", and s/\(foo$\)/Z/ writes "xxZ\nZ\nfoobar\n".
+  it('anchors BRE ^ and $ at group and alternation boundaries', () => {
+    expect(applySed("sed -i 's/\\(^foo\\)/Z/' f.txt", 'xxfoo\nfoo\n')).toBe(
+      'xxfoo\nZ\n',
+    );
+    expect(
+      applySed("sed -i 's/\\(foo$\\)/Z/' f.txt", 'xxfoo\nfoo\nfoobar\n'),
+    ).toBe('xxZ\nZ\nfoobar\n');
+    expect(
+      applySed("sed -i 's/\\(^foo$\\)/Z/' f.txt", 'foo\nfoobar\nxfoo\n'),
+    ).toBe('Z\nfoobar\nxfoo\n');
+    expect(
+      applySed(
+        "sed -i 's/\\(foo$\\|^bar\\)/Z/' f.txt",
+        'foo\nxxfoo\nbar\nxbar\n',
+      ),
+    ).toBe('Z\nxxZ\nZ\nxbar\n');
+    expect(
+      applySed("sed -i 's/foo\\|^bar/Z/' f.txt", 'bar\nxxbar\nfoo\n'),
+    ).toBe('Z\nxxbar\nZ\n');
+    expect(
+      applySed("sed -i 's/foo$\\|bar/Z/' f.txt", 'foo\nfoobar\nbar\n'),
+    ).toBe('Z\nfooZ\nZ\n');
+    // ^ that is not the first character of the group stays a literal.
+    expect(applySed("sed -i 's/\\(a^b\\)/X/' f.txt", 'a^b\n')).toBe('X\n');
+    // An even run of backslashes is a literal \, so "(^" is not a group.
+    expect(applySed("sed -i 's/\\\\(^/X/' f.txt", 'a\\(^b\n(^b\n')).toBe(
+      'aXb\n(^b\n',
+    );
+  });
+
   it('applies non-global substitutions once per line', () => {
     expect(applySed("sed -i 's/foo/bar/' file.txt", 'foo foo\nfoo foo')).toBe(
       'bar foo\nbar foo',

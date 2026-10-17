@@ -544,11 +544,13 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
       continue;
     }
 
-    if (char === '^' && i !== 0) {
+    // Escaping every non-initial ^/$ made s/\(^foo$\)/ look for the literal
+    // characters ^foo$. GNU sed still anchors at those group and \| boundaries.
+    if (char === '^' && !isBreCaretAnchor(pattern, i)) {
       jsPattern += '\\^';
       continue;
     }
-    if (char === '$' && i !== pattern.length - 1) {
+    if (char === '$' && !isBreDollarAnchor(pattern, i)) {
       jsPattern += '\\$';
       continue;
     }
@@ -556,6 +558,36 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
     jsPattern += BRE_OPERATORS.has(char) ? `\\${char}` : char;
   }
   return jsPattern;
+}
+
+function hasOddBackslashRun(pattern: string, index: number): boolean {
+  let count = 0;
+  for (let j = index; j >= 0 && pattern[j] === '\\'; j--) {
+    count++;
+  }
+  return count % 2 === 1;
+}
+
+// BRE anchors ^ at the start of the expression and immediately after \( or \|,
+// and $ at the end and immediately before \) or \|. An even run of backslashes
+// is a literal \, so \\(^ is not a group.
+function isBreCaretAnchor(pattern: string, index: number): boolean {
+  if (index === 0) {
+    return true;
+  }
+  const prev = pattern[index - 1];
+  if (index < 2 || (prev !== '(' && prev !== '|')) {
+    return false;
+  }
+  return hasOddBackslashRun(pattern, index - 2);
+}
+
+function isBreDollarAnchor(pattern: string, index: number): boolean {
+  if (index === pattern.length - 1) {
+    return true;
+  }
+  const marker = pattern[index + 2];
+  return pattern[index + 1] === '\\' && (marker === ')' || marker === '|');
 }
 
 function unescapeSedDelimiter(pattern: string): string {
