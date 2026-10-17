@@ -1000,15 +1000,17 @@ describe('getStartupContextLength', () => {
     [
       'is 2 for rewind with attachments folded into the summary (#14325)',
       [
+        // Real composer shape: summary at parts[0], then the bare plan-mode
+        // reminder and the file restoration block as separate parts.
         content(
           'user',
+          { text: 'summary\n\nResume the prior task...' },
+          { text: '<plan-mode-active>\nplan\n</plan-mode-active>' },
           {
             text:
-              'summary\n\nResume the prior task...\n' +
               'Recently accessed file (full current content embedded):\n\n' +
               '## /repo/file.ts\n\n```ts\nexport const x = 1;\n```',
           },
-          { text: '<system-reminder>\nplan mode\n</system-reminder>' },
         ),
         compressionAck(),
       ],

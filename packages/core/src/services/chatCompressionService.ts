@@ -41,6 +41,7 @@ import {
   countToolResponseImages,
   postProcessSummary,
   stripAnalysisBlock,
+  trailingTurnPartsForAck,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
 
@@ -1251,11 +1252,14 @@ export class ChatCompressionService {
         // functionResponse (auto-compaction mid-tool-loop) keeps its matching
         // call — otherwise the next request has an orphaned functionResponse
         // → 400. (Manual orphans were already stripped above.) Folding into
-        // the ack avoids a model→model adjacency.
+        // the ack avoids a model→model adjacency. Same parts as the composer
+        // keeps (functionCall + plain narration text), so the degraded path
+        // does not lose the trailing turn's text either.
         const trailingFc = historyForCompose[historyForCompose.length - 1];
         const fcParts =
-          trailingFc?.role === 'model'
-            ? (trailingFc.parts ?? []).filter((p) => !!p.functionCall)
+          trailingFc?.role === 'model' &&
+          trailingFc.parts?.some((p) => !!p.functionCall)
+            ? trailingTurnPartsForAck(trailingFc)
             : [];
         // Re-apply the SAME plan-mode + subagent reminders the normal path
         // injects. These builders are pure (no disk I/O / history walking),
@@ -1328,13 +1332,25 @@ export class ChatCompressionService {
         // compressionOutputTokenCount. Estimate their cost locally so the
         // inflation guard below fires when attachments dominate the
         // post-compact size.
-        const restorationChars = extraHistory
-          .slice(2) // skip [summary, model ack]
-          .reduce(
-            (acc, c) =>
-              acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
-            0,
-          );
+        //
+        // Since #14325 the composer folds these blocks (and the plan-mode /
+        // subagent reminders) into the summary entry itself, so they live in
+        // `extraHistory[0].parts[1..]` rather than in separate trailing
+        // entries. Measure them where they are: every part of the first entry
+        // except the summary text (already paid for by
+        // compressionOutputTokenCount), plus any entries after the ack. Do not
+        // infer "no attachments" from the entry count — both the composer and
+        // the degraded fallback above always emit 2 entries.
+        const [summaryEntry, , ...trailingEntries] = extraHistory;
+        const restorationEntries: Content[] = [
+          { role: 'user', parts: (summaryEntry?.parts ?? []).slice(1) },
+          ...trailingEntries,
+        ];
+        const restorationChars = restorationEntries.reduce(
+          (acc, c) =>
+            acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
+          0,
+        );
         newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
       } else {
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(

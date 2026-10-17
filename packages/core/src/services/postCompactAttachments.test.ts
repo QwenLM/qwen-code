@@ -779,6 +779,63 @@ import {
   postProcessSummary,
 } from './postCompactAttachments.js';
 
+const ACK_TEXT = 'Got it. Thanks for the additional context!';
+const RESTORED_FILE_BODY = 'export const restored = 1;';
+
+// Mirrors the manual /compress input: the trailing model+functionCall was
+// already stripped, and a file read earlier produces a restoration
+// attachment, so the with-attachments shape (which used to end on a user
+// entry) is exercised. Shared by the composer-shape test and the #14325
+// interruption/rewind tests so they cannot drift apart. The call and its
+// response carry `id: 'call-1'` because the restore-path test records it as
+// a completed tool call id.
+async function composeManualCompressHistory(
+  tmpDir: string,
+  opts: { planModeActive?: boolean } = {},
+): Promise<Content[]> {
+  const realFile = join(tmpDir, 'restored.ts');
+  writeFileSync(realFile, RESTORED_FILE_BODY);
+  const history: Content[] = [
+    { role: 'user', parts: [{ text: 'read it' }] },
+    {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-1',
+            name: 'read_file',
+            args: { file_path: realFile },
+          },
+        },
+      ],
+    },
+    {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'ok' },
+          },
+        },
+      ],
+    },
+    { role: 'model', parts: [{ text: 'done reading' }] },
+  ];
+  const composed = await composePostCompactHistory(history, 'SUM', {
+    workspaceRoot: tmpDir,
+    planModeActive: opts.planModeActive,
+  });
+  // Guard: the attachment really was emitted.
+  const allText = composed
+    .flatMap((c) => c.parts ?? [])
+    .map((p) => (p as { text?: string }).text ?? '')
+    .join('\n');
+  expect(allText).toContain(RESTORED_FILE_BODY);
+  return composed;
+}
+
 describe('composePostCompactHistory', () => {
   let tmpDir: string;
   beforeEach(() => {
@@ -970,8 +1027,15 @@ describe('composePostCompactHistory', () => {
       {
         role: 'model',
         parts: [
-          { text: 'editing' },
-          { functionCall: { name: 'edit', args: { file_path: realFile } } },
+          { text: 'internal reasoning', thought: true },
+          { text: 'I need one decision from you before I touch the schema' },
+          {
+            functionCall: {
+              id: 'call-edit',
+              name: 'edit',
+              args: { file_path: realFile },
+            },
+          },
         ],
       },
     ];
@@ -981,7 +1045,23 @@ describe('composePostCompactHistory', () => {
     expect(result).toHaveLength(2);
     expect(result[0].role).toBe('user');
     expect(result[1].role).toBe('model');
-    expect(result[1].parts?.some((p) => !!p.functionCall)).toBe(true);
+    // The ack must stay parts[0]: detectCompressedPrefixLength matches it
+    // positionally for rewind indexing.
+    expect((result[1].parts?.[0] as { text?: string }).text).toBe(ACK_TEXT);
+    // The trailing turn keeps its functionCall (original id) AND its plain
+    // narration text; the auto-compaction side-query excludes this turn when
+    // no tool result is pending, so the summary cannot carry that text.
+    // Thought parts are not carried over.
+    expect(result[1].parts?.slice(1)).toEqual([
+      { text: 'I need one decision from you before I touch the schema' },
+      {
+        functionCall: {
+          id: 'call-edit',
+          name: 'edit',
+          args: { file_path: realFile },
+        },
+      },
+    ]);
     // Attachments live on the summary entry (not a trailing user turn).
     const summaryText = (result[0].parts ?? [])
       .map((p) => (p as { text?: string }).text ?? '')
@@ -993,44 +1073,18 @@ describe('composePostCompactHistory', () => {
     // Manual /compress strips trailing model+functionCall before compose.
     // Previously that left [user(sum), model(ack), user(attach)] and
     // detectTurnInterruption classified the idle snapshot as interrupted_prompt.
-    const realFile = join(tmpDir, 'manual.ts');
-    writeFileSync(realFile, 'export const manual = 1;');
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'read it' }] },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: { name: 'read_file', args: { file_path: realFile } },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'read_file',
-              response: { output: 'ok' },
-            },
-          },
-        ],
-      },
-      { role: 'model', parts: [{ text: 'done reading' }] },
-    ];
-    const result = await composePostCompactHistory(history, 'SUM', {
-      workspaceRoot: tmpDir,
-    });
+    const result = await composeManualCompressHistory(tmpDir);
     expect(result).toHaveLength(2);
     expect(result[0].role).toBe('user');
     expect(result[result.length - 1].role).toBe('model');
     expect(result[result.length - 1].parts?.some((p) => !!p.functionCall)).toBe(
       false,
     );
+    expect(result[1].parts).toEqual([{ text: ACK_TEXT }]);
     const summaryText = (result[0].parts ?? [])
       .map((p) => (p as { text?: string }).text ?? '')
       .join('\n');
-    expect(summaryText).toContain('export const manual = 1;');
+    expect(summaryText).toContain(RESTORED_FILE_BODY);
   });
 
   it('skips files outside the workspace root (Finding 4)', async () => {
@@ -1628,6 +1682,7 @@ describe('composePostCompactHistory — subagent snapshot', () => {
 });
 
 import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 import { buildSessionHistoryFromConversation } from './session-api-history.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -1641,62 +1696,54 @@ describe('post-/compress history is not classified as interrupted (#14325)', () 
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  // Mirrors the manual /compress input: the trailing model+functionCall was
-  // already stripped, and a file read earlier produces a restoration
-  // attachment, so postAckParts is non-empty.
-  async function composeManualCompressHistory(): Promise<Content[]> {
-    const realFile = join(tmpDir, 'restored.ts');
-    writeFileSync(realFile, 'export const restored = 1;');
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'read it' }] },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call-1',
-              name: 'read_file',
-              args: { file_path: realFile },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'read_file',
-              response: { output: 'ok' },
-            },
-          },
-        ],
-      },
-      { role: 'model', parts: [{ text: 'done reading' }] },
-    ];
-    const composed = await composePostCompactHistory(history, 'SUM', {
-      workspaceRoot: tmpDir,
-    });
-    // Guard: the attachment really was emitted, so this exercises the
-    // with-attachments shape that used to end on a user entry.
-    const allText = composed
-      .flatMap((c) => c.parts ?? [])
-      .map((p) => (p as { text?: string }).text ?? '')
-      .join('\n');
-    expect(allText).toContain('export const restored = 1;');
-    return composed;
-  }
-
   it('live session: composed history installed via setHistory classifies as none', async () => {
-    const composed = await composeManualCompressHistory();
+    const composed = await composeManualCompressHistory(tmpDir);
     // Live recovery (Session#getRecoveryPlan) classifies chat.getHistory(),
     // which is the composed array; no completed tool-call ids survive.
     expect(detectTurnInterruption(composed).kind).toBe('none');
   });
 
+  it('rewind indexing still sees the 2-entry compressed prefix (plan mode + restored file)', async () => {
+    const composed = await composeManualCompressHistory(tmpDir, {
+      planModeActive: true,
+    });
+    expect(composed[0].parts?.length).toBeGreaterThan(2);
+    // includeCompressed is the rewind-only view; refresh/restore paths must
+    // keep treating compressed history as having no startup prelude.
+    expect(getStartupContextLength(composed, { includeCompressed: true })).toBe(
+      2,
+    );
+    expect(getStartupContextLength(composed)).toBe(0);
+
+    // Same with a preserved trailing functionCall folded into the ack: the
+    // ack text must stay parts[0] of the model entry for rewind to match.
+    const withCall = await composePostCompactHistory(
+      [
+        { role: 'user', parts: [{ text: 'go' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'calling' },
+            {
+              functionCall: {
+                id: 'c2',
+                name: 'read_file',
+                args: { file_path: join(tmpDir, 'restored.ts') },
+              },
+            },
+          ],
+        },
+      ],
+      'SUM',
+      { workspaceRoot: tmpDir, planModeActive: true },
+    );
+    expect(getStartupContextLength(withCall, { includeCompressed: true })).toBe(
+      2,
+    );
+  });
+
   it('restored session: chat_compression record rebuilt from transcript classifies as none', async () => {
-    const composed = await composeManualCompressHistory();
+    const composed = await composeManualCompressHistory(tmpDir);
     const base = {
       sessionId: 'session',
       timestamp: '2026-10-15T00:00:00.000Z',
