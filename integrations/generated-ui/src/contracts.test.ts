@@ -104,6 +104,41 @@ describe('immutable generated view contract', () => {
     expect(document.summary).toBe('Lineonevalue');
   });
 
+  it('preserves text and emoji joiners while binding the normalized public fields', () => {
+    const candidate = {
+      ...input,
+      title: '中文👩‍💻\u202eTitle\u200b',
+      summary: 'A\u200cB\r\nLine\tvalue\u0007\u0085\u00ad\ufeff\u2028\u2029',
+    };
+    const normalized = {
+      ...candidate,
+      title: '中文👩‍💻Title',
+      summary: 'A\u200cB\nLine\tvalue',
+    };
+    const result = createShowResult(candidate);
+    const document = parseToolResult(result);
+    expect(document).toMatchObject(normalized);
+    expect(document.documentId).toBe(hashDocument(normalized));
+    expect(result.structuredContent).toMatchObject({
+      title: normalized.title,
+      summary: normalized.summary,
+      documentId: document.documentId,
+    });
+    expect(result.content).toEqual([
+      { type: 'text', text: `${normalized.title}\n${normalized.summary}` },
+    ]);
+    expect(candidate.title).toContain('\u202e');
+  });
+
+  it.each(['title', 'summary'] as const)(
+    'rejects a %s that becomes empty after display normalization',
+    (field) => {
+      expect(() =>
+        createShowResult({ ...input, [field]: '\u202e\u0007' }),
+      ).toThrow('Invalid generated view document.');
+    },
+  );
+
   it('rejects a stored snapshot whose title or summary was not swept', () => {
     const raw = { ...input, title: 'Rate\u202edeliah' };
     const document = {

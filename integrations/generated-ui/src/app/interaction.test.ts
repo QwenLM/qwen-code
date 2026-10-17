@@ -160,6 +160,46 @@ describe('interactions while a worker response is pending', () => {
     expect(h.content.getElementById('answer')!.textContent).toBe('9');
   });
 
+  it('applies a select commit despite the trailing change notification', async () => {
+    const h = await harness(
+      `ui.on('rate', 'input', () => {
+        const value = ui.input('rate').value;
+        ui.value('rate', value);
+        ui.text('answer', '$' + Number(value) * 10);
+      });
+      ui.on('rate', 'change', (event) => ui.text('eventValue', event.type + ':' + event.value));`,
+      '<select id="rate"><option value="1">One</option><option value="2">Two</option></select><output id="answer"></output><output id="eventValue"></output>',
+    );
+    h.enter('2');
+    h.input.dispatchEvent(new Event('change', { bubbles: true }));
+    h.deliver();
+    h.deliver();
+    expect(h.input.value).toBe('2');
+    expect(h.content.getElementById('answer')!.textContent).toBe('$20');
+    expect(h.content.getElementById('eventValue')!.textContent).toBe(
+      'change:2',
+    );
+  });
+
+  it('preserves a genuinely newer edit delivered only through change', async () => {
+    const h = await harness(`
+      ui.on('rate', 'change', () => {
+        const value = ui.input('rate').value;
+        ui.value('rate', value);
+        ui.text('answer', String(Number(value) * 2));
+      });
+    `);
+    for (const value of ['5', '50']) {
+      h.input.value = value;
+      h.input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    h.deliver();
+    expect(h.input.value).toBe('50');
+    expect(h.content.getElementById('answer')!.textContent).toBe('');
+    h.deliver();
+    expect(h.content.getElementById('answer')!.textContent).toBe('100');
+  });
+
   it('discards all outputs derived from a value superseded by a queued edit', async () => {
     const h = await harness(`
       function calculate() { ui.text('answer', String(Number(ui.input('rate').value) * 2)); }

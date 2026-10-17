@@ -167,12 +167,10 @@ describe('UiRuntime', () => {
 
   it.each([
     ['loop', 'while (true) {}', /time limit/],
-    // An unbounded chain now runs into the documented 250 ms budget, the same
-    // stop as an unbounded synchronous loop.
     [
       'microtask loop',
       'function spin() { Promise.resolve().then(spin); } spin();',
-      /time limit/,
+      /microtask limit/,
     ],
     ['allocation', 'new ArrayBuffer(64 * 1024 * 1024);', /runtime limit/],
     ['recursion', '(function recur() { recur(); })();', /runtime limit/],
@@ -198,17 +196,23 @@ describe('UiRuntime', () => {
     expect(() => runtime.dispatch(event(), {})).toThrow(/stopped/);
   });
 
-  it('drains a bounded asynchronous chain past the removed job cap', () => {
-    const runtime = createRuntime();
-    expect(
-      runtime.initialize(
-        `(async () => {
-          for (let i = 0; i < 400; i++) await Promise.resolve();
-          ui.text('out', 'done');
-        })();`,
-        {},
-      ),
-    ).toEqual([{ kind: 'text', id: 'out', value: 'done' }]);
+  it('allows 256 microtask jobs and terminates a round needing one more', () => {
+    const script = (count: number) => `
+      let jobs = 0;
+      function next() {
+        if (++jobs < ${count}) Promise.resolve().then(next);
+        else ui.text('out', String(jobs));
+      }
+      Promise.resolve().then(next);
+    `;
+    expect(createRuntime().initialize(script(256), {})).toEqual([
+      { kind: 'text', id: 'out', value: '256' },
+    ]);
+    const exceeded = createRuntime();
+    expect(() => exceeded.initialize(script(257), {})).toThrow(
+      /microtask limit/,
+    );
+    expect(() => exceeded.dispatch(event(), {})).toThrow(/stopped/);
   });
 
   it('cannot catch and hide an output limit violation', () => {

@@ -119,7 +119,9 @@ export class ViewSurface {
     if (html.length > MAX_MARKUP)
       throw new Error('Generated markup is too large.');
     const fragment = this.purify.sanitize(html, {
-      ALLOWED_TAGS: TAGS,
+      // Keep the parser root: stripping it clones radios into their own group
+      // and clears the original checked state in Chromium. Only children return.
+      ALLOWED_TAGS: ['body', ...TAGS],
       ALLOWED_ATTR: ATTRS,
       ALLOW_DATA_ATTR: false,
       ALLOW_ARIA_ATTR: false,
@@ -130,13 +132,6 @@ export class ViewSurface {
     });
     if (fragment.querySelectorAll('*').length > MAX_NODES)
       throw new Error('The view contains too many elements.');
-    // Fragment parsing can drop a radio group's live checkedness; restore it
-    // from the checked attribute so the rendered control matches the markup.
-    for (const radio of fragment.querySelectorAll<HTMLInputElement>(
-      'input[type=radio]',
-    )) {
-      radio.checked = radio.hasAttribute('checked');
-    }
     return fragment;
   }
 
@@ -255,13 +250,6 @@ export class ViewSurface {
         throw new Error('A view update referenced a missing element.');
       switch (patch.kind) {
         case 'text':
-          if (element.tagName === 'TEXTAREA') {
-            // Route through .value so the input length bound applies.
-            (element as HTMLTextAreaElement).value = patch.value;
-            break;
-          }
-          if (element.tagName === 'INPUT' || element.tagName === 'SELECT')
-            throw new Error('Only plain elements have text content.');
           element.textContent = patch.value;
           break;
         case 'html': {

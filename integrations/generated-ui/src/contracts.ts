@@ -83,11 +83,9 @@ function checkResultBudget(value: unknown): void {
   }
 }
 
-// Same class as the CLI's inert-text rule: terminal control characters,
-// invisible formatting (bidi overrides, zero-width), and U+2028/U+2029.
 function sweep(value: string): string {
   return value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (character) =>
-    character === '\n' || character === '\t' ? character : '',
+    ['\n', '\t', '\u200c', '\u200d'].includes(character) ? character : '',
   );
 }
 
@@ -107,6 +105,9 @@ export function createShowResult(input: unknown): CallToolResult {
     title: sweep(parsed.data.title),
     summary: sweep(parsed.data.summary),
   };
+  if (!data.title || !data.summary) {
+    throw new Error('Invalid generated view document.');
+  }
   const document: GeneratedDocument = {
     schemaVersion: 1,
     documentId: hashDocument(data),
