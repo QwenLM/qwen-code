@@ -112,7 +112,6 @@ test('keeps CODEOWNERS lookalikes and mixed changes on the full profile', () => 
     ['.github/ISSUE_TEMPLATE/bug_report.yml'],
     ['.github/CODEOWNERS', 'packages/core/src/runtime.ts'],
     ['.github/CODEOWNERS', '.github/workflows/ci.yml'],
-    ['.github/CODEOWNERS', 'README.md'],
   ]) {
     assert.equal(classifyChangedFiles(files), 'full', files.join(', '));
   }
@@ -218,6 +217,10 @@ test('keeps docs mixed with helper files or Markdown off application tests', () 
   );
   assert.equal(
     classifyChangedFiles(['docs/usage.md', 'packages/web-shell/README.md']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles(['.github/CODEOWNERS', 'README.md']),
     'github_ci_only',
   );
 });
