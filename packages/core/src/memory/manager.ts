@@ -66,6 +66,10 @@ import {
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
 import {
+  EXTRACT_CADENCE_MAX_PENDING_ENTRIES,
+  getExtractNoopSkipTurns,
+} from './extract-cadence.js';
+import {
   runManagedAutoMemoryDream,
   type AutoMemoryDreamResult,
 } from './dream.js';
@@ -168,6 +172,12 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+  skippedHistory?: Content[];
+  /**
+   * Whether the turn's prompt stayed below the compaction warning threshold.
+   * Cadence skips (#13004) need `true`; near compaction every turn extracts.
+   */
+  belowCompactionWarn?: boolean;
 }
 
 export interface ScheduleSkillReviewParams {
@@ -653,7 +663,37 @@ export class MemoryManager {
   private readonly extractCurrentTaskId = new Map<string, string>();
   private readonly extractQueued = new Map<
     string,
-    { taskId: string; params: ScheduleExtractParams }
+    { taskId: string; params: ScheduleExtractParams; epoch: number }
+  >();
+  // #13004 cadence, per session and in memory only. A session switch drops
+  // both ids' entries (discardExtractCadence), so /clear, /resume and /branch
+  // never inherit another session's skips.
+  private readonly extractCadence = new Map<
+    string,
+    {
+      projectRoot: string;
+      armed: boolean;
+      skips: number;
+      lastExtractedLength: number;
+      pending?: ScheduleExtractParams;
+    }
+  >();
+  // Bumped by every cadence discard. An extraction that was in flight, or a
+  // trailing request already queued, when the discard lands drops its outcome:
+  // the discarded id can come back (/resume, or a failed resume restoring the
+  // old id), and must not be re-armed by a run the switch already left.
+  // Dropping an outcome only costs one arm. The epoch is captured where the
+  // request is queued, not where it starts, or a bump landing while it waits
+  // would be invisible to it.
+  private cadenceDiscardEpoch = 0;
+  // One shared flush run per session and snapshot (#13004), so overlapping
+  // boundaries over the same pending turns wait for one extraction instead of
+  // each passing on an entry the first one is already flushing, while a skip
+  // that lands behind a parked run gets its own run rather than the older
+  // one's answer. Each caller still applies its own timeout.
+  private readonly extractFlushRuns = new Map<
+    string,
+    { pending: ScheduleExtractParams; run: Promise<boolean> }
   >();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
@@ -1092,6 +1132,7 @@ export class MemoryManager {
    */
   async scheduleExtract(
     params: ScheduleExtractParams,
+    options: { bypassCadence?: boolean } = {},
   ): Promise<
     ReturnType<typeof runAutoMemoryExtract> extends Promise<infer T> ? T : never
   > {
@@ -1115,6 +1156,17 @@ export class MemoryManager {
           historyLength: params.history.length,
         },
       });
+      // The main agent saved memory itself; do not keep skipping on the
+      // strength of an older no-op. Drop the snapshot with it: a close-time
+      // flush would otherwise fork over the live tail (this turn's own memory
+      // write included) while its gate inspected the skipped turn.
+      this.cadenceDiscardEpoch += 1;
+      const cadence = this.extractCadence.get(params.sessionId);
+      if (cadence) {
+        cadence.armed = false;
+        cadence.skips = 0;
+        delete cadence.pending;
+      }
       if (wroteUserMemory && params.config) {
         await this.recordUserMutation(
           params.projectRoot,
@@ -1132,6 +1184,69 @@ export class MemoryManager {
       } as never;
     }
 
+    if (!options.bypassCadence && this.shouldSkipForCadence(params)) {
+      const record = makeTaskRecord(
+        'extract',
+        params.projectRoot,
+        params.sessionId,
+      );
+      this.storeWith(record, {
+        status: 'skipped',
+        progressText:
+          'Skipped: the last extraction saved nothing and recent turns still fit its window.',
+        metadata: {
+          skippedReason: 'cadence',
+          historyLength: params.history.length,
+        },
+      });
+      if (params.config) {
+        logMemoryExtract(
+          params.config,
+          new MemoryExtractEvent({
+            trigger: 'auto',
+            status: 'skipped',
+            skipped_reason: 'cadence',
+            patches_count: 0,
+            touched_topics: [],
+            duration_ms: 0,
+          }),
+        );
+      }
+      return {
+        touchedTopics: [],
+        skippedReason: 'cadence' as const,
+        cursor: {
+          sessionId: params.sessionId,
+          updatedAt: (params.now ?? new Date()).toISOString(),
+        },
+      } as never;
+    }
+
+    // Compaction and rewind shrink history without a session switch, so no
+    // discard fires. History only grows between this session's own requests,
+    // so a shorter one proves the parked snapshot predates the shrink. A flush
+    // replay is exempt: it runs a snapshot a newer skip replaced.
+    const cadenceNow = this.extractCadence.get(params.sessionId);
+    if (
+      !options.bypassCadence &&
+      cadenceNow?.pending !== undefined &&
+      params.history.length < cadenceNow.pending.history.length
+    ) {
+      delete cadenceNow.pending;
+    }
+
+    if (
+      cadenceNow?.pending &&
+      cadenceNow.projectRoot === params.projectRoot &&
+      params.history.length - cadenceNow.lastExtractedLength > 40
+    ) {
+      // A long following turn can evict skipped turns from the captured tail.
+      params = {
+        ...params,
+        skippedHistory: cadenceNow.pending.skippedHistory,
+      };
+    }
+
     if (this.extractRunning.has(params.projectRoot)) {
       const currentTaskId = this.extractCurrentTaskId.get(params.projectRoot);
       if (!currentTaskId) {
@@ -1147,8 +1262,11 @@ export class MemoryManager {
 
       const queued = this.extractQueued.get(params.projectRoot);
       if (queued) {
-        // Supersede the existing queued request with newer params
+        // Supersede the existing queued request with newer params, and refresh
+        // the epoch: a turn arriving after a switch must not be judged by one
+        // captured before it.
         queued.params = params;
+        queued.epoch = this.cadenceDiscardEpoch;
         const queuedRecord = this.tasks.get(queued.taskId);
         if (queuedRecord) {
           this.update(queuedRecord, {
@@ -1181,6 +1299,7 @@ export class MemoryManager {
         this.extractQueued.set(params.projectRoot, {
           taskId: record.id,
           params,
+          epoch: this.cadenceDiscardEpoch,
         });
       }
 
@@ -1201,6 +1320,313 @@ export class MemoryManager {
     );
     this.store(record);
     return this.track(record.id, this.runExtract(record.id, params)) as never;
+  }
+
+  /**
+   * #13004: skip this turn's extraction only when the previous run for the
+   * session engaged with memory and saved nothing, the skip budget is not
+   * spent, every unprocessed entry still fits the next run's history tail as
+   * measured at skip time, and the prompt is
+   * below the compaction warning. A skip records the turn as pending for
+   * {@link flushPendingExtract} and leaves the cursor untouched.
+   * Arming requires a completed run, so a skip can overlap this session's own
+   * extraction when that run is a trailing request with older history, and also
+   * when it is a direct run whose own gate returned false (see
+   * {@link recordCadenceOutcome}).
+   */
+  private shouldSkipForCadence(params: ScheduleExtractParams): boolean {
+    const budget = getExtractNoopSkipTurns();
+    const state = this.extractCadence.get(params.sessionId);
+    if (budget === 0 || !state?.armed || state.skips >= budget) return false;
+    // `/cd` and the daemon's `session/cd` relocate the project root without a
+    // session switch, so no discard fires and this entry outlives the project
+    // that earned it. An arm measured against one project's memory says
+    // nothing about the next one's, so it must not suppress a turn there.
+    if (state.projectRoot !== params.projectRoot) return false;
+    if (params.belowCompactionWarn !== true) return false;
+    const pendingEntries = params.history.length - state.lastExtractedLength;
+    if (
+      pendingEntries < 0 ||
+      pendingEntries > EXTRACT_CADENCE_MAX_PENDING_ENTRIES
+    ) {
+      return false;
+    }
+    state.skips += 1;
+    state.pending = {
+      ...params,
+      skippedHistory: params.history.slice(state.lastExtractedLength),
+    };
+    return true;
+  }
+
+  private recordCadenceOutcome(
+    params: ScheduleExtractParams,
+    result: Awaited<ReturnType<typeof runAutoMemoryExtract>> | undefined,
+    startEpoch: number,
+  ): void {
+    // Both early returns below drop this run's outcome, but a completed run
+    // already persisted its own project's extract cursor by the time it lands
+    // here — `runAutoMemoryExtract` writes it before returning. Record what
+    // that write covers before either exit can leave the entry behind it, or a
+    // later flush replays a snapshot this run extracted and persists the
+    // cursor backwards, which the next run then reads as a reason to re-scan
+    // everything after it. Only the snapshot this run's own root parked is
+    // covered: after a `/cd` the entry belongs to the live root, whose newer
+    // snapshot this run never extracted (see the guard below).
+    if (result && !result.skippedReason) {
+      const covered = this.extractCadence.get(params.sessionId);
+      if (
+        covered?.pending !== undefined &&
+        covered.pending.projectRoot === params.projectRoot &&
+        (result.cursor.processedOffset ?? 0) >= covered.pending.history.length
+      ) {
+        delete covered.pending;
+      }
+    }
+    if (startEpoch !== this.cadenceDiscardEpoch) return;
+    if (getExtractNoopSkipTurns() === 0) {
+      this.extractCadence.delete(params.sessionId);
+      return;
+    }
+    // `/cd` relocates the live Config in place and fires no discard, so a run
+    // still in flight for the old root lands here afterwards. It describes
+    // another project's memory and must not re-key the entry or drop the
+    // snapshot the new root parked. Compare the live root, not the carried
+    // entry's, or the first run after a `/cd` could never re-arm the cadence.
+    const liveProjectRoot = params.config?.getProjectRoot?.();
+    if (
+      liveProjectRoot !== undefined &&
+      liveProjectRoot !== params.projectRoot
+    ) {
+      return;
+    }
+    // A failed or unconsumed run retries without dropping skipped history.
+    if (
+      !result ||
+      (!result.skippedReason &&
+        (result.cursor.processedOffset ?? 0) < params.history.length)
+    ) {
+      const state = this.extractCadence.get(params.sessionId);
+      if (state) {
+        state.armed = false;
+        state.skips = 0;
+      }
+      return;
+    }
+    if (result.skippedReason) return;
+    // A trailing request queued before a later skip carries older history;
+    // keep that skipped turn pending rather than treating it as extracted, and
+    // keep its spent skip budget: the carried turn is still un-extracted, so
+    // refunding here would let a streak reach twice the documented N.
+    const carried = this.extractCadence.get(params.sessionId);
+    const previous = carried?.pending;
+    // History also shrinks under the snapshot when compaction runs, which is
+    // not a trailing request: a run shorter than what this session already
+    // extracted means the snapshot predates the shrink, so it must neither be
+    // carried forward nor replayed by a close-time flush.
+    const shrank =
+      carried !== undefined &&
+      params.history.length < carried.lastExtractedLength;
+    const carry =
+      !shrank &&
+      previous !== undefined &&
+      previous.history.length > params.history.length;
+    this.extractCadence.set(params.sessionId, {
+      projectRoot: params.projectRoot,
+      armed:
+        result.extractorEngaged === true && result.touchedTopics.length === 0,
+      skips: carry ? (carried?.skips ?? 0) : 0,
+      lastExtractedLength: params.history.length,
+      ...(carry && { pending: previous }),
+    });
+  }
+
+  /**
+   * Runs one extraction for turns the cadence skipped, before an ACP session
+   * close discards them. Other boundaries (compaction, `/clear`, `/resume`,
+   * `/branch`, process exit) do not flush: the experiment accepts losing up to
+   * N skipped turns there. The extraction reads the session's cache-safe
+   * params and checks the live session id, so the caller awaits it while the
+   * session is still current.
+   *
+   * Resolves `true` only when the pending turns were extracted. Resolves
+   * `false` when this call did not settle within `timeoutMs`, when the run
+   * extracted nothing (skipped or threw — the turns stay recorded so a later
+   * boundary can retry them), when the snapshot went stale before it ran, and
+   * when the budget expired while the shared run was parked: the run is then
+   * abandoned rather than left to fork after the caller has moved on, and the
+   * pending turns stay recorded for a later boundary.
+   * Overlapping calls for one session share a single run while keeping their
+   * own timeout. That shared run is tracked here, not in `inFlight`, so
+   * `drain()` does not wait for the flush wrapper itself — but the extraction
+   * it schedules goes through `scheduleExtract` and `track`, so `drain()` does
+   * wait for that extraction while it runs.
+   */
+  async flushPendingExtract(
+    sessionId: string,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const pending = this.extractCadence.get(sessionId)?.pending;
+    if (!pending) return true;
+    // Join a run only when it was started for this same snapshot: a skip that
+    // landed while an older run was parked replaced `pending`, and that run's
+    // answer describes turns this caller did not ask about.
+    let entry = this.extractFlushRuns.get(sessionId);
+    if (!entry || entry.pending !== pending) {
+      const deadline = Date.now() + timeoutMs;
+      const run = this.runPendingExtractFlush(sessionId, pending, deadline);
+      entry = { pending, run };
+      this.extractFlushRuns.set(sessionId, entry);
+      const started = entry;
+      void run.then(() => {
+        if (this.extractFlushRuns.get(sessionId) === started) {
+          this.extractFlushRuns.delete(sessionId);
+        }
+      });
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        entry.run,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => {
+            debugLogger.warn(
+              'Pending auto-memory extraction did not settle in time.',
+              sessionId,
+              timeoutMs,
+            );
+            resolve(false);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Drops the #13004 cadence state of the sessions a switch leaves and enters.
+   * Skipped turns are not flushed there, and a resumed id must not inherit an
+   * earlier skip.
+   */
+  discardExtractCadence(...sessionIds: string[]): void {
+    this.cadenceDiscardEpoch += 1;
+    for (const sessionId of sessionIds) this.extractCadence.delete(sessionId);
+  }
+
+  /**
+   * The shared body behind {@link flushPendingExtract}: waits for the project
+   * slot, then extracts the pending snapshot unless it went stale or the run
+   * outlived `deadline` (the creating caller's budget, which bounds the run
+   * itself, not only that caller's wait), and settles the cadence entry exactly
+   * once whenever it does run. A run abandoned for its deadline leaves the
+   * entry pending instead. Never rejects, so a boundary always gets a boolean.
+   */
+  private async runPendingExtractFlush(
+    sessionId: string,
+    pending: ScheduleExtractParams,
+    deadline: number,
+  ): Promise<boolean> {
+    try {
+      // This session's own in-flight or trailing extraction may hold the
+      // slot, and so can a run recorded for a session this Config has since
+      // left: `startNewSession()` mutates one canonical Config in place, so
+      // this manager outlives the session id, and both maps are keyed by
+      // projectRoot/taskId rather than by session. Wait for it and for any
+      // trailing request it starts.
+      for (;;) {
+        const taskId = this.extractCurrentTaskId.get(pending.projectRoot);
+        const active = taskId ? this.inFlight.get(taskId) : undefined;
+        if (!active) break;
+        await active.catch(() => undefined);
+      }
+      // `pending.config` is the live Config, which `startNewSession()` mutates
+      // in place, so a flush that outlived its boundary would otherwise fork
+      // against the *incoming* session: both sides of the cache-safe mismatch
+      // guard move together and it never fires. The session this snapshot
+      // describes is gone, so drop it rather than keep its history alive for a
+      // retry no boundary will ever ask for.
+      const liveSessionId = pending.config?.getSessionId();
+      if (liveSessionId !== undefined && liveSessionId !== pending.sessionId) {
+        this.extractCadence.delete(sessionId);
+        return false;
+      }
+      // `/cd` mutates that same live Config in place too
+      // (`relocateWorkingDirectory`), and the fork's conversation comes from
+      // the session's cache-safe capture, not from this snapshot's history:
+      // running a snapshot earned in project A after the session moved to B
+      // would read B's turns against A's memory and write A's memory from
+      // them. The session-id guard above cannot see a relocation, so check
+      // the root the same way. Only refuse this snapshot: the session lives on
+      // across a `/cd`, so a skip in the new root can have parked a newer one
+      // behind this flush, and that one is still owed the run.
+      const liveProjectRoot = pending.config?.getProjectRoot?.();
+      if (
+        liveProjectRoot !== undefined &&
+        liveProjectRoot !== pending.projectRoot
+      ) {
+        if (this.extractCadence.get(sessionId)?.pending === pending) {
+          this.extractCadence.delete(sessionId);
+        }
+        return false;
+      }
+      // The deadline bounds the run, not only the wait: a flush that outlived
+      // its boundary must not fork an extraction the close path has already
+      // torn the Config down under. Leave the snapshot pending so a later
+      // boundary can retry the turns.
+      if (Date.now() >= deadline) return false;
+      // The entry no longer holds this snapshot: a newer run for the session
+      // completed while the slot was held (leaving its own coverage, or a
+      // dropped snapshot behind) or a newer skip replaced it. Either way the
+      // state it carries describes turns this run never extracted, and
+      // replaying it forks over content that was already covered and persists
+      // the cursor backwards, which the next run then reads as a reason to
+      // re-scan everything after it. A replacement that *shrank* under the
+      // snapshot (compaction, then another skip) is the same case: the length
+      // test below cannot see it, because a shrink rewrites the cursor
+      // downward while the parked snapshot keeps a length no live history has.
+      // Leave the newer entry alone; only clear one this snapshot still owns.
+      const state = this.extractCadence.get(sessionId);
+      if (state !== undefined && state.pending !== pending) return false;
+      if (
+        state !== undefined &&
+        state.lastExtractedLength >= pending.history.length
+      ) {
+        this.extractCadence.delete(sessionId);
+        return false;
+      }
+      const result = await this.scheduleExtract(pending, {
+        bypassCadence: true,
+      });
+      // Nothing was extracted (session mismatch, memory pressure, a queued
+      // slot, or the throw below): keep the entry so the next boundary retries
+      // the same turns instead of a no-op consuming them.
+      if (
+        !result ||
+        result.skippedReason ||
+        (result.cursor.processedOffset ?? 0) < pending.history.length
+      ) {
+        return false;
+      }
+      // The run re-armed the cadence under the session this boundary is
+      // leaving behind, and `/resume` restores that id — drop the entry so a
+      // resumed session inherits no skip. The next completed run re-arms from
+      // scratch, including on the compaction boundary, where the session
+      // lives on. Only when this snapshot still owns the entry: a skip that
+      // landed while this run was parked left a newer snapshot pending, and
+      // that one describes turns this run never extracted.
+      const settled = this.extractCadence.get(sessionId);
+      if (!settled?.pending || settled.pending === pending) {
+        this.extractCadence.delete(sessionId);
+      }
+      return true;
+    } catch (error) {
+      debugLogger.warn(
+        'Failed to flush pending auto-memory extraction.',
+        error,
+      );
+      return false;
+    }
   }
 
   /**
@@ -1235,6 +1661,9 @@ export class MemoryManager {
   private async runExtract(
     taskId: string,
     params: ScheduleExtractParams,
+    // Captured when the request was queued: a bump landing while it waited must
+    // discard its outcome too, and `finally` starts it after that bump.
+    queuedEpoch?: number,
   ): Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>> {
     const record = this.tasks.get(taskId)!;
 
@@ -1247,6 +1676,7 @@ export class MemoryManager {
     });
 
     const t0 = Date.now();
+    const cadenceEpoch = queuedEpoch ?? this.cadenceDiscardEpoch;
     try {
       // Memory-pressure gate. Checked inside try so the finally block
       // always runs — extractRunning/extractCurrentTaskId are cleaned up
@@ -1282,6 +1712,7 @@ export class MemoryManager {
       }
 
       const result = await runAutoMemoryExtract(params);
+      this.recordCadenceOutcome(params, result, cadenceEpoch);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
           params.projectRoot,
@@ -1323,6 +1754,7 @@ export class MemoryManager {
       return result;
     } catch (error) {
       const durationMs = Date.now() - t0;
+      this.recordCadenceOutcome(params, undefined, cadenceEpoch);
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
@@ -1354,7 +1786,7 @@ export class MemoryManager {
     this.extractQueued.delete(projectRoot);
     await this.track(
       queued.taskId,
-      this.runExtract(queued.taskId, queued.params),
+      this.runExtract(queued.taskId, queued.params, queued.epoch),
     );
   }
 
@@ -2550,6 +2982,12 @@ export class MemoryManager {
     this.extractRunning.clear();
     this.extractCurrentTaskId.clear();
     this.extractQueued.clear();
+    this.extractCadence.clear();
+    this.extractFlushRuns.clear();
+    // Bump (never re-zero) the discard epoch: a run that started before the
+    // reset holds the old value and would otherwise pass the guard and re-arm
+    // an id this helper just cleared.
+    this.cadenceDiscardEpoch += 1;
   }
 
   /** Reset all dream scheduling state. */

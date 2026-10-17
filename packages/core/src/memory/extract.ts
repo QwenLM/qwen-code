@@ -41,9 +41,12 @@ export interface AutoMemoryExtractResult {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch';
+    | 'session_mismatch'
+    | 'cadence';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
+  /** The extractor ran and used a tool (read or wrote memory files). */
+  extractorEngaged?: boolean;
 }
 
 function getSessionMismatchResult(
@@ -129,6 +132,7 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
+  skippedHistory?: Content[];
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -199,6 +203,7 @@ export async function runAutoMemoryExtract(params: {
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
+    params.skippedHistory,
   );
 
   if (agentResult.touchedTopics.length > 0) {
@@ -258,5 +263,6 @@ export async function runAutoMemoryExtract(params: {
     touchedUserScope: agentResult.touchedUserScope,
     cursor,
     systemMessage: agentResult.systemMessage,
+    extractorEngaged: agentResult.extractorEngaged === true,
   };
 }
