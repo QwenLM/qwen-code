@@ -8,6 +8,8 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getOrderedStickyTodos,
+  STICKY_TODO_MAX_VISIBLE_ITEMS,
   getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
@@ -1449,5 +1451,29 @@ describe('todoDetailSignature', () => {
       { id: 'a1', role: 'assistant', content: 'different text' },
     ]);
     expect(b).toBe(a);
+  });
+});
+
+describe('getOrderedStickyTodos', () => {
+  it('puts in-progress before pending before completed, keeping order within a status', () => {
+    const ordered = getOrderedStickyTodos([
+      todo('1', 'completed'),
+      todo('2', 'pending'),
+      todo('3', 'in_progress'),
+      todo('4', 'pending'),
+      todo('5', 'in_progress'),
+    ]);
+
+    expect(ordered.map((entry) => entry.id)).toEqual(['3', '5', '2', '4', '1']);
+  });
+
+  it('leaves the input untouched', () => {
+    const todos = [todo('1', 'completed'), todo('2', 'in_progress')];
+    getOrderedStickyTodos(todos);
+    expect(todos.map((entry) => entry.id)).toEqual(['1', '2']);
+  });
+
+  it('caps the strip the same way the terminal panel does', () => {
+    expect(STICKY_TODO_MAX_VISIBLE_ITEMS).toBe(5);
   });
 });
