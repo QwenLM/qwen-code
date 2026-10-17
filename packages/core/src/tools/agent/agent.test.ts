@@ -449,7 +449,11 @@ describe('AgentTool', () => {
       .mockResolvedValue(mockSubagents[0]);
   /** A fresh ContextState that every `new ContextState()` returns. */
   const newContextState = () => {
-    const state = { set: vi.fn() } as unknown as ContextState;
+    const values = new Map<string, unknown>();
+    const state = {
+      set: vi.fn((key: string, value: unknown) => values.set(key, value)),
+      get: vi.fn((key: string) => values.get(key)),
+    } as unknown as ContextState;
     MockedContextState.mockImplementation(() => state);
     return state;
   };
@@ -605,9 +609,7 @@ describe('AgentTool', () => {
         .mockReturnValue(vi.fn().mockResolvedValue(environment));
       config.registerExecutionEnvironment = vi.fn().mockReturnValue(vi.fn());
       setCwd(os.tmpdir());
-      MockedContextState.mockImplementation(
-        () => ({ set: vi.fn() }) as unknown as ContextState,
-      );
+      newContextState();
       mockAgent = mockHeadless(
         'Contained result',
         {},
@@ -3689,6 +3691,29 @@ describe('AgentTool', () => {
       );
     });
 
+    it('delivers start-hook context without changing the fork cache prefix or directive', async () => {
+      const parentHistory = [userText('Parent question'), modelText('Ready.')];
+      llmClient({
+        getHistory: vi.fn().mockReturnValue(parentHistory),
+        ...chatWith({ systemInstruction: 'Parent system instruction' }),
+      });
+      const hookSystem = installHookSystem();
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
+        getAdditionalContext: () => 'Fork hook context',
+      } as never);
+
+      await runFork(forkParams('inspect the task', { fork_turns: 'all' }));
+      await vi.runAllTimersAsync();
+
+      expect(createArgs()?.[2]).toMatchObject({
+        renderedSystemPrompt: 'Parent system instruction',
+        initialMessages: parentHistory,
+      });
+      expect(
+        vi.mocked(mockAgent.execute).mock.calls[0]?.[0].get('task_prompt'),
+      ).toBe(`${buildChildMessage('do the thing')}\n\nFork hook context`);
+    });
+
     it('stops the per-subagent ToolRegistry after the fork body finishes', async () => {
       // Regression: the detached fork body never stopped its per-subagent
       // ToolRegistry, leaking change-listeners of AgentTool / SkillTool on the
@@ -3799,11 +3824,12 @@ describe('AgentTool', () => {
   const runFg = (signal?: AbortSignal) => invoke(fg()).execute(signal);
 
   describe('SubagentStart hook integration', () => {
+    let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
     let mockHookSystem: HookSystem;
 
     beforeEach(() => {
-      ({ mockContextState, mockHookSystem } = setupHookSuite());
+      ({ mockAgent, mockContextState, mockHookSystem } = setupHookSuite());
     });
 
     const startOutput = (additionalContext: string | undefined) =>
@@ -3822,13 +3848,34 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should inject additionalContext from SubagentStart hook into context', async () => {
+    const executedPrompt = () =>
+      vi.mocked(mockAgent.execute).mock.calls[0]?.[0].get('task_prompt');
+
+    it('delivers additionalContext in the foreground executor input', async () => {
       startOutput('Extra context from hook');
       await runFg();
-      expect(mockContextState.set).toHaveBeenCalledWith(
-        'hook_context',
-        'Extra context from hook',
+      expect(executedPrompt()).toBe(
+        'Find all TypeScript files\n\nExtra context from hook',
       );
+    });
+
+    it('keeps explicit hook_context templates from duplicating context in the task', async () => {
+      const definition = {
+        ...mockSubagents[0],
+        systemPrompt: 'You are a search specialist. ${hook_context}',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(definition);
+      startOutput('Extra context from hook');
+      await runFg();
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        definition,
+        expect.any(Object),
+        expect.any(Object),
+      );
+      expect(executedPrompt()).toBe('Find all TypeScript files');
+      expect(
+        vi.mocked(mockAgent.execute).mock.calls[0]?.[0].get('hook_context'),
+      ).toBe('Extra context from hook');
     });
 
     it('should inject hook_context as empty string when additionalContext is undefined', async () => {
@@ -3840,6 +3887,7 @@ describe('AgentTool', () => {
         'hook_context',
         expect.stringMatching(/.+/),
       );
+      expect(executedPrompt()).toBe('Find all TypeScript files');
     });
 
     it('should continue execution when SubagentStart hook fails', async () => {
@@ -3849,6 +3897,7 @@ describe('AgentTool', () => {
       const result = await runFg();
       expect(textOf(result)).toBe('Task completed successfully');
       expectDisplay(result, { status: 'completed' });
+      expect(executedPrompt()).toBe('Find all TypeScript files');
     });
 
     it('should set hook_context to empty string even when hookSystem is not available', async () => {
@@ -4908,6 +4957,58 @@ describe('AgentTool', () => {
       expect(completed?.continue('Now inspect the helper')).toBe('continued');
     };
 
+    it('delivers fresh hook context on resident string continuations with a templated system prompt', async () => {
+      loadAs({ systemPrompt: 'Monitor instructions: ${hook_context}' });
+      const hookSystem = installHookSystem();
+      vi.mocked(hookSystem.fireSubagentStartEvent)
+        .mockResolvedValueOnce({
+          getAdditionalContext: () => 'Initial context',
+        } as never)
+        .mockResolvedValueOnce({
+          getAdditionalContext: () => 'Continuation context',
+        } as never);
+      const inputs: unknown[] = [];
+      vi.mocked(mockAgent.execute).mockImplementation(async (context) => {
+        inputs.push(context.get('task_prompt'));
+      });
+
+      await continueResident();
+      await untilCompleted(2);
+
+      expect(inputs).toEqual([
+        'Watch for changes',
+        'Now inspect the helper\n\nContinuation context',
+      ]);
+      expect(mockAgent.executeExternalInputs).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, 'acp'] as const)(
+      'preserves structured resident input alongside start-hook context (executor=%s)',
+      async (executor) => {
+        if (executor)
+          loadAs({ executor: { kind: executor, command: 'claude' } });
+        const hookSystem = installHookSystem();
+        await launch();
+        await untilCompleted(1);
+        vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
+          getAdditionalContext: () => 'Notification context',
+        } as never);
+        const notification = {
+          kind: 'notification' as const,
+          text: '<task-notification />',
+        };
+
+        expect(resident()?.continue(notification)).toBe('continued');
+        await untilCompleted(2);
+
+        expect(mockAgent.executeExternalInputs).toHaveBeenCalledWith(
+          [notification, 'Notification context'],
+          expect.any(AbortSignal),
+        );
+        expect(mockAgent.execute).toHaveBeenCalledOnce();
+      },
+    );
+
     it('continues a completed background agent on the same runtime', async () => {
       await continueResident();
       await vi.waitFor(() => {
@@ -5047,6 +5148,25 @@ describe('AgentTool', () => {
       expect(textOf(result)).toContain('Background agent launched');
       expect(mockRegistry.register).toHaveBeenCalled();
     });
+
+    it.each([true, undefined])(
+      'delivers start-hook context on the first background input (flag=%s)',
+      async (runInBackground) => {
+        loadForeground();
+        const hookSystem = installHookSystem();
+        vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
+          getAdditionalContext: () => 'Background hook context',
+        } as never);
+
+        await invoke(search({ run_in_background: runInBackground })).execute();
+        await untilCompleted(1);
+
+        expect(
+          vi.mocked(mockAgent.execute).mock.calls[0]?.[0].get('task_prompt'),
+        ).toBe('Find all TypeScript files\n\nBackground hook context');
+        expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce();
+      },
+    );
 
     it('keeps a named-teammate launch in the foreground when no team is active and the flag is omitted', async () => {
       // Without a team a `name` falls through to a one-shot agent, and

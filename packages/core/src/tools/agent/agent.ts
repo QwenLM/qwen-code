@@ -110,6 +110,7 @@ import {
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
+import { applySubagentStartContext } from '../../hooks/subagent-start-context.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -2410,6 +2411,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       agentType: string;
       resolvedMode: PermissionMode;
       externalExecutor?: boolean;
+      systemPrompt?: string;
       signal?: AbortSignal;
       updateOutput?: (output: ToolResultDisplay) => void;
       /**
@@ -2444,7 +2446,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Inject additional context from hook output into subagent context
           const additionalContext = startHookOutput?.getAdditionalContext();
           if (additionalContext) {
-            contextState.set('hook_context', additionalContext);
+            applySubagentStartContext(
+              contextState,
+              additionalContext,
+              opts.systemPrompt,
+            );
           }
         } catch (hookError) {
           debugLogger.warn(
@@ -3689,7 +3695,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             );
             const additionalContext = startHookOutput?.getAdditionalContext();
             if (additionalContext) {
-              contextState.set('hook_context', additionalContext);
+              applySubagentStartContext(
+                contextState,
+                additionalContext,
+                isFork ? undefined : subagentConfig.systemPrompt,
+              );
             }
             subagentStartHookCompleted = true;
           } catch (hookError) {
@@ -4075,13 +4085,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   const additionalContext =
                     startHookOutput?.getAdditionalContext();
                   if (additionalContext) {
-                    turnContextState.set('hook_context', additionalContext);
-                    // The resident chat's system instruction was rendered on
-                    // its first turn, so make new hook context visible in the
-                    // continuation user turn as well.
-                    turnContextState.set(
-                      'task_prompt',
-                      `${String(turnContextState.get('task_prompt'))}\n\n${additionalContext}`,
+                    applySubagentStartContext(
+                      turnContextState,
+                      additionalContext,
                     );
                   }
                 } catch (hookError) {
@@ -4092,6 +4098,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               }
               shouldFireStartHook = false;
 
+              const externalInputs = turnContextState.get(
+                'external_inputs_override',
+              ) as AgentExternalInput[] | undefined;
               if (finishingInputs) {
                 await bgSubagent.executeExternalInputs(
                   finishingInputs,
@@ -4099,6 +4108,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   { resetStats: false },
                 );
                 finishingInputs = undefined;
+              } else if (externalInputs) {
+                await bgSubagent.executeExternalInputs(
+                  externalInputs,
+                  turnAbortController.signal,
+                );
               } else {
                 await bgSubagent.execute(
                   turnContextState,
@@ -4606,6 +4620,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             runWithAgentContext(hookOpts.agentId, () =>
               this.runSubagentWithHooks(subagent, contextState, {
                 ...fgHookOpts,
+                systemPrompt: subagentConfig.systemPrompt,
                 recordSpanOutcome,
               }),
             ),
