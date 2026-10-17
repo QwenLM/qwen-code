@@ -25,6 +25,7 @@ import type {
   UserPromptAdmission,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
+import { waitForPendingMemoryTasks } from './nonInteractive/memory-tasks.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -466,6 +467,8 @@ export interface RunNonInteractiveOptions {
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
   onResultEmitted?: () => void;
+  /** Stop memory waiting at the session EOF deadline without cancelling a turn. */
+  memoryWaitStopSignal?: AbortSignal;
   /**
    * Emit a terminal result and return from this turn when its controller is
    * aborted with {@link TurnInterruptedError}, instead of exiting the process.
@@ -612,17 +615,30 @@ export async function runNonInteractive(
       })();
       return chatRecordingSettlement;
     };
+    const drainPendingMemoryTasks = (): Promise<void> =>
+      waitForPendingMemoryTasks(
+        config.getLlmClient(),
+        abortController.signal,
+        options.memoryWaitStopSignal,
+      );
+    let resultEmitted = false;
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
     ): Promise<void> => {
-      await settleBeforeTerminalOutput();
-      // Fire the callback only after a successful emit. The continue caller
-      // (session.ts) uses it to mark the result as delivered and swallow any
-      // later error; if emitResult itself throws, the flag must stay unset so
-      // the error still surfaces instead of losing both result and error.
-      adapter.emitResult(result);
-      options.onResultEmitted?.();
-      await modSession?.flushOutput();
+      try {
+        await settleBeforeTerminalOutput();
+        // Fire the callback only after a successful emit. The continue caller
+        // (session.ts) uses it to mark the result as delivered and swallow any
+        // later error; if emitResult itself throws, the flag must stay unset so
+        // the error still surfaces instead of losing both result and error.
+        adapter.emitResult(result);
+        resultEmitted = true;
+        options.onResultEmitted?.();
+        await modSession?.flushOutput();
+      } finally {
+        // Write the result first, but keep the invocation alive for memory writes.
+        await drainPendingMemoryTasks();
+      }
     };
 
     // Get readonly values once at the start
@@ -894,6 +910,10 @@ export async function runNonInteractive(
      * preserved. Both branches call into `process.exit(...)` so the
      * `unreachable` throw is only present to keep the type-checker honest.
      */
+    let abortExitCommitted = false;
+    const markAbortExitCommitted = (): void => {
+      abortExitCommitted = true;
+    };
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
       endActiveInteraction(exceeded ? 'error' : 'cancelled', {
@@ -912,7 +932,11 @@ export async function runNonInteractive(
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {
-        await handleBudgetExceededError(config, exceeded);
+        await handleBudgetExceededError(
+          config,
+          exceeded,
+          markAbortExitCommitted,
+        );
         // Explicit unreachable — `handleBudgetExceededError` is `never`
         // in production (it calls `process.exit`). If a test stubs
         // `process.exit` or a future refactor makes the handler
@@ -927,7 +951,7 @@ export async function runNonInteractive(
       ) {
         throw abortController.signal.reason;
       }
-      await handleCancellationError(config);
+      await handleCancellationError(config, markAbortExitCommitted);
       throw new Error('Operation cancelled.');
     };
 
@@ -1818,6 +1842,12 @@ export async function runNonInteractive(
 
         if (outputFormat === OutputFormat.TEXT) {
           await settleBeforeTerminalOutput();
+          try {
+            await drainPendingMemoryTasks();
+          } catch {
+            // Keep the marker for the loop error already written to stderr.
+            throw new AlreadyReportedError(loopDetectedMessage);
+          }
           return 1;
         }
 
@@ -2724,7 +2754,7 @@ export async function runNonInteractive(
         totalApiDurationMs += Date.now() - apiStartTime;
 
         if (loopDetected) {
-          return emitLoopDetectedResult();
+          return await emitLoopDetectedResult();
         }
 
         let shouldFinalizeTurn = toolCallRequests.length === 0;
@@ -2766,7 +2796,7 @@ export async function runNonInteractive(
             // task_notification events to land, then emits the
             // structured success envelope. Same helper as the drain-turn
             // post-loop branch — see emitStructuredSuccess above.
-            return emitStructuredSuccess();
+            return await emitStructuredSuccess();
           }
           if (
             repeatedDuplicateProviderToolCall &&
@@ -2776,7 +2806,7 @@ export async function runNonInteractive(
               config,
               LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
             );
-            return emitLoopDetectedResult();
+            return await emitLoopDetectedResult();
           }
           if (terminateTurn && activeGoalTurn) {
             llmClient.addHistory({
@@ -3253,7 +3283,7 @@ export async function runNonInteractive(
             // through the model, but later monitor output is SDK-only.
             captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
-            if (loopDetected) return emitLoopDetectedResult();
+            if (loopDetected) return await emitLoopDetectedResult();
             // A drain-turn structured_output captured the terminal
             // contract — bail out of the holdback loop early and let the
             // post-loop code emit the success result.
@@ -3270,12 +3300,6 @@ export async function runNonInteractive(
             await new Promise((r) => setTimeout(r, 100));
           }
 
-          const memoryTaskPromises = config
-            .getLlmClient()
-            .consumePendingMemoryTaskPromises();
-          if (memoryTaskPromises.length > 0) {
-            await Promise.allSettled(memoryTaskPromises);
-          }
           finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();
@@ -3293,7 +3317,7 @@ export async function runNonInteractive(
           // metrics snapshot after the holdback so any task notifications
           // that landed during shutdown contribute to the totals.
           if (structuredSubmission !== undefined) {
-            return emitStructuredSuccess();
+            return await emitStructuredSuccess();
           }
 
           // --json-schema contract: the model MUST terminate via the
@@ -3428,15 +3452,15 @@ export async function runNonInteractive(
       // This path must settle independently because skipAdapterEmit bypasses
       // emitResult(), which normally performs the settle step.
       await settleBeforeTerminalOutput();
-      if (!skipAdapterEmit) {
-        // Wrap in try/catch: emitResult eventually hits stdout.write, which
-        // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
-        // consumer closes early (`qwen -p ... | head -n 1` is the common
-        // case). Letting that throw bubble out skips `handleBudgetExceededError`
-        // / `handleError` below, dropping the documented exit code 55
-        // contract — precisely when stdout is in trouble. Best-effort emit
-        // and continue to the exit handler.
-        try {
+      try {
+        if (!skipAdapterEmit && !resultEmitted) {
+          // Wrap in try/catch: emitResult eventually hits stdout.write, which
+          // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
+          // consumer closes early (`qwen -p ... | head -n 1` is the common
+          // case). Letting that throw bubble out skips `handleBudgetExceededError`
+          // / `handleError` below, dropping the documented exit code 55
+          // contract — precisely when stdout is in trouble. Best-effort emit
+          // and continue to the exit handler.
           await emitResult({
             isError: true,
             durationMs: Date.now() - startTime,
@@ -3446,7 +3470,11 @@ export async function runNonInteractive(
             usage,
             stats,
           });
-        } catch (emitErr) {
+        } else {
+          await drainPendingMemoryTasks();
+        }
+      } catch (emitErr) {
+        if (!abortController.signal.aborted) {
           debugLogger.error(
             `Failed to emit terminal result envelope: ${
               emitErr instanceof Error ? emitErr.message : String(emitErr)
@@ -3454,13 +3482,23 @@ export async function runNonInteractive(
           );
         }
       }
-      if (budgetExceeded) {
-        // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
-        // see a terminal result envelope before the process dies.
-        await handleBudgetExceededError(config, budgetExceeded);
-      }
-      if (recoverableCancellation) {
-        return 130;
+      // Preserve terminal output without entering exit cleanup a second time.
+      if (abortExitCommitted) throw error;
+      // Abort or budget expiry can arrive during the memory wait, after the
+      // result was written. Re-read the reason without emitting another result.
+      if (abortController.signal.aborted) {
+        try {
+          await routeAbort();
+        } catch (abortError) {
+          if (
+            options.recoverableCancellation === true &&
+            abortError instanceof TurnInterruptedError &&
+            abortError === abortController.signal.reason
+          ) {
+            return 130;
+          }
+          throw abortError;
+        }
       }
       await handleError(error, config);
     } finally {
