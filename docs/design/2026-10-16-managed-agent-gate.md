@@ -136,8 +136,11 @@ no Java lane and does not count. After a failed full run, the next approval or
   for about 125 minutes and then report a head that branch protection no
   longer reads.
 - Approvals never cancel: a second approval waits for the first full run and
-  then skips it through the deduplication above, and a comment review does not
-  replace a pending approval run.
+  then skips it through the deduplication above.
+- A group keeps one pending run, and a newcomer cancels it regardless of
+  `cancel-in-progress`. A review that is not an approval therefore runs in a
+  group of its own, so a comment cannot cancel an approval run that waits
+  behind the PR's fast tier.
 - Main pushes carry no pull request, so they get one group per commit.
 - `sdk-java.yml`'s own group now includes the event name and the called
   commit, so a fast run and a full run on the same PR no longer queue behind

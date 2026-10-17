@@ -114,8 +114,10 @@ push 之后。只有维护者的 approve 才会启动全量层级：reviewer 的
   属性、且只对 `pull_request` 为 true。因此一次 push 会取消它所取代的 approve 运行
   ——否则那次运行还要跑约 125 分钟，最后把结果报在一个 branch protection 已不再读取
   的 head 上。
-- approve 之间不取消：第二个 approve 等第一次全量跑完，再由上面的去重跳过它；
-  comment review 也不会顶掉排队中的 approve 运行。
+- approve 之间不取消：第二个 approve 等第一次全量跑完，再由上面的去重跳过它。
+- 一个组只保留一个排队中的运行，新进来的运行无论 `cancel-in-progress` 如何都会把它
+  取消。因此非 approve 的 review 各自单独成组，评论不会取消排在该 PR fast 层级之后
+  等待的 approve 运行。
 - main push 不带 pull request，所以每个 commit 一组。
 - `sdk-java.yml` 自身的并发组现在包含事件名和被调用的 commit，同一 PR 的 fast 与
   full 运行不再互相排队（否则新排队的运行会顶掉旧的）。

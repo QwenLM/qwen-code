@@ -19,11 +19,16 @@ permissions:
 # report a head branch protection no longer reads. cancel-in-progress is a
 # property of the incoming run and stays true only for pull_request, so a second
 # approval queues behind the first full run and then finds it through the
-# deduplication below instead of starting another, and a comment review never
-# displaces a pending approval. Main pushes stay keyed per commit.
+# deduplication below instead of starting another. A group keeps one pending
+# run and a newcomer cancels it whatever cancel-in-progress says, so a review
+# that is not an approval gets a group of its own and cannot cancel an
+# approval run waiting there. Main pushes stay keyed per commit.
 concurrency:
   group: >-
-    managed-agent-gate-${{ github.event.pull_request.number ||
+    managed-agent-gate-${{ github.event_name == 'pull_request_review' &&
+    github.event.review.state != 'approved' &&
+    format('review-{0}', github.event.review.id) ||
+    github.event.pull_request.number ||
     github.event_name == 'push' && github.sha ||
     github.ref }}
   cancel-in-progress: "${{ github.event_name == 'pull_request' }}"

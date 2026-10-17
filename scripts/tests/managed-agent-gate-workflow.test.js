@@ -242,21 +242,32 @@ describe('Managed Agent gate triggers', () => {
 
   it('groups every event of one pull request so a push cancels its approval run', () => {
     const group = (ctx) => interpolate(gate.concurrency.group, ctx);
-    const review = (state, sha) =>
+    const review = (state, sha, id = 1) =>
       github('pull_request_review', {
-        review: { state },
+        review: { state, id },
         pull_request: { number: 7, head: { sha } },
       });
     const pr = (number) => github('pull_request', { pull_request: { number } });
     const push = (sha) => ({ github: { ...github('push'), sha } });
-    // One group per pull request across pushes, approvals and comments: a push
+    // One group per pull request across pushes and approvals: a push
     // that supersedes an in-flight approval run must be able to cancel it,
     // since that run reports a head branch protection no longer reads.
     expect(group({ github: pr(7) })).toBe(
       group({ github: review('approved', 'h1') }),
     );
     expect(group({ github: review('approved', 'h1') })).toBe(
-      group({ github: review('commented', 'h2') }),
+      group({ github: review('approved', 'h2', 2) }),
+    );
+    // A group keeps one pending run and a newcomer cancels it, so a comment
+    // or change request must stay out of the pull request's group, or it
+    // would cancel an approval run waiting behind the fast tier.
+    for (const state of ['commented', 'changes_requested']) {
+      expect(group({ github: review(state, 'h1', 3) }), state).not.toBe(
+        group({ github: pr(7) }),
+      );
+    }
+    expect(group({ github: review('commented', 'h1', 3) })).not.toBe(
+      group({ github: review('commented', 'h1', 4) }),
     );
     expect(group({ github: pr(7) })).not.toBe(group({ github: pr(8) }));
     // A main push carries no pull request, so it stays keyed per commit.
