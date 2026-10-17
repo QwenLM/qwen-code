@@ -17,6 +17,7 @@ import {
 } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -294,14 +295,12 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
         : current === 'SHELL_CANCEL'
           ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
           : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
-      const quote = (text: string) =>
-        "'" + text.replaceAll("'", "'\"'\"'") + "'";
       return {
         toolCalls: [
           fakeToolCall(
             'run_shell_command',
             {
-              command: `${quote(process.execPath)} -e ${quote(producer)}`,
+              command: `${quotePosix(process.execPath)} -e ${quotePosix(producer)}`,
               timeout: 180000,
             },
             callId,

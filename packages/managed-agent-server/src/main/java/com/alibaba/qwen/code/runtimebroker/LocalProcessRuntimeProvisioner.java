@@ -98,8 +98,13 @@ public final class LocalProcessRuntimeProvisioner
 
     public static LocalProcessRuntimeProvisioner durable(List<String> command,
             Path stateDirectory, HttpRuntimeTransport transport, boolean trustedRebootRecovery) {
+        LocalRuntimeStore.HostIdentity identity = LocalRuntimeStore.HostIdentity.current();
+        if (trustedRebootRecovery && "macos".equals(identity.pidNamespace())) {
+            throw new IllegalStateException("Trusted whole-host reboot recovery requires Linux;"
+                    + " set runtime-broker.trusted-local-reboot-recovery=false on macOS");
+        }
         return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null,
-                new LocalRuntimeStore(stateDirectory, LocalRuntimeStore.HostIdentity.linux()), trustedRebootRecovery);
+                new LocalRuntimeStore(stateDirectory, identity), trustedRebootRecovery);
     }
 
     /** Checks an existing private state directory without initializing or changing it. */

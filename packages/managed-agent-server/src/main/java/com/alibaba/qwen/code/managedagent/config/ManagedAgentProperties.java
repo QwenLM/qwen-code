@@ -159,6 +159,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
+        if (runtimeBroker.getSsh().isEnabled() && (!harness.isWorkspaceFilesEnabled()
+                || runtimeBroker.getSsh().getNodes().isEmpty())) {
+            throw new IllegalStateException("SSH Runtime requires Workspace files and configured nodes");
+        }
         runtimeBroker.getRetention().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
@@ -169,6 +173,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         boolean residentFiles = "kubernetes-workspace".equals(runtimeBroker.getProvisioner())
                 && "workspace".equals(runtimeBroker.getIsolationClass())
                 && !runtimeBroker.getResidentWorkspaces().isEmpty() && runtimeBroker.getWorkspaceMounts().isEmpty()
+                && runtimeBroker.getSsh().getNodes().isEmpty()
                 && !runtimeBroker.isTrustedLocalRebootRecovery() && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
                 && !runtimeBroker.isChildWorkspacesEnabled() && !harness.isWorkspaceShellEnabled()
                 && !runtimeBroker.getResidentKubernetesApiUrl().isBlank()
@@ -193,7 +198,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         || !residentFiles && (!LocalProcessRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
-                                && runtimeBroker.getWorkspaceCreationRoot().isBlank()))
+                                && runtimeBroker.getWorkspaceCreationRoot().isBlank()
+                                && runtimeBroker.getSsh().getNodes().isEmpty()))
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
                                 .contains(
@@ -944,6 +950,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
     }
 
     public static class RuntimeBroker {
+        private final SshRuntimeSettings ssh = new SshRuntimeSettings();
+
+        public SshRuntimeSettings getSsh() {
+            return ssh;
+        }
         private boolean enabled;
         private final Retention retention = new Retention();
         private String host = "127.0.0.1";
@@ -970,6 +981,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
+        private Map<String, String> previousCredentialKeys =
+                new LinkedHashMap<>();
         private String nodeExecutable = "";
         private String workerEntry = "";
         private String staticEndpoint = "";
@@ -1249,6 +1262,15 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCredentialKey(String credentialKey) {
             this.credentialKey = credentialKey;
+        }
+
+        public Map<String, String> getPreviousCredentialKeys() {
+            return previousCredentialKeys;
+        }
+
+        public void setPreviousCredentialKeys(
+                Map<String, String> previousCredentialKeys) {
+            this.previousCredentialKeys = previousCredentialKeys;
         }
 
         public String getNodeExecutable() {

@@ -31,6 +31,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -1044,8 +1045,30 @@ class HostedHarnessClientTest {
         assertEquals(Boolean.TRUE, enabled.toJson().get("childSnapshots"));
         assertEquals(Boolean.TRUE, enabled.forLifecycle("op-1", 3).toJson().get("childSnapshots"));
         assertEquals(Boolean.TRUE, enabled.withStoppedMessages().toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.withForegroundOnly(false).toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.withForegroundOnly(true).forLifecycle("op-1", 3, 2)
+                .withStoppedMessages().toJson().get("childSnapshots"));
         assertEquals(Boolean.TRUE, load.forLifecycle("op-1", 3).withChildWorkspaces(true, true)
                 .toJson().get("childSnapshots"));
+    }
+
+    @Test
+    void preservesTheForegroundOnlyRestrictionAcrossEveryLoadCopy() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID);
+        assertFalse(create.build().toJson().containsKey("foregroundOnly"));
+        assertEquals(Boolean.TRUE, create.foregroundOnly(true).build().toJson().get("foregroundOnly"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.toJson().containsKey("foregroundOnly"));
+        LoadHarnessSession restricted = load.withForegroundOnly(true);
+        for (LoadHarnessSession copy : java.util.List.of(restricted,
+                restricted.withChildWorkspaces(false), restricted.withStoppedMessages(),
+                restricted.forLifecycle("close-1", 2, 2),
+                load.forLifecycle("close-1", 2, 2).withStoppedMessages().withForegroundOnly(true))) {
+            assertEquals(Boolean.TRUE, copy.toJson().get("foregroundOnly"));
+            assertEquals(Boolean.TRUE, copy.toJson().get("passiveManagedRuntimeRecovery"));
+        }
+        assertFalse(load.toJson().containsKey("foregroundOnly"));
     }
 
     @Test
@@ -1061,7 +1084,9 @@ class HostedHarnessClientTest {
         LoadHarnessSession load = new LoadHarnessSession(SESSION_ID).withMcpServers(mcp).withHookCatalog(hooks);
         for (LoadHarnessSession copy : java.util.List.of(load, load.withChildWorkspaces(true),
                 load.forLifecycle("op-1", 3, 2), load.withStoppedMessages(),
-                load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true))) {
+                load.withStoppedMessages().forLifecycle("op-1", 3, 2).withChildWorkspaces(true),
+                load.withForegroundOnly(false), load.withForegroundOnly(true),
+                load.withForegroundOnly(true).forLifecycle("op-1", 3, 2).withStoppedMessages())) {
             assertEquals(mcp, copy.toJson().get("mcpServers"));
             assertEquals(hooks, copy.toJson().get("hookCatalog"));
         }
@@ -4894,14 +4919,19 @@ class HostedHarnessClientTest {
     }
 
     private static void awaitSchedulerDrained(HostedHarnessClient client)
-            throws InterruptedException {
+            throws Exception {
+        // A periodic task is off the queue while it runs, so the queue is
+        // read on the single scheduler thread, where no heartbeat task can
+        // be running and a live one must be queued.
+        ScheduledThreadPoolExecutor scheduler = client.scheduler();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (!client.scheduler().getQueue().isEmpty()
+        boolean drained;
+        while (!(drained = scheduler.submit(
+                () -> scheduler.getQueue().isEmpty()).get())
                 && System.nanoTime() < deadline) {
             Thread.sleep(10);
         }
-        assertTrue(client.scheduler().getQueue().isEmpty(),
-                "the scheduler queue never drained");
+        assertTrue(drained, "the scheduler queue never drained");
     }
 
     @Test

@@ -31,8 +31,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The FG9 lose-once/hold reverse proxy. One instance fronts one HTTP
- * boundary (the Session Store or the Harness daemon) and passes every
- * request through unless an armed rule matches its method+path+body; a
+ * boundary (the Session Store, or the public API for one client's own
+ * request) and passes every request through unless an armed rule
+ * matches its method+path+body; a
  * matched rule then drops the reply after the upstream already committed
  * (the lose-once shape fault rounds live on), or holds it until the IT
  * releases the named latch (the controlled-ambiguity shape). The armed
@@ -99,31 +100,37 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
                     .connectTimeout(Duration.ofSeconds(10)).build();
     private final HttpServer server;
-    private final URI upstream;
     private final Path logFile;
+    private volatile URI upstream;
     private final List<Rule> rules = new CopyOnWriteArrayList<>();
     private final Map<String, CompletableFuture<Void>> latches =
             new ConcurrentHashMap<>();
     private final List<String> operations = new CopyOnWriteArrayList<>();
 
-    private HostedSessionRelayForwardingProxy(URI upstream, Path logFile,
+    private HostedSessionRelayForwardingProxy(Path logFile,
             HttpServer server) {
-        this.upstream = upstream;
         this.logFile = logFile;
         this.server = server;
     }
 
-    static HostedSessionRelayForwardingProxy start(String label, URI upstream,
+    /** Binds an ephemeral port now; {@link #forwardTo} names the upstream
+     * once it is listening, so the upstream's own port need not be picked
+     * ahead of its boot. */
+    static HostedSessionRelayForwardingProxy start(String label,
             Path logFile) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(
                 "127.0.0.1", 0), 0);
         HostedSessionRelayForwardingProxy proxy =
-                new HostedSessionRelayForwardingProxy(upstream, logFile,
-                        server);
+                new HostedSessionRelayForwardingProxy(logFile, server);
         server.createContext("/", proxy::handle);
         server.start();
-        proxy.record("PROXY up " + label + " upstream=" + upstream);
+        proxy.record("PROXY up " + label);
         return proxy;
+    }
+
+    void forwardTo(URI target) {
+        upstream = target;
+        record("PROXY upstream=" + target);
     }
 
     String baseUrl() {
@@ -167,7 +174,7 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             return;
         }
         String text = new String(body, StandardCharsets.UTF_8);
-        String kind = kindOf(text);
+        String kind = tagOf(text);
         Rule armed = null;
         for (Rule rule : rules) {
             if (rule.fires(method, path, text)) {
@@ -180,8 +187,7 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             holdLatch = new CompletableFuture<>();
             latches.put(armed.name, holdLatch);
         }
-        String tag = method + " " + path
-                + (kind.isEmpty() ? "" : " kind=" + kind);
+        String tag = method + " " + path + kind;
         try {
             HttpRequest.Builder forward = HttpRequest.newBuilder(upstream
                             .resolve(exchange.getRequestURI().toString()))
@@ -192,13 +198,14 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
                             : HttpRequest.BodyPublishers.ofByteArray(body));
             HttpResponse<byte[]> response = client.send(forward.build(),
                     HttpResponse.BodyHandlers.ofByteArray());
+            String status = " status=" + response.statusCode();
             if (armed == null) {
-                record("PROXY passthru " + tag);
+                record("PROXY passthru " + tag + status);
             } else if (armed.disposition == Disposition.DROP) {
-                record("PROXY dropped " + armed.name + " " + tag);
+                record("PROXY dropped " + armed.name + " " + tag + status);
                 return;
             } else {
-                record("PROXY holding " + armed.name + " " + tag);
+                record("PROXY holding " + armed.name + " " + tag + status);
                 try {
                     holdLatch.get(90, TimeUnit.SECONDS);
                 } catch (Exception interrupted) {
@@ -235,11 +242,16 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         }
     }
 
-    private String kindOf(String text) {
+    /** The relay verb (`kind`) and journal commit (`operation`) a body
+     * names, so the log tells one commit from another. */
+    private String tagOf(String text) {
         try {
             JsonNode parsed = json.readTree(text);
             JsonNode kind = parsed.path("kind");
-            return kind.isTextual() ? kind.asText() : "";
+            JsonNode operation = parsed.path("operation");
+            return (kind.isTextual() ? " kind=" + kind.asText() : "")
+                    + (operation.isTextual() ? " op=" + operation.asText()
+                            : "");
         } catch (IOException ignored) {
             return "";
         }
