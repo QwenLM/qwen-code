@@ -174,27 +174,28 @@ letter 欠的摘要性质；记录的 relay 结算是 FG10b/c 的机制。probe 
 Harness 再重启后，child 未结算的 workflow Turn 被恢复机制重新驱动——
 脚本重跑并重新派发了它的子 agent（击杀后的 model 请求带着子 agent
 的系统提示词）。这正是本 letter 要钉的「never re-executed on reopen」
-所禁止的。恢复机制对一个未结算的 workflow Turn 的重驱动，究竟是待修
-的生产缺口还是可接受的行为，越出了本测试切片之外，故 FG10d 随承载该
-发现的后续 issue(#14387)落地；本节保留为其设计。本切片只交付
-FG10a。
+所禁止的。该发现已作为生产 bug（#14387）落地并在 #14461 修复：
+恢复机制把该 Turn 泊车为 `hosted_workflow_recovery_blocked`——绝不
+重驱动、绝不结算——relay 随之把记录结算为 `recovery_blocked` 覆盖
+`outcome_unknown`。FG10d 随其落地并断言该形状；本节保留为其设计。
+本切片只交付 FG10a。
 
 仅 POSIX。驱动器持有 Harness 子进程并 SIGKILL。在飞见证是假模型
 服务器的请求日志：一次 `agent()` 派发即一次 POST，所以「子 agent
 在飞」= 已收到但尚未放行应答的请求。
 
-台账必须尊重的一个时序事实：relay 的放弃路径是
-`MAX_ATTEMPTS = 64`、叠加指数退避（`1 s << attempts`，封顶
-300 s——`ChildResultRelay.java` 的 `defer`），所以终态 `unknown`
-归类落在任何 case 预算都无法容纳的数十分钟之后。门禁因此钉住的
-是击杀后有界观察窗内的可观测不变量——relay 对着已死的 Harness
-持续退避期间，记录绝不结算为 `failed`、`cancelled` 或
+门禁观察的机制：coordinator 的恢复扫描把未结算的 workflow Turn 标记为
+`hosted_workflow_recovery_blocked`——绝不重驱动、绝不结算；relay 从
+Turn 行读到该标记，把记录结算为 `recovery_blocked` 覆盖
+`outcome_unknown`，并在自己的扫描节奏内把台账归类为
+`unknown`（#14387）。门禁因此钉住的是 case 预算内的可观测不变量：
+记录结算为 `recovery_blocked`——绝不为 `failed`、`cancelled` 或
 `settled`——再加上冷载拒绝这条持久性质的另一半。
 
-| Case                                         | 注入                                                                                                                                | 期望                                                                                                                                                                                                                                                      |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kill-mid-workflow-subagents-in-flight`      | 在一条子 agent 请求被假模型服务器挂起期间 SIGKILL Harness                                                                           | 击杀后的观察窗内记录保持 `running`——绝不为 `failed`、`cancelled` 或 `settled`；重启的 Harness 对 child session 的冷载回答 409 `hosted_turn_recovery_required`，零新 model 调用、零重执行；记录的 `definitionDigest` 仍等于原脚本的 sha256（绝不重新解析） |
-| `kill-after-last-subagent-before-settlement` | store 代理扣住 child 的 `settleTurn` 提交并在**转发之前** SIGKILL Harness——击杀先于提交是刻意的，这就是被钉死的确定性「结算前」交错 | 结算从未落库：观察窗内记录保持 `running`，被丢弃的提交在代理日志里有见证，冷载如上拒绝；绝不为 `failed`/`cancelled`，重开时绝不重跑                                                                                                                       |
+| Case                                         | 注入                                                                                                                                | 期望                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kill-mid-workflow-subagents-in-flight`      | 在一条子 agent 请求被假模型服务器挂起期间 SIGKILL Harness                                                                           | 击杀后的观察窗内记录结算为 `recovery_blocked` 覆盖 `outcome_unknown`——绝不为 `failed`、`cancelled` 或 `settled`；重启的 Harness 对 child session 的冷载回答 409 `hosted_turn_recovery_required`，零新 model 调用、零重执行；记录的 `definitionDigest` 仍等于原脚本的 sha256（绝不重新解析） |
+| `kill-after-last-subagent-before-settlement` | store 代理扣住 child 的 `settleTurn` 提交并在**转发之前** SIGKILL Harness——击杀先于提交是刻意的，这就是被钉死的确定性「结算前」交错 | 结算从未落库：观察窗内记录结算为 `recovery_blocked` 覆盖 `outcome_unknown`，被丢弃的提交在代理日志里有见证，冷载如上拒绝；绝不为 `failed`/`cancelled`，重开时绝不重跑                                                                                                                       |
 
 ## 夹具设计
 

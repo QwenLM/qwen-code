@@ -116,18 +116,18 @@ export function hostedApprovalDefinition(
 }
 
 /**
- * Whether a call asks the operator. `searchProfile` is the Session's own
+ * Whether a call asks the operator. `globProfile` is the Session's own
  * `/2` search or read profile, the only places `glob` is pre-approved.
  */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,
   toolName: string,
-  searchProfile: boolean = false,
+  globProfile: boolean = false,
 ): boolean {
   if (settings.mode === 'yolo') return false;
   return (
     !PREAPPROVED_TOOLS[settings.mode].includes(toolName) &&
-    !(searchProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
+    !(globProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
   );
 }
 
