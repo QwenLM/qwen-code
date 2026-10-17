@@ -5,6 +5,7 @@
  */
 
 import { LRUCache } from 'mnemonist';
+import { rm } from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import {
   fetchWithPolicy,
@@ -480,13 +481,27 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
 
       content = '';
       if (sniff.extension === 'pdf' && persistedPath) {
-        const pdfText = await extractPDFText(persistedPath, { signal });
-        if (pdfText.success && pdfText.text.trim()) {
-          content = truncateText(pdfText.text);
-        } else if (!pdfText.success) {
-          this.debugLogger.debug(
-            `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
-          );
+        try {
+          const pdfText = await extractPDFText(persistedPath, { signal });
+          signal.throwIfAborted();
+          if (pdfText.success && pdfText.text.trim()) {
+            content = truncateText(pdfText.text);
+          } else if (!pdfText.success) {
+            this.debugLogger.debug(
+              `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
+            );
+          }
+        } catch (error) {
+          try {
+            await rm(persistedPath, { force: true });
+            this.config.trackToolResultBytes(-response.body.length);
+          } catch (cleanupError) {
+            this.debugLogger.error(
+              '[WebFetchTool] Failed to remove unused PDF',
+              cleanupError,
+            );
+          }
+          throw error;
         }
       }
     } else if (contentType.includes('text/html')) {
@@ -666,6 +681,7 @@ ${entry.content}
           : {}),
       };
     } catch (e) {
+      if (signal.aborted) throw e;
       // e may be a non-Error abort reason (throwIfAborted rethrows whatever
       // the aborting caller passed — e.g. a plain string, or null).
       const errorMessage = `Error during fetch for ${this.params.url}: ${getErrorMessage(e)}`;
