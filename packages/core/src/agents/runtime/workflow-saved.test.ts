@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -825,5 +825,662 @@ describe('isWorkflowRunId', () => {
     ]) {
       expect(isWorkflowRunId(value)).toBe(false);
     }
+  });
+});
+
+describe('workflow-saved — local ancestor discovery', () => {
+  let base: string;
+  let repo: string;
+  let target: string;
+  let previousHome: string | undefined;
+  const trust = vi.fn(async (dirs: readonly string[]) => dirs.map(() => true));
+  const workflows = (dir: string) => path.join(dir, '.qwen', 'workflows');
+  const config = (storageTarget = target): Config =>
+    ({
+      storage: new Storage(storageTarget),
+      getTargetDir: () => target,
+      getWorkflowAncestorTrustProvider: () => trust,
+    }) as unknown as Config;
+
+  beforeEach(async () => {
+    base = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'wf-ancestor-')),
+    );
+    repo = path.join(base, 'repo');
+    target = path.join(repo, 'packages', 'a');
+    await fs.mkdir(target, { recursive: true });
+    await fs.mkdir(path.join(repo, '.git'));
+    previousHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(base, 'home', '.qwen');
+    trust.mockReset();
+    trust.mockImplementation(async (dirs) => dirs.map(() => true));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (previousHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = previousHome;
+    await fs.rm(base, { recursive: true, force: true });
+  });
+
+  it('C01: resolves nearest scope and refreshes layout and trust next call', async () => {
+    const parent = path.dirname(target);
+    const scopes = [
+      [target, "return 'DW01_TARGET_7F3A';"],
+      [parent, "return 'DW01_PACKAGES_6B2E';"],
+      [repo, "return 'DW01_ROOT_4C8D';"],
+    ];
+    await writeWorkflow(
+      Storage.getUserWorkflowsDir(),
+      'shared',
+      "return 'DW01_USER_9A1F';",
+    );
+    for (const [dir, script] of scopes.toReversed()) {
+      await writeWorkflow(workflows(dir), 'shared', script);
+    }
+    for (const [dir, script] of scopes) {
+      const entry = (await listSavedWorkflows(config())).find(
+        (e) => e.name === 'shared',
+      );
+      expect(entry?.scriptPath).toBe(path.join(workflows(dir), 'shared.js'));
+      expect(
+        await resolveSavedWorkflowScript('shared', config()),
+      ).toMatchObject({
+        script,
+        scriptPath: path.join(workflows(dir), 'shared.js'),
+        source: 'project',
+      });
+      await fs.unlink(path.join(workflows(dir), 'shared.js'));
+    }
+    expect((await resolveSavedWorkflowScript('shared', config())).script).toBe(
+      "return 'DW01_USER_9A1F';",
+    );
+    await writeWorkflow(workflows(repo), 'root-only', 'return 4;');
+    trust.mockImplementation(async (dirs) => dirs.map(() => false));
+    expect((await listSavedWorkflows(config())).map((e) => e.name)).toEqual([
+      'shared',
+    ]);
+    await expect(
+      resolveSavedWorkflowScript(
+        { scriptPath: path.join(workflows(repo), 'root-only.js') },
+        config(),
+      ),
+    ).rejects.toThrow(OUTSIDE_ROOTS);
+  });
+
+  it('C05/R01: absent provider does not expand ordinary Config scope', async () => {
+    await writeWorkflow(workflows(repo), 'hidden', 'return 1;');
+    const ordinary = {
+      storage: new Storage(target),
+      getTargetDir: () => target,
+    } as unknown as Config;
+    expect(await listSavedWorkflows(ordinary)).toEqual([]);
+    expect(trust).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'throws',
+      async () => {
+        throw new Error('unavailable');
+      },
+    ],
+    ['wrong length', async () => [true]],
+    ['non boolean', async () => [true, 'yes']],
+    ['first deny', async () => [false, true]],
+  ])(
+    'C05: rejects invalid or denied provider response: %s',
+    async (_label, provider) => {
+      await writeWorkflow(workflows(repo), 'hidden', 'return 1;');
+      const cfg = {
+        ...config(),
+        getWorkflowAncestorTrustProvider: () => provider,
+      } as unknown as Config;
+      expect(await listSavedWorkflows(cfg)).toEqual([]);
+    },
+  );
+
+  it('C05: includes only the continuously trusted nearest prefix', async () => {
+    const parent = path.dirname(target);
+    await writeWorkflow(workflows(parent), 'near', 'return 2;');
+    await writeWorkflow(workflows(repo), 'far', 'return 3;');
+    trust.mockResolvedValue([true, false]);
+    expect((await listSavedWorkflows(config())).map((e) => e.name)).toEqual([
+      'near',
+    ]);
+    expect(trust).toHaveBeenCalledExactlyOnceWith([parent, repo]);
+  });
+
+  it('C03: no Git root and a nested Git boundary do not expose outer definitions', async () => {
+    await writeWorkflow(workflows(repo), 'outer', 'return 1;');
+    await fs.rm(path.join(repo, '.git'), { recursive: true });
+    expect(await listSavedWorkflows(config())).toEqual([]);
+    await fs.mkdir(path.join(repo, '.git'));
+    await fs.writeFile(
+      path.join(path.dirname(target), '.git'),
+      'gitdir: /elsewhere',
+    );
+    expect(await listSavedWorkflows(config())).toEqual([]);
+    expect(trust).toHaveBeenLastCalledWith([path.dirname(target)]);
+  });
+
+  it('C04: refuses uncertain Git boundaries instead of walking past them', async () => {
+    await writeWorkflow(workflows(repo), 'outer', 'return 1;');
+    const gitLink = path.join(path.dirname(target), '.git');
+    await fs.symlink(path.join(repo, '.git'), gitLink, 'dir');
+    expect(await listSavedWorkflows(config())).toEqual([]);
+    expect(trust).not.toHaveBeenCalled();
+    await fs.unlink(gitLink);
+    const original = fs.lstat.bind(fs);
+    vi.spyOn(fs, 'lstat').mockImplementation(((p, ...args) => {
+      if (String(p) === gitLink)
+        return Promise.reject(
+          Object.assign(new Error('git EIO'), { code: 'EIO' }),
+        );
+      return original(p, ...args);
+    }) as typeof fs.lstat);
+    expect(await listSavedWorkflows(config())).toEqual([]);
+    expect(trust).not.toHaveBeenCalled();
+  });
+
+  it('C06: lists and names only direct ordinary candidates, with ancestor path equally bounded', async () => {
+    const dir = workflows(repo);
+    await writeWorkflow(dir, 'good', 'return 1;');
+    await writeWorkflow(dir, '9bad', 'return 2;');
+    await put(path.join(dir, 'nested', 'nested.js'), 'return 3;');
+    await put(path.join(dir, '.env'), 'SECRET');
+    await fs.mkdir(path.join(dir, 'folder.js'));
+    await fs.symlink(path.join(dir, 'good.js'), path.join(dir, 'linked.js'));
+    expect((await listSavedWorkflows(config())).map((e) => e.name)).toEqual([
+      'good',
+    ]);
+    for (const file of [
+      '9bad.js',
+      'nested/nested.js',
+      '.env',
+      'folder.js',
+      'linked.js',
+    ]) {
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: path.join(dir, file) },
+          config(),
+        ),
+      ).rejects.toThrow();
+    }
+    await writeWorkflow(Storage.getUserWorkflowsDir(), 'folder', 'return 5;');
+    expect((await resolveSavedWorkflowScript('folder', config())).script).toBe(
+      'return 5;',
+    );
+  });
+
+  it.each(['.qwen', 'workflows'])(
+    'C06: ancestor %s symlink grants no discovery or explicit path access',
+    async (segment) => {
+      const external = path.join(base, 'external');
+      const externalWorkflows =
+        segment === '.qwen' ? path.join(external, 'workflows') : external;
+      await writeWorkflow(externalWorkflows, 'leak', "return 'SECRET';");
+      const link =
+        segment === '.qwen' ? path.join(repo, '.qwen') : workflows(repo);
+      await symlinkDir(external, link);
+      expect(await listSavedWorkflows(config())).toEqual([]);
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: path.join(workflows(repo), 'leak.js') },
+          config(),
+        ),
+      ).rejects.toThrow(OUTSIDE_ROOTS);
+    },
+  );
+
+  it('C07: a selected near file failing to read never falls back to a farther namesake', async () => {
+    const near = path.join(workflows(path.dirname(target)), 'shared.js');
+    await put(near, "return 'NEAR';");
+    await writeWorkflow(workflows(repo), 'shared', "return 'FAR';");
+    const original = fs.realpath.bind(fs);
+    vi.spyOn(fs, 'realpath').mockImplementation(((p) => {
+      if (String(p) === near)
+        return Promise.reject(
+          Object.assign(new Error('selected file vanished'), {
+            code: 'ENOENT',
+          }),
+        );
+      return original(p);
+    }) as typeof fs.realpath);
+    await expect(
+      resolveSavedWorkflowScript('shared', config()),
+    ).rejects.toThrow(/selected file vanished/);
+  });
+
+  it('C07: listing errors are actionable, while a nearest named hit ignores farther I/O', async () => {
+    await writeWorkflow(workflows(target), 'shared', "return 'TARGET';");
+    const far = workflows(repo);
+    await writeWorkflow(far, 'far', 'return 2;');
+    const original = fs.lstat.bind(fs);
+    vi.spyOn(fs, 'lstat').mockImplementation(((p, ...args) => {
+      if (String(p) === far)
+        return Promise.reject(
+          Object.assign(new Error('far EIO'), { code: 'EIO' }),
+        );
+      return original(p, ...args);
+    }) as typeof fs.lstat);
+    expect((await resolveSavedWorkflowScript('shared', config())).script).toBe(
+      "return 'TARGET';",
+    );
+    await expect(listSavedWorkflows(config())).rejects.toThrow(/far EIO/);
+  });
+
+  it('C08: target .qwen cannot launder an untrusted ancestor for reads or saves', async () => {
+    await writeWorkflow(workflows(repo), 'hidden', "return 'SECRET';");
+    await symlinkDir(path.join(repo, '.qwen'), path.join(target, '.qwen'));
+    trust.mockImplementation(async (dirs) => dirs.map(() => false));
+    expect(await listSavedWorkflows(config())).toEqual([]);
+    await expect(
+      resolveSavedWorkflowScript(
+        { scriptPath: path.join(workflows(target), 'hidden.js') },
+        config(),
+      ),
+    ).rejects.toThrow(OUTSIDE_ROOTS);
+    await expect(
+      saveWorkflowScript(config(), {
+        name: 'hidden',
+        scope: 'project',
+        script: 'return 9;',
+        overwrite: true,
+      }),
+    ).rejects.toThrow();
+    expect(
+      await fs.readFile(path.join(workflows(repo), 'hidden.js'), 'utf8'),
+    ).toBe("return 'SECRET';");
+  });
+
+  it('C08: keeps project aliases inside target and user parent aliases usable', async () => {
+    const local = path.join(target, 'config');
+    await writeWorkflow(path.join(local, 'workflows'), 'local', 'return 1;');
+    await symlinkDir(local, path.join(target, '.qwen'));
+    const userAlias = path.join(base, 'user-config');
+    await writeWorkflow(path.join(userAlias, 'workflows'), 'user', 'return 2;');
+    await symlinkDir(userAlias, Storage.getGlobalQwenDir());
+    expect((await listSavedWorkflows(config())).map((e) => e.name)).toEqual([
+      'local',
+      'user',
+    ]);
+    expect((await resolveSavedWorkflowScript('local', config())).script).toBe(
+      'return 1;',
+    );
+    expect((await resolveSavedWorkflowScript('user', config())).script).toBe(
+      'return 2;',
+    );
+    expect(
+      (
+        await saveWorkflowScript(config(), {
+          name: 'saved',
+          scope: 'project',
+          script: 'return 3;',
+        })
+      ).status,
+    ).toBe('saved');
+  });
+
+  it('C08: explicit base paths retain contained file aliases without making them named workflows', async () => {
+    const dir = workflows(target);
+    await put(path.join(dir, 'nested', 'wf_abcdef.js'), 'return 8;');
+    await fs.symlink(
+      path.join(dir, 'nested', 'wf_abcdef.js'),
+      path.join(dir, 'alias.js'),
+    );
+    expect(await listSavedWorkflows(config())).toEqual([]);
+    expect(
+      await resolveSavedWorkflowScript(
+        { scriptPath: path.join(dir, 'alias.js') },
+        config(),
+      ),
+    ).toMatchObject({ script: 'return 8;' });
+    await expect(resolveSavedWorkflowScript('alias', config())).rejects.toThrow(
+      /no workflow/,
+    );
+  });
+
+  it('C04/R01: an unverifiable target denies project and ancestors while independent scopes remain readable', async () => {
+    await writeWorkflow(workflows(repo), 'ancestor', 'return 1;');
+    await writeWorkflow(workflows(target), 'local', 'return 2;');
+    await writeWorkflow(Storage.getUserWorkflowsDir(), 'user', 'return 3;');
+    const extensionScript = path.join(base, 'extension', 'check.js');
+    await put(extensionScript, 'return 4;');
+    const cfg = {
+      ...config(),
+      getActiveExtensions: () => [
+        {
+          workflows: [
+            {
+              name: 'audit:check',
+              extensionName: 'audit',
+              description: 'Check',
+              scriptPath: extensionScript,
+            },
+          ],
+        },
+      ],
+    } as unknown as Config;
+    const generated = await persistInlineWorkflowScript(
+      cfg,
+      'wf_abc012',
+      'return 5;',
+    );
+    const original = fs.realpath.bind(fs);
+    vi.spyOn(fs, 'realpath').mockImplementation(((file) =>
+      String(file) === target
+        ? Promise.reject(
+            Object.assign(new Error('target EIO'), { code: 'EIO' }),
+          )
+        : original(file)) as typeof fs.realpath);
+    expect((await listSavedWorkflows(cfg)).map((entry) => entry.name)).toEqual([
+      'audit:check',
+      'user',
+    ]);
+    expect((await resolveSavedWorkflowScript('user', cfg)).script).toBe(
+      'return 3;',
+    );
+    expect((await resolveSavedWorkflowScript('audit:check', cfg)).script).toBe(
+      'return 4;',
+    );
+    expect(
+      (await resolveSavedWorkflowScript({ scriptPath: generated! }, cfg))
+        .script,
+    ).toBe('return 5;');
+    expect(trust).not.toHaveBeenCalled();
+  });
+
+  it('C04: canonicalizes target and ancestor script paths through a system-style parent alias', async () => {
+    const alias = path.join(base, 'alias');
+    await symlinkDir(repo, alias);
+    target = path.join(alias, 'packages', 'a');
+    await writeWorkflow(workflows(repo), 'root-only', 'return 6;');
+    expect(
+      (await resolveSavedWorkflowScript('root-only', config())).scriptPath,
+    ).toBe(path.join(workflows(repo), 'root-only.js'));
+    expect(
+      (
+        await resolveSavedWorkflowScript(
+          { scriptPath: path.join(workflows(alias), 'root-only.js') },
+          config(),
+        )
+      ).script,
+    ).toBe('return 6;');
+    expect(trust).toHaveBeenLastCalledWith([path.join(repo, 'packages'), repo]);
+  });
+
+  it('C07: a selected file swapped for a symlink does not read the link or a farther namesake', async () => {
+    const near = path.join(workflows(path.dirname(target)), 'shared.js');
+    const secret = path.join(base, 'secret.js');
+    await put(near, "return 'NEAR';");
+    await put(secret, "return 'SECRET';");
+    await writeWorkflow(workflows(repo), 'shared', "return 'FAR';");
+    const original = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
+      if (String(file) === near) {
+        await fs.unlink(near);
+        await fs.symlink(secret, near);
+      }
+      return original(file, flags, mode);
+    });
+    await expect(
+      resolveSavedWorkflowScript('shared', config()),
+    ).rejects.toThrow();
+  });
+
+  it('C07: a selected file read error does not fall back to a farther namesake', async () => {
+    const near = path.join(workflows(path.dirname(target)), 'shared.js');
+    await put(near, "return 'NEAR';");
+    await writeWorkflow(workflows(repo), 'shared', "return 'FAR';");
+    const original = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
+      const handle = await original(file, flags, mode);
+      if (String(file) === near)
+        vi.spyOn(handle, 'readFile').mockRejectedValueOnce(
+          new Error('selected read EIO'),
+        );
+      return handle;
+    });
+    await expect(
+      resolveSavedWorkflowScript('shared', config()),
+    ).rejects.toThrow('selected read EIO');
+  });
+
+  it('C10: rechecks project containment after mkdir before saving', async () => {
+    const external = path.join(base, 'external');
+    await fs.mkdir(external);
+    const dir = workflows(target);
+    const original = fs.mkdir.bind(fs);
+    vi.spyOn(fs, 'mkdir').mockImplementation((async (file, opts) => {
+      const result = await original(file, opts);
+      if (String(file) === dir) {
+        await fs.rm(path.dirname(dir), { recursive: true });
+        await fs.symlink(external, path.dirname(dir), 'dir');
+      }
+      return result;
+    }) as typeof fs.mkdir);
+    await expect(
+      saveWorkflowScript(config(), {
+        name: 'saved',
+        scope: 'project',
+        script: 'return 1;',
+      }),
+    ).rejects.toThrow(/outside the project target/);
+    expect(await fs.readdir(external)).toEqual([]);
+  });
+
+  it('C09: derived target discovery and save ignore inherited project Storage', async () => {
+    await writeWorkflow(workflows(repo), 'parent', 'return 1;');
+    await writeWorkflow(workflows(target), 'child', 'return 2;');
+    trust.mockImplementation(async (dirs) => dirs.map(() => false));
+    const cfg = config(repo);
+    expect((await listSavedWorkflows(cfg)).map((e) => e.name)).toEqual([
+      'child',
+    ]);
+    const saved = await saveWorkflowScript(cfg, {
+      name: 'saved',
+      scope: 'project',
+      script: 'return 3;',
+    });
+    expect(saved).toMatchObject({
+      status: 'saved',
+      path: path.join(workflows(target), 'saved.js'),
+    });
+    await expect(
+      fs.access(path.join(workflows(repo), 'saved.js')),
+    ).rejects.toThrow();
+  });
+
+  it('C10: overwrite never writes through a workflow file symlink', async () => {
+    const secret = path.join(base, 'secret');
+    await put(secret, 'KEEP');
+    await fs.mkdir(workflows(target), { recursive: true });
+    await fs.symlink(secret, path.join(workflows(target), 'saved.js'));
+    await expect(
+      saveWorkflowScript(config(), {
+        name: 'saved',
+        scope: 'project',
+        script: 'return 1;',
+        overwrite: true,
+      }),
+    ).rejects.toThrow(/symlink/i);
+    expect(await fs.readFile(secret, 'utf8')).toBe('KEEP');
+  });
+
+  it('P01: name lookup probes only that filename without enumerating unrelated scripts', async () => {
+    await writeWorkflow(workflows(repo), 'selected', 'return 1;');
+    await writeWorkflow(workflows(repo), 'unrelated', 'return 2;');
+    const readdir = vi.spyOn(fs, 'readdir');
+    const lstat = vi.spyOn(fs, 'lstat');
+    expect(
+      (await resolveSavedWorkflowScript('selected', config())).script,
+    ).toBe('return 1;');
+    expect(readdir).not.toHaveBeenCalled();
+    expect(
+      lstat.mock.calls.some(([p]) => String(p).endsWith('unrelated.js')),
+    ).toBe(false);
+    expect(trust).toHaveBeenCalledTimes(1);
+  });
+
+  it('C05: a not-found message reuses one ancestor trust snapshot', async () => {
+    await writeWorkflow(workflows(repo), 'available', 'return 1;');
+    await expect(
+      resolveSavedWorkflowScript('missing', config()),
+    ).rejects.toThrow('Available: available');
+    expect(trust).toHaveBeenCalledTimes(1);
+  });
+
+  it('C06: a target beneath an ancestor workflow directory retains its own name and path admission', async () => {
+    target = path.join(workflows(repo), 'editor');
+    await fs.mkdir(target, { recursive: true });
+    const scriptPath = path.join(workflows(target), 'local.js');
+    await put(scriptPath, "return 'OVERLAPPING_TARGET';");
+    expect(
+      (await listSavedWorkflows(config())).find(
+        (entry) => entry.name === 'local',
+      ),
+    ).toMatchObject({ scriptPath });
+    for (const ref of ['local', { scriptPath }]) {
+      expect(await resolveSavedWorkflowScript(ref, config())).toMatchObject({
+        scriptPath,
+        script: "return 'OVERLAPPING_TARGET';",
+        source: 'project',
+      });
+    }
+  });
+
+  it('C06: an independently configured user scope beneath an ancestor workflow directory stays readable', async () => {
+    process.env['QWEN_HOME'] = path.join(
+      workflows(repo),
+      'user-config',
+      '.qwen',
+    );
+    const scriptPath = path.join(
+      Storage.getUserWorkflowsDir(),
+      'user-overlap.js',
+    );
+    await put(scriptPath, "return 'OVERLAPPING_USER';");
+    for (const ref of ['user-overlap', { scriptPath }]) {
+      expect(await resolveSavedWorkflowScript(ref, config())).toMatchObject({
+        scriptPath,
+        script: "return 'OVERLAPPING_USER';",
+        source: 'user',
+      });
+    }
+  });
+
+  it('R03: a generated runtime beneath an ancestor workflow directory retains nested inline run ids', async () => {
+    const cfg = {
+      ...config(),
+      storage: new Storage(target, path.join(workflows(repo), 'runtime')),
+    } as unknown as Config;
+    const scriptPath = await persistInlineWorkflowScript(
+      cfg,
+      'wf_abcdef02',
+      "return 'OVERLAPPING_GENERATED';",
+    );
+    expect(scriptPath).not.toBeNull();
+    const resolved = await resolveSavedWorkflowScript(
+      { scriptPath: scriptPath! },
+      cfg,
+    );
+    expect(resolved).toMatchObject({
+      scriptPath,
+      script: "return 'OVERLAPPING_GENERATED';",
+    });
+    expect(resolved.savedWorkflowName).toBeUndefined();
+  });
+
+  it('C06: an exact registered extension file beneath an ancestor workflow directory stays readable', async () => {
+    const scriptPath = path.join(
+      workflows(repo),
+      'extension',
+      'nested',
+      'check.js',
+    );
+    await put(scriptPath, "return 'OVERLAPPING_EXTENSION';");
+    const cfg = {
+      ...config(),
+      getActiveExtensions: () => [
+        {
+          workflows: [
+            {
+              name: 'audit:check',
+              extensionName: 'audit',
+              description: 'Check',
+              scriptPath,
+            },
+          ],
+        },
+      ],
+    } as unknown as Config;
+    for (const ref of ['audit:check', { scriptPath }]) {
+      expect(await resolveSavedWorkflowScript(ref, cfg)).toMatchObject({
+        scriptPath,
+        script: "return 'OVERLAPPING_EXTENSION';",
+        source: 'extension',
+      });
+    }
+  });
+
+  it.each(['.qwen', 'workflows', 'file'])(
+    'C06: an ancestor %s link into the independent user scope grants no ancestor path',
+    async (segment) => {
+      const userFile = path.join(Storage.getUserWorkflowsDir(), 'user-only.js');
+      await put(userFile, "return 'USER_ONLY';");
+      if (segment === '.qwen') {
+        await symlinkDir(Storage.getGlobalQwenDir(), path.join(repo, '.qwen'));
+      } else if (segment === 'workflows') {
+        await symlinkDir(Storage.getUserWorkflowsDir(), workflows(repo));
+      } else {
+        await fs.mkdir(workflows(repo), { recursive: true });
+        await fs.symlink(userFile, path.join(workflows(repo), 'user-only.js'));
+      }
+      expect(
+        (await resolveSavedWorkflowScript('user-only', config())).script,
+      ).toBe("return 'USER_ONLY';");
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: path.join(workflows(repo), 'user-only.js') },
+          config(),
+        ),
+      ).rejects.toThrow(OUTSIDE_ROOTS);
+    },
+  );
+
+  it('C06: spelling an ancestor root through a parent alias cannot launder its workflows link into user scope', async () => {
+    const userFile = path.join(Storage.getUserWorkflowsDir(), 'user-only.js');
+    await put(userFile, "return 'USER_ONLY';");
+    await symlinkDir(Storage.getUserWorkflowsDir(), workflows(repo));
+    const alias = path.join(base, 'repo-alias');
+    await symlinkDir(repo, alias);
+    await expect(
+      resolveSavedWorkflowScript(
+        { scriptPath: path.join(workflows(alias), 'user-only.js') },
+        config(),
+      ),
+    ).rejects.toThrow(OUTSIDE_ROOTS);
+  });
+
+  it('R03: persisted nested inline paths keep underscore run ids and no saved name', async () => {
+    const cfg = config();
+    const scriptPath = await persistInlineWorkflowScript(
+      cfg,
+      'wf_abcdef01',
+      'return 7;',
+    );
+    expect(scriptPath).not.toBeNull();
+    expect(
+      await resolveSavedWorkflowScript({ scriptPath: scriptPath! }, cfg),
+    ).toMatchObject({
+      script: 'return 7;',
+      name: 'wf_abcdef01',
+    });
+    expect(
+      (await resolveSavedWorkflowScript({ scriptPath: scriptPath! }, cfg))
+        .savedWorkflowName,
+    ).toBeUndefined();
   });
 });
