@@ -1671,13 +1671,32 @@ async function runStoreFailureCase() {
   }
 }
 
+// FG8d's six cases share one tenant, and the fixture admits four active
+// captures (`active-captures=4`). A capture a case leaves OPEN keeps the
+// expiry its last grant renewal set (the writer lease or the activation,
+// whichever ends first), and grant renewals stop once the tool call that
+// launched the run returns, so under the default 60 s lease the capture
+// holds its slot for up to a minute after its case moves on. On a fast
+// host drain-release found all four slots held and its reservation was
+// refused (the store's "Publication capacity exhausted", which the Harness
+// logs as "The request is invalid."), so the run never started. Under a
+// 10 s lease a capture stops counting within ten seconds of its last
+// renewal. FG8d's one store arm matches a single stop-revision commit, so
+// the extra writer and activation renewals a shorter lease brings never
+// trip it.
+const CANCEL_DRAIN_LEASE_MS = 10_000;
+
 async function runCancelDrainCase() {
   const cli = await bootHarness();
   try {
     const name = current.name;
     if (name === 'cancel-before-start') holdNextStart = true;
     execFileSync('mkfifo', [path.join(current.directory, 'run-gate')]);
-    const { clientId } = await createSession(cli, storeProxyUrl);
+    const { clientId } = await createSession(
+      cli,
+      storeProxyUrl,
+      CANCEL_DRAIN_LEASE_MS,
+    );
     const promptId = await submitPrompt(cli, clientId, `fg8d ${name} launch`);
     step('prompt admitted');
     if (name === 'cancel-before-start') {
