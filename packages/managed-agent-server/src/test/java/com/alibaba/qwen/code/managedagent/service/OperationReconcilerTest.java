@@ -49,9 +49,9 @@ class OperationReconcilerTest {
     private static final long RECHECK_AT =
             1_000 + OperationReconciler.RECHECK.toMillis();
     private static final ParkedOperation PARKED_CANCEL = new ParkedOperation(
-            TENANT, SESSION, CANCEL, OperationKind.TASK_CANCEL);
+            TENANT, SESSION, CANCEL, "TASK_CANCEL");
     private static final ParkedOperation PARKED_INPUT = new ParkedOperation(
-            TENANT, SESSION, INPUT, OperationKind.SUBMIT_INPUT);
+            TENANT, SESSION, INPUT, "SUBMIT_INPUT");
 
     private AgentStateStore store;
     private ManagedExtensionRecordStore records;
@@ -81,7 +81,8 @@ class OperationReconcilerTest {
                 Executors.newVirtualThreadPerTaskExecutor(), clock,
                 new ManagedAgentProperties());
         reconciler = new OperationReconciler(store,
-                List.of(cancels, new TurnInputEvidence(store)), clock);
+                List.of(cancels, new TurnInputEvidence(store)), DIRECT,
+                clock);
     }
 
     @Test
@@ -161,11 +162,134 @@ class OperationReconcilerTest {
                 anyLong());
     }
 
+    // A kind outside any Session lists its own parked rows and settles with
+    // effects of its own, also when its evidence cannot be read; the Session
+    // store's settle never touches it.
+    @Test
+    void aKindOutsideAnySessionScansAndSettlesThroughItsSource() {
+        ParkedOperation landed = new ParkedOperation(TENANT, null, "wop_1",
+                "WORKSPACE_CREATE");
+        ParkedOperation unreadable = new ParkedOperation(TENANT, null,
+                "wop_2", "WORKSPACE_CREATE");
+        List<String> settled = new java.util.ArrayList<>();
+        AcceptanceEvidence source = new AcceptanceEvidence() {
+            @Override
+            public String kind() {
+                return "WORKSPACE_CREATE";
+            }
+
+            @Override
+            public Optional<AcceptanceVerdict> read(ParkedOperation parked) {
+                if (parked.equals(unreadable)) {
+                    throw new IllegalStateException("node unreachable");
+                }
+                return Optional.of(AcceptanceVerdict.committed());
+            }
+
+            @Override
+            public boolean settle(AgentStateStore ignored,
+                    ParkedOperation parked, AcceptanceVerdict verdict,
+                    long retryAt) {
+                settled.add(parked.operationId() + ":"
+                        + verdict.acceptance() + "@" + retryAt);
+                return true;
+            }
+
+            @Override
+            public List<ParkedOperation> parked(int limit) {
+                return List.of(landed, unreadable);
+            }
+        };
+        new OperationReconciler(store, List.of(source), DIRECT,
+                Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC))
+                .reconcile();
+        assertThat(settled).containsExactly("wop_1:COMMITTED@" + RECHECK_AT,
+                "wop_2:UNKNOWN@" + RECHECK_AT);
+        verify(store, never()).settleParkedOperation(any(), any(),
+                anyLong());
+    }
+
+    // Review of #14456: evidence may block (an SSH probe waits up to a
+    // minute on its node), yet the scan runs on the scheduler every other
+    // coordinator's recovery shares. The scan only hands rows out, so the
+    // next task on that single thread runs while the probe is still blocked,
+    // and a row being reconciled is not handed out twice.
+    @Test
+    void aBlockedEvidenceReadNeverHoldsTheSharedScheduler()
+            throws Exception {
+        ParkedOperation registration = new ParkedOperation(TENANT, null,
+                "wop_1", "WORKSPACE_CREATE");
+        java.util.concurrent.CountDownLatch probing =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger reads =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.CountDownLatch settled =
+                new java.util.concurrent.CountDownLatch(1);
+        AcceptanceEvidence slowNode = new AcceptanceEvidence() {
+            @Override
+            public String kind() {
+                return "WORKSPACE_CREATE";
+            }
+
+            @Override
+            public Optional<AcceptanceVerdict> read(ParkedOperation parked) {
+                reads.incrementAndGet();
+                probing.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                }
+                return Optional.of(AcceptanceVerdict.committed());
+            }
+
+            @Override
+            public boolean settle(AgentStateStore ignored,
+                    ParkedOperation parked, AcceptanceVerdict verdict,
+                    long retryAt) {
+                settled.countDown();
+                return true;
+            }
+
+            @Override
+            public List<ParkedOperation> parked(int limit) {
+                return List.of(registration);
+            }
+        };
+        var executor = Executors.newVirtualThreadPerTaskExecutor();
+        var scheduler = Executors.newSingleThreadScheduledExecutor();
+        try {
+            OperationReconciler slow = new OperationReconciler(store,
+                    List.of(slowNode), executor, Clock.systemUTC());
+            scheduler.execute(slow::reconcile);
+            assertThat(probing.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                    .isTrue();
+            java.util.concurrent.CountDownLatch otherTick =
+                    new java.util.concurrent.CountDownLatch(1);
+            scheduler.execute(otherTick::countDown);
+            assertThat(otherTick.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                    .isTrue();
+            scheduler.submit(slow::reconcile).get(10,
+                    java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(reads).hasValue(1);
+            assertThat(settled.getCount()).isEqualTo(1);
+            release.countDown();
+            assertThat(settled.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                    .isTrue();
+        } finally {
+            release.countDown();
+            scheduler.shutdownNow();
+            executor.shutdownNow();
+        }
+    }
+
     @Test
     void oneKindHasOneEvidenceSource() {
         TurnInputEvidence input = new TurnInputEvidence(store);
         assertThatThrownBy(() -> new OperationReconciler(store,
-                List.of(input, new TurnInputEvidence(store)),
+                List.of(input, new TurnInputEvidence(store)), DIRECT,
                 Clock.systemUTC()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("SUBMIT_INPUT");
@@ -206,4 +330,38 @@ class OperationReconcilerTest {
         when(provider.getIfAvailable()).thenReturn(broker);
         return provider;
     }
+
+    /** Runs each reconciliation on the calling thread. */
+    private static final java.util.concurrent.ExecutorService DIRECT =
+            new java.util.concurrent.AbstractExecutorService() {
+                @Override
+                public void execute(Runnable task) {
+                    task.run();
+                }
+
+                @Override
+                public void shutdown() {
+                }
+
+                @Override
+                public List<Runnable> shutdownNow() {
+                    return List.of();
+                }
+
+                @Override
+                public boolean isShutdown() {
+                    return false;
+                }
+
+                @Override
+                public boolean isTerminated() {
+                    return false;
+                }
+
+                @Override
+                public boolean awaitTermination(long timeout,
+                        java.util.concurrent.TimeUnit unit) {
+                    return true;
+                }
+            };
 }

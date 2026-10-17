@@ -1299,7 +1299,8 @@ class HostedHarnessClientTest {
                                 null)));
 
         assertTrue(recovery.hasUnknownOutcome());
-        assertFalse(recovery.isCancellationReady());
+        assertFalse(recovery.isContinuationReady());
+        assertTrue(recovery.isCancellationReady());
     }
 
     @Test

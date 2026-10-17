@@ -187,8 +187,8 @@ final class HostedSseGapProbe implements AutoCloseable {
         assertExecution(true);
         var events = events();
         assertThat(events).extracting(row -> row.get("event_type"))
-                .containsExactly("session.created", "item.tool_call.updated", "item.tool_call.updated",
-                        "item.output_text.delta", "turn.completed");
+                .containsExactly("session.created", "item.tool_call.updated",
+                        "item.tool_call.updated", "item.output_text.delta", "turn.completed");
         assertThat(events.stream().skip(1).map(row -> row.get("source_key")).toList()).isEqualTo(sourceKeys);
         assertThat(events.stream().map(row -> ((Number) row.get("sequence_id")).longValue()).toList())
                 .containsExactly(1L, 2L, 3L, 4L, 5L);

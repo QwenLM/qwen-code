@@ -237,6 +237,21 @@ try {
   const ledger: Array<Record<string, unknown>> = await evidence('ledger');
   const publicFrames = [...publicBefore.frames, ...publicAfter.frames];
   const webFrames = [...webBefore.frames, ...webAfter.frames];
+  const toolProgress = publicFrames
+    .filter((frame) => frame.event === 'item.tool_call.updated')
+    .map((frame) => frame.data['data'] as Record<string, unknown>);
+  assert.deepEqual(
+    toolProgress.map((update) => [
+      update['toolCallId'],
+      update['name'],
+      update['status'],
+    ]),
+    [
+      ['effect', 'edit', 'in_progress'],
+      ['effect', 'edit', 'completed'],
+    ],
+  );
+  assert.equal(toolProgress[0]['itemId'], toolProgress[1]['itemId']);
   for (const [surface, frames] of [
     ['public', publicFrames],
     ['web', webFrames],
@@ -274,6 +289,13 @@ try {
   assert.equal(transcript.lastSequence, 5);
   assert.equal(transcript.hasMore, false);
   assert.equal(transcript.coveredSequence, 5);
+  const toolItems = transcript.items.filter(
+    (item: { type: string }) => item.type === 'tool_call',
+  );
+  assert.equal(toolItems.length, 1);
+  assert.equal(toolItems[0].itemId, toolProgress[0]['itemId']);
+  assert.equal(toolItems[0].status, 'completed');
+  assert.equal(toolItems[0].attributes.toolCallId, 'effect');
   assert.equal(
     transcript.items
       .flatMap((item: { content?: Array<{ text?: string }> }) =>
