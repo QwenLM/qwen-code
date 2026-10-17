@@ -495,6 +495,7 @@ function applyDaemonTranscriptEvent(
         appendUnrecognizedDiagnostic(next, event);
         break;
       }
+      if (coalesceTeammateActivity(next, event)) break;
       appendStatusBlock(next, event.type, event.text, event, {
         clearActiveText: event.clearActiveText,
       });
@@ -1696,6 +1697,49 @@ function appendUnrecognizedDiagnostic(
     diagnostics.length > UNRECOGNIZED_DIAGNOSTICS_LIMIT
       ? diagnostics.slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT)
       : diagnostics;
+}
+
+/**
+ * `teammate_activity` arrives once per teammate tool call *and* per tool
+ * result and is never persisted, so one block per event spends the `maxBlocks`
+ * budget on rows a reload will not contain and `trimTranscriptState` then
+ * evicts real conversation from the front to make room — the second symptom
+ * the sidechannel doc above names. Keep one row per teammate and refresh it,
+ * so N events cost O(teammates) blocks. Returns false when the event is not
+ * coalescable and the caller must append normally.
+ */
+function coalesceTeammateActivity(
+  state: DaemonTranscriptState,
+  event: DaemonUiStatusEvent,
+): boolean {
+  if (event.type !== 'status' || event.source !== 'teammate_activity') {
+    return false;
+  }
+  const agentName = event.agent?.agentName;
+  if (!agentName) return false;
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const candidate = state.blocks[i]!;
+    if (
+      candidate.kind !== 'status' ||
+      candidate.source !== 'teammate_activity' ||
+      candidate.agent?.agentName !== agentName
+    ) {
+      continue;
+    }
+    const block = getWritableBlockById(state, candidate.id);
+    if (block?.kind !== 'status') return false;
+    const bytesBefore = estimateBlockBytes(block);
+    block.text = truncateText(state, block.id, undefined, event.text);
+    if (event.data !== undefined) block.data = event.data;
+    if (event.eventId !== undefined) block.eventId = event.eventId;
+    block.updatedAt = state.now;
+    state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+    // Same pointer discipline as `appendStatusBlock`'s opt-out branch: the
+    // streaming assistant block stays active, the user pointer resets.
+    state.activeUserBlockId = undefined;
+    return true;
+  }
+  return false;
 }
 
 function appendStatusBlock(

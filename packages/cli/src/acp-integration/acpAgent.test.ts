@@ -30656,6 +30656,39 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('lands queued teammate reports before managed shutdown closes the writers', async () => {
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      flushPendingPeerNotifications: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    await agent.beginManagedShutdown().writerShutdown;
+
+    // A queued report is already marked read in the on-disk mailbox, and
+    // `appendRecord` drops silently once the writer has closed — so landing it
+    // only counts ahead of the writer loop.
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('clears the replayed Todo plan revision on a live-session load', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     const innerConfig = makeRestoreInnerConfig({

@@ -2251,6 +2251,58 @@ describe('createTranscriptReplayMachine', () => {
     }
   });
 
+  it('attributes a subagent that ran and then failed', () => {
+    // A run that throws returns `{ ...currentDisplay, status: 'failed' }`, so
+    // the frame keeps the validated name *and* the `executionMode` that only
+    // post-admission displays carry. `buildSpawnBlockedResult` carries
+    // neither. Rejecting the whole `'failed'` class would unattribute a
+    // subagent the live wire did attribute. Single valid segment: only the
+    // started/status guard can reject this fixture.
+    for (const executionMode of ['foreground', 'background'] as const) {
+      const machine = createTranscriptReplayMachine();
+      const result = updates(
+        machine,
+        record('agent-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'agent-1',
+            status: 'error',
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              status: 'failed',
+              executionMode,
+              terminateReason: 'Failed to run subagent: boom',
+            },
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'agent-1',
+                  name: 'agent',
+                  response: { output: 'boom' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        _meta: {
+          agent: {
+            agentName: '/root/researcher',
+            depth: 1,
+            kind: 'subagent',
+          },
+        },
+      });
+    }
+  });
+
   it('leaves a spawn unattributed when the persisted name is not one segment', () => {
     // A replayed transcript is read back from disk, so the persisted name is
     // only as trustworthy as whichever version wrote it. Admitting a `/` here

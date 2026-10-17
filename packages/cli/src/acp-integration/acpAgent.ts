@@ -4208,6 +4208,10 @@ class QwenAgent implements Agent {
           }`,
         );
       });
+      // Queued teammate reports are already marked read in the on-disk
+      // mailbox, so land them here: the writer-close loop below runs before
+      // `dispose()`, and `appendRecord` is a silent no-op once it has closed.
+      session.flushPendingPeerNotifications?.();
       configs.add(session.getConfig());
     }
     for (const pending of this.pendingConfigCleanup.values()) {
