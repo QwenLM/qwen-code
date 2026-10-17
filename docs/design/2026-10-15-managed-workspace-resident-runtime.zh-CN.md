@@ -4,7 +4,8 @@
 
 状态：4.1 节已由 PR1（[#14254](https://github.com/QwenLM/qwen-code/pull/14254)）实现，
 4.2 节由 PR2（[#14339](https://github.com/QwenLM/qwen-code/pull/14339)）实现，
-4.3 节由 PR3 实现。4.4 节（Session 创建时 warm）与 4.5 节仍是提案。跟踪 issue：
+4.3 节由 PR3（[#14435](https://github.com/QwenLM/qwen-code/pull/14435)）实现。
+4.4 节（Session 创建时 warm）与 4.5 节仍是提案。跟踪 issue：
 [#14211](https://github.com/QwenLM/qwen-code/issues/14211)。属于 Managed Agent 提案
 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。代码引用基于 PR2 之前的
 `main` @ `c3012a523f`。
@@ -18,7 +19,7 @@
   - 接受 workspace 隔离下的 close 证据（原待确认问题 1）；
   - 推后空闲回收和 generation 预算（见 4.5 节）；
   - 切片重新排序：PR2 重建 Harness 归属，PR3 开启 Workspace 常驻，PR4 增加 Session 创建时 warm。
-- 修订 4（PR3）：
+- 修订 4（PR3，[#14435](https://github.com/QwenLM/qwen-code/pull/14435)）：
   - close/恢复侧落地：正在关闭的 Session 在共享 binding 上只释放自己的 Runtime Session
     （worker 与 binding 保持 `READY`），两个 close 协议都覆盖；v2 cleanup authority 由
     Runtime Session 自己的 Harness Session 认领 fence；丢失的共享 worker 让 close 失败关闭，
@@ -295,14 +296,14 @@ archive、delete 和 unarchive 继承该 Session 隔离方式所提供的 close 
 
 ## 6. 交付切片
 
-| PR   | 范围                                                      | 依赖     | 行为变化   |
-| ---- | --------------------------------------------------------- | -------- | ---------- |
-| PR0  | 中英文设计文档（#14214）                                  | —        | 无         |
-| PR1  | Kind 身份与隔离策略（4.1，#14254）                        | —        | 无         |
-| PR2  | 共享 binding 上的 Harness 归属（4.2）                     | PR1      | 无         |
-| PR3  | 绑定 Workspace 的 Session 使用 workspace isolation（4.3） | PR2      | 需显式开启 |
-| PR4  | Session 创建时 warm（4.4）                                | —        | 需显式开启 |
-| 之后 | 空闲回收与 generation 预算（4.5）、keep-warm              | 测量数据 | 需显式开启 |
+| PR   | 范围                                                                                                                | 依赖     | 行为变化   |
+| ---- | ------------------------------------------------------------------------------------------------------------------- | -------- | ---------- |
+| PR0  | 中英文设计文档（#14214）                                                                                            | —        | 无         |
+| PR1  | Kind 身份与隔离策略（4.1，#14254）                                                                                  | —        | 无         |
+| PR2  | 共享 binding 上的 Harness 归属（4.2）                                                                               | PR1      | 无         |
+| PR3  | 绑定 Workspace 的 Session 使用 workspace isolation（4.3，[#14435](https://github.com/QwenLM/qwen-code/pull/14435)） | PR2      | 需显式开启 |
+| PR4  | Session 创建时 warm（4.4）                                                                                          | —        | 需显式开启 |
+| 之后 | 空闲回收与 generation 预算（4.5）、keep-warm                                                                        | 测量数据 | 需显式开启 |
 
 PR3 如果超过约 1000 行生产代码，就拆成"provisioning 与放置"和"close 拆分与证据"两部分。
 每个切片都要同时更新本文档的中英文版本。由于 `sdk-java.yml` 不在 pull request 上运行，

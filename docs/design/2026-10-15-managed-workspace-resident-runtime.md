@@ -5,7 +5,8 @@
 Status: Section 4.1 is implemented by PR1
 ([#14254](https://github.com/QwenLM/qwen-code/pull/14254)), Section 4.2 by PR2
 ([#14339](https://github.com/QwenLM/qwen-code/pull/14339)) and Section 4.3 by
-PR3. Section 4.4 (Session-create warm) and Section 4.5 remain proposals.
+PR3 ([#14435](https://github.com/QwenLM/qwen-code/pull/14435)). Section 4.4
+(Session-create warm) and Section 4.5 remain proposals.
 Tracking issue:
 [#14211](https://github.com/QwenLM/qwen-code/issues/14211). Part of the Managed
 Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). Code
@@ -22,7 +23,7 @@ Revision history:
   - idle retirement and the generation budget are deferred (Section 4.5);
   - the slices are reordered: PR2 re-keys Harness ownership, PR3 enables
     Workspace residency, PR4 adds Session-create warm.
-- Revision 4 (PR3):
+- Revision 4 (PR3, [#14435](https://github.com/QwenLM/qwen-code/pull/14435)):
   - close/recovery side: a closing Session releases only its own Runtime
     Sessions on a shared binding (the worker and the binding stay `READY`) on
     both close protocols; v2 cleanup authority is fenced by the Runtime
@@ -358,14 +359,14 @@ Durations follow the existing unit rules and must be written with a suffix.
 
 ## 6. Delivery slices
 
-| PR    | Scope                                                  | Depends on   | Behaviour change |
-| ----- | ------------------------------------------------------ | ------------ | ---------------- |
-| PR0   | Bilingual design (#14214)                              | —            | none             |
-| PR1   | Kind identity and isolation policy (4.1, #14254)       | —            | none             |
-| PR2   | Harness ownership on shared bindings (4.2)             | PR1          | none             |
-| PR3   | Workspace isolation for bound Sessions (4.3)           | PR2          | opt-in           |
-| PR4   | Session-create warm (4.4)                              | —            | opt-in           |
-| Later | Idle retirement and generation budget (4.5), keep-warm | measurements | opt-in           |
+| PR    | Scope                                                                                                  | Depends on   | Behaviour change |
+| ----- | ------------------------------------------------------------------------------------------------------ | ------------ | ---------------- |
+| PR0   | Bilingual design (#14214)                                                                              | —            | none             |
+| PR1   | Kind identity and isolation policy (4.1, #14254)                                                       | —            | none             |
+| PR2   | Harness ownership on shared bindings (4.2)                                                             | PR1          | none             |
+| PR3   | Workspace isolation for bound Sessions (4.3, [#14435](https://github.com/QwenLM/qwen-code/pull/14435)) | PR2          | opt-in           |
+| PR4   | Session-create warm (4.4)                                                                              | —            | opt-in           |
+| Later | Idle retirement and generation budget (4.5), keep-warm                                                 | measurements | opt-in           |
 
 If PR3 exceeds roughly 1000 production lines, split it into
 "provisioning and placement" and "close split and evidence". Each slice updates
