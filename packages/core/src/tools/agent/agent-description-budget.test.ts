@@ -94,6 +94,9 @@ async function buildTool({
 
   const config = {
     getSubagentManager: () => subagentManager,
+    getWorkspaceContext: () => ({
+      onDirectoriesChanged: () => () => {},
+    }),
     getLlmClient: () => undefined,
     isAgentTeamEnabled: () => team,
     isTodoWriteEnabled: () => todo,

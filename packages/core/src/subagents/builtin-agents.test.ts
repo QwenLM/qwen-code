@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   BuiltinAgentRegistry,
@@ -12,7 +12,16 @@ import {
   REVIEW_BUILTIN_SUBAGENT_TYPE,
 } from './builtin-agents.js';
 
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
+
 describe('BuiltinAgentRegistry', () => {
+  beforeEach(() => {
+    mockIsBashSearchAvailable.mockReturnValue(false);
+  });
+
   describe('getBuiltinAgents', () => {
     it('should return array of builtin agents with correct properties', () => {
       const agents = BuiltinAgentRegistry.getBuiltinAgents();
@@ -74,6 +83,31 @@ describe('BuiltinAgentRegistry', () => {
         'pipelines are allowed when every command is read-only',
       );
       expect(exploreAgent?.systemPrompt).not.toContain('(>, >>, |)');
+      expect(exploreAgent?.tools).toContain(ToolNames.SHELL);
+      expect(exploreAgent?.tools).toContain(ToolNames.GREP);
+      expect(exploreAgent?.tools).toContain(ToolNames.GLOB);
+    });
+
+    it('rebuilds agents when Bash search availability changes', () => {
+      expect(BuiltinAgentRegistry.getBuiltinAgent('Explore')?.tools).toContain(
+        ToolNames.GREP,
+      );
+
+      mockIsBashSearchAvailable.mockReturnValue(true);
+      const exploreAgent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+      const reviewAgent = BuiltinAgentRegistry.getBuiltinAgent('review-agent');
+
+      expect(exploreAgent?.tools).toContain(ToolNames.SHELL);
+      expect(exploreAgent?.tools).not.toContain(ToolNames.GREP);
+      expect(exploreAgent?.tools).not.toContain(ToolNames.GLOB);
+      expect(exploreAgent?.systemPrompt).toContain('`rg --files`');
+      // review-agent keeps the dedicated search tools either way: the review
+      // skill document enumerates its exact tool set for the orchestrator to
+      // judge against, and a static document cannot track a list that varies
+      // with whether Bash hosts the search tools.
+      expect(reviewAgent?.tools).toContain(ToolNames.SHELL);
+      expect(reviewAgent?.tools).toContain(ToolNames.GREP);
+      expect(reviewAgent?.tools).toContain(ToolNames.GLOB);
     });
 
     // Regression for #7126: Explore is a read-only search worker that

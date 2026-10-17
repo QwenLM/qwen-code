@@ -44,6 +44,10 @@ vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
   getCacheSafeParams: vi.fn(),
 }));
+const mockIsBashSearchAvailable = vi.hoisted(() => vi.fn());
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: mockIsBashSearchAvailable,
+}));
 
 describe('runAutoMemoryExtractionByAgent', () => {
   const mockConfig = {
@@ -81,6 +85,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsBashSearchAvailable.mockReturnValue(false);
     vi.mocked(getCacheSafeParams).mockReturnValue({
       generationConfig: {},
       history: [
@@ -426,6 +431,25 @@ describe('runAutoMemoryExtractionByAgent', () => {
     const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
     expect(call?.config.getAutoMemoryPrompt()).toBe('');
     expect(call?.systemPrompt).toContain('Memory file format reference:');
+  });
+
+  it('retains confined search tools when parent Bash search is available', async () => {
+    mockIsBashSearchAvailable.mockReturnValue(true);
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: ['read_file', 'grep_search', 'glob', 'write_file', 'edit'],
+        taskPrompt: expect.stringContaining('`grep_search`, `glob`'),
+      }),
+    );
   });
 
   it.each([

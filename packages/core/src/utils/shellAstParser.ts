@@ -26,6 +26,7 @@ import {
   classifySedCommandSafety,
   hasShellPatternExpansion,
 } from './shell-safety-rules.js';
+import { scanUgrepOptions } from './ugrep-options.js';
 
 export type ShellCommandSafety = 'read-only' | 'write' | 'unknown';
 type Safety = ShellCommandSafety;
@@ -788,6 +789,10 @@ function evaluateOutputOption(args: string[], long = true, short = true) {
   return null;
 }
 
+function evaluateGrepSafety(args: string[]): ShellCommandSafety {
+  return scanUgrepOptions(args).safety;
+}
+
 function evaluateGitSafety(args: string[]): ShellCommandSafety {
   const first = args[0];
   if (!first || first === '--version') return 'read-only';
@@ -1002,6 +1007,7 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   else if (root === 'find') result = evaluateFindSafety(args);
   else if (root === 'sed') result = evaluateSedSafety(args);
   else if (root === 'awk') result = evaluateAwkSafety(args);
+  else if (root === 'grep') result = evaluateGrepSafety(args);
   else if (root === 'sort' || root === 'tree') {
     result = evaluateOutputOption(args, root === 'sort') ?? 'read-only';
     if (hasHelp(args, ['-o', '--output'])) result = 'unknown';
@@ -1029,7 +1035,9 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
     ['less', 'more'].includes(root) ||
     (['rg', 'ripgrep'].includes(root) &&
       beforeTerminator(args).some((arg) =>
-        /^(?:--(?:hostname-bin|pre)(?:=|$)|--search-zip$|-[^-]*z)/.test(arg),
+        /^(?:--(?:hostname-bin|pre)(?:=|$)|--no-ignore-files$|--search-zip$|-[^-]*z)/.test(
+          arg,
+        ),
       ))
   ) {
     result = 'unknown';
