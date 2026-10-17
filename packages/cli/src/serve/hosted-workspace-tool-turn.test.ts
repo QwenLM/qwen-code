@@ -95,6 +95,7 @@ const broker = vi.hoisted(() => ({
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
   backgroundProcessStatus: vi.fn(),
+  status: vi.fn(),
   monitorControl: vi.fn(),
 }));
 // child_run's shell kind and monitor_run are enabled by the H3 enablement
@@ -132,6 +133,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     backgroundProcessStatus = broker.backgroundProcessStatus;
+    status = broker.status;
     monitorControl = broker.monitorControl;
   },
 }));
@@ -5581,6 +5583,9 @@ function backgroundTurnRig(
     lane?: HostedShellTurnOptions;
     notStartedProven?: boolean;
     reserveRefused?: boolean;
+    /** The store's answer to one execution's reservation, if it refuses. */
+    refuse?: (executionCallId: string | undefined) => Error | undefined;
+    fitsInline?: (type: string) => boolean;
     publicationMissing?: boolean;
     foregroundOnly?: boolean;
     closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
@@ -5589,6 +5594,10 @@ function backgroundTurnRig(
 ) {
   enablement.childRun = true;
   const order: string[] = [];
+  const closed: string[] = [];
+  // executionCallId -> publicationId, and the publications the store refused.
+  const publications = new Map<string, string>();
+  const refused = new Set<string>();
   const orchestrator = {
     calls: [] as Array<readonly [string, unknown]>,
     record(id: string) {
@@ -5631,6 +5640,18 @@ function backgroundTurnRig(
             'store_unavailable',
             'reserve refused',
           );
+        const binding = (
+          body as {
+            binding?: { executionCallId?: string; publicationId?: string };
+          }
+        ).binding;
+        if (binding?.executionCallId && binding.publicationId)
+          publications.set(binding.executionCallId, binding.publicationId);
+        const refusal = options.refuse?.(binding?.executionCallId);
+        if (refusal) {
+          if (binding?.publicationId) refused.add(binding.publicationId);
+          throw refusal;
+        }
         return { state: 'OPEN' };
       }
       if (route === '/grants' && operation === 'renew') {
@@ -5639,6 +5660,17 @@ function backgroundTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
+        const publicationId = String(
+          (body as { publicationId?: string }).publicationId,
+        );
+        closed.push(publicationId);
+        // The store never wrote a row for a refused reservation.
+        if (refused.has(publicationId))
+          throw new ManagedSessionStoreHttpError(
+            400,
+            'invalid_request',
+            'The request is invalid.',
+          );
         const closeResult =
           options.closeResults?.[
             order.filter((item) => item === 'close_not_started').length - 1
@@ -5700,7 +5732,7 @@ function backgroundTurnRig(
       });
       return uuid;
     },
-    () => true,
+    (type: string) => options.fitsInline?.(type) ?? true,
     { owner, captureBytes: 1024 * 1024 },
     undefined,
     undefined,
@@ -5710,7 +5742,14 @@ function backgroundTurnRig(
       foregroundOnly: options.foregroundOnly,
     },
   );
-  return { order, orchestrator, turn, lane: options.lane };
+  return {
+    order,
+    closed,
+    publications,
+    orchestrator,
+    turn,
+    lane: options.lane,
+  };
 }
 
 function monitorTurnRig(
@@ -5719,6 +5758,7 @@ function monitorTurnRig(
     notStartedProven?: boolean;
     lane?: HostedShellTurnOptions;
     reserveRefused?: boolean;
+    capacityRefused?: boolean;
     foregroundOnly?: boolean;
   } = {},
 ) {
@@ -5803,6 +5843,7 @@ function monitorTurnRig(
             'store_unavailable',
             'reserve refused',
           );
+        if (opts.capacityRefused === true) throw capacityExhausted();
         return { state: 'OPEN' };
       }
       if (route === '/grants' && operation === 'renew') {
@@ -5811,6 +5852,12 @@ function monitorTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
+        if (opts.capacityRefused === true)
+          throw new ManagedSessionStoreHttpError(
+            400,
+            'invalid_request',
+            'The request is invalid.',
+          );
         return {
           state: opts.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
         };
@@ -6911,6 +6958,642 @@ it('settles an in-turn dispatch with no publication and no durable process row',
     'qwen serve: Settled never-started background child run shell-execution from durable process-ledger absence.',
   );
   stderr.mockRestore();
+});
+
+// #14434: a limit refusal reaches the batch before any call ran. Every
+// execution reads `prepared` until its cancel lands, then settles: a Shell
+// or Monitor (`shell-…`, `monitor-…`, v3) with the Broker's not-started
+// result, any other call with `cancelled`, as the Broker answers.
+function capacityExhausted() {
+  return new ManagedSessionStoreHttpError(
+    429,
+    'managed_tool_publication_capacity_exhausted',
+    'Tool publication reservation refused at the active_captures limit',
+  );
+}
+
+function retentionExhausted() {
+  return new ManagedSessionStoreHttpError(
+    409,
+    'managed_tool_publication_retention_exhausted',
+    'Tool publication reservation refused at the session_bytes limit',
+  );
+}
+
+const CAPACITY_ANSWER =
+  'This call was not started: Tool publication reservation refused at the active_captures limit. Retry after the running tools finish.';
+
+function brokerStatusThroughCancel(
+  override?: (id: string, cancelled: boolean) => unknown,
+) {
+  broker.status.mockImplementation(async (id: string) => {
+    const cancelled = broker.cancel.mock.calls.some(
+      ([cancelledId]) => cancelledId === id,
+    );
+    if (override) {
+      const state = override(id, cancelled);
+      if (state !== null) return state;
+    }
+    if (!cancelled) return { state: 'prepared' };
+    return {
+      state: 'settled',
+      executionStatus: /^(shell|monitor)-/.test(id)
+        ? 'not_started'
+        : 'cancelled',
+    };
+  });
+}
+
+function answerText(responses: Part[]): string[] {
+  return responses.map((part) =>
+    String(
+      (
+        part.functionResponse?.response as Record<string, unknown> | undefined
+      )?.['error'],
+    ),
+  );
+}
+
+async function runtimeItemStates(): Promise<string[]> {
+  const authorization = await session.authority.harnessRunAuthorization();
+  if (authorization.status !== 'runnable') return [authorization.status];
+  return (authorization.checkpoint.tools?.items ?? []).map(
+    (item) => item.state,
+  );
+}
+
+async function toolResultCount(): Promise<number> {
+  return (await session.sink.project()).filter(
+    (record) => record.type === 'tool_result',
+  ).length;
+}
+
+const foregroundShell = {
+  ...calls[0],
+  name: 'run_shell_command',
+  callId: 'foreground-call',
+  args: { command: 'echo hi' },
+};
+const foregroundParts: Part[] = [
+  {
+    functionCall: {
+      id: foregroundShell.callId,
+      name: foregroundShell.name,
+      args: foregroundShell.args,
+    },
+  },
+];
+const unreachedOutcome: ToolResultEnvelope = {
+  executionStatus: 'success',
+  responseParts: [{ text: 'unreached' }],
+  capture: null,
+};
+
+it('answers a capacity-refused foreground Shell as not started and lets the turn go on', async () => {
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const resolve = harness.resolveAwaitRuntime.bind(harness);
+  vi.spyOn(harness, 'resolveAwaitRuntime').mockImplementation(
+    async (...args) => {
+      rig.order.push('resolve');
+      return resolve(...args);
+    },
+  );
+  const responses = await turn.execute(
+    [foregroundShell],
+    foregroundParts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(broker.cancel).toHaveBeenCalledWith('shell-execution');
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    'foreground-call',
+  ]);
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER]);
+  expect(
+    (responses[0]?.functionResponse?.response as Record<string, unknown>)[
+      'executionStatus'
+    ],
+  ).toBe('not_started');
+  // The 429 is retried, the close finds no row, and the answer journals
+  // before its await_runtime item resolves.
+  expect(rig.order).toEqual([
+    'assistant',
+    'reserve',
+    'reserve',
+    'reserve',
+    'close_not_started',
+    'tool_result',
+    'resolve',
+  ]);
+  expect(await runtimeItemStates()).toEqual(['settled']);
+  expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+  await expect(turn.finish()).resolves.toBeUndefined();
+});
+
+it('answers a retention-refused Shell at once and says a retry will not help', async () => {
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: retentionExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    [foregroundShell],
+    foregroundParts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([
+    'This call was not started: Tool publication reservation refused at the session_bytes limit. Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.',
+  ]);
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
+  expect(await runtimeItemStates()).toEqual(['settled']);
+});
+
+it.each([
+  [
+    'a 429 that is not a limit refusal',
+    () =>
+      new ManagedSessionStoreHttpError(
+        429,
+        'managed_tool_publication_busy',
+        'Tool publication entry capacity is exhausted',
+      ),
+  ],
+  [
+    'a limit code under another status',
+    () =>
+      new ManagedSessionStoreHttpError(
+        400,
+        'managed_tool_publication_capacity_exhausted',
+        'Tool publication reservation refused at the active_captures limit',
+      ),
+  ],
+  [
+    'the retention code under another status',
+    () =>
+      new ManagedSessionStoreHttpError(
+        429,
+        'managed_tool_publication_retention_exhausted',
+        'Tool publication reservation refused at the session_bytes limit',
+      ),
+  ],
+  [
+    'a 409 that is not a limit refusal',
+    () =>
+      new ManagedSessionStoreHttpError(
+        409,
+        'managed_session_writer_conflict',
+        'The Session writer changed',
+      ),
+  ],
+])('keeps a batch recovery-blocked for %s', async (_label, refusal) => {
+  const rig = backgroundTurnRig(unreachedOutcome, { refuse: refusal });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('answers a capacity-refused background Shell once its process ledger proves it never started', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  broker.backgroundProcessStatus.mockResolvedValue(undefined);
+  const responses = await turn.execute(
+    [call],
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER]);
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.orchestrator.calls.at(-1)?.[1]).toEqual({
+    id: 'shell-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(await runtimeItemStates()).toEqual(['settled']);
+  stderr.mockRestore();
+});
+
+it('keeps a capacity-refused background Shell recovery-blocked while its process proof is ambiguous', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+  ]);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  stderr.mockRestore();
+});
+
+it('keeps a capacity-refused background Shell recovery-blocked when its record does not settle', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  rig.orchestrator.settleFailed = async () => {
+    throw new Error('record write refused');
+  };
+  brokerStatusThroughCancel();
+  broker.backgroundProcessStatus.mockResolvedValue(undefined);
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  stderr.mockRestore();
+});
+
+it('answers a capacity-refused Monitor on the Broker record that it never started', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = monitorCall();
+  const rig = monitorTurnRig(unreachedOutcome, { capacityRefused: true });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    [call],
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER]);
+  expect(rig.monitors.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.monitors.calls.at(-1)?.[1]).toEqual({
+    id: 'monitor-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(await runtimeItemStates()).toEqual(['settled']);
+  stderr.mockRestore();
+});
+
+it.each([
+  [
+    'an execution already past prepared',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? null : { state: 'executing' },
+    1,
+  ],
+  [
+    'an unreadable execution',
+    (_id: string, cancelled: boolean) => {
+      if (!cancelled) throw new Error('status unavailable');
+      return null;
+    },
+    1,
+  ],
+  [
+    'a cancelled execution that cannot be read',
+    (_id: string, cancelled: boolean) => {
+      if (cancelled) throw new Error('status unavailable');
+      return null;
+    },
+    2,
+  ],
+  [
+    'a cancelled execution the Broker no longer knows',
+    (_id: string, cancelled: boolean) => (cancelled ? undefined : null),
+    2,
+  ],
+  [
+    'a cancelled execution whose outcome is unknown',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? { state: 'unknown' } : null,
+    2,
+  ],
+  [
+    'a cancelled execution the Broker abandoned',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? { state: 'abandoned' } : null,
+    2,
+  ],
+  [
+    'a Shell execution that settled with a result other than not started',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? { state: 'settled', executionStatus: 'cancelled' } : null,
+    2,
+  ],
+])(
+  'keeps a capacity-refused batch recovery-blocked for %s',
+  async (_label, override, statusReads) => {
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: capacityExhausted,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel(override);
+    await expect(
+      turn.execute(
+        [foregroundShell],
+        foregroundParts,
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    // Each verdict is final: nothing waits out the window on it.
+    expect(broker.status).toHaveBeenCalledTimes(statusReads);
+    expect(await runtimeItemStates()).toEqual(['in_progress']);
+    expect(await toolResultCount()).toBe(0);
+  },
+);
+
+it('waits for each cancelled execution to settle before answering', async () => {
+  const batch = [foregroundShell, calls[0]];
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  // Each execution's first read after its cancel is still pending.
+  const pending = new Set<string>();
+  brokerStatusThroughCancel((id, cancelled) => {
+    if (!cancelled || pending.has(id)) return null;
+    pending.add(id);
+    return { state: 'cancel_requested' };
+  });
+  const responses = await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER, CAPACITY_ANSWER]);
+  // Two reads before the cancels, then two after each.
+  expect(broker.status).toHaveBeenCalledTimes(6);
+});
+
+it('keeps the batch recovery-blocked when a later execution does not settle', async () => {
+  const shells = ['shell-a', 'shell-b'].map((id) => ({
+    ...foregroundShell,
+    callId: `${id}-call`,
+  }));
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) => (id === 'shell-b' ? capacityExhausted() : undefined),
+    executionCallIds: ['shell-a', 'shell-b'],
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel((id, cancelled) =>
+    id === 'shell-b' && cancelled ? { state: 'unknown' } : null,
+  );
+  await expect(
+    turn.execute(
+      shells,
+      shells.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.status).toHaveBeenCalledTimes(4);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('keeps a capacity-refused Monitor recovery-blocked when its record does not settle', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = monitorCall();
+  const rig = monitorTurnRig(unreachedOutcome, { capacityRefused: true });
+  turn = rig.turn;
+  rig.monitors.settleFailed = async () => {
+    throw new Error('record write refused');
+  };
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  stderr.mockRestore();
+});
+
+it('gives up at once when an execution could not be cancelled', async () => {
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  broker.cancel.mockRejectedValue(new Error('cancel lost'));
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // Only the read before the cancel: nothing waits on a cancel that failed.
+  expect(broker.status).toHaveBeenCalledTimes(1);
+});
+
+it.each(['cancel_requested', 'prepared'])(
+  'gives up when a cancelled execution stays %s past its window',
+  async (state) => {
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: capacityExhausted,
+    });
+    turn = rig.turn;
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => realNow() + skew);
+    brokerStatusThroughCancel((_id, cancelled) => {
+      if (!cancelled) return null;
+      skew += 31_000;
+      return { state };
+    });
+    try {
+      await expect(
+        turn.execute(
+          [foregroundShell],
+          foregroundParts,
+          'model',
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+      expect(broker.status).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  },
+);
+
+it('keeps the batch recovery-blocked when a later execution lacks its proof', async () => {
+  const shells = ['shell-a', 'shell-b'].map((id) => ({
+    ...foregroundShell,
+    callId: `${id}-call`,
+  }));
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) => (id === 'shell-b' ? capacityExhausted() : undefined),
+    executionCallIds: ['shell-a', 'shell-b'],
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel((id, cancelled) =>
+    id === 'shell-b' && !cancelled ? { state: 'executing' } : null,
+  );
+  await expect(
+    turn.execute(
+      shells,
+      shells.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress', 'in_progress']);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('keeps a limit refusal raised after the batch started running recovery-blocked', async () => {
+  // Only a reservation answers this code in production; one arriving once
+  // calls may run proves nothing about which of them started.
+  const rig = backgroundTurnRig(unreachedOutcome, {});
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  broker.executeV3.mockRejectedValue(capacityExhausted());
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.status).not.toHaveBeenCalled();
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('wraps a failed answer in the recovery error', async () => {
+  // Only the answer, written after the refusal, cannot be stored inline.
+  let refused = false;
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: () => {
+      refused = true;
+      return capacityExhausted();
+    },
+    fitsInline: (type) => !(refused && type === 'tool_result'),
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('answers every call of a mixed batch and closes every reservation', async () => {
+  const shells = ['shell-a', 'shell-b'].map((id) => ({
+    ...foregroundShell,
+    callId: `${id}-call`,
+  }));
+  const batch = [shells[0]!, calls[0], calls[1], shells[1]!];
+  const batchParts: Part[] = batch.map((call) => ({
+    functionCall: { id: call.callId, name: call.name, args: call.args },
+  }));
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) => (id === 'shell-b' ? capacityExhausted() : undefined),
+    executionCallIds: ['shell-a', 'shell-b'],
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  // The read_file is refused before dispatch and keeps that answer.
+  broker.prepare.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(
+      409,
+      'runtime_execution_conflict',
+      undefined,
+      'conflicting execution',
+    ),
+  );
+  const responses = await turn.execute(
+    batch,
+    batchParts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    'shell-a-call',
+    'call-0',
+    'call-1',
+    'shell-b-call',
+  ]);
+  const answers = answerText(responses);
+  expect(answers[1]).toContain(
+    'Runtime refused this execution reservation before dispatch',
+  );
+  expect([answers[0], answers[2], answers[3]]).toEqual([
+    CAPACITY_ANSWER,
+    CAPACITY_ANSWER,
+    CAPACITY_ANSWER,
+  ]);
+  expect(rig.closed).toEqual([
+    rig.publications.get('shell-a'),
+    rig.publications.get('shell-b'),
+  ]);
+  // The Edit's prepared file history is settled like a finished batch's.
+  expect(broker.fileHistory).toHaveBeenLastCalledWith({
+    kind: 'raw-file-history',
+    action: 'snapshot',
+  });
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
+  expect(await runtimeItemStates()).toEqual(['settled', 'settled', 'settled']);
 });
 
 it('probes every inconclusive background binding within one timeout window', async () => {
