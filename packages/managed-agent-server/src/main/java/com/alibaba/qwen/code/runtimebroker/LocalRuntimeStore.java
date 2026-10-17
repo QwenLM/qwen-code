@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,9 +37,22 @@ final class LocalRuntimeStore {
         HostIdentity {
             if (hostId == null || !hostId.matches("[0-9a-f]{32}")
                     || bootId == null || !bootId.matches("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
-                    || pidNamespace == null || !pidNamespace.matches("pid:\\[[0-9]+\\]")
-                    || timeNamespace == null || !timeNamespace.matches("time:\\[[0-9]+\\]")) {
-                throw new IllegalArgumentException("Linux host/boot identity is invalid");
+                    || !("macos".equals(pidNamespace) && "macos".equals(timeNamespace))
+                    && (pidNamespace == null || !pidNamespace.matches("pid:\\[[0-9]+\\]")
+                    || timeNamespace == null || !timeNamespace.matches("time:\\[[0-9]+\\]"))) {
+                throw new IllegalArgumentException("Local host/boot identity is invalid");
+            }
+        }
+
+        static HostIdentity current() {
+            if (!"Mac OS X".equals(System.getProperty("os.name"))) {
+                return linux();
+            }
+            try {
+                return new HostIdentity(MacOsHostIdentity.machineId().replace("-", "").toLowerCase(Locale.ROOT),
+                        MacOsHostIdentity.bootId(), "macos", "macos");
+            } catch (IOException error) {
+                throw new IllegalStateException("macOS hardware or boot-session identity is unavailable", error);
             }
         }
 
@@ -88,7 +102,7 @@ final class LocalRuntimeStore {
                     Long.parseLong(started.substring(6));
                 } else {
                     if (!started.startsWith("instant:")) {
-                        throw new IllegalArgumentException("Invalid test process start identity");
+                        throw new IllegalArgumentException("Invalid process start identity");
                     }
                     Instant.parse(started.substring(8));
                 }
@@ -272,7 +286,9 @@ final class LocalRuntimeStore {
     }
 
     boolean rebooted(Registration registration) {
-        return identity.hostId().equals(registration.handle().getValue().get("hostId"))
+        return !"macos".equals(identity.pidNamespace())
+                && !"macos".equals(registration.handle().getValue().get("pidNamespace"))
+                && identity.hostId().equals(registration.handle().getValue().get("hostId"))
                 && !identity.bootId().equals(registration.handle().getValue().get("bootId"));
     }
 
