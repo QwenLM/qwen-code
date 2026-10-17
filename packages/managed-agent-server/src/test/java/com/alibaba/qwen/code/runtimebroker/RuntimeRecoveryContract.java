@@ -297,6 +297,52 @@ final class RuntimeRecoveryContract {
                         .getState());
     }
 
+    /**
+     * #13800: the mount handback's capture probe. Only a SETTLED row of this
+     * binding generation and Runtime Session counts, and only when its
+     * capture never proved the writer stopped; a complete or detached
+     * capture, or a result without one, frees the mount.
+     */
+    static void verifyUnprovenCapture(RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            String prefix) {
+        Fixture fixture = new Fixture(bindings, sessions, executions,
+                prefix + "-capture", "capture-id");
+        Fixture other = new Fixture(bindings, sessions, executions,
+                prefix + "-capture-other", "capture-id");
+        String binding = fixture.binding.getBindingId();
+        long generation = fixture.binding.getGeneration();
+        settle(fixture, "complete", "complete");
+        settle(fixture, "detached", "detached");
+        settle(fixture, "plain", null);
+        fixture.prepare("unsettled");
+        settle(other, "foreign", "partial");
+        assertFalse(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation, "capture-id"));
+        assertTrue(executions.hasUnprovenCaptureByRuntimeSession(
+                other.binding.getBindingId(), other.binding.getGeneration(),
+                "capture-id"));
+        settle(fixture, "unavailable", "unavailable");
+        assertTrue(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation, "capture-id"));
+        assertFalse(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation + 1, "capture-id"));
+        assertFalse(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation, "other-id"));
+    }
+
+    private static void settle(Fixture fixture, String suffix, String captureStatus) {
+        ToolExecutionRecord claimed = fixture.executions.claimDispatch(
+                fixture.prepare(suffix).getExecutionCallId(), "dispatcher",
+                Duration.ofMinutes(5));
+        Map<String, Object> result = captureStatus == null
+                ? Map.of("executionStatus", "success")
+                : Map.of("executionStatus", "success", "capture",
+                        Map.of("captureStatus", captureStatus, "deliveryStatus", "pending"));
+        fixture.executions.compareAndSet(claimed, claimed.withResult(result, 3,
+                Instant.now()), "dispatcher", claimed.getDispatchGeneration());
+    }
+
     static RuntimeRecoveryEvidence evidence(RuntimeBindingRecord binding, RuntimeRecoveryEvidence.Fact fact) {
         RuntimeProvisionSeed seed = binding.getProvisionSeed();
         return new RuntimeRecoveryEvidence(UUID.randomUUID().toString(), fact, "deterministic-test-supervisor",

@@ -855,7 +855,7 @@ describe('ManagedSessionsPage', () => {
           .find((button) => button.textContent === text)!
           .click();
       });
-    await click('Child Agent tasks');
+    await click('Session tasks');
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     await render('s1', 'en', provider, undefined, false);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -882,7 +882,7 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).toContain(
       'Cancellation result is unconfirmed.',
     );
-    expect(document.activeElement?.textContent).toBe('Child Agent tasks');
+    expect(document.activeElement?.textContent).toBe('Session tasks');
   });
 
   it.each([false, true])(
@@ -931,7 +931,7 @@ describe('ManagedSessionsPage', () => {
             .click();
           await flush();
         });
-      await click('Child Agent tasks');
+      await click('Session tasks');
       if (detail) {
         await click('Child Agent · 01234567');
         expect(document.body.textContent).toContain('Back to tasks');
@@ -970,7 +970,7 @@ describe('ManagedSessionsPage', () => {
       tasks: { list: vi.fn(), get: vi.fn(), listEvents: vi.fn() },
     };
     await render('s1');
-    expect(container.textContent).not.toContain('Child Agent tasks');
+    expect(container.textContent).not.toContain('Session tasks');
     expect(container.textContent).not.toContain('Resume task cancellation');
     expect(provider.tasks!.list).not.toHaveBeenCalled();
   });
