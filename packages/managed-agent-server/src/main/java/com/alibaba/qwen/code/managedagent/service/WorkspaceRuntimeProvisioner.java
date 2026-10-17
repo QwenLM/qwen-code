@@ -28,10 +28,15 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
+        return createRequest(scope, isolationKey, isolationKey);
+    }
+
+    @Override
+    public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey, String harnessSessionId) {
         if (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
             return delegate.createRequest(scope, isolationKey);
         }
-        var resolved = resolver.resolve(isolationKey, scope.getLifecycleAuthority());
+        var resolved = resolver.resolve(harnessSessionId, scope.getLifecycleAuthority());
         if (!resolved.scope().equals(scope)) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -77,11 +82,17 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         if (!request.isManagedContext() || !executionStore.verifiedRecoveryEnabled()) {
             return;
         }
-        var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
-        if (!resolved.scope().equals(request.getScope())
-                || !resolved.binding().getStorageId().equals(request.getStorageId())) {
-            throw WorkspaceExecutionStore.unavailable();
+        if (request.getIsolationKey() != null) {
+            var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
+            if (!resolved.scope().equals(request.getScope())
+                    || !resolved.binding().getStorageId().equals(request.getStorageId())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return;
         }
+        // A shared (Workspace-isolated) request has no owning Session: the
+        // workspace/storage mount mapping itself must still be current.
+        resolver.requireMountCurrent(request.getScope(), request.getStorageId());
     }
 
     @Override
