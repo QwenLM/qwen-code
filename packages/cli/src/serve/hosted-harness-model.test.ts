@@ -33,6 +33,7 @@ import { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
+import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -230,50 +231,76 @@ describe('Hosted Harness model boundary', () => {
     },
   );
 
-  it.each(['success', 'lost-output', 'round-limit'] as const)(
+  it.each([
+    'success',
+    'lost-output',
+    'round-limit',
+    'persistence-output',
+    'persistence-consume',
+    'recovery-consume',
+  ] as const)(
     'commits final output before consuming file results (%s)',
     async (scenario) => {
       const model = config([]);
       if (scenario === 'round-limit')
         state.config['getMaxSessionTurns'] = () => 1;
       const order: string[] = [];
+      const persistenceError = new ManagedSessionRecordError(
+        'owned persistence',
+      );
+      const recoveryError = new HostedToolRecoveryRequiredError(
+        'owned recovery',
+      );
+      const prepareModel = vi.fn().mockResolvedValue(undefined);
       let round = 0;
-      model.sendMessageStream.mockImplementation(async function* () {
-        if (++round === 1) {
-          model.getHistory.mockReturnValue([
-            {
-              role: 'model',
-              parts: [
-                {
-                  functionCall: {
-                    name: 'read_file',
-                    args: { file_path: 'owned.txt' },
+      model.sendMessageStream.mockImplementation(
+        async function* (_request, _signal, _promptId, options) {
+          await (
+            options as { onPreparedRequest: LlmPreparedRequestCallback }
+          ).onPreparedRequest({
+            request: { model: 'test-model', contents: [], config: {} },
+            history: [],
+            completedToolCallIds: round === 0 ? [] : ['original-call'],
+            routeSelector: 'owned-test',
+            providerPin: llmPreparedProviderPin({ model: 'test-model' }),
+            promptTokensForClamp: 0,
+          });
+          if (++round === 1) {
+            model.getHistory.mockReturnValue([
+              {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      name: 'read_file',
+                      args: { file_path: 'owned.txt' },
+                    },
                   },
-                },
-              ],
-            },
-          ]);
-          yield {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'original-call',
-              name: 'read_file',
-              args: { file_path: 'owned.txt' },
-              isClientInitiated: false,
-              prompt_id: input.promptId,
-            },
-          };
-        } else {
-          model.getHistory.mockReturnValue([
-            {
-              role: 'model',
-              parts: [{ text: 'reason', thought: true }, { text: 'answer' }],
-            },
-          ]);
-          yield { type: LlmEventType.Content, value: 'answer' };
-        }
-        yield { type: LlmEventType.Finished };
-      });
+                ],
+              },
+            ]);
+            yield {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'original-call',
+                name: 'read_file',
+                args: { file_path: 'owned.txt' },
+                isClientInitiated: false,
+                prompt_id: input.promptId,
+              },
+            };
+          } else {
+            model.getHistory.mockReturnValue([
+              {
+                role: 'model',
+                parts: [{ text: 'reason', thought: true }, { text: 'answer' }],
+              },
+            ]);
+            yield { type: LlmEventType.Content, value: 'answer' };
+          }
+          yield { type: LlmEventType.Finished };
+        },
+      );
       const first = Object.assign(vi.fn().mockResolvedValue(undefined), {
         attemptId: 'first',
       });
@@ -293,6 +320,8 @@ describe('Hosted Harness model boundary', () => {
         ]),
         consumeResults: vi.fn(async () => {
           order.push('consume');
+          if (scenario === 'persistence-consume') throw persistenceError;
+          if (scenario === 'recovery-consume') throw recoveryError;
         }),
       };
       const completeFinalOutput = vi.fn<
@@ -308,10 +337,12 @@ describe('Hosted Harness model boundary', () => {
         expect(name).toBe('test-model');
         order.push('output');
         if (scenario === 'lost-output') throw new Error('owned lost output');
+        if (scenario === 'persistence-output') throw persistenceError;
         await complete(true, usage);
       });
       const running = runHostedHarnessTextTurn({
         ...input,
+        prepareModel,
         toolTurn,
         completeFinalOutput,
         modelScope: {
@@ -336,6 +367,19 @@ describe('Hosted Harness model boundary', () => {
         );
         expect(order).toEqual(['output']);
         expect(final).not.toHaveBeenCalled();
+      } else if (
+        scenario === 'persistence-output' ||
+        scenario === 'persistence-consume' ||
+        scenario === 'recovery-consume'
+      ) {
+        await expect(running).rejects.toBe(
+          scenario === 'recovery-consume' ? recoveryError : persistenceError,
+        );
+        expect(order).toEqual(
+          scenario === 'persistence-output'
+            ? ['output']
+            : ['output', 'consume'],
+        );
       } else {
         await expect(running).resolves.toMatchObject({ text: 'answer' });
         expect(order).toEqual(['output', 'consume']);
@@ -344,6 +388,14 @@ describe('Hosted Harness model boundary', () => {
       expect(first).toHaveBeenCalledOnce();
       if (scenario !== 'round-limit')
         expect(completeFinalOutput).toHaveBeenCalledOnce();
+      expect(prepareModel.mock.calls.map((call) => call.slice(1, 3))).toEqual(
+        scenario === 'round-limit'
+          ? [[0, false]]
+          : [
+              [0, false],
+              [1, true],
+            ],
+      );
     },
   );
 

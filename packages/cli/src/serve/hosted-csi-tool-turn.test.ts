@@ -34,6 +34,20 @@ const commit = vi.fn();
 let requests: Array<Record<string, unknown>>;
 let members: Array<Record<string, unknown>>;
 let paths: string[];
+const messageFitsInline = vi.fn();
+
+function emptyHistory(): CsiFileHistoryObservation {
+  return {
+    state: { ownerSessionId: sessionId, snapshots: [], files: {} },
+    backupDirectory: {
+      volumeDevice: '1',
+      volumeInode: '2',
+      directoryDevice: '1',
+      directoryInode: '3',
+    },
+    retainedBackups: [],
+  };
+}
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'qwen-csi-reservation-unit-'));
@@ -78,6 +92,7 @@ beforeEach(async () => {
   const harness = createManagedHarnessHandle(managed);
   await harness.ensureRunnable();
   commit.mockReset().mockResolvedValue(batchId);
+  messageFitsInline.mockReset().mockReturnValue(true);
   turn = new HostedCsiToolTurn(
     managed,
     { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
@@ -85,12 +100,16 @@ beforeEach(async () => {
     promptId,
     commit,
     harness,
-    () => true,
+    messageFitsInline,
   );
   await turn.declarations(new AbortController().signal);
   requests = [];
   members = [];
   paths = [];
+  // Control/worker history is a seam here; the history client has separate wire tests.
+  vi.spyOn(history, 'requestHostedCsiHistory').mockImplementation(async () =>
+    emptyHistory(),
+  );
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
     const route = new URL(String(url)).pathname;
     paths.push(route);
@@ -233,17 +252,27 @@ it('fixes full Parts, original IDs, exact input bytes and final definitions befo
   });
   const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
   vi.spyOn(globalThis, 'fetch').mockImplementation((...args) => {
-    expect(publications).toBe(6);
+    if (String(args[0]).endsWith('/executions:prepare'))
+      expect(publications).toBe(6);
     return fetch(...args);
   });
-  await expect(
-    turn.execute(calls, parts, 'unit-model', new AbortController().signal),
-  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
-  expect(commit).toHaveBeenCalledExactlyOnceWith(
-    'assistant',
+  const responses = await turn.execute(
+    calls,
     parts,
     'unit-model',
+    new AbortController().signal,
   );
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual(
+    calls.map((call) => call.callId),
+  );
+  expect(commit).toHaveBeenNthCalledWith(1, 'assistant', parts, 'unit-model');
+  expect(commit).toHaveBeenCalledTimes(4);
+  expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(3);
+  expect(
+    managed.authority
+      .eventsInSequenceRange(1, managed.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
+  ).toHaveLength(3);
   expect(requests).toHaveLength(3);
   const pinned = JSON.parse(
     await readFile(
@@ -295,13 +324,22 @@ it('fixes full Parts, original IDs, exact input bytes and final definitions befo
   expect(await turn.declarations(new AbortController().signal)).toEqual(pinned);
 });
 
-it('retains ordinal and Part gaps for invalid input without fabricating a response', async () => {
+it('retains Runtime ordinal and Part gaps and commits an explicit rejected-call response', async () => {
   const { calls, parts } = batch();
   calls[1].args = { file_path: '../outside', content: 'blocked' };
   parts[3].functionCall!.args = calls[1].args;
-  await expect(
-    turn.execute(calls, parts, 'unit-model', new AbortController().signal),
-  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const responses = await turn.execute(
+    calls,
+    parts,
+    'unit-model',
+    new AbortController().signal,
+  );
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual(
+    calls.map((call) => call.callId),
+  );
+  expect(responses[1].functionResponse?.response).toEqual({
+    error: 'CSI file input is invalid.',
+  });
   expect(
     requests.map(
       (request) => (request['reference'] as Record<string, unknown>)['ordinal'],
@@ -313,7 +351,8 @@ it('retains ordinal and Part gaps for invalid input without fabricating a respon
         (request['reference'] as Record<string, unknown>)['partIndex'],
     ),
   ).toEqual([2, 4]);
-  expect(commit).toHaveBeenCalledTimes(1);
+  expect(commit).toHaveBeenCalledTimes(4);
+  expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(2);
 });
 
 it('reads complete current membership after a lost answer and never remints or settles', async () => {
@@ -351,127 +390,177 @@ it('refuses a changed complete-read identity while preserving the original assis
   });
   await expect(
     turn.execute(calls, parts, 'unit-model', new AbortController().signal),
-  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  ).rejects.toMatchObject({
+    cause: { message: 'Original CSI member read differs.' },
+  });
   expect(requests).toHaveLength(3);
   expect(commit).toHaveBeenCalledTimes(1);
+  expect(paths.some((route) => route.endsWith(':start'))).toBe(false);
 });
 
-it('closes prepared history after the complete mixed batch and before returning model results with labelled broker/worker seams', async () => {
-  // Original local authority; the assistant callback, broker rows and worker observation are explicit seams.
-  const initial: CsiFileHistoryObservation = {
-    state: { ownerSessionId: sessionId, snapshots: [], files: {} },
-    backupDirectory: {
-      volumeDevice: '1',
-      volumeInode: '2',
-      directoryDevice: '1',
-      directoryInode: '3',
-    },
-    retainedBackups: [],
-  };
-  const first = await history.commitInitialHostedCsiHistory(managed, initial);
-  expect(first.revision).toBe(1);
-  expect(first.receipt.replayed).toBe(false);
-  let preparedObservation: CsiFileHistoryObservation | undefined;
-  const control = vi
-    .spyOn(history, 'requestHostedCsiHistory')
-    .mockImplementation(async (_broker, _key, operation) => {
-      if (operation.action === 'snapshot')
-        return preparedObservation ?? initial;
-      expect(operation.action).toBe('prepare');
-      if (operation.action !== 'prepare')
-        throw new Error('Unexpected operation');
-      const original = JSON.parse(
-        (await managed.resources.read(operation.preparationRef)).toString(),
-      );
-      expect(original.revision).toBe(2);
-      expect(original.previousRecordRef).toEqual(first.recordRef);
-      expect(original.preparation.stage).toBe('intent');
-      expect(
-        original.preparation.invocations.map(
-          (item: { toolName: string }) => item.toolName,
-        ),
-      ).toEqual(['read_file', 'write_file', 'edit']);
-      expect(original.preparation.paths).toEqual([
-        'dir/file.txt',
-        'output.txt',
-      ]);
-      expect(original.record.parentUuid).toBe(batchId);
-      const timestamp = new Date().toISOString();
-      preparedObservation = {
-        ...initial,
-        state: {
-          ...initial.state,
-          files: { 'dir/file.txt': null, 'output.txt': null },
-          snapshots: [
-            {
-              promptId,
-              timestamp,
-              trackedFileBackups: {
-                'dir/file.txt': {
-                  backupFileName: null,
-                  version: 1,
-                  backupTime: timestamp,
-                },
-                'output.txt': {
-                  backupFileName: null,
-                  version: 1,
-                  backupTime: timestamp,
+it.each([false, true])(
+  'closes prepared history after the complete mixed batch with labelled broker/worker seams (refusal: %s)',
+  async (withRefusal) => {
+    // Original local authority; the assistant callback, broker rows and worker observation are explicit seams.
+    const initial: CsiFileHistoryObservation = {
+      state: { ownerSessionId: sessionId, snapshots: [], files: {} },
+      backupDirectory: {
+        volumeDevice: '1',
+        volumeInode: '2',
+        directoryDevice: '1',
+        directoryInode: '3',
+      },
+      retainedBackups: [],
+    };
+    const first = await history.commitInitialHostedCsiHistory(managed, initial);
+    expect(first.revision).toBe(1);
+    expect(first.receipt.replayed).toBe(false);
+    const parentMessageId = withRefusal ? randomUUID() : batchId;
+    if (withRefusal)
+      commit
+        .mockResolvedValueOnce(batchId)
+        .mockResolvedValueOnce(parentMessageId);
+    let preparedObservation: CsiFileHistoryObservation | undefined;
+    let postWorkObservation: CsiFileHistoryObservation | undefined;
+    const control = vi
+      .spyOn(history, 'requestHostedCsiHistory')
+      .mockImplementation(async (_broker, _key, operation) => {
+        if (
+          operation.action === 'snapshot' &&
+          paths.some((route) => route.endsWith(':start'))
+        ) {
+          expect(
+            paths.filter((route) => route.endsWith(':start')),
+          ).toHaveLength(3);
+          postWorkObservation = structuredClone(preparedObservation!);
+          postWorkObservation.state.files['output.txt'] = {
+            digest: `sha256:${'c'.repeat(64)}`,
+            mode: 420,
+          };
+          return postWorkObservation;
+        }
+        if (operation.action === 'snapshot')
+          return preparedObservation ?? initial;
+        expect(operation.action).toBe('prepare');
+        if (operation.action !== 'prepare')
+          throw new Error('Unexpected operation');
+        const original = JSON.parse(
+          (await managed.resources.read(operation.preparationRef)).toString(),
+        );
+        expect(original.revision).toBe(2);
+        expect(original.previousRecordRef).toEqual(first.recordRef);
+        expect(original.preparation.stage).toBe('intent');
+        expect(
+          original.preparation.invocations.map(
+            (item: { toolName: string }) => item.toolName,
+          ),
+        ).toEqual(['read_file', 'write_file', 'edit']);
+        expect(original.preparation.paths).toEqual([
+          'dir/file.txt',
+          'output.txt',
+        ]);
+        expect(original.record.parentUuid).toBe(parentMessageId);
+        const timestamp = new Date().toISOString();
+        preparedObservation = {
+          ...initial,
+          state: {
+            ...initial.state,
+            files: { 'dir/file.txt': null, 'output.txt': null },
+            snapshots: [
+              {
+                promptId,
+                timestamp,
+                trackedFileBackups: {
+                  'dir/file.txt': {
+                    backupFileName: null,
+                    version: 1,
+                    backupTime: timestamp,
+                  },
+                  'output.txt': {
+                    backupFileName: null,
+                    version: 1,
+                    backupTime: timestamp,
+                  },
                 },
               },
-            },
-          ],
-        },
+            ],
+          },
+        };
+        return preparedObservation;
+      });
+    const { calls, parts } = batch();
+    if (withRefusal) {
+      const refused = {
+        ...calls[0],
+        callId: 'refused-root',
+        args: { file_path: './' },
       };
-      return preparedObservation;
-    });
-  const { calls, parts } = batch();
-  const responses = await turn.execute(
-    calls,
-    parts,
-    'unit-model',
-    new AbortController().signal,
-  );
-  expect(responses).toHaveLength(3);
-  expect(control).toHaveBeenCalledTimes(3);
-  const latest = managed.authority.domainRecord('file_history')!;
-  expect(latest.revision).toBe(4);
-  const resultHistory = JSON.parse(
-    (await managed.resources.read(latest.recordRef)).toString(),
-  );
-  expect(resultHistory.preparation).toBeNull();
-  expect(resultHistory.operationId).toBe(`csi-file-history:result:${batchId}`);
-  expect(resultHistory.record.parentUuid).toBe(
-    commit.mock.calls.at(-1)![3].uuid,
-  );
-  const prepared = JSON.parse(
-    (await managed.resources.read(resultHistory.previousRecordRef)).toString(),
-  );
-  expect(prepared.preparation.stage).toBe('prepared');
-  expect(prepared.preparation.intentRef).toEqual(prepared.previousRecordRef);
-  expect(prepared.preparation.invocations).toHaveLength(3);
-  expect(prepared.record.parentUuid).toBe(batchId);
-  const replay = await history.commitHostedCsiHistory(
-    managed,
-    {
-      state: prepared.state,
-      backupDirectory: prepared.backupDirectory,
-      retainedBackups: prepared.retainedBackups,
-    },
-    prepared.preparation,
-    batchId,
-    `csi-file-history:prepared:${batchId}`,
-  );
-  expect(replay.revision).toBe(3);
-  expect(replay.recordRef).toEqual(resultHistory.previousRecordRef);
-  expect(replay.receipt.replayed).toBe(true);
-  expect(
-    paths.some((path) => path.includes('start') || path.includes('execute')),
-  ).toBe(true);
-  expect(
-    parseHarnessCheckpointV1((await managed.authority.readCheckpointState())!)
-      .continuation.phase,
-  ).toBe('results_ready');
-});
+      calls.push(refused);
+      parts.push({
+        functionCall: {
+          id: refused.callId,
+          name: refused.name,
+          args: refused.args,
+        },
+      });
+    }
+    const responses = await turn.execute(
+      calls,
+      parts,
+      'unit-model',
+      new AbortController().signal,
+    );
+    expect(responses).toHaveLength(withRefusal ? 4 : 3);
+    expect(control).toHaveBeenCalledTimes(3);
+    const latest = managed.authority.domainRecord('file_history')!;
+    expect(latest.revision).toBe(4);
+    const resultHistory = JSON.parse(
+      (await managed.resources.read(latest.recordRef)).toString(),
+    );
+    expect(resultHistory.preparation).toBeNull();
+    expect(resultHistory.state).toEqual(postWorkObservation!.state);
+    expect(resultHistory.state).not.toEqual(preparedObservation!.state);
+    expect(resultHistory.record.systemPayload.snapshots).toEqual(
+      postWorkObservation!.state.snapshots,
+    );
+    expect(resultHistory.operationId).toBe(
+      `csi-file-history:result:${batchId}`,
+    );
+    expect(resultHistory.record.parentUuid).toBe(
+      commit.mock.calls.at(-1)![3].uuid,
+    );
+    const prepared = JSON.parse(
+      (
+        await managed.resources.read(resultHistory.previousRecordRef)
+      ).toString(),
+    );
+    expect(prepared.preparation.stage).toBe('prepared');
+    expect(prepared.preparation.intentRef).toEqual(prepared.previousRecordRef);
+    expect(prepared.preparation.invocations).toHaveLength(3);
+    expect(prepared.record.parentUuid).toBe(parentMessageId);
+    const replay = await history.commitHostedCsiHistory(
+      managed,
+      {
+        state: prepared.state,
+        backupDirectory: prepared.backupDirectory,
+        retainedBackups: prepared.retainedBackups,
+      },
+      prepared.preparation,
+      parentMessageId,
+      `csi-file-history:prepared:${batchId}`,
+    );
+    expect(replay.revision).toBe(3);
+    expect(replay.recordRef).toEqual(resultHistory.previousRecordRef);
+    expect(replay.receipt.replayed).toBe(true);
+    expect(
+      paths.some((path) => path.includes('start') || path.includes('execute')),
+    ).toBe(true);
+    expect(
+      parseHarnessCheckpointV1((await managed.authority.readCheckpointState())!)
+        .continuation.phase,
+    ).toBe('results_ready');
+  },
+);
 
 it('records complete broker results and tool history before explicit Harness consumption with a labelled broker seam', async () => {
   const { calls } = batch();
@@ -489,6 +578,16 @@ it('records complete broker results and tool history before explicit Harness con
   const parts: Part[] = readCalls.map((call) => ({
     functionCall: { id: call.callId, name: call.name, args: call.args },
   }));
+  const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+    const response = await fetch(...args);
+    if (String(args[0]).endsWith('/executions:read-batch')) {
+      const body = await response.json();
+      body.members.reverse();
+      return new Response(JSON.stringify(body));
+    }
+    return response;
+  });
   const responses = await turn.execute(
     readCalls,
     parts,
@@ -497,6 +596,7 @@ it('records complete broker results and tool history before explicit Harness con
   );
   expect(responses.map((part) => part.functionResponse?.id)).toEqual([
     calls[0].callId,
+    refused.callId,
     second.callId,
   ]);
   const checkpoint = parseHarnessCheckpointV1(
@@ -538,12 +638,12 @@ it('records complete broker results and tool history before explicit Harness con
         executionStatus: 'success',
         responseParts: [{ text: `owned result unit-execution-${index + 1}` }],
       },
-      history: { model: 'unit-model', parts: [responses[index]] },
+      history: { model: 'unit-model', parts: [responses[index === 0 ? 0 : 2]] },
     });
     expect(commit).toHaveBeenNthCalledWith(
-      index + 2,
+      index + 3,
       'tool_result',
-      [responses[index]],
+      [responses[index === 0 ? 0 : 2]],
       'unit-model',
       { uuid: outcome.history.messageId, timestamp: outcome.history.timestamp },
     );
@@ -562,4 +662,231 @@ it('records complete broker results and tool history before explicit Harness con
     parseHarnessCheckpointV1((await managed.authority.readCheckpointState())!)
       .continuation.phase,
   ).toBe('turn_settled');
+});
+
+it.each(['short', 'executing'])(
+  'refuses a %s batch before dispatch for the intended reason',
+  async (fault) => {
+    const { calls, parts } = batch();
+    const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+      const response = await fetch(...args);
+      if (String(args[0]).endsWith('/executions:read-batch')) {
+        const body = await response.json();
+        if (fault === 'short') body.members.pop();
+        else body.members[0].state = 'executing';
+        return new Response(JSON.stringify(body));
+      }
+      return response;
+    });
+    await expect(
+      turn.execute(calls, parts, 'unit-model', new AbortController().signal),
+    ).rejects.toMatchObject({
+      cause: {
+        message:
+          fault === 'short'
+            ? 'Original CSI batch is incomplete.'
+            : 'Original CSI batch is not prepared.',
+      },
+    });
+    expect(requests).toHaveLength(3);
+    expect(paths.some((route) => route.endsWith(':start'))).toBe(false);
+    expect(commit).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(['schema', 'oversized', 'root'])(
+  'returns a durable %s refusal without any Runtime work for an all-rejected batch',
+  async (fault) => {
+    const { calls } = batch();
+    const call = calls[1];
+    call.args =
+      fault === 'schema'
+        ? { file_path: 'a.txt', content: '', extra: true }
+        : fault === 'oversized'
+          ? { file_path: 'a.txt', content: 'x'.repeat(70 * 1024) }
+          : { file_path: './', content: '' };
+    const parts = [
+      { functionCall: { id: call.callId, name: call.name, args: call.args } },
+    ];
+    const result = await turn.execute(
+      [call],
+      parts,
+      'unit-model',
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject([
+      {
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: {
+            error:
+              fault === 'oversized'
+                ? 'CSI file input exceeds the durable Session limit.'
+                : 'CSI file input is invalid.',
+          },
+        },
+      },
+    ]);
+    expect(commit).toHaveBeenNthCalledWith(
+      2,
+      'tool_result',
+      result,
+      'unit-model',
+    );
+    expect(commit).toHaveBeenCalledTimes(2);
+    expect(requests).toEqual([]);
+    expect(paths).toEqual([]);
+    expect(history.requestHostedCsiHistory).not.toHaveBeenCalled();
+    expect(
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'tool.intent' || event.kind === 'tool.receipt',
+        ),
+    ).toEqual([]);
+    await turn.consumeResults();
+    await turn.finish();
+  },
+);
+
+it.each(['outcome-bytes', 'message'])(
+  'retains the unconsumed batch and refuses later dispatch when %s exceeds capacity',
+  async (fault) => {
+    const call = batch().calls[0];
+    const calls = [call, { ...call, callId: 'later-read' }];
+    const parts = calls.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    }));
+    const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+      const response = await fetch(...args);
+      if (fault === 'outcome-bytes' && String(args[0]).endsWith(':start')) {
+        const body = await response.json();
+        body.status.result.responseParts = [{ text: 'x'.repeat(70 * 1024) }];
+        return new Response(JSON.stringify(body));
+      }
+      return response;
+    });
+    messageFitsInline.mockReturnValue(fault !== 'message');
+    await expect(
+      turn.execute(calls, parts, 'unit-model', new AbortController().signal),
+    ).rejects.toMatchObject({
+      cause: {
+        message: 'Complete CSI result exceeds the durable Session limit.',
+      },
+    });
+    expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(1);
+    expect(commit).toHaveBeenCalledTimes(1);
+    const checkpoint = parseHarnessCheckpointV1(
+      (await managed.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.continuation.phase).toBe('await_runtime');
+    expect(checkpoint.tools!.items).toHaveLength(2);
+    expect(
+      checkpoint.tools!.items.every(
+        (item) => !item.consumed && item.outcomeRef === null,
+      ),
+    ).toBe(true);
+    expect(
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .filter((event) => event.kind === 'tool.receipt'),
+    ).toEqual([]);
+  },
+);
+
+it('cancels an in-flight prepare while reconciling once with an independent live signal', async () => {
+  const { calls, parts } = batch();
+  const controller = new AbortController();
+  const reason = new Error('owned cancel');
+  const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+    const signal = args[1]!.signal!;
+    const response = await fetch(...args);
+    if (String(args[0]).endsWith('/executions:prepare')) {
+      expect(signal.aborted).toBe(false);
+      controller.abort(reason);
+      expect(signal.aborted).toBe(true);
+      signal.throwIfAborted();
+    } else if (String(args[0]).endsWith('/executions:read-batch')) {
+      expect(controller.signal.aborted).toBe(true);
+      expect(signal.aborted).toBe(false);
+    }
+    return response;
+  });
+  await expect(
+    turn.execute(calls, parts, 'unit-model', controller.signal),
+  ).rejects.toMatchObject({ cause: reason });
+  expect(requests).toHaveLength(1);
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions:prepare',
+    '/internal/runtime-broker/v1/executions:read-batch',
+  ]);
+  expect(commit).toHaveBeenCalledTimes(1);
+});
+
+it('refuses nonempty initial history before committing it', async () => {
+  const observation = emptyHistory();
+  observation.state.files['owned.txt'] = null;
+  const timestamp = new Date().toISOString();
+  observation.state.snapshots.push({
+    promptId,
+    timestamp,
+    trackedFileBackups: {
+      'owned.txt': { backupFileName: null, version: 1, backupTime: timestamp },
+    },
+  });
+  const commit = vi.spyOn(managed.authority, 'commitDomainRecord');
+  await expect(
+    history.commitInitialHostedCsiHistory(managed, observation),
+  ).rejects.toThrow('Initial CSI history must be empty.');
+  expect(commit).not.toHaveBeenCalled();
+});
+
+it('checks the full serialized history envelope before publishing it', async () => {
+  const observation = emptyHistory();
+  const filename = `owned-${'x'.repeat(230)}.txt`;
+  observation.state.files[filename] = null;
+  observation.state.snapshots = Array.from({ length: 85 }, () => ({
+    promptId: randomUUID(),
+    timestamp: '2026-10-18T00:00:00.000Z',
+    trackedFileBackups: {
+      [filename]: {
+        backupFileName: null,
+        version: 1,
+        backupTime: '2026-10-18T00:00:00.000Z',
+      },
+    },
+  }));
+  expect(Buffer.byteLength(JSON.stringify(observation))).toBeLessThan(65536);
+  const publish = vi.spyOn(managed.resources, 'publish');
+  await expect(
+    history.commitHostedCsiHistory(
+      managed,
+      observation,
+      null,
+      null,
+      'capacity-refused',
+    ),
+  ).rejects.toThrow(
+    'Complete CSI file history exceeds the durable Session limit.',
+  );
+  expect(publish).not.toHaveBeenCalled();
+  expect(managed.authority.domainRecord('file_history')).toBeUndefined();
+  observation.state.snapshots = observation.state.snapshots.slice(0, 55);
+  const committed = await history.commitHostedCsiHistory(
+    managed,
+    observation,
+    null,
+    null,
+    'capacity-accepted',
+  );
+  const bytes = await managed.resources.read(committed.recordRef);
+  expect(bytes.length).toBeLessThan(65536);
+  expect(JSON.parse(bytes.toString()).record.systemPayload.snapshots).toEqual(
+    observation.state.snapshots,
+  );
 });

@@ -37,18 +37,31 @@ export async function runHostedFileTurn({
       assert.ok(wire.includes(prompt));
       const round = requests++;
       assert.ok(round < 2, 'No extra inference request may repair this turn');
-      if (round === 1) {
-        const results = body.messages
-          .filter((message) => message.role === 'tool')
-          .slice(-2);
-        assert.equal(results.length, 2);
-        assert.equal(
-          new Set(results.map((message) => message.tool_call_id)).size,
-          2,
+      if (index === 1)
+        assert.ok(
+          body.messages.some(
+            (message) =>
+              message.role === 'assistant' &&
+              JSON.stringify(message.content).includes('owned file answer 1 ✓'),
+          ),
+          'The second turn must include the first committed answer',
         );
+      const results = body.messages.filter(
+        (message) => message.role === 'tool',
+      );
+      assert.deepEqual(
+        results.map((message) => message.tool_call_id),
+        Array.from({ length: index + round }, (_, turn) => [
+          `owned-function-${turn}-0`,
+          `owned-function-${turn}-1`,
+        ]).flat(),
+      );
+      if (round === 1) {
         assert.ok(results.every((message) => message.content.length > 0));
         assert.ok(
-          JSON.stringify(results[0]).includes(index === 0 ? 'alpha' : 'beta'),
+          JSON.stringify(results[index * 2]).includes(
+            index === 0 ? 'alpha' : 'beta',
+          ),
         );
       }
       const base = {
@@ -153,6 +166,33 @@ export async function runHostedFileTurn({
         event.payload.modelAttemptId === attempts[1].payload.attemptId,
     );
     assert.equal(final.sequence, attempts[1].sequence + 1);
+    const intents = events.filter((event) => event.kind === 'tool.intent');
+    const receipts = events.filter((event) => event.kind === 'tool.receipt');
+    assert.equal(intents.length, 2);
+    assert.equal(receipts.length, 2);
+    for (const [ordinal, intent] of intents.entries()) {
+      const id = intent.payload.executionCallId;
+      assert.equal(intent.payload.ordinal, ordinal);
+      assert.equal(intent.eventId, `tool-intent:${id}`);
+      const receipt = receipts.find(
+        (event) => event.payload.executionCallId === id,
+      );
+      assert.ok(receipt, 'Every original tool intent must have its receipt');
+      assert.equal(receipt.eventId, `tool-receipt:${id}`);
+      assert.ok(
+        intent.sequence < receipt.sequence && receipt.sequence < final.sequence,
+      );
+      const outcome = JSON.parse(
+        (
+          await session.resources.read(receipt.payload.toolOutcomeRef)
+        ).toString(),
+      );
+      assert.equal(outcome.executionCallId, id);
+      assert.equal(
+        outcome.history.parts[0].functionResponse.id,
+        `owned-function-${index}-${ordinal}`,
+      );
+    }
     const projected = await session.sink.project();
     const answer = projected.find(
       (entry) => entry.uuid === final.payload.messageId,

@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
@@ -188,6 +189,19 @@ export async function commitHostedCsiHistory(
       systemPayload: { snapshots: original.state.snapshots },
     },
   };
+  const previous = authority.domainRecord('file_history');
+  const bytes = Buffer.byteLength(
+    JSON.stringify({
+      ...content,
+      operationId: commandId,
+      revision: (previous?.revision ?? 0) + 1,
+      previousRecordRef: previous?.recordRef ?? null,
+    }),
+  );
+  if (bytes > HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes)
+    throw new Error(
+      'Complete CSI file history exceeds the durable Session limit.',
+    );
   return authority.commitDomainRecord(
     {
       operation: 'commitFileHistory',

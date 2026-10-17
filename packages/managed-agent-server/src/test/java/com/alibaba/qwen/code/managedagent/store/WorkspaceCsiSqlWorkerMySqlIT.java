@@ -267,9 +267,21 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 assertThat(result.path("workerClosed").asBoolean()).isTrue();
                 assertThat(result.path("finalBytes").asText()).isEqualTo("gamma\n");
                 if (hostedProducer) {
-                    assertThat(result.path("hostedProducer").asBoolean()).isTrue();
+                    assertThat(result.path("refusalChecks").asInt()).isPositive();
                     assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                             + " WHERE operation = 'hostedModelAttempt' AND event_count = 2", Integer.class)).isEqualTo(2);
+                    var outputRevisions = jdbc.queryForList("SELECT journal_revision FROM ma_session_journal_tx"
+                            + " WHERE operation = 'hostedModelAttempt' AND event_count = 2 ORDER BY journal_revision", Long.class);
+                    var consumptionRevisions = jdbc.query("SELECT command_id, journal_revision FROM ma_session_journal_tx"
+                            + " WHERE operation = 'commitCheckpoint' ORDER BY journal_revision", (row, number) ->
+                                    Map.entry(new String(row.getBytes("command_id"), StandardCharsets.UTF_8), row.getLong("journal_revision")))
+                            .stream().filter(entry -> entry.getKey().startsWith("harness:results_consumed:"))
+                            .map(Map.Entry::getValue).toList();
+                    assertThat(consumptionRevisions).hasSize(2);
+                    for (int index = 0; index < 2; index++) {
+                        assertThat(outputRevisions.get(index)).isLessThan(consumptionRevisions.get(index));
+                    }
+                    assertThat(consumptionRevisions.get(0)).isLessThan(outputRevisions.get(1));
                     assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                             + " WHERE operation = 'commitFileHistory'", Integer.class)).isEqualTo(7);
                 }

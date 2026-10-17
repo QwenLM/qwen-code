@@ -32,6 +32,15 @@ checkpoint，只声明三个受支持的文件工具。
 准备备份，并持久保存观察，随后由 tool intent 和 dispatch checkpoint 授权执行。
 只读调用不需要修改准备。
 
+在 Runtime 预留前拒绝非法输入、根目录及超限输入。为每个被拒绝的原 function ID
+持久保存明确错误结果；全部被拒绝的 batch 仍可继续模型回合，不伪造 Runtime
+工作。原生 reader 根据原始调用及完整输入大小核实准确的拒绝原因，每项拒绝只接受
+一次；已准入的工作仍须提供 receipt 证明。修改历史关联到最新提交的拒绝消息，
+同时保持原始 batch 身份。正常预留请求响应回合取消；prepare 响应丢失或取消后，
+仍以独立且有时限的
+请求读取成员身份。发布历史前检查完整持久化 envelope 的大小，包括面向 reader
+的快照副本。容量拒绝保留不确定工作，不截断证据，也不重放修改。
+
 经认证 Broker 在固定原 Runtime Session 上执行。保留每份完整 Broker outcome
 及转换后的 tool-result message，再完成相应 Harness wait。将结果返回模型前保存
 工作后的 file-history 观察；仅在模型消费结果后标记 consumed，并结算正常

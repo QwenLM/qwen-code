@@ -8,6 +8,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
@@ -90,6 +92,7 @@ export class HostedCsiToolTurn {
     try {
       signal.throwIfAborted();
       const batchId = await this.commit('assistant', parts, model);
+      let parentMessageId = batchId;
       const functions = parts.flatMap((part, partIndex) =>
         part.functionCall ? [{ call: part.functionCall, partIndex }] : [],
       );
@@ -101,6 +104,20 @@ export class HostedCsiToolTurn {
       const sessionId =
         this.session.authority.sessionHeader.sessionKey.sessionId;
       const reservations: Array<Record<string, unknown>> = [];
+      const responses: Part[][] = calls.map(() => []);
+      const reject = async (ordinal: number, reason: string) => {
+        const call = calls[ordinal];
+        const converted = convertToFunctionErrorResponse(
+          call.name,
+          call.callId,
+          [],
+          reason,
+        );
+        if (!this.messageFitsInline('tool_result', converted, model))
+          throw new Error('CSI refusal exceeds the durable Session limit.');
+        parentMessageId = await this.commit('tool_result', converted, model);
+        responses[ordinal] = converted;
+      };
       for (const [ordinal, call] of calls.entries()) {
         const original = functions[ordinal];
         if (
@@ -113,6 +130,7 @@ export class HostedCsiToolTurn {
         try {
           input = acceptedCsiToolInput(call);
         } catch {
+          await reject(ordinal, 'CSI file input is invalid.');
           continue;
         }
         const definitionBytes = this.advertised.get(call.name);
@@ -129,8 +147,13 @@ export class HostedCsiToolTurn {
         if (
           inputBytes.length >
           HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
-        )
+        ) {
+          await reject(
+            ordinal,
+            'CSI file input exceeds the durable Session limit.',
+          );
           continue;
+        }
         const callId = randomUUID();
         const argsDigest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
         const inputRef = await this.session.resources.publish(
@@ -162,10 +185,11 @@ export class HostedCsiToolTurn {
           toolDefinitionBytesBase64: definitionBytes.toString('base64'),
         });
       }
+      if (reservations.length === 0) return responses.flat();
       for (const reservation of reservations) {
         signal.throwIfAborted();
         try {
-          await this.request('/executions:prepare', reservation);
+          await this.request('/executions:prepare', reservation, signal);
         } catch (cause) {
           // A lost answer cannot establish absence or justify new identities.
           const batch = await this.request('/executions:read-batch', {
@@ -176,10 +200,11 @@ export class HostedCsiToolTurn {
           throw cause;
         }
       }
-      const batch = await this.request('/executions:read-batch', {
-        promptId: this.promptId,
-        batchId,
-      });
+      const batch = await this.request(
+        '/executions:read-batch',
+        { promptId: this.promptId, batchId },
+        signal,
+      );
       this.verifyBatch(batch, batchId, reservations);
       if ((batch['members'] as unknown[]).length !== reservations.length)
         throw new Error('Original CSI batch is incomplete.');
@@ -242,7 +267,7 @@ export class HostedCsiToolTurn {
           this.session,
           observation,
           preparation,
-          batchId,
+          parentMessageId,
           `csi-file-history:intent:${batchId}`,
         );
         signal.throwIfAborted();
@@ -261,12 +286,10 @@ export class HostedCsiToolTurn {
             stage: 'prepared',
             intentRef: intent.recordRef,
           },
-          batchId,
+          parentMessageId,
           `csi-file-history:prepared:${batchId}`,
         );
       }
-      if (invocations.length === 0)
-        throw new Error('Original CSI batch has no accepted members.');
       const authority = this.session.authority;
       const activation = this.session.activation;
       for (const invocation of invocations) {
@@ -327,7 +350,6 @@ export class HostedCsiToolTurn {
         authority.sessionHeader.sessionKey,
         sessionId,
       );
-      const responses: Part[] = [];
       let lastResultMessageId: string | null = null;
       for (const invocation of invocations) {
         signal.throwIfAborted();
@@ -393,7 +415,7 @@ export class HostedCsiToolTurn {
           invocation.executionCallId,
           outcomeRef,
         );
-        responses.push(...converted);
+        responses[invocation.ordinal] = converted;
       }
       if (paths.size > 0) {
         signal.throwIfAborted();
@@ -411,8 +433,13 @@ export class HostedCsiToolTurn {
           `csi-file-history:result:${batchId}`,
         );
       }
-      return responses;
+      return responses.flat();
     } catch (cause) {
+      if (
+        cause instanceof ManagedSessionRecordError ||
+        cause instanceof HostedToolRecoveryRequiredError
+      )
+        throw cause;
       throw new HostedToolRecoveryRequiredError(cause);
     }
   }
@@ -472,6 +499,7 @@ export class HostedCsiToolTurn {
   private async request(
     route: string,
     body: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const sessionId = this.session.authority.sessionHeader.sessionKey.sessionId;
     const response = await fetch(
@@ -482,7 +510,9 @@ export class HostedCsiToolTurn {
       {
         method: 'POST',
         redirect: 'error',
-        signal: AbortSignal.timeout(30_000),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+          : AbortSignal.timeout(30_000),
         headers: {
           Authorization: `Bearer ${this.broker.token}`,
           'Content-Type': 'application/json',
@@ -512,6 +542,11 @@ export class HostedCsiToolTurn {
     try {
       await this.harness.consumeRuntimeResults();
     } catch (cause) {
+      if (
+        cause instanceof ManagedSessionRecordError ||
+        cause instanceof HostedToolRecoveryRequiredError
+      )
+        throw cause;
       throw new HostedToolRecoveryRequiredError(cause);
     }
   }

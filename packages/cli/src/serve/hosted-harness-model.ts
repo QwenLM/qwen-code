@@ -43,6 +43,7 @@ import type {
   ManagedMainModelAttempt,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
+import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { createHostedPromptHookRunner } from './hosted-hook-model.js';
 import {
   HookEventName,
@@ -818,6 +819,11 @@ export async function runHostedHarnessTextTurn(input: {
       pendingToolResults = true;
     }
   } catch (cause) {
+    if (
+      cause instanceof ManagedSessionRecordError ||
+      cause instanceof HostedToolRecoveryRequiredError
+    )
+      throw cause;
     if (pendingToolResults && input.completeFinalOutput)
       throw new HostedToolRecoveryRequiredError(cause);
     throw cause;

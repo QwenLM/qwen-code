@@ -6,7 +6,10 @@
 
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
+import {
+  normalizeWorkspaceRelativePath,
+  WORKSPACE_ROOT,
+} from './managed-workspace-binding.js';
 import type { Part } from '@google/genai';
 import {
   convertToFunctionResponse,
@@ -61,6 +64,8 @@ export function acceptedCsiToolInput(
   input['file_path'] = normalizeWorkspaceRelativePath(
     (input['file_path'] as string).trim(),
   );
+  if (input['file_path'] === WORKSPACE_ROOT)
+    throw new Error('CSI file input must name a file.');
   return input;
 }
 

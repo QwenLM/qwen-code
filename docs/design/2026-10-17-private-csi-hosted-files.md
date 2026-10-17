@@ -38,6 +38,19 @@ mutations, commit a preparation intent, request the original worker's backup
 preparation, and persist its observation before the tool intent and dispatch
 checkpoint authorize execution. Read-only calls need no mutation preparation.
 
+Reject invalid, root-directory and oversized inputs before Runtime reservation.
+Persist an explicit error result with each rejected original function ID; an
+all-rejected batch can continue through the model without fabricated Runtime
+work. The native reader validates the exact rejection reason against the original
+call and full input size, accepts each refusal once, and keeps receipt proof
+mandatory for admitted work. Mutation history references the latest committed
+refusal message while preserving the original batch identity. Normal reservation
+requests follow turn cancellation, while a lost or
+cancelled prepare answer still requires an independent bounded membership read.
+Check the size of the complete persisted history envelope, including the
+reader-facing snapshot copy, before publishing it. Capacity refusal retains
+uncertain work; it never truncates evidence or replays a mutation.
+
 Execute through the authenticated Broker with the fixed original Runtime
 Session. Retain each complete Broker outcome and the converted tool-result
 message, then resolve the corresponding Harness wait. Persist the post-work
