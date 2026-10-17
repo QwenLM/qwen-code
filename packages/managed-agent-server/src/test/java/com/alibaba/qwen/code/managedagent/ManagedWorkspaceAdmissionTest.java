@@ -347,8 +347,10 @@ class ManagedWorkspaceAdmissionTest {
             assertThat(read.sessionArchive()).isFalse();
             assertThat(read.sessionUnarchive()).isFalse();
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?",
-                Integer.class, tenant, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind NOT IN ('SUBMIT_INPUT', 'CANCEL')", Integer.class, tenant, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind IN ('SUBMIT_INPUT', 'CANCEL')", Integer.class, tenant, session)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session)).isEqualTo(2);
         String files = transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
