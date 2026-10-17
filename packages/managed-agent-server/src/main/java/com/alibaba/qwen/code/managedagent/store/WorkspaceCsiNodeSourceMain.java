@@ -20,7 +20,8 @@ public final class WorkspaceCsiNodeSourceMain {
             Path clientStore, Path passwordFile, Path caFile) {
     }
 
-    public record Deployment(String nodeName, Request client, Path sourceConfiguration, Path shimConfiguration) { }
+    public record Deployment(String nodeName, Request client, Path sourceConfiguration, Path shimConfiguration,
+            Path installedArtifacts) { }
 
     public static void main(String[] args) {
         try {
@@ -53,12 +54,14 @@ public final class WorkspaceCsiNodeSourceMain {
     /** Uses reviewed deployment inputs for expectations, never hashes copied from observed births. */
     static WorkspaceCsiRuntimeMain.NodeRequest nodeRequest(Deployment deployment, CsiNodeSourceJournal.Stream observed) throws java.io.IOException {
         WorkspaceCsiApplicationJson.require(deployment != null && deployment.client() != null && observed != null);
-        var source = WorkspaceCsiApplicationJson.object(read(deployment.sourceConfiguration(), 32 * 1024), 32 * 1024);
+        byte[] sourceRaw = read(deployment.sourceConfiguration(), 32 * 1024);
+        var source = WorkspaceCsiApplicationJson.object(sourceRaw, 32 * 1024);
         WorkspaceCsiApplicationJson.closed(source, Set.of("listen", "certificate", "key", "authority", "coordinatorPrincipal",
                 "nodeUid", "driver", "journalRoot", "pluginSocket", "pluginDigest", "frontendSocket", "kubeletDigest",
                 "registrarDigest", "gatewayUrl", "gatewayPrincipal", "runtimeDigest", "gatewayClientCertificate",
                 "gatewayClientKey", "workerPolicySha256", "sandboxImageSha256"));
-        var shim = WorkspaceCsiApplicationJson.object(read(deployment.shimConfiguration(), 32 * 1024), 32 * 1024);
+        byte[] shimRaw = read(deployment.shimConfiguration(), 32 * 1024);
+        var shim = WorkspaceCsiApplicationJson.object(shimRaw, 32 * 1024);
         WorkspaceCsiApplicationJson.closed(shim, Set.of("inputs", "sourceSocket", "sourceSha256", "shimPath", "shimSha256",
                 "socketRoot", "containerdGrpc", "containerdTtrpc", "creationContract"));
         var inputs = shim.path("inputs");
@@ -93,9 +96,12 @@ public final class WorkspaceCsiNodeSourceMain {
                 && source.path("sandboxImageSha256").textValue().matches("[0-9a-f]{64}"));
         var birthInputs = new WorkspaceCsiNodeSourceStore.BirthInputs(shim.path("shimSha256").textValue(),
                 inputs.path("runcSha256").textValue(), source.path("sandboxImageSha256").textValue(), shim.path("creationContract").textValue());
+        var installedBytes = WorkspaceCsiInstalledBytes.read(deployment.installedArtifacts(), sourceRaw, shimRaw);
+        WorkspaceCsiApplicationJson.require(installedBytes.source().equals(identity.sourceArtifacts())
+                && installedBytes.gateway().equals(identity.gatewayArtifacts()));
         var node = new WorkspaceCsiNodeSourceStore.Node(deployment.nodeName(), observed.incarnation(), identity,
                 client.sourceOrigin(), client.sourcePrincipal(), URI.create(source.path("gatewayUrl").textValue()),
-                source.path("gatewayPrincipal").textValue(), source.path("workerPolicySha256").textValue(), birthInputs);
+                source.path("gatewayPrincipal").textValue(), source.path("workerPolicySha256").textValue(), birthInputs, installedBytes);
         return new WorkspaceCsiRuntimeMain.NodeRequest(node, client.coordinatorPrincipal(), client.clientStore(), client.passwordFile(), client.caFile());
     }
 

@@ -827,7 +827,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var json = new ObjectMapper();
         var identity = json.readTree(plan);
         byte[] raw;
-        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v6.fixture.json")) {
+        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v7.fixture.json")) {
             assertThat(input).isNotNull();
             raw = java.util.Base64.getDecoder().decode(json.readTree(input).path("bytesBase64").textValue());
         }
@@ -886,7 +886,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var scope = armed.stream().observations().getFirst().scope();
         var node = new WorkspaceCsiNodeSourceStore.Node("owned-node", armed.stream().incarnation(), armed.stream().source(),
                 URI.create("https://source.invalid"), "spiffe://test/source", URI.create("https://gateway.invalid"), "spiffe://test/gateway",
-                frames.get(1).path("policy").path("rawSha256").textValue(), WorkspaceCsiBirthTestInputs.reviewed());
+                frames.get(1).path("policy").path("rawSha256").textValue(), WorkspaceCsiBirthTestInputs.reviewed(), WorkspaceCsiInstalledByteTestInputs.reviewed());
         var configuration = new WorkspaceCsiNodeSourceStore.Configuration(node, frames.get(1).path("imageDigest").textValue(), scope);
         var association = new WorkspaceCsiNodeSourceStore.Association(scope.bindingId(), 1, identity.path("physicalKey").textValue(),
                 UUID.randomUUID().toString(), 1, configuration, "PUBLISHED", 3, armed, frames.get(2).path("scope").path("podUid").textValue(),

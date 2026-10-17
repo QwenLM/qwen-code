@@ -55,3 +55,23 @@ func roleInputs(role string) (string, string) {
 	}
 	return "gateway-config.json", "qwen-k2-runtime-gateway.service"
 }
+
+// ValidatePair checks recorded byte identities only, never installation trust.
+func ValidatePair(source, gateway Observation) error {
+	for role, value := range map[string]Observation{"source": source, "gateway": gateway} {
+		_, unit := roleInputs(role)
+		if value.Format != "qwen-k2-installed-byte-observation/1" || value.Role != role ||
+			!birth.Hash(value.InstallationSHA256) || value.Architecture != "amd64" && value.Architecture != "arm64" ||
+			!birth.Hash(value.PackedSHA256) || value.PackedBytes < 1 || value.PackedBytes > 8<<20 ||
+			!configurationPath(value.ConfigurationPath) || !birth.Hash(value.ConfigurationSHA256) ||
+			!birth.Hash(value.ShimConfigurationSHA256) || value.UnitPath != "/etc/systemd/system/"+unit || !birth.Hash(value.UnitSHA256) {
+			return errors.New("invalid recorded role byte observation")
+		}
+	}
+	if source.InstallationSHA256 != gateway.InstallationSHA256 || source.Architecture != gateway.Architecture ||
+		source.PackedSHA256 != gateway.PackedSHA256 || source.PackedBytes != gateway.PackedBytes ||
+		source.ShimConfigurationSHA256 != gateway.ShimConfigurationSHA256 || source.ConfigurationPath == gateway.ConfigurationPath {
+		return errors.New("recorded roles belong to different installation bytes")
+	}
+	return nil
+}

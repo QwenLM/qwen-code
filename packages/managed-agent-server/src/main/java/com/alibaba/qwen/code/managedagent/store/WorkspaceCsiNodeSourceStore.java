@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.CsiCreationContract;
+import com.alibaba.qwen.code.runtimebroker.CsiInstalledByteObservation;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -52,14 +53,29 @@ public final class WorkspaceCsiNodeSourceStore {
         }
     }
 
+    /** Independent reviewed metadata, not values learned from the observed stream. */
+    public record InstalledBytes(CsiInstalledByteObservation source, CsiInstalledByteObservation gateway,
+            String kubeletSha256, String registrarSha256) {
+        public InstalledBytes {
+            CsiInstalledByteObservation.requirePair(source, gateway);
+            require(kubeletSha256 != null && kubeletSha256.matches("[0-9a-f]{64}")
+                    && registrarSha256 != null && registrarSha256.matches("[0-9a-f]{64}")
+                    && !kubeletSha256.equals(registrarSha256));
+        }
+    }
+
     public record Node(String name, String incarnation, CsiNodeSourceJournal.SourceIdentity identity,
-            URI sourceOrigin, String sourcePrincipal, URI gatewayOrigin, String gatewayPrincipal, String workerPolicySha256, BirthInputs birthInputs) {
+            URI sourceOrigin, String sourcePrincipal, URI gatewayOrigin, String gatewayPrincipal, String workerPolicySha256,
+            BirthInputs birthInputs, InstalledBytes installedBytes) {
         public Node {
             require(name != null && name.matches("[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
                     && incarnation != null && incarnation.matches("[0-9a-f]{32}") && identity != null
                     && sourceOrigin != null && gatewayOrigin != null && !sourceOrigin.equals(gatewayOrigin)
                     && sourcePrincipal != null && gatewayPrincipal != null && !sourcePrincipal.equals(gatewayPrincipal)
-                    && workerPolicySha256 != null && workerPolicySha256.matches("[0-9a-f]{64}") && birthInputs != null);
+                    && workerPolicySha256 != null && workerPolicySha256.matches("[0-9a-f]{64}") && birthInputs != null
+                    && installedBytes != null && workerPolicySha256.equals(installedBytes.source().packedSha256())
+                    && installedBytes.source().equals(identity.sourceArtifacts())
+                    && installedBytes.gateway().equals(identity.gatewayArtifacts()));
         }
     }
 
@@ -271,6 +287,9 @@ public final class WorkspaceCsiNodeSourceStore {
                 && evidence != null && evidence.bytes().length <= EVIDENCE_LIMIT
                 && configuration.node().identity().equals(evidence.stream().source())
                 && configuration.node().incarnation().equals(evidence.stream().incarnation()));
+        var installed = configuration.node().installedBytes();
+        require(installed.source().equals(evidence.stream().source().sourceArtifacts())
+                && installed.gateway().equals(evidence.stream().source().gatewayArtifacts()));
         var matches = evidence.stream().observations().stream().filter(value -> value.scope().armId().equals(configuration.scope().armId())).toList();
         require(matches.size() == 1);
         var observation = matches.getFirst();
@@ -278,7 +297,10 @@ public final class WorkspaceCsiNodeSourceStore {
         var expected = configuration.scope();
         var armed = evidence.record(observation.arm());
         require(configuration.imageDigest().equals(armed.path("imageDigest").textValue())
-                && configuration.node().workerPolicySha256().equals(armed.path("policy").path("rawSha256").textValue()));
+                && configuration.node().workerPolicySha256().equals(armed.path("policy").path("rawSha256").textValue())
+                && armed.path("policy").path("rawBytes").longValue() == installed.source().packedBytes()
+                && installed.kubeletSha256().equals(armed.path("frontend").path("kubelet").path("digest").textValue())
+                && installed.registrarSha256().equals(armed.path("frontend").path("registrar").path("digest").textValue()));
         require(scope.namespace().equals(expected.namespace()) && scope.podName().equals(expected.podName())
                 && scope.bindingId().equals(expected.bindingId()) && scope.driver().equals(expected.driver())
                 && scope.volumeId().equals(expected.volumeId()) && scope.pvUid().equals(expected.pvUid())

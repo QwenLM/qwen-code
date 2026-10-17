@@ -8,6 +8,11 @@ type runtimePeer struct {
 	Digest     string `json:"digest"`
 }
 
+type frontendIdentity struct {
+	Kubelet   runtimePeer `json:"kubelet"`
+	Registrar runtimePeer `json:"registrar"`
+}
+
 type gatewayIdentity struct {
 	Version     string                  `json:"version"`
 	Incarnation string                  `json:"incarnation"`

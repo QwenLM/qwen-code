@@ -297,7 +297,7 @@ func configurationPath(v string) bool {
 }
 
 func configurationFile(v string) bool {
-	if path.Dir(v) != "/etc/qwen-k2" || path.Clean(v) != v {
+	if len(v) > 2048 || path.Dir(v) != "/etc/qwen-k2" || path.Clean(v) != v {
 		return false
 	}
 	for _, c := range path.Base(v) {

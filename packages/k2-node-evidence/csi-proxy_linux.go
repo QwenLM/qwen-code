@@ -40,6 +40,10 @@ func (p *csiProxy) NodePublishVolume(ctx context.Context, request *csi.NodePubli
 		_ = p.source.block(original)
 		return nil, status.Error(codes.FailedPrecondition, "original publication confinement differs")
 	}
+	caller, err := frontendCaller(ctx)
+	if err != nil || original.arm.Frontend == nil || caller != original.arm.Frontend.Kubelet {
+		return nil, status.Error(codes.PermissionDenied, "original ARM kubelet caller is required")
+	}
 	if original.publish != nil {
 		target, err := readTarget(original.scope, false)
 		if !proto.Equal(request, original.publishRequest) || err != nil || target != *original.publish.Target {
@@ -51,10 +55,6 @@ func (p *csiProxy) NodePublishVolume(ctx context.Context, request *csi.NodePubli
 	if p.source.gateway.verify(ctx) != nil || targetUnmounted(original.scope) != nil {
 		_ = p.source.block(original)
 		return nil, status.Error(codes.FailedPrecondition, "original publication chain is unknown")
-	}
-	caller, err := frontendCaller(ctx)
-	if err != nil {
-		return nil, status.Error(codes.PermissionDenied, "original kubelet caller is required")
 	}
 	begin, err := p.source.record(original, journalBody{Kind: "PUBLISH_BEGIN", Caller: &caller})
 	if err != nil {

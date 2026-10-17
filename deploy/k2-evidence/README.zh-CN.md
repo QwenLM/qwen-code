@@ -236,4 +236,6 @@ k2-assemble-artifacts \
 
 gateway 现在返回第2版 runtime 身份，包含其实际匹配的自身配置、shim、unit 字节，以及完整原 installation manifest、架构和 packed 策略的观察。source 在创建 journal 前，将全部观察字段与自己独立验证快照中的 gateway 角色比较；后续检查保留完整原身份。旧第1版 runtime 身份、其他角色或任一不同字节身份均拒绝。两个角色均不打开对方的真实配置或凭据。
 
-清单只证明字节一致性，不认证 systemd 有效设置、加载策略语义、runtime handler 选择、actor 排除、CSI 独占或安装 provenance。目前验证使用明确合成的编译数据和可移植字节测试，以及仅编译的 Linux 输出；组装器 CLI、真实受保护对象行为和现场安装尚未验收。服务通道观察尚未进入持久 SOURCE_START/ARM 或 Java 独立期待值。source 第6版协议、物理释放权限和复用限制保持不变。
+清单只证明字节一致性，不认证 systemd 有效设置、加载策略语义、runtime handler 选择、actor 排除、CSI 独占或安装 provenance。目前验证使用明确合成的编译数据和可移植字节测试，以及仅编译的 Linux 输出；组装器 CLI、真实受保护对象行为和现场安装尚未验收。[source/7](../../docs/design/2026-10-17-k2-installed-byte-journal.zh-CN.md) 现将两份字节观察写入 SOURCE_START，ARM 保存原持有 frontend 身份；Java 核对必填的独立已审元数据期待值。source/6 和旧 Node 配置直接拒绝，不转换。这仅记录事实，不提供安装信任、物理释放权限或安全复用。
+
+`node-config` 的 deployment JSON 现须在 `nodeName`、`client`、`sourceConfiguration`、`shimConfiguration` 之外提供必填 `installedArtifacts`，指向独立已审18文件元数据目录的绝对路径。使用准确派生 `source-config.installed.json` 及原 `shim.json`。Client 仍保留 source/coordinator 主体及外部 PKCS12/password/CA 路径，保存的 Node 配置仅含紧凑非秘密字节期待值，不持久保存元数据目录，也不把引用凭据文件当作工件打开。Java 仅读固定小型元数据及其 pin，真实 Go 服务持有完整工件图；这项操作员解析不代表安装资格。

@@ -134,9 +134,13 @@ func (s *nodeSource) arm(request armRequest) (journalRecord, error) {
 	if err := s.gateway.verify(context.Background()); err != nil {
 		return journalRecord{}, err
 	}
+	frontend, err := s.gateway.frontend.snapshot()
+	if err != nil {
+		return journalRecord{}, err
+	}
 	original := &originalSource{scope: request.Scope, imageDigest: request.ImageDigest}
 	policy := s.gateway.policy.value
-	r, err := s.record(original, journalBody{Kind: "ARM", ImageDigest: request.ImageDigest, Policy: &policy})
+	r, err := s.record(original, journalBody{Kind: "ARM", ImageDigest: request.ImageDigest, Policy: &policy, Frontend: &frontend})
 	if err != nil {
 		return journalRecord{}, err
 	}

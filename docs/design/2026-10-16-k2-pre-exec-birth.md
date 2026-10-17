@@ -3,7 +3,7 @@
 [English](2026-10-16-k2-pre-exec-birth.md) | [简体中文](2026-10-16-k2-pre-exec-birth.zh-CN.md)
 
 Status: implementation in progress. The resident Workspace first version is
-separate. The source/6 implementation now connects actual shim birth records to the Java
+separate. The source/7 implementation connects actual shim birth records and installed-byte observations to the Java
 consumer. Its compilation and ordinary data tests do not establish installed
 confinement from birth and cannot authorize physical release. Ref #13395 and
 Draft PR #13526.
@@ -158,16 +158,17 @@ The source compares every field with the gateway role in its independently
 validated snapshot before creating a journal. Existing request guards then
 compare the complete original gateway identity, including these comparable
 scalar fields. A different role, manifest byte or input refuses; there is no
-version-one fallback. This is service-channel byte association, not a durable
-installation identity: SOURCE_START/ARM and the Java expectation/reader still
-need a coordinated explicit protocol upgrade.
+version-one fallback. [Source/7](2026-10-17-k2-installed-byte-journal.md) additionally persists
+the paired observations and original ARM frontend identities, with independent
+reviewed metadata expectations in Java. These are recorded facts, not a qualified
+installation identity.
 
 This step binds actual retained runtime inputs to the generated artifact graph.
 It does not prove the effective daemon handler, loaded unit configuration,
 external actor exclusion, reciprocal host policy, exclusive CSI wiring or a
-gap-free installed lifecycle. It does not add an installation authority, change
-source/6, grant final release or relax the reuse fence. A later producer and
-consumer must bind those actual live facts into the durable source protocol.
+gap-free installed lifecycle. It does not add an installation authority, grant final release or relax the reuse
+fence. Source/7 records these byte facts; further actual live installation facts
+and their external trust root remain required.
 
 ## Source and release dependency
 
@@ -198,7 +199,7 @@ candidate, uses exact parser/features with an empty configuration and no kernel
 load/cache, and saves failed attempts. Its ordinary tests only prepare data and
 inspect argv; they never execute a parser. Neither stage grants release.
 
-The current source/6 format preserves paired sandbox/worker births, actual image
+The current source/7 format preserves paired sandbox/worker births, actual image
 and snapshot ancestry, raw consumed inputs, created-process custody and the
 explicit publication/stop/unpublish dependencies. Update the Go producer and
 Java reader together. A decoder, signature, hash chain or claimed digest does

@@ -413,7 +413,7 @@ class WorkspaceCsiNodeSourceStoreTest {
 
     private void prepareProtocolFixture() throws Exception {
         byte[] raw;
-        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v6.fixture.json")) {
+        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v7.fixture.json")) {
             raw = Base64.getDecoder().decode(json.readTree(input).path("bytesBase64").textValue());
         }
         var input = ByteBuffer.wrap(raw);
@@ -468,7 +468,7 @@ class WorkspaceCsiNodeSourceStoreTest {
         unpublished = prefix(frames, 18);
         var identity = arm.stream().source();
         var node = new WorkspaceCsiNodeSourceStore.Node("node", arm.stream().incarnation(), identity,
-                URI.create("https://source.invalid"), "spiffe://test/source", URI.create("https://gateway.invalid"), "spiffe://test/gateway", arm.record(arm.stream().observations().getFirst().arm()).path("policy").path("rawSha256").textValue(), WorkspaceCsiBirthTestInputs.reviewed());
+                URI.create("https://source.invalid"), "spiffe://test/source", URI.create("https://gateway.invalid"), "spiffe://test/gateway", arm.record(arm.stream().observations().getFirst().arm()).path("policy").path("rawSha256").textValue(), WorkspaceCsiBirthTestInputs.reviewed(), WorkspaceCsiInstalledByteTestInputs.reviewed());
         var observed = publication.stream().observations().getFirst();
         String imageDigest = publication.record(observed.custody()).path("runtime").path("imageDigest").textValue();
         configuration = new WorkspaceCsiNodeSourceStore.Configuration(node, imageDigest, arm.stream().observations().getFirst().scope());
@@ -626,9 +626,9 @@ class WorkspaceCsiNodeSourceStoreTest {
         var identity = before.identity();
         var max = new java.math.BigInteger("18446744073709551615");
         var unsigned = new CsiNodeSourceJournal.SourceIdentity(identity.nodeUid(), identity.bootId(), identity.runtimeDigest(),
-                max, identity.runtimePid(), identity.gatewayIncarnation(), identity.pluginDigest(), max, identity.pluginPid());
+                max, identity.runtimePid(), identity.gatewayIncarnation(), identity.pluginDigest(), max, identity.pluginPid(), identity.sourceArtifacts(), identity.gatewayArtifacts());
         var node = new WorkspaceCsiNodeSourceStore.Node(before.name(), before.incarnation(), unsigned, before.sourceOrigin(),
-                before.sourcePrincipal(), before.gatewayOrigin(), before.gatewayPrincipal(), before.workerPolicySha256(), before.birthInputs());
+                before.sourcePrincipal(), before.gatewayOrigin(), before.gatewayPrincipal(), before.workerPolicySha256(), before.birthInputs(), before.installedBytes());
         var encoded = new WorkspaceCsiNodeSourceStore.Configuration(node, configuration.imageDigest(), configuration.scope());
         byte[] configBytes = WorkspaceCsiApplicationJson.encode(encoded);
         var plan = (ObjectNode) json.readTree(physicalPlan());
@@ -947,11 +947,30 @@ class WorkspaceCsiNodeSourceStoreTest {
     @Test
     void wrongReviewedPolicyCannotSaveArm() {
         var old = configuration.node();
-        var node = new WorkspaceCsiNodeSourceStore.Node(old.name(), old.incarnation(), old.identity(), old.sourceOrigin(),
-                old.sourcePrincipal(), old.gatewayOrigin(), old.gatewayPrincipal(), "f".repeat(64), old.birthInputs());
-        var wrong = new WorkspaceCsiNodeSourceStore.Configuration(node, configuration.imageDigest(), configuration.scope());
-        assertThatThrownBy(() -> store.saveArm(binding, registration, reservation, wrong, arm)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> new WorkspaceCsiNodeSourceStore.Node(old.name(), old.incarnation(), old.identity(), old.sourceOrigin(),
+                old.sourcePrincipal(), old.gatewayOrigin(), old.gatewayPrincipal(), "f".repeat(64), old.birthInputs(), old.installedBytes()))
+                .isInstanceOf(RuntimeBrokerException.class);
         assertThat(store.inspect(binding.getBindingId())).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"kubelet", "registrar"})
+    void independentFrontendExpectationRefusesArmBeforeSqlMutation(String changed) {
+        var node = configuration.node();
+        var bytes = node.installedBytes();
+        var reviewed = new WorkspaceCsiNodeSourceStore.InstalledBytes(bytes.source(), bytes.gateway(),
+                changed.equals("kubelet") ? "f".repeat(64) : bytes.kubeletSha256(),
+                changed.equals("registrar") ? "f".repeat(64) : bytes.registrarSha256());
+        var selected = new WorkspaceCsiNodeSourceStore.Node(node.name(), node.incarnation(), node.identity(), node.sourceOrigin(),
+                node.sourcePrincipal(), node.gatewayOrigin(), node.gatewayPrincipal(), node.workerPolicySha256(), node.birthInputs(), reviewed);
+        var expected = new WorkspaceCsiNodeSourceStore.Configuration(selected, configuration.imageDigest(), configuration.scope());
+        var holder = jdbc.queryForList("SELECT * FROM ma_storage_owner");
+        var before = bindings.findById(binding.getBindingId());
+        assertThatThrownBy(() -> store.saveArm(binding, registration, reservation, expected, arm))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(store.inspect(binding.getBindingId())).isNull();
+        assertThat(jdbc.queryForList("SELECT * FROM ma_storage_owner")).usingRecursiveComparison().isEqualTo(holder);
+        assertThat(bindings.findById(binding.getBindingId())).usingRecursiveComparison().isEqualTo(before);
     }
 
     @ParameterizedTest
@@ -969,7 +988,7 @@ class WorkspaceCsiNodeSourceStoreTest {
                 changed.equals("runc") ? "f".repeat(64) : inputs.runcSha256(),
                 changed.equals("sandbox") ? "f".repeat(64) : inputs.sandboxImageSha256(), contract);
         var selected = new WorkspaceCsiNodeSourceStore.Node(node.name(), node.incarnation(), node.identity(), node.sourceOrigin(),
-                node.sourcePrincipal(), node.gatewayOrigin(), node.gatewayPrincipal(), node.workerPolicySha256(), reviewed);
+                node.sourcePrincipal(), node.gatewayOrigin(), node.gatewayPrincipal(), node.workerPolicySha256(), reviewed, node.installedBytes());
         var expected = new WorkspaceCsiNodeSourceStore.Configuration(selected, configuration.imageDigest(), configuration.scope());
         store.saveArm(binding, registration, reservation, expected, arm);
         store.saveBound(binding, registration, reservation, store.inspect(binding.getBindingId()), podUid, "a".repeat(64), "opaque:1", bound);

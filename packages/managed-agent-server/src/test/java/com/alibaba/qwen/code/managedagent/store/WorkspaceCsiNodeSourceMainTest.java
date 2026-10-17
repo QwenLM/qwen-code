@@ -27,13 +27,14 @@ class WorkspaceCsiNodeSourceMainTest {
     @Test
     void nodeRequestUsesReviewedContractAndArtifactPins() throws Exception {
         var files = files(CsiCreationContractFixture.bytes());
-        var result = WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), observed());
+        var result = WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), observed(files));
         var inputs = result.node().birthInputs();
         assertThat(inputs.shimSha256()).isEqualTo("3".repeat(64));
         assertThat(inputs.runcSha256()).isEqualTo("4".repeat(64));
         assertThat(inputs.sandboxImageSha256()).isEqualTo("5".repeat(64));
         assertThat(Base64.getDecoder().decode(inputs.creationContract())).isEqualTo(CsiCreationContractFixture.bytes());
-        assertThat(result.node().identity()).isEqualTo(observed().source());
+        assertThat(result.node().identity()).isEqualTo(observed(files).source());
+        assertThat(result.node().installedBytes()).isEqualTo(files.reviewed());
     }
 
     @Test
@@ -45,7 +46,7 @@ class WorkspaceCsiNodeSourceMainTest {
         }
         byte[] raw = json.writeValueAsBytes(contract);
         var files = files(raw);
-        var request = WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), observed());
+        var request = WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), observed(files));
         var scope = new CsiNodeSourceJournal.Scope("arm", "namespace", "pod", "", "", "driver", "volume", "pv", "pvc", "", "binding", "");
         var configuration = new WorkspaceCsiNodeSourceStore.Configuration(request.node(), "6".repeat(64), scope);
         String encoded = json.writeValueAsString(configuration);
@@ -53,6 +54,7 @@ class WorkspaceCsiNodeSourceMainTest {
         var restored = WorkspaceCsiNodeSourceStore.decode(encoded, WorkspaceCsiNodeSourceStore.Configuration.class);
         assertThat(restored).isEqualTo(configuration);
         assertThat(Base64.getDecoder().decode(restored.node().birthInputs().creationContract())).isEqualTo(raw);
+        assertThat(encoded).doesNotContain("client.p12", "password", "ca.pem", "synthetic-key", "gatewayClientKey");
     }
 
     @ParameterizedTest
@@ -70,10 +72,33 @@ class WorkspaceCsiNodeSourceMainTest {
             default -> throw new AssertionError(fault);
         }
         write(files);
-        assertThatThrownBy(() -> WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), observed())).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), observed(files))).isInstanceOf(RuntimeException.class);
     }
 
-    private record Inputs(WorkspaceCsiNodeSourceMain.Deployment deployment, ObjectNode source, ObjectNode shim) {
+    @ParameterizedTest
+    @ValueSource(strings = {"installation.json", "profile-candidate.json", "profile-compile.json", "source-config.installed.json",
+        "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service"})
+    void independentlyChangedReviewedBytesCannotBeLearnedFromTheStream(String name) throws Exception {
+        var files = files(CsiCreationContractFixture.bytes());
+        var before = observed(files);
+        Files.writeString(files.deployment().installedArtifacts().resolve(name), "\n", java.nio.file.StandardOpenOption.APPEND);
+        assertThatThrownBy(() -> WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), before)).isInstanceOf(RuntimeException.class);
+        assertThat(before.source()).isEqualTo(observed(files).source());
+    }
+
+    @Test
+    void oldNodeConfigurationCannotAcquireMissingByteExpectations() throws Exception {
+        var files = files(CsiCreationContractFixture.bytes());
+        var request = WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), observed(files));
+        var scope = new CsiNodeSourceJournal.Scope("arm", "namespace", "pod", "", "", "driver", "volume", "pv", "pvc", "", "binding", "");
+        var value = json.valueToTree(new WorkspaceCsiNodeSourceStore.Configuration(request.node(), "6".repeat(64), scope));
+        ((ObjectNode) value.path("node")).remove("installedBytes");
+        assertThatThrownBy(() -> WorkspaceCsiNodeSourceStore.decode(json.writeValueAsString(value), WorkspaceCsiNodeSourceStore.Configuration.class))
+                .isInstanceOf(RuntimeException.class);
+    }
+
+    private record Inputs(WorkspaceCsiNodeSourceMain.Deployment deployment, ObjectNode source, ObjectNode shim,
+            WorkspaceCsiNodeSourceStore.InstalledBytes reviewed) {
     }
 
     private Inputs files(byte[] contract) throws Exception {
@@ -85,7 +110,8 @@ class WorkspaceCsiNodeSourceMainTest {
         source.put("listen", "source.example:9443").put("coordinatorPrincipal", "spiffe://test/coordinator")
                 .put("nodeUid", "node-uid").put("pluginDigest", "2".repeat(64)).put("runtimeDigest", "1".repeat(64))
                 .put("gatewayUrl", "https://gateway.example:9444").put("gatewayPrincipal", "spiffe://test/gateway")
-                .put("workerPolicySha256", "7".repeat(64)).put("sandboxImageSha256", "5".repeat(64));
+                .put("kubeletDigest", "a".repeat(64)).put("registrarDigest", "b".repeat(64))
+                .put("workerPolicySha256", hash("explicit synthetic packed data".getBytes(java.nio.charset.StandardCharsets.UTF_8))).put("sandboxImageSha256", "5".repeat(64));
         var shim = json.createObjectNode();
         shim.putObject("inputs").put("bundleRoot", "/run/containerd/io.containerd.runtime.v2.task/k8s.io")
                 .put("inputRoot", "/var/lib/qwen-k2/inputs").put("runcPath", "/opt/qwen-k2/bin/runc")
@@ -97,8 +123,9 @@ class WorkspaceCsiNodeSourceMainTest {
                 .put("creationContract", Base64.getEncoder().encodeToString(contract));
         var client = new WorkspaceCsiNodeSourceMain.Request(URI.create("https://source.example:9443"), "spiffe://test/source",
                 "spiffe://test/coordinator", directory.resolve("client.p12"), directory.resolve("password"), directory.resolve("ca.pem"));
-        var deployment = new WorkspaceCsiNodeSourceMain.Deployment("node", client, directory.resolve("source.json"), directory.resolve("shim.json"));
-        var result = new Inputs(deployment, source, shim);
+        var deployment = new WorkspaceCsiNodeSourceMain.Deployment("node", client, directory.resolve("source.json"), directory.resolve("shim.json"), directory.resolve("metadata"));
+        var reviewed = metadata(deployment.installedArtifacts(), json.writeValueAsBytes(source), json.writeValueAsBytes(shim));
+        var result = new Inputs(deployment, source, shim, reviewed);
         write(result);
         return result;
     }
@@ -108,9 +135,84 @@ class WorkspaceCsiNodeSourceMainTest {
         Files.write(inputs.deployment().shimConfiguration(), json.writeValueAsBytes(inputs.shim()));
     }
 
-    private static CsiNodeSourceJournal.Stream observed() {
+    private static CsiNodeSourceJournal.Stream observed(Inputs files) {
         var source = new CsiNodeSourceJournal.SourceIdentity("node-uid", "boot-id", "1".repeat(64), BigInteger.ONE,
-                10, "9".repeat(32), "2".repeat(64), BigInteger.TWO, 20);
+                10, "9".repeat(32), "2".repeat(64), BigInteger.TWO, 20, files.reviewed().source(), files.reviewed().gateway());
         return new CsiNodeSourceJournal.Stream("0".repeat(32), source, new CsiNodeSourceJournal.Cursor(1, "a".repeat(64)), "b".repeat(64), List.of());
+    }
+
+    // These are explicitly synthetic reviewed metadata bytes, never a parser or installation result.
+    private WorkspaceCsiNodeSourceStore.InstalledBytes metadata(Path root, byte[] source, byte[] shim) throws Exception {
+        var sourceValue = json.readTree(source);
+        var shimValue = json.readTree(shim);
+        var files = new java.util.LinkedHashMap<String, byte[]>();
+        files.put("source-config.installed.json", source);
+        files.put("source-config.json", source);
+        files.put("shim.json", shim);
+        files.put("gateway-config.json", "{\"synthetic\":\"gateway config bytes\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        files.put("qwen-k2-node-source.service", "ExecStart=/opt/qwen-k2/bin/k2-node-evidence source /etc/qwen-k2/source.json\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        files.put("qwen-k2-runtime-gateway.service", "ExecStart=/opt/qwen-k2/bin/k2-node-evidence gateway /etc/qwen-k2/gateway.json\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        files.put("packed.bin", "explicit synthetic packed data".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        for (String name : List.of("features", "qwen-k2-profiles", "target.json", "runtime.json", "worker-catalog.json", "sandbox-catalog.json")) {
+            files.put(name, ("explicit synthetic " + name).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        files.put("creation-contract.json", Base64.getDecoder().decode(shimValue.path("creationContract").textValue()));
+        var artifacts = json.createObjectNode().put("format", "qwen-k2-pre-exec-artifacts/2");
+        var executable = artifacts.putObject("artifacts");
+        for (String role : List.of("source", "shim", "runc")) {
+            String sha = role.equals("runc") ? shimValue.path("inputs").path("runcSha256").textValue() : shimValue.path(role + "Sha256").textValue();
+            executable.putObject(role).put("sha256", sha).put("bytes", 64).put("architecture", "amd64");
+        }
+        artifacts.put("creationContractSha256", hash(files.get("creation-contract.json")))
+                .put("sandboxImageSha256", sourceValue.path("sandboxImageSha256").textValue()).put("workerImageSha256", "6".repeat(64));
+        artifacts.putObject("catalogues");
+        artifacts.putObject("generators");
+        files.put("artifact-manifest.json", json.writeValueAsBytes(artifacts));
+        var candidate = json.createObjectNode().put("format", "qwen-k2-profile-candidate/1")
+                .put("artifactManifestSha256", hash(files.get("artifact-manifest.json"))).put("shimConfigurationSha256", hash(shim));
+        candidate.putObject("roleConfigPaths").put("source", "/etc/qwen-k2/source.json").put("gateway", "/etc/qwen-k2/gateway.json");
+        candidate.putArray("boundaries").add("synthetic data only, no qualification");
+        candidate.putObject("generators");
+        var profileFiles = candidate.putObject("files");
+        for (String name : List.of("source-config.json", "gateway-config.json", "target.json", "runtime.json", "creation-contract.json",
+                "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "qwen-k2-profiles")) {
+            profileFiles.putObject(name).put("bytes", files.get(name).length).put("sha256", hash(files.get(name)));
+        }
+        files.put("profile-candidate.json", json.writeValueAsBytes(candidate));
+        var compilation = json.createObjectNode().put("format", "qwen-k2-profile-compile/2");
+        compilation.putArray("command").add("not-executed-parser-placeholder");
+        compilation.put("profileCandidateSha256", hash(files.get("profile-candidate.json"))).put("parserSha256", "0".repeat(64))
+                .put("featuresSha256", hash(files.get("features"))).put("sourceSha256", hash(files.get("qwen-k2-profiles")))
+                .put("parserConfigurationSha256", "0".repeat(64)).put("generatorSha256", "0".repeat(64)).put("exitCode", 0)
+                .put("packedBytes", files.get("packed.bin").length).put("packedSha256", hash(files.get("packed.bin")));
+        files.put("profile-compile.json", json.writeValueAsBytes(compilation));
+        var manifest = json.createObjectNode().put("format", "qwen-k2-installed-artifacts/1");
+        var pins = manifest.putObject("files");
+        for (var entry : files.entrySet()) {
+            pins.putObject(entry.getKey()).put("bytes", entry.getValue().length).put("sha256", hash(entry.getValue()));
+        }
+        byte[] manifestRaw = json.writeValueAsBytes(manifest);
+        Files.createDirectory(root);
+        Files.write(root.resolve("installation.json"), manifestRaw);
+        for (var entry : files.entrySet()) {
+            Files.write(root.resolve(entry.getKey()), entry.getValue());
+        }
+        var sourceExpected = expected("source", manifestRaw, files, sourceValue.path("workerPolicySha256").textValue());
+        var gatewayExpected = expected("gateway", manifestRaw, files, sourceValue.path("workerPolicySha256").textValue());
+        return new WorkspaceCsiNodeSourceStore.InstalledBytes(sourceExpected, gatewayExpected,
+                sourceValue.path("kubeletDigest").textValue(), sourceValue.path("registrarDigest").textValue());
+    }
+
+    private static com.alibaba.qwen.code.runtimebroker.CsiInstalledByteObservation expected(String role, byte[] manifest,
+            java.util.Map<String, byte[]> files, String packed) throws Exception {
+        String configuration = role.equals("source") ? "source-config.installed.json" : "gateway-config.json";
+        String unit = role.equals("source") ? "qwen-k2-node-source.service" : "qwen-k2-runtime-gateway.service";
+        return new com.alibaba.qwen.code.runtimebroker.CsiInstalledByteObservation("qwen-k2-installed-byte-observation/1", role,
+                hash(manifest), "amd64", packed, files.get("packed.bin").length, "/etc/qwen-k2/" + role + ".json",
+                hash(files.get(configuration)), hash(files.get("shim.json")), "/etc/systemd/system/" + unit, hash(files.get(unit)));
+    }
+
+    private static String hash(byte[] raw) throws Exception {
+        return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(raw));
     }
 }

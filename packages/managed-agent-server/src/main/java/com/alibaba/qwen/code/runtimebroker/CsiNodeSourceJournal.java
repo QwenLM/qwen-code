@@ -32,7 +32,7 @@ public final class CsiNodeSourceJournal {
             "volumeId", "pvUid", "pvcUid", "target", "bindingId", "retirementId");
     private static final List<String> RECORD = List.of("version", "incarnation", "sequence", "previous", "kind", "source",
             "scope", "begin", "publish", "stop", "custody", "runtime", "caller", "target", "intentHash", "status",
-            "imageDigest", "policy", "gatedSpecSha256", "podResourceVersion", "birth", "hash");
+            "imageDigest", "policy", "frontend", "gatedSpecSha256", "podResourceVersion", "birth", "hash");
 
     private CsiNodeSourceJournal() {}
 
@@ -43,7 +43,8 @@ public final class CsiNodeSourceJournal {
     }
 
     public record SourceIdentity(String nodeUid, String bootId, String runtimeDigest, BigInteger runtimeStart,
-            int runtimePid, String gatewayIncarnation, String pluginDigest, BigInteger pluginStart, int pluginPid) {}
+            int runtimePid, String gatewayIncarnation, String pluginDigest, BigInteger pluginStart, int pluginPid,
+            CsiInstalledByteObservation sourceArtifacts, CsiInstalledByteObservation gatewayArtifacts) {}
 
     public record Scope(String armId, String namespace, String podName, String podUid, String containerId, String driver,
             String volumeId, String pvUid, String pvcUid, String target, String bindingId, String retirementId) {}
@@ -147,6 +148,9 @@ public final class CsiNodeSourceJournal {
                 Original original = originals.get(armId);
                 if ("ARM".equals(kind)) {
                     require(original == null && originals.size() < 4096 && (active == null || active.unpublished != null));
+                    var installed = CsiInstalledByteObservation.read(records.getFirst().path("source").path("sourceArtifacts"));
+                    require(installed.packedSha256().equals(text(record.path("policy"), "rawSha256"))
+                            && installed.packedBytes() == integer(record.path("policy"), "rawBytes", 8 * 1024 * 1024));
                     original = new Original(record);
                     originals.put(armId, original);
                     active = original;
@@ -162,7 +166,8 @@ public final class CsiNodeSourceJournal {
         JsonNode source = records.getFirst().path("source");
         var identity = new SourceIdentity(text(source, "nodeUid"), text(source, "bootId"), text(source, "runtimeDigest"),
                 source.path("runtimeStart").bigIntegerValue(), source.path("runtimePid").intValue(), text(source, "gatewayIncarnation"),
-                text(source, "pluginDigest"), source.path("pluginStart").bigIntegerValue(), source.path("pluginPid").intValue());
+                text(source, "pluginDigest"), source.path("pluginStart").bigIntegerValue(), source.path("pluginPid").intValue(),
+                CsiInstalledByteObservation.read(source.path("sourceArtifacts")), CsiInstalledByteObservation.read(source.path("gatewayArtifacts")));
         return new Stream(incarnation, identity, head, CsiNativeActivationProof.sha256(bytes),
                 originals.values().stream().map(Original::observation).toList());
     }
@@ -214,7 +219,7 @@ public final class CsiNodeSourceJournal {
     private static void validate(JsonNode r) {
         String kind = text(r, "kind");
         var expected = new ArrayList<>(List.of("version", "incarnation", "sequence", "previous", "kind"));
-        require("qwen-k2-node-source/6".equals(text(r, "version"))
+        require("qwen-k2-node-source/7".equals(text(r, "version"))
                 && text(r, "incarnation").matches("[0-9a-f]{32}")
                 && text(r, "previous").matches("[0-9a-f]{64}") && text(r, "hash").matches("[0-9a-f]{64}"));
         if ("SOURCE_START".equals(kind)) {
@@ -222,7 +227,9 @@ public final class CsiNodeSourceJournal {
             require(integer(r, "sequence", 65536) == 1);
             JsonNode s = r.path("source");
             fields(s, List.of("nodeUid", "bootId", "runtimeDigest", "runtimeStart", "runtimePid", "gatewayIncarnation",
-                    "pluginDigest", "pluginStart", "pluginPid"));
+                    "pluginDigest", "pluginStart", "pluginPid", "sourceArtifacts", "gatewayArtifacts"));
+            CsiInstalledByteObservation.requirePair(CsiInstalledByteObservation.read(s.path("sourceArtifacts")),
+                    CsiInstalledByteObservation.read(s.path("gatewayArtifacts")));
             for (String f : List.of("nodeUid", "bootId")) {
                 bounded(s, f, false);
             }
@@ -255,7 +262,7 @@ public final class CsiNodeSourceJournal {
                         && (!text(s, "podUid").isEmpty() || text(s, "containerId").isEmpty() && text(s, "retirementId").isEmpty()));
             }
             var extras = switch (kind) {
-                case "ARM" -> List.of("imageDigest", "policy");
+                case "ARM" -> List.of("imageDigest", "policy", "frontend");
                 case "BIND" -> List.of("gatedSpecSha256", "podResourceVersion");
                 case "CONFINEMENT_LOST" -> List.<String>of();
                 case "PUBLISH_BEGIN" -> List.of("caller");
@@ -274,6 +281,11 @@ public final class CsiNodeSourceJournal {
             if ("ARM".equals(kind)) {
                 require(text(r, "imageDigest").matches("[0-9a-f]{64}"));
                 policy(r.path("policy"));
+                JsonNode frontend = r.path("frontend");
+                fields(frontend, List.of("kubelet", "registrar"));
+                peer(frontend.path("kubelet"));
+                peer(frontend.path("registrar"));
+                require(!text(frontend.path("kubelet"), "digest").equals(text(frontend.path("registrar"), "digest")));
             }
             if ("BIND".equals(kind)) {
                 require(text(r, "gatedSpecSha256").matches("[0-9a-f]{64}"));
@@ -492,6 +504,7 @@ public final class CsiNodeSourceJournal {
                 }
                 case "PUBLISH_BEGIN" -> {
                     require(bound != null && publishBegin == null && intent == null);
+                    require(r.path("caller").equals(arm.path("frontend").path("kubelet")));
                     publishBegin = r;
                 }
                 case "PUBLISH_OK", "PUBLISH_FAILED" -> {

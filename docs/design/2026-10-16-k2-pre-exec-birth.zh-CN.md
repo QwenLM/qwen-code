@@ -2,7 +2,7 @@
 
 [English](2026-10-16-k2-pre-exec-birth.md) | [简体中文](2026-10-16-k2-pre-exec-birth.zh-CN.md)
 
-状态：实现进行中。常驻 Workspace 第一版独立维护。source/6 实现已将真实 shim 出生记录接到 Java
+状态：实现进行中。常驻 Workspace 第一版独立维护。source/7 实现已将真实 shim 出生记录和安装字节观察接到 Java
 读端。编译和普通数据测试不能证明已安装的首次执行前持续约束，不能授权物理释放。关联 #13395 和 Draft PR #13526。
 
 ## 问题
@@ -91,9 +91,9 @@ version-2 artifact manifest 绑定两份原始镜像 digest、完整清单字节
 
 source 还须将安装 packed hash、长度与实际 kernel policy 测量比较；gateway 保留自身 confinement 检查，不取得 source 的 kernel exporter 权限。两个角色均不读取另一个角色的真实配置或私钥，快照配置副本只含闭合配置中的路径和身份。
 
-runtime 身份协议升级为第2版。gateway 字节观察包含完整原 installation manifest 摘要、架构、packed 摘要及长度、角色、实际自身配置路径/摘要、shim 摘要，以及固定自身 unit 路径/摘要；只有实际保留输入匹配后才能构造。source 在创建 journal 前，将全部字段与自己独立验证快照中的 gateway 角色比较。既有请求守卫随后比较完整原 gateway 身份，包括这些可比较的标量字段。角色、manifest 任一字节或输入不同即拒绝，不回退第1版。这是服务通道字节关联，尚不是持久安装身份；SOURCE_START/ARM 及 Java 期待值/读端仍须协调进行显式协议升级。
+runtime 身份协议升级为第2版。gateway 字节观察包含完整原 installation manifest 摘要、架构、packed 摘要及长度、角色、实际自身配置路径/摘要、shim 摘要，以及固定自身 unit 路径/摘要；只有实际保留输入匹配后才能构造。source 在创建 journal 前，将全部字段与自己独立验证快照中的 gateway 角色比较。既有请求守卫随后比较完整原 gateway 身份，包括这些可比较的标量字段。角色、manifest 任一字节或输入不同即拒绝，不回退第1版。这是服务通道字节关联；[source/7](2026-10-17-k2-installed-byte-journal.zh-CN.md) 进一步持久保存配对观察及 ARM 原 frontend 身份，并接通 Java 独立已审元数据期待值。这些仍是已记录事实，不是已资格化安装身份。
 
-此步将真实保留运行时输入与生成工件图关联，不证明 daemon 有效 handler、实际加载 unit 配置、外部 actor 排除、宿主反向策略、CSI 独占接线或无间隙生命周期；不创建安装 authority，不改变 source/6，不授予最终释放或放宽复用门。后续 producer/consumer 仍须将真实 live facts 绑定到持久来源协议。
+此步将真实保留运行时输入与生成工件图关联，不证明 daemon 有效 handler、实际加载 unit 配置、外部 actor 排除、宿主反向策略、CSI 独占接线或无间隙生命周期；不创建安装 authority，不授予最终释放或放宽复用门。source/7 记录这些字节事实；其他真实 live 安装事实及外部信任根仍待补齐。
 
 ## 来源与释放依赖
 
@@ -103,7 +103,7 @@ runtime 身份协议升级为第2版。gateway 字节观察包含完整原 insta
 
 外层 snapshot 挂载输入与内层 OCI mount 分开；规则拆分正常挂载阶段，将原数据保留在已审目标及契约中。实际 source 类型、VFS flags 和 disconnected 别名仍需原生资格化。后续编译阶段消费完整 pinned 候选，以准确 parser/features、空配置、无 kernel load/cache 的方式执行，并保留失败记录。普通测试仅准备数据及检查 argv，绝不执行 parser；两个阶段均不授予释放权限。
 
-当前 source/6 格式保留配对 sandbox/worker 出生、实际镜像及 snapshot 祖先链、原始消费
+当前 source/7 格式保留配对 sandbox/worker 出生、实际镜像及 snapshot 祖先链、原始消费
 输入、创建进程 custody，以及明确的发布/停止/卸载依赖。Go producer 与 Java 读端一起
 更新。decoder、签名、hash 链或自报摘要都不能资格化安装结果。读端必须通过绑定原始 SQL
 连接的私有 authority 比较实际安装及已审阅 shim/runc/sandbox/角色输入，包含创建契约。

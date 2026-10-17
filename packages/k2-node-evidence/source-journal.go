@@ -15,10 +15,11 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/artifactset"
 	"golang.org/x/sys/unix"
 )
 
-const journalVersion = "qwen-k2-node-source/6"
+const journalVersion = "qwen-k2-node-source/7"
 const maxRecordBytes = 192 << 10
 const maxJournalBytes = 64 << 20
 const maxJournalRecords = 65536
@@ -26,15 +27,17 @@ const maxJournalRecords = 65536
 var errJournalPoisoned = errors.New("source journal has an unknown append outcome")
 
 type sourceIdentity struct {
-	NodeUID            string `json:"nodeUid"`
-	BootID             string `json:"bootId"`
-	RuntimeDigest      string `json:"runtimeDigest"`
-	RuntimeStart       uint64 `json:"runtimeStart"`
-	RuntimePID         int32  `json:"runtimePid"`
-	GatewayIncarnation string `json:"gatewayIncarnation"`
-	PluginDigest       string `json:"pluginDigest"`
-	PluginStart        uint64 `json:"pluginStart"`
-	PluginPID          int32  `json:"pluginPid"`
+	NodeUID            string                  `json:"nodeUid"`
+	BootID             string                  `json:"bootId"`
+	RuntimeDigest      string                  `json:"runtimeDigest"`
+	RuntimeStart       uint64                  `json:"runtimeStart"`
+	RuntimePID         int32                   `json:"runtimePid"`
+	GatewayIncarnation string                  `json:"gatewayIncarnation"`
+	PluginDigest       string                  `json:"pluginDigest"`
+	PluginStart        uint64                  `json:"pluginStart"`
+	PluginPID          int32                   `json:"pluginPid"`
+	SourceArtifacts    artifactset.Observation `json:"sourceArtifacts"`
+	GatewayArtifacts   artifactset.Observation `json:"gatewayArtifacts"`
 }
 
 type originalScope struct {
@@ -94,6 +97,7 @@ type journalBody struct {
 	Status             uint32              `json:"status,omitempty"`
 	ImageDigest        string              `json:"imageDigest,omitempty"`
 	Policy             *workerPolicy       `json:"policy,omitempty"`
+	Frontend           *frontendIdentity   `json:"frontend,omitempty"`
 	GatedSpecSHA256    string              `json:"gatedSpecSha256,omitempty"`
 	PodResourceVersion string              `json:"podResourceVersion,omitempty"`
 	Birth              *birthRecord        `json:"birth,omitempty"`
@@ -138,17 +142,26 @@ func validateBody(b journalBody) error {
 		return errors.New("invalid source journal chain")
 	}
 	if b.Kind == "SOURCE_START" {
-		if b.Sequence != 1 || b.Source == nil || b.Scope != nil || b.Begin != nil || b.Publish != nil || b.Stop != nil || b.Custody != nil || b.Runtime != nil || b.Caller != nil || b.Target != nil || b.IntentHash != "" || b.Status != 0 || b.ImageDigest != "" || b.Policy != nil || b.GatedSpecSHA256 != "" || b.PodResourceVersion != "" || b.Birth != nil {
+		if b.Sequence != 1 || b.Source == nil || b.Scope != nil || b.Begin != nil || b.Publish != nil || b.Stop != nil || b.Custody != nil || b.Runtime != nil || b.Caller != nil || b.Target != nil || b.IntentHash != "" || b.Status != 0 || b.ImageDigest != "" || b.Policy != nil || b.Frontend != nil || b.GatedSpecSHA256 != "" || b.PodResourceVersion != "" || b.Birth != nil {
 			return errors.New("invalid source start")
 		}
 		s := b.Source
-		if !bounded(s.NodeUID) || !bounded(s.BootID) || !hashString(s.RuntimeDigest) || !hashString(s.PluginDigest) || s.RuntimeStart == 0 || s.PluginStart == 0 || s.RuntimePID <= 0 || s.PluginPID <= 0 || len(s.GatewayIncarnation) != 32 || !hashString(s.GatewayIncarnation+s.GatewayIncarnation) {
+		if !bounded(s.NodeUID) || !bounded(s.BootID) || !hashString(s.RuntimeDigest) || !hashString(s.PluginDigest) || s.RuntimeStart == 0 || s.PluginStart == 0 || s.RuntimePID <= 0 || s.PluginPID <= 0 || len(s.GatewayIncarnation) != 32 || !hashString(s.GatewayIncarnation+s.GatewayIncarnation) || artifactset.ValidatePair(s.SourceArtifacts, s.GatewayArtifacts) != nil {
 			return errors.New("invalid original source identity")
 		}
 		return nil
 	}
 	if b.Sequence == 1 || b.Source != nil || b.Scope == nil {
 		return errors.New("missing original scope")
+	}
+	if (b.Frontend != nil) != (b.Kind == "ARM") {
+		return errors.New("original frontend identities belong only to ARM")
+	}
+	if b.Frontend != nil {
+		k, r := b.Frontend.Kubelet, b.Frontend.Registrar
+		if k.PID <= 0 || r.PID <= 0 || k.StartTicks == 0 || r.StartTicks == 0 || !hashString(k.Digest) || !hashString(r.Digest) || k.Digest == r.Digest {
+			return errors.New("invalid original frontend identities")
+		}
 	}
 	s := b.Scope
 	for _, field := range []string{s.ArmID, s.Namespace, s.PodName, s.Driver, s.VolumeID, s.PVUID, s.PVCUID, s.BindingID} {

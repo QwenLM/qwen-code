@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -138,5 +139,49 @@ func TestObservationPinsOriginalManifestBytesAndRetainsItsInputs(t *testing.T) {
 	}
 	if original.MatchObservation("gateway", observed) != nil {
 		t.Fatal("caller mutation changed retained observation inputs")
+	}
+}
+
+func TestRecordedPairNeedsIndependentSnapshotComparison(t *testing.T) {
+	pre, profiles, compiled := fixture(t)
+	files := assemble(t, pre, profiles, compiled)
+	snapshot, err := Validate(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := snapshot.Observation("source", "/etc/qwen-k2/source.json", files["source-config.installed.json"], files["shim.json"], files["qwen-k2-node-source.service"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := snapshot.Observation("gateway", "/etc/qwen-k2/gateway.json", files["gateway-config.json"], files["shim.json"], files["qwen-k2-runtime-gateway.service"])
+	if err != nil || ValidatePair(source, gateway) != nil {
+		t.Fatal("matched byte graph did not form a recorded pair", err)
+	}
+	changed := gateway
+	changed.ConfigurationSHA256 = byteHash([]byte("another configuration"))
+	if ValidatePair(source, changed) != nil || snapshot.MatchObservation("gateway", changed) == nil {
+		t.Fatal("record format was confused with independent byte association")
+	}
+	for _, change := range []func(*Observation){
+		func(v *Observation) { v.Format = "" },
+		func(v *Observation) { v.Role = "source" },
+		func(v *Observation) { v.InstallationSHA256 = byteHash(nil) },
+		func(v *Observation) { v.Architecture = "arm64" },
+		func(v *Observation) { v.PackedSHA256 = byteHash(nil) },
+		func(v *Observation) { v.PackedBytes++ },
+		func(v *Observation) { v.PackedBytes = 0 },
+		func(v *Observation) { v.PackedBytes = 8<<20 + 1 },
+		func(v *Observation) { v.ConfigurationPath = source.ConfigurationPath },
+		func(v *Observation) { v.ConfigurationPath = "/etc/qwen-k2/" + strings.Repeat("x", 2048) + ".json" },
+		func(v *Observation) { v.ConfigurationSHA256 = "invalid" },
+		func(v *Observation) { v.ShimConfigurationSHA256 = byteHash(nil) },
+		func(v *Observation) { v.UnitPath = source.UnitPath },
+		func(v *Observation) { v.UnitSHA256 = "invalid" },
+	} {
+		changed := gateway
+		change(&changed)
+		if ValidatePair(source, changed) == nil {
+			t.Fatal("malformed or mismatched recorded pair accepted", changed)
+		}
 	}
 }

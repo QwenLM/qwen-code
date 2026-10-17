@@ -256,7 +256,7 @@ func runSource(ctx context.Context, path string) error {
 	defer frontend.close()
 	gateway.identity, gateway.plugin, gateway.frontend, gateway.policy = runtime, plugin, frontend, policy
 	gateway.shimConfig = shimConfiguration
-	sourceIdentity := sourceIdentity{NodeUID: cfg.NodeUID, BootID: boot, RuntimeDigest: runtime.Peer.Digest, RuntimeStart: runtime.Peer.StartTicks, RuntimePID: runtime.Peer.PID, GatewayIncarnation: runtime.Incarnation, PluginDigest: plugin.identity.Digest, PluginStart: plugin.identity.StartTicks, PluginPID: plugin.identity.PID}
+	sourceIdentity := sourceIdentity{NodeUID: cfg.NodeUID, BootID: boot, RuntimeDigest: runtime.Peer.Digest, RuntimeStart: runtime.Peer.StartTicks, RuntimePID: runtime.Peer.PID, GatewayIncarnation: runtime.Incarnation, PluginDigest: plugin.identity.Digest, PluginStart: plugin.identity.StartTicks, PluginPID: plugin.identity.PID, SourceArtifacts: observed, GatewayArtifacts: runtime.Artifacts}
 	journal, journalPath, err := createJournal(cfg.JournalRoot, sourceIdentity)
 	if err != nil {
 		return err

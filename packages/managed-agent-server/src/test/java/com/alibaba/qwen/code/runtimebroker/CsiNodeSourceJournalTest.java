@@ -25,9 +25,9 @@ class CsiNodeSourceJournalTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
-    void consumesSyntheticV6BirthProtocolWithoutChangingBodyOrder() throws Exception {
+    void consumesSyntheticV7BytesAndFrontendWithoutChangingBodyOrder() throws Exception {
         Fixture fixture = fixture();
-        assertEquals("54a3006139ff5091febb8bde8703103fa9e42a223b5f51349f5fb7cdc33dc303",
+        assertEquals("d2e829ba7ae8248b09bf01c40e3a57e6338f8951c8a843ae298a3b7a20472fa9",
                 CsiNativeActivationProof.sha256(fixture.bytes()));
         var stream = CsiNodeSourceJournal.read(fixture.bytes(), fixture.head());
         assertEquals(fixture.head(), stream.head());
@@ -673,7 +673,7 @@ class CsiNodeSourceJournalTest {
         var frames = new ArrayList<>(frames(fixture().bytes()).subList(0, 2));
         var lost = frames.get(1).deepCopy();
         lost.put("kind", "CONFINEMENT_LOST").put("sequence", 3);
-        lost.remove(List.of("imageDigest", "policy"));
+        lost.remove(List.of("imageDigest", "policy", "frontend"));
         frames.add(lost);
         var head = rechain(frames);
         var observation = CsiNodeSourceJournal.read(encode(frames), head).observations().getFirst();
@@ -696,6 +696,57 @@ class CsiNodeSourceJournalTest {
                 assertThrows(IllegalArgumentException.class, () -> CsiNodeSourceJournal.read(bytes, head));
             }
         }
+    }
+
+    @Test
+    void sourceSixCannotAcquireInstalledBytesByDefault() throws Exception {
+        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v6.fixture.json")) {
+            var old = JSON.readTree(input);
+            byte[] raw = Base64.getDecoder().decode(old.path("bytesBase64").textValue());
+            var head = new CsiNodeSourceJournal.Cursor(old.path("head").path("sequence").longValue(), old.path("head").path("hash").textValue());
+            assertThrows(IllegalArgumentException.class, () -> CsiNodeSourceJournal.read(raw, head));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"format", "role", "installationSha256", "architecture", "packedSha256", "packedBytes",
+        "configurationPath", "configurationSha256", "shimConfigurationSha256", "unitPath", "unitSha256"})
+    void installedObservationFieldsAreMandatoryAndNotNullable(String field) throws Exception {
+        for (String role : List.of("sourceArtifacts", "gatewayArtifacts")) {
+            rejects(0, r -> ((ObjectNode) r.path("source").path(role)).remove(field));
+            rejects(0, r -> ((ObjectNode) r.path("source").path(role)).putNull(field));
+        }
+    }
+
+    @Test
+    void installedObservationsRejectUnknownAndForeignRoleData() throws Exception {
+        rejects(0, r -> ((ObjectNode) r.path("source").path("sourceArtifacts")).put("qualified", true));
+        rejects(0, r -> ((ObjectNode) r.path("source").path("gatewayArtifacts")).put("role", "source"));
+        rejects(0, r -> ((ObjectNode) r.path("source").path("gatewayArtifacts")).put("installationSha256", "f".repeat(64)));
+        rejects(1, r -> ((ObjectNode) r.path("frontend")).remove("registrar"));
+        rejects(1, r -> ((ObjectNode) r.path("frontend")).put("qualified", true));
+    }
+
+    @Test
+    void bothConsistentLaterCallersCannotReplaceTheOriginalArmKubelet() throws Exception {
+        var frames = frames(fixture().bytes());
+        for (ObjectNode frame : frames) {
+            if (frame.has("caller")) {
+                ((ObjectNode) frame.path("caller")).put("pid", 4348);
+            }
+        }
+        var head = rechain(frames);
+        assertThrows(IllegalArgumentException.class, () -> CsiNodeSourceJournal.read(encode(frames), head));
+    }
+
+    @Test
+    void aWellFormedBytePairStillMustMatchTheActualArmPolicyLength() throws Exception {
+        var frames = frames(fixture().bytes());
+        for (String role : List.of("sourceArtifacts", "gatewayArtifacts")) {
+            ((ObjectNode) frames.getFirst().path("source").path(role)).put("packedBytes", 2);
+        }
+        var head = rechain(frames);
+        assertThrows(IllegalArgumentException.class, () -> CsiNodeSourceJournal.read(encode(frames), head));
     }
 
     private static CsiNodeSourceJournal.Cursor rechain(List<ObjectNode> frames) throws Exception {
@@ -756,7 +807,7 @@ class CsiNodeSourceJournalTest {
     }
 
     private static Fixture fixture() throws Exception {
-        try (var input = CsiNodeSourceJournalTest.class.getResourceAsStream("/contracts/k2-node-source-v6.fixture.json")) {
+        try (var input = CsiNodeSourceJournalTest.class.getResourceAsStream("/contracts/k2-node-source-v7.fixture.json")) {
             JsonNode value = JSON.readTree(input);
             return new Fixture(Base64.getDecoder().decode(value.path("bytesBase64").textValue()),
                     new CsiNodeSourceJournal.Cursor(value.path("head").path("sequence").longValue(),

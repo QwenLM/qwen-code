@@ -104,17 +104,22 @@ func (*frontendPeers) OverrideServerName(string) error {
 }
 
 func (f *frontendPeers) verify() error {
+	_, err := f.snapshot()
+	return err
+}
+
+func (f *frontendPeers) snapshot() (frontendIdentity, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.peers) != 2 {
-		return errors.New("original kubelet and registrar are not ready")
+	if len(f.peers) != 2 || f.peers["kubelet"] == nil || f.peers["registrar"] == nil {
+		return frontendIdentity{}, errors.New("original kubelet and registrar are not ready")
 	}
 	for _, p := range f.peers {
 		if p.verify() != nil {
-			return errors.New("original CSI frontend process changed")
+			return frontendIdentity{}, errors.New("original CSI frontend process changed")
 		}
 	}
-	return nil
+	return frontendIdentity{Kubelet: f.peers["kubelet"].identity, Registrar: f.peers["registrar"].identity}, nil
 }
 
 func (f *frontendPeers) close() {

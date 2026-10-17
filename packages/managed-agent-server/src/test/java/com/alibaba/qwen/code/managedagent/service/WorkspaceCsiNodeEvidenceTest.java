@@ -101,12 +101,13 @@ class WorkspaceCsiNodeEvidenceTest {
     }
 
     private WorkspaceCsiNodeEvidence evidence() {
+        var installed = com.alibaba.qwen.code.managedagent.store.WorkspaceCsiInstalledByteTestInputs.reviewed();
         var identity = new CsiNodeSourceJournal.SourceIdentity(NODE_UID, BOOT_ID, "a".repeat(64), BigInteger.ONE,
-                10, "b".repeat(32), "c".repeat(64), BigInteger.TWO, 20);
+                10, "b".repeat(32), "c".repeat(64), BigInteger.TWO, 20, installed.source(), installed.gateway());
         var node = new WorkspaceCsiNodeSourceStore.Node("owned-node", "d".repeat(32), identity,
                 URI.create("https://source.example"), "spiffe://example/source", URI.create("https://gateway.example"),
-                "spiffe://example/gateway", "e".repeat(64),
-                com.alibaba.qwen.code.managedagent.store.WorkspaceCsiBirthTestInputs.reviewed());
+                "spiffe://example/gateway", installed.source().packedSha256(),
+                com.alibaba.qwen.code.managedagent.store.WorkspaceCsiBirthTestInputs.reviewed(), installed);
         var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "runtime", "claim", "pvc-uid",
                 "volume", "pv-uid", "diskplugin.csi.alibabacloud.com", "handle", "backend", "serial", "/workspace", 1);
         return new WorkspaceCsiNodeEvidence(store, node, registration, api, source, gateway,

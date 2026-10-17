@@ -8,10 +8,20 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/artifactset"
 )
 
 func testSource() sourceIdentity {
-	return sourceIdentity{NodeUID: "owned-node", BootID: "owned-boot", RuntimeDigest: digest([]byte("runtime")), RuntimeStart: 1, RuntimePID: 100, GatewayIncarnation: "0123456789abcdef0123456789abcdef", PluginDigest: digest([]byte("plugin")), PluginStart: 2, PluginPID: 200}
+	return sourceIdentity{NodeUID: "owned-node", BootID: "owned-boot", RuntimeDigest: digest([]byte("runtime")), RuntimeStart: 1, RuntimePID: 100, GatewayIncarnation: "0123456789abcdef0123456789abcdef", PluginDigest: digest([]byte("plugin")), PluginStart: 2, PluginPID: 200, SourceArtifacts: testSourceArtifacts("source"), GatewayArtifacts: testSourceArtifacts("gateway")}
+}
+
+func testSourceArtifacts(role string) artifactset.Observation {
+	unit := "/etc/systemd/system/qwen-k2-runtime-gateway.service"
+	if role == "source" {
+		unit = "/etc/systemd/system/qwen-k2-node-source.service"
+	}
+	return artifactset.Observation{Format: "qwen-k2-installed-byte-observation/1", Role: role, InstallationSHA256: digest([]byte("synthetic installation metadata")), Architecture: "amd64", PackedSHA256: testPolicy().RawSHA256, PackedBytes: 1, ConfigurationPath: "/etc/qwen-k2/" + role + ".json", ConfigurationSHA256: digest([]byte("synthetic " + role)), ShimConfigurationSHA256: digest([]byte("synthetic shim metadata")), UnitPath: unit, UnitSHA256: digest([]byte(unit))}
 }
 
 func testArm(id string) originalScope {
@@ -24,7 +34,7 @@ func testPolicy() workerPolicy {
 
 func testArmBody(scope *originalScope) journalBody {
 	policy := testPolicy()
-	return journalBody{Kind: "ARM", Scope: scope, ImageDigest: digest([]byte("synthetic image")), Policy: &policy}
+	return journalBody{Kind: "ARM", Scope: scope, ImageDigest: digest([]byte("synthetic image")), Policy: &policy, Frontend: &frontendIdentity{Kubelet: runtimePeer{301, 3, digest([]byte("synthetic kubelet"))}, Registrar: runtimePeer{302, 4, digest([]byte("synthetic registrar"))}}}
 }
 
 func newTestJournal(t *testing.T) (*sourceJournal, string) {
