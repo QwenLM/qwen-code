@@ -1609,12 +1609,24 @@ jobs:
 
       - name: 'Install Playwright Chromium and WebKit (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
-        # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
+        # Pool hosts carry Chromium's system libraries but not WebKit's: the
+        # first pool run of this job lacked GTK 4, GStreamer, libwoff2 and
+        # about 40 more. Install them only when Playwright's own host
+        # validation reports them missing, so each host installs them once and
+        # later jobs skip apt. sudo -n fails fast instead of prompting, and the
+        # lock timeout waits out another job's apt run on the same host.
+        timeout-minutes: 30
         run: |-
-          node node_modules/playwright/cli.js install chromium webkit
+          install_log="${RUNNER_TEMP}/playwright-install.log"
+          node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit
+            node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
+          fi
+          if grep -q 'Host system is missing dependencies' "${install_log}"; then
+            apt_config="${RUNNER_TEMP}/apt-playwright.conf"
+            printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
+            sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
           fi
 
       - name: 'Choose web-shell Playwright port'
