@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-delivery-task-cancel.md) | [简体中文](2026-10-17-managed-delivery-task-cancel.zh-CN.md)
 
-状态：已在本变更中实现。channel 投递投影为其路由 Session 的一个任务（kind `channel_delivery`），并且在尚无适配器认领它时，公开任务取消可以服务它。契约在 `1.57.0` 中点名该 kind（main 现为 `1.56.0`：child Session 链接切片占用 `1.55.0`，#14405 占用 `1.56.0`；若合入前另有 PR 先占用 `1.57.0` 则再改号）。没有新路由、新操作类型或新失败码。本变更建立在已合入的 [H4f-c](2026-10-17-managed-h3-task-cancel.zh-CN.md) 之上，与它共用可取消类型规则与投递分支。
+状态：已在本变更中实现。channel 投递投影为其路由 Session 的一个任务（kind `channel_delivery`），并且在尚无适配器认领它时，公开任务取消可以服务它。契约在 `1.57.0` 中点名该 kind。没有新路由、新操作类型或新失败码。本变更建立在已合入的 [H4f-c](2026-10-17-managed-h3-task-cancel.zh-CN.md) 之上，与它共用可取消类型规则与投递分支。
 
 这是 [#13746](https://github.com/QwenLM/qwen-code/issues/13746) 的 F3，即「H5 的那一半」：一条取消路径同时服务 child 任务与 channel 投递，两者都不另长词汇。它属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H，在 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 下跟踪。它替代 [H4f 文档](2026-10-10-managed-task-cancel.zh-CN.md)的决策 10：那条决策把投递留在任务模型之外，并把它的取消留给 H5 的公开变更路由。issue 自己的表述已经回答了这个问题：channel 投递就是带投递行的任务。
 
@@ -93,7 +93,9 @@ channel 的回复在适配器拉取之前，以 `planned` 投递的形式留在 
 - **投递**（`TaskCancelCoordinatorTest`）：
   - pending 投递经 channel 路由（从不经 child operation 路由）收到 `cancel_delivery`，并从标志完成；
   - 期间被认领的投递以已记录的标志完成；
-  - 已 delivered 且无标志的投递以 `task_already_settled` 失败，不发送。
+  - 已 delivered 且无标志的投递以 `task_already_settled` 失败，不发送；
+  - Workspace 权限拒绝了路由时，取消会重试、在预算用完后停放，且不再发送；投递在没有标志的情况下发出后，停放的取消以 `task_already_settled` 失败。
+- **连接器**（`QwenHostedHarnessConnectorTest`）：`cancel_delivery` 与 `submit_input` 一样，在已缓存的挂接上也要经过 channel 路由的 Workspace 检查，检查失败时不转发任何东西。
 - **真实栈**（FG7d，`HostedChannelFaultGatesIT`，MySQL 8.4，打包的 Harness，email 参考适配器）：
   - `task-cancel-planned`：路由 Session 的任务列表把 planned 投递显示为带 `cancel` 的 `pending` 任务。公开取消回 `202`，操作完成且其 key 可重放，任务读为 `cancelled`。outbox 拉取到达控制面但什么也不发送，台账保持为空。
   - `task-cancel-claimed`：适配器的发送被挂起期间，任务读为无动作的 `running`，公开取消回 `409 task_action_unavailable`。放行后投递发送一次，任务读为 `completed`。
@@ -104,13 +106,14 @@ channel 的回复在适配器拉取之前，以 `planned` 投递的形式留在 
 
 - **路由 Session 的任务列表行数变多。** channel Session 的每条回复现在都是那里的一个任务，每次修订都是一条任务事件。日志的上限与保留下限照常适用。
 - **竞争可见。** 准入时看到 `pending` 的取消，可能在适配器先认领的情况下完成，而回复仍然发出。操作的 `completed` 是已记录的请求，任务的 `completed` 是物理结果，契约把二者分开。
+- **创建者缺少执行授权时取消会停放。** channel 操作路由在每次操作时都会重新校验路由 Session 的 Workspace 执行权限，已缓存的挂接也不例外（`QwenHostedHarnessConnector.runChannelOperation`），`cancel_delivery` 与 `submit_input` 一样要经过它。创建者缺少该授权期间，投递取消什么也不发送，按预算重试后停放为 `recovery_blocked`。停放的取消不会再发送（[H4f 决策 5](2026-10-10-managed-task-cancel.zh-CN.md)）。授权恢复后，新的取消仍能停下尚未被认领的投递，因为停放的取消不算 open；但适配器可能先认领并发出它，此时停放的取消以 `task_already_settled` 失败。这就是 H4f 对「创建者失去授权」的既有限制，适用范围是这条路由：child 任务的取消走 child operation 路由，它在已缓存的挂接上不做自己的 Workspace 检查。
 - **旧行。** 升级前已 planned 的投递不是任务（决策 2）。
 - **回滚下限。** 早于本变更的 server 对它不知道会投影任务的行，在每次修订时都写入空的任务状态。回滚后，它会继续列出期间插入的投递任务（它们的 kind 已存储），状态为空，kind 也是其契约不认识的值。只有在这些 Session 关闭之后才回滚到本变更之前，或者接受这些行在关闭前读起来不正确。
 
 ## 后续工作
 
-| 项            | 范围                                                                                                       |
-| ------------- | ---------------------------------------------------------------------------------------------------------- |
-| 公开重发      | 对 `unknown` 或 `rejected` 投递的重发仍是受信适配器的动词；公开的重发需要自己的契约工作（H5 未决问题 4）。 |
-| WebShell 面板 | 列出投递任务并接受其取消。                                                                                 |
-| 部分停止      | 停止 `partial` 投递的剩余分段需要改记录契约；目前没有适配器会产生 partial。                                |
+| 项            | 范围                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 公开重发      | 对 `unknown` 或 `rejected` 投递的重发仍是受信适配器的动词；公开的重发需要自己的契约工作（H5 未决问题 4）。                      |
+| WebShell 面板 | **已由 #14415 交付：** 面板按标签列出所有 kind，并只按 `actionCapabilities` 决定是否允许取消，所以 pending 投递会带着取消显示。 |
+| 部分停止      | 停止 `partial` 投递的剩余分段需要改记录契约；目前没有适配器会产生 partial。                                                     |
