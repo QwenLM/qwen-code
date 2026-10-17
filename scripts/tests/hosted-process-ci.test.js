@@ -330,6 +330,16 @@ describe('Hosted real-process gates', () => {
     );
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
+    // The admission and O4 steps both run `clean verify` on the module, so
+    // an upload below either ships an empty artifact with only a warning.
+    for (const name of [
+      'Verify Hosted admission gates',
+      'Verify O4 filesystem process and capacity gates',
+    ]) {
+      const cleaning = job.steps.findIndex((step) => step.name === name);
+      expect(job.steps[cleaning].run, name).toContain('clean verify');
+      expect(job.steps.indexOf(upload), name).toBeLessThan(cleaning);
+    }
     // The FG7 lane moved its per-case evidence out of @TempDir into this
     // module-relative directory precisely so an artifact can carry it; the
     // writer and the upload path must not drift.
@@ -518,6 +528,7 @@ describe('Hosted real-process gates', () => {
         '--freeze',
         '--frozen-control-plane',
         '--g3-verify',
+        '--big-output',
       ]) {
         if (!flags.some((entry) => entry.split(' ')[0] === flag)) {
           expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(

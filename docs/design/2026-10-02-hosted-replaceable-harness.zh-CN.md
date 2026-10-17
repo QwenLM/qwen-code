@@ -4,7 +4,8 @@
 
 状态：Step 1 与 Step 2 已实现（D1-D9）。Step 3 的限定原生文件审批与
 主模型切片已实现（#13777）；它的打包门禁、模型轮支路和 Q2 binding 半边
-支路都已是 Hosted MySQL CI 任务的步骤（D11），加入时该任务还没有运行过它们。
+支路都在 `hosted-failover-e2e` CI 任务中运行（D11）；它们最初加入的 Hosted MySQL
+任务没有运行过它们。
 更广的验收矩阵仍未完成，详见
 [Step 3 设计](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
 `728c13de21` 为准，除非某个决策注明了更晚的修正。本设计按 issue 评论
@@ -401,7 +402,7 @@ worker 不会成孤儿，不需要 W0e reclaim，所以代码里对 workspace-tu
 Spring、Broker 与耐久 Worker 持续服务同一个
 `runtime_session_id`，活着的 Broker 在其已持有的代际上重派发（恰为
 `'0'` 或 `'1'`——不再是只允许 `'1'`，也不接受无界值）。但运行这些
-支路的所有 lane 都是 Linux（`hosted-harness-mysql` 仅 ubuntu），所以
+支路的所有 lane 都是 Linux（`hosted-failover-e2e` 仅 ubuntu），所以
 darwin 是一个未被验证的预期，而不是等待首个不可能发生的运行来拍板
 的门禁。
 
@@ -539,8 +540,8 @@ Turn。所以它的过期工作只有 lease 续约和一次重试，两者都到
 快照之内，因为存活 writer 一直在推动这些列。两个控制面同时存活的部署仍不受
 支持（见「边界与开放问题」）。
 
-新增的七个步骤各占 10 分钟上限，步骤上限之和因此为 275（45 + 16×10 + 20 + 50），
-任务上限从 220 分钟调到 290 分钟。
+新增的七个步骤各占 10 分钟上限，当时步骤上限之和因此为 275（45 + 16×10 + 20 + 50），
+任务上限从 220 分钟调到 290 分钟；当前上限见本节末尾。
 
 自 #14205 起，该任务只按每日计划或手动触发运行，不在 pull request 上运行。
 新增步骤排在 `Verify Hosted Java, Spring and MySQL processes` 和此前的 failover
@@ -628,8 +629,8 @@ E2E（runner 支路，全部对着打包后的栈）：
 4. CI：`hosted-harness-mysql` 增加 D7 支路、D8 各支路与
    `--session-failover`。这一切片把任务上限从 60 分钟放宽到 120 分钟，
    步骤上限之和为 104（12 + 8×10 + 12——workspace 产出门禁又占了一条
-   12 分钟步骤），不设上限的安装准备步骤仍有余量。之后的门禁又上调过上限；
-   当前上限以 D11 为准：290 分钟，步骤上限之和 275。
+   12 分钟步骤），不设上限的安装准备步骤仍有余量。之后的门禁又上调过上限，
+   这些支路现在也已移到 `hosted-failover-e2e`；两个任务的当前上限以 D11 为准。
 5. D11 的 Step 3 门禁：Allow、Deny、Cancel、过期与 continuation 收尾
    各一个 CI 步骤。
 6. D11 模型轮支路：断言见 D11。把控制面的两条撤回路径都改成空操作后，
