@@ -407,9 +407,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (90 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (95 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 170, 185],
+    ['hosted-harness-mysql', 175, 190],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -583,12 +583,14 @@ describe('Hosted real-process gates', () => {
       // workflow relay letters add ~82 s, so the fork moves to 4155 and
       // the Verify step to 85 minutes; their slice 2 (FG10c/FG10e) brings
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
-      // to 90 minutes):
+      // to 90 minutes; the FG13c Hook owner-restart cells add three cases
+      // budgeted at 300 s, so the fork moves to 4653 and the Verify step
+      // to 95 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4353);
+        expect(forkSeconds).toBe(4653);
       }
     },
   );
@@ -615,10 +617,10 @@ describe('Hosted real-process gates', () => {
   // 181.2–181.6s for the class locally on JDK 21 + MySQL 8.4.6 across
   // three acceptance runs (~363s budgeted at 2x, as FG10a, up from slice
   // 1's ~165s); with the fork itself ~14s, 3743s (3545s after slice 1,
-  // plus slice 2's ~198s) covers them.
-  // A larger ceiling lets failsafe kill the fork mid-run, and the classes
-  // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 3743;
+  // plus slice 2's ~198s) covers them. The FG13c Hook owner-restart cells
+  // (issue #14449, three cases) are budgeted at 300s until the lane measures
+  // them, so the healthy sum becomes 4043s.
+  const hostedForkHealthySeconds = 4043;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -661,6 +663,21 @@ describe('Hosted real-process gates', () => {
     const ceilings = ceilingsOf(
       hostedTestSource('HostedMonitorRunFaultGatesIT'),
     );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedHookFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG13c owner-restart cells (issue #14449) are independent fixtures
+    // sharing the fork like the FG8 letters: each boots its own Spring,
+    // Harness and durable worker, so the per-ceiling relation is the honest
+    // model. The class is budgeted inside the slack the FG10b/c/e/f figure
+    // left rather than re-measuring the whole fork.
+    const ceilings = ceilingsOf(hostedTestSource('HostedHookFaultGatesIT'));
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {
       expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
