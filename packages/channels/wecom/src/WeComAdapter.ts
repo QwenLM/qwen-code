@@ -9,7 +9,11 @@ import { Buffer } from 'node:buffer';
 import { isIP, type LookupFunction } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { WSClient, decryptFile } from '@wecom/aibot-node-sdk';
-import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  sanitizeLogText,
+  singleScopeRoutingKey,
+} from '@qwen-code/channel-base';
 import type {
   Attachment,
   ChannelAgentBridge,
@@ -804,6 +808,12 @@ export class WeComChannel extends ChannelBase {
     chatId: string,
     threadId?: string,
   ): string {
+    // This switch mirrors SessionRouter.routingKey so an attachment directory
+    // is keyed like the route that owns it. Only `single` consumes the shared
+    // template (singleScopeRoutingKey); `thread`, `chat_thread` and `user`
+    // still hand-duplicate SessionRouter's key shapes there, so a change to
+    // those shapes must be applied here too or an attachment lookup silently
+    // misses the route that stored it.
     switch (this.config.sessionScope) {
       case 'thread':
         return `${this.name}:${threadId || chatId}`;
@@ -812,7 +822,7 @@ export class WeComChannel extends ChannelBase {
           ? `${this.name}:${chatId}:${threadId}`
           : `${this.name}:${chatId}`;
       case 'single':
-        return `${this.name}:__single__`;
+        return singleScopeRoutingKey(this.name);
       case 'user':
       default:
         return `${this.name}:${senderId}:${chatId}`;
