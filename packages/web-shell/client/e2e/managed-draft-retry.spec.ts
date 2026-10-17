@@ -25,6 +25,10 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.route('**/api/agent/web-shell/v1/**', async (route) => {
+      if (
+        new URL(route.request().url()).pathname.endsWith('/runtime-nodes/query')
+      )
+        return route.fulfill({ json: { supported: false, data: [] } });
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
       if (path.endsWith('/sessions/query'))
