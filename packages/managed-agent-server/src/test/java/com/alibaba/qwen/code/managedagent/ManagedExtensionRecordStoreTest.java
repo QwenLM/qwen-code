@@ -1027,6 +1027,126 @@ class ManagedExtensionRecordStoreTest {
         assertThat(records.listRecords(TENANT, sessionId, "channel_delivery").getFirst().path("run").path("delivery").path("state").asText()).isEqualTo("unknown");
     }
 
+    // #13746 F3: a channel delivery projects as a task of its route
+    // Session, advertising cancel only while no adapter has claimed it.
+    @Test
+    void aChannelDeliveryProjectsAsATaskCancellableOnlyWhilePlanned()
+            throws Exception {
+        JsonNode templates = ManagedChannelRecordContractTest.fixtures()
+                .required("templates");
+        CommitResource policy = channelResource("policy-task", "channel-policy", "{}");
+        CommitResource result = channelResource("reply-task", "managed-tool-result", "reply");
+        CommitResource segment1 = channelResource("part1-task", "channel-delivery-segment", "one");
+        CommitResource segment2 = channelResource("part2-task", "channel-delivery-segment", "two");
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
+                + " session_id, agent_id, status, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
+                sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        commitDomain(journal, "route-task", "channel_route",
+                channelRoute(templates, policy), List.of(policy));
+        ObjectNode delivery = channelDelivery(templates, result, segment1,
+                segment2);
+        commitDomain(journal, "planned-task", "channel_delivery", delivery,
+                List.of(result, segment1, segment2));
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId,
+                        "channel_delivery",
+                        delivery.path("deliveryId").asText()));
+        var planned = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        assertThat(planned.kind()).isEqualTo("channel_delivery");
+        assertThat(planned.state()).isEqualTo("pending");
+        assertThat(planned.runtimeState()).isNull();
+        assertThat(planned.actionCapabilities()).containsExactly("cancel");
+        assertThat(records.findTaskTarget(TENANT, sessionId, taskId)
+                .orElseThrow().recordId())
+                .isEqualTo(delivery.path("deliveryId").asText());
+        // A claimed delivery is on its way to the provider: no cancel.
+        ObjectNode sending = delivery.deepCopy();
+        ((ObjectNode) sending.path("run")).put("state", "running");
+        ((ObjectNode) sending.path("run").path("delivery"))
+                .put("state", "sending");
+        commitDomain(journal, "sending-task", "channel_delivery", sending,
+                List.of());
+        var claimed = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        assertThat(claimed.state()).isEqualTo("running");
+        assertThat(claimed.actionCapabilities()).isEmpty();
+        // A planned one the cancel settled reads cancelled, with its
+        // request on the record the delivery verdict reads.
+        String otherId = delivery.path("deliveryId").asText() + "-other";
+        ObjectNode other = delivery.deepCopy();
+        other.put("deliveryId", otherId);
+        ((ObjectNode) other.path("run")).put("effectId", otherId)
+                .put("deliveryId", otherId);
+        commitDomain(journal, "other-planned", "channel_delivery", other,
+                List.of());
+        ObjectNode cancelled = other.deepCopy();
+        cancelled.put("cancelRequested", true);
+        ((ObjectNode) cancelled.path("run")).put("state", "cancelled");
+        ((ObjectNode) cancelled.path("run").path("delivery"))
+                .put("state", "cancelled");
+        commitDomain(journal, "other-cancelled", "channel_delivery",
+                cancelled, List.of());
+        String otherTask = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId,
+                        "channel_delivery", otherId));
+        var settled = tasks.getPublicTask(TENANT, TENANT, sessionId,
+                otherTask);
+        assertThat(settled.state()).isEqualTo("cancelled");
+        assertThat(settled.actionCapabilities()).isEmpty();
+        assertThat(records.findTaskTarget(TENANT, sessionId, otherTask)
+                .orElseThrow().body().path("cancelRequested").asBoolean())
+                .isTrue();
+    }
+
+    // #13746 F3 decision 2: a delivery row written before deliveries
+    // projected tasks keeps no task kind, so a later revision writes no
+    // task state and journals no task event for it.
+    @Test
+    void aDeliveryRowWrittenBeforeTheTaskProjectionStaysANonTask()
+            throws Exception {
+        JsonNode templates = ManagedChannelRecordContractTest.fixtures()
+                .required("templates");
+        CommitResource policy = channelResource("policy-legacy", "channel-policy", "{}");
+        CommitResource result = channelResource("reply-legacy", "managed-tool-result", "reply");
+        CommitResource segment1 = channelResource("part1-legacy", "channel-delivery-segment", "one");
+        CommitResource segment2 = channelResource("part2-legacy", "channel-delivery-segment", "two");
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        commitDomain(journal, "route-legacy", "channel_route",
+                channelRoute(templates, policy), List.of(policy));
+        ObjectNode delivery = channelDelivery(templates, result, segment1,
+                segment2);
+        commitDomain(journal, "planned-legacy", "channel_delivery", delivery,
+                List.of(result, segment1, segment2));
+        String recordKey = ManagedExtensionProjection.recordKey(sessionId,
+                "channel_delivery", delivery.path("deliveryId").asText());
+        // The row as a server before the projection wrote it.
+        jdbc.update("UPDATE ma_session_record SET task_kind = NULL,"
+                + " task_state = NULL WHERE record_key = ?", recordKey);
+        jdbc.update("DELETE FROM ma_public_event WHERE tenant_id = ? AND"
+                + " session_id = ? AND stream_kind = 'TASK'", TENANT,
+                sessionId);
+        ObjectNode sending = delivery.deepCopy();
+        ((ObjectNode) sending.path("run")).put("state", "running");
+        ((ObjectNode) sending.path("run").path("delivery"))
+                .put("state", "sending");
+        commitDomain(journal, "sending-legacy", "channel_delivery", sending,
+                List.of());
+        Map<String, Object> row = jdbc.queryForMap("SELECT task_kind,"
+                + " task_state, delivery_state FROM ma_session_record WHERE"
+                + " record_key = ?", recordKey);
+        assertThat(row.get("delivery_state")).isEqualTo("sending");
+        assertThat(row.get("task_kind")).isNull();
+        assertThat(row.get("task_state")).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
+                + " WHERE tenant_id = ? AND session_id = ? AND stream_kind ="
+                + " 'TASK'", Integer.class, TENANT, sessionId)).isZero();
+        assertThat(records.findTaskTarget(TENANT, sessionId,
+                ManagedExtensionProjection.taskId(recordKey))).isEmpty();
+    }
+
     @Test
     void verifiesTheChannelResourceClosure() throws Exception {
         JsonNode templates = ManagedChannelRecordContractTest.fixtures()
