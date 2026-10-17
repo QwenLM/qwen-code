@@ -197,6 +197,86 @@ describe('sedEditParser', () => {
     expect(applySed("sed -i 's/a$-/X/g' file.txt", 'a$- a')).toBe('X a');
   });
 
+  // GNU sed anchors ^ right after \( or \|, and $ right before \) or \|
+  // (escaped or raw). Measured against GNU sed 4.9: s/\(^foo\)/Z/ on
+  // "xxfoo\nfoo\n" writes "xxfoo\nZ\n", and s/\(foo$\)/Z/ writes
+  // "xxZ\nZ\nfoobar\n". A live anchor that shares an alternation is declined
+  // below: JavaScript's leftmost-first choice is not POSIX leftmost-longest.
+  it('anchors BRE ^ and $ at group boundaries', () => {
+    expect(applySed("sed -i 's/\\(^foo\\)/Z/' f.txt", 'xxfoo\nfoo\n')).toBe(
+      'xxfoo\nZ\n',
+    );
+    expect(
+      applySed("sed -i 's/\\(foo$\\)/Z/' f.txt", 'xxfoo\nfoo\nfoobar\n'),
+    ).toBe('xxZ\nZ\nfoobar\n');
+    expect(
+      applySed("sed -i 's/\\(^foo$\\)/Z/' f.txt", 'foo\nfoobar\nxfoo\n'),
+    ).toBe('Z\nfoobar\nxfoo\n');
+    // ^ that is not the first character of the group stays a literal.
+    expect(applySed("sed -i 's/\\(a^b\\)/X/' f.txt", 'a^b\n')).toBe('X\n');
+    // An even run of backslashes is a literal \, so "(^" is not a group.
+    expect(applySed("sed -i 's/\\\\(^/X/' f.txt", 'a\\(^b\n(^b\n')).toBe(
+      'aXb\n(^b\n',
+    );
+    // The same even run before | keeps "^" literal (pattern a\\|^b).
+    expect(applySed("sed -i 's/a\\\\|^b/X/' f.txt", 'a\\|^b\n')).toBe('X\n');
+    // An anchor outside the alternation is still simulated.
+    expect(
+      applySed("sed -i 's/^foo\\(a\\|b\\)/Z/' f.txt", 'fooa\nfoob\nxfooa\n'),
+    ).toBe('Z\nZ\nxfooa\n');
+  });
+
+  it('declines a live anchor inside an alternation', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(foo$\\|^bar\\)/Z/' f.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/foo\\|^bar/Z/' f.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/foo$\\|bar/Z/' f.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^\\|TODO\\)/DONE/g' f.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\(^a\\|ab\\)/X/' f.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^ab\\|abc\\)/X/' f.txt"),
+    ).toBeNull();
+    // The anchor sits in a nested group that is itself a branch.
+    expect(
+      parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\|ab\\)/X/' f.txt"),
+    ).toBeNull();
+  });
+
+  // GNU sed 4.9 leaves "aa" unchanged for s/\(^a\)\{1,2\}/X/ and for \+,
+  // and rewrites s/\(^a\)*/X/ as Xa / X / Xba on "aa", "", and "ba".
+  it('declines an anchored group closed by an unsafe quantifier', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^#\\)\\{1,2\\} */# /' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{1,2\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\(^a\\)\\+/X/' a.ts")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\(^a\\)*/X/' a.ts")).not.toBeNull();
+    expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", 'aa\n')).toBe('Xa\n');
+    expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", '\n')).toBe('X\n');
+    expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", 'ba\n')).toBe('Xba\n');
+  });
+
+  // GNU sed 4.9: $ before a raw ) or | is an anchor, so the line is unchanged.
+  it('anchors $ before a raw ) or |', () => {
+    expect(applySed("sed -i 's/\\(^foo$|bar\\)/Z/' f.txt", 'foo$|bar\n')).toBe(
+      'foo$|bar\n',
+    );
+    expect(applySed("sed -i 's/x$)y/Z/' f.txt", 'x$)y\n')).toBe('x$)y\n');
+    expect(applySed("sed -i 's/x$|y/Z/' f.txt", 'x$|y\n')).toBe('x$|y\n');
+  });
+
+  // $ followed by \ and a char other than ) or | stays literal. GNU sed 4.9
+  // writes X for s/a$\\b/X/ on the bytes a, $, \, b. A helper that treats
+  // every $ before \ as an anchor leaves the line unchanged.
+  it('keeps $ literal before a backslash that does not escape ) or |', () => {
+    expect(applySed("sed -i 's/a$\\\\b/X/' f.txt", 'a$\\b\n')).toBe('X\n');
+  });
+
   it('applies non-global substitutions once per line', () => {
     expect(applySed("sed -i 's/foo/bar/' file.txt", 'foo foo\nfoo foo')).toBe(
       'bar foo\nbar foo',
