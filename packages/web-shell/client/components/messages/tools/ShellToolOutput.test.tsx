@@ -95,6 +95,33 @@ describe('shell result presentation', () => {
     render(tool(''), true);
     expect(container.textContent).toContain('No output');
   });
+  it.each([undefined, []])(
+    'distinguishes missing output from an empty result (%j)',
+    (content) => {
+      render(tool('', { content, args: undefined, status: 'failed' }));
+      expect(container.textContent).toContain(
+        'Output is unavailable for this tool call.',
+      );
+      expect(container.textContent).not.toContain('No output');
+      expect(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Copy output"]',
+        )?.disabled,
+      ).toBe(true);
+    },
+  );
+  it('labels missing output in documents', () => {
+    render(tool('', { content: undefined }), true);
+    expect(container.textContent).toContain(
+      'Output is unavailable for this tool call.',
+    );
+    expect(container.textContent).not.toContain('No output');
+  });
+  it('keeps waiting while output has not arrived', () => {
+    render(tool('', { content: undefined, status: 'in_progress' }));
+    expect(container.textContent).toContain('Waiting for output…');
+    expect(container.textContent).not.toContain('Output is unavailable');
+  });
   it.each([
     ['cancelled', null],
     ['timed_out', null],
