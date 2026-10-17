@@ -557,7 +557,26 @@ export function useQueuedSubmissionDrain({
             );
             markAdmissionFailed();
           },
-          onDeliveryFailed: () => {
+          onDeliveryFailed: (reason) => {
+            // Only an interrupted turn puts the envelope back. Restoring
+            // on a terminal model error re-submitted the same envelope
+            // after every failed call: the failed turn settles, that
+            // settle releases the admission guard below, and the drain
+            // pops the restored entry again — unbounded, with no backoff
+            // and nothing on screen, while the sender holds a `delivered`
+            // receipt. A typed prompt ends on the same error with one
+            // error and a Ctrl+Y hint, so end the peer turn the same way
+            // and correct the receipt instead.
+            if (reason === 'error') {
+              peerMessaging?.settleFailedPeerTurn(submission.delivery);
+              return;
+            }
+            // An admission failure is already restored by
+            // onAdmissionFailed above; restoring here too would leave two
+            // copies of one envelope in the queue.
+            if (reason !== 'cancelled') {
+              return;
+            }
             restorePeerMessage(
               submission.modelText,
               submission.displayText,

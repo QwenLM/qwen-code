@@ -423,6 +423,21 @@ const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
 
 /**
+ * Why a submitted turn produced no delivery.
+ *
+ * A caller that restores a queued entry on failure has to tell these
+ * apart: restoring a cancelled turn is recovery, restoring a turn that
+ * ended on a model error is an automatic retry nobody asked for.
+ *
+ * - `cancelled`: the turn started and the user interrupted it (Esc).
+ * - `error`: the turn ran and ended on a terminal model error.
+ * - `not-admitted`: the submission never started (the session was busy,
+ *   a mod failed to load, the steer drain found nothing to send). The
+ *   admission callback fires for these too.
+ */
+export type DeliveryFailureReason = 'cancelled' | 'error' | 'not-admitted';
+
+/**
  * An overflow summary taken from the tally and awaiting a turn to carry it.
  * `displayed` mirrors the per-notification flag so a re-queued summary is not
  * rendered twice.
@@ -450,7 +465,7 @@ interface QueuedNotification {
   monitor?: { id: string; status: string };
   todoWorkChainId?: string;
   onDelivered?: () => void;
-  onDeliveryFailed?: () => void;
+  onDeliveryFailed?: (reason: DeliveryFailureReason) => void;
   displayed?: boolean;
 }
 
@@ -3562,7 +3577,7 @@ export const useLlmStream = (
         notificationDisplayText?: string;
         todoWorkChainId?: string;
         onDelivered?: () => void;
-        onDeliveryFailed?: () => void;
+        onDeliveryFailed?: (reason: DeliveryFailureReason) => void;
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
         onRequestStarted?: () => void;
@@ -3601,7 +3616,7 @@ export const useLlmStream = (
           );
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           metadata?.onAdmissionFailed?.();
-          metadata?.onDeliveryFailed?.();
+          metadata?.onDeliveryFailed?.('not-admitted');
           return;
         }
       }
@@ -3648,7 +3663,7 @@ export const useLlmStream = (
       ) {
         await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
         metadata?.onAdmissionFailed?.();
-        metadata?.onDeliveryFailed?.();
+        metadata?.onDeliveryFailed?.('not-admitted');
         return;
       }
 
@@ -3660,7 +3675,7 @@ export const useLlmStream = (
       ) {
         await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
         metadata?.onAdmissionFailed?.();
-        metadata?.onDeliveryFailed?.();
+        metadata?.onDeliveryFailed?.('not-admitted');
         return;
       }
 
@@ -3897,7 +3912,7 @@ export const useLlmStream = (
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
-          metadata?.onDeliveryFailed?.();
+          metadata?.onDeliveryFailed?.('not-admitted');
           return;
         }
 
@@ -4161,7 +4176,7 @@ export const useLlmStream = (
           ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
-            metadata?.onDeliveryFailed?.();
+            metadata?.onDeliveryFailed?.('cancelled');
             return;
           }
 
@@ -4272,7 +4287,7 @@ export const useLlmStream = (
             goalTerminalErrorRef.current ||
             processingResult.userPromptBlocked
           ) {
-            metadata?.onDeliveryFailed?.();
+            metadata?.onDeliveryFailed?.('error');
           } else {
             metadata?.onDelivered?.();
           }
@@ -4309,7 +4324,11 @@ export const useLlmStream = (
           }
         } catch (error: unknown) {
           cleanupReviewLease = true;
-          metadata?.onDeliveryFailed?.();
+          metadata?.onDeliveryFailed?.(
+            isNodeError(error) && error.name === 'AbortError'
+              ? 'cancelled'
+              : 'error',
+          );
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -6631,9 +6650,9 @@ export const useLlmStream = (
             notificationDisplayText: item.displayText,
             todoWorkChainId: item.todoWorkChainId,
             onDelivered: item.onDelivered,
-            onDeliveryFailed: () => {
+            onDeliveryFailed: (reason) => {
               restoreDroppedSummary();
-              item.onDeliveryFailed?.();
+              item.onDeliveryFailed?.(reason);
             },
             onAdmissionFailed: () => {
               queue.unshift(item);

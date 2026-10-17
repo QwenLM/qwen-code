@@ -835,6 +835,51 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(m.drainQueuedFrame(undefined)).toBe(true);
   });
 
+  it('settles a peer message whose turn ended on a model error', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      getSessionId: () => 'session-a',
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const queued: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) queued.push(delivery);
+      return true;
+    });
+    const frame = peerFrame({
+      content: 'the turn this starts will fail',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    await send(started.socketPath!, frame);
+    await settle();
+    expect(queued).toHaveLength(1);
+
+    // The turn was admitted and then its model call failed, so the
+    // envelope is not put back. The sender is still holding the
+    // `delivered` receipt it got at admission: correct it with the
+    // status the exit scrub uses for accepted-but-never-consumed.
+    started.settleFailedPeerTurn(queued[0]);
+    await settle();
+    const statuses = receipts
+      .filter((receipt) => receipt.type === 'control')
+      .filter((receipt) => receipt.origMsgId === frame.msgId)
+      .map((receipt) => receipt.status);
+    expect(statuses).toEqual(['delivered', 'expired']);
+  });
+
+  it('ignores a settle for a message that carried no delivery', () => {
+    // A queue entry that never came from the transport has nothing to
+    // settle, and must not throw.
+    expect(() => messaging?.settleFailedPeerTurn(undefined)).not.toThrow();
+  });
+
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
     await send(
