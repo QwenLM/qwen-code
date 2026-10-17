@@ -318,6 +318,25 @@ class SurfaceAdmissionAcceptanceTest {
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(tenant, session),
                 recordKey, tenant, session, "b".repeat(64));
+        // The task view reads a child task's committed body for its child
+        // Session link (#13746 F2), so the list probes need one.
+        String scope = com.alibaba.qwen.code.managedagent.store
+                .ManagedSessionStore.sessionScopeKey(tenant, session);
+        byte[] body = "{\"childSessionId\":null}".getBytes(
+                StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key,"
+                        + " session_scope_key, tenant_id, workspace_id,"
+                        + " session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind, inline_bytes,"
+                        + " publish_command_id, state, gmt_create) VALUES (?,"
+                        + " ?, ?, 'ws', ?, 'resource-settled',"
+                        + " 'managed-child_run', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                        + " 'command', 'REFERENCED', 1)",
+                com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaKeys.key(scope, "resource-settled"),
+                scope, tenant, session, body.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
+                body);
         return "task_" + recordKey;
     }
 
@@ -559,6 +578,21 @@ class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted());
+    }
+
+    // The admitted list probes only prove "not refused": pin that a
+    // reader's task list really serves the child task whose committed body
+    // the view reads for its child Session link (#13746 F2).
+    @Test
+    void aReadersTaskListServesTheChildTaskThroughItsBody() throws Exception {
+        mvc.perform(get("/v1/agents/sessions/" + bound + "/tasks")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, READER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[?(@.id == '" + settledTask
+                        + "')].kind").value("child_agent"))
+                .andExpect(jsonPath("$.data[?(@.id == '" + settledTask
+                        + "')].child_session_id").isEmpty());
     }
 
     @Test

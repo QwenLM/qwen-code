@@ -91,6 +91,9 @@ public class ManagedExtensionRecordStore {
             + "):[0-9]+$");
     private static final Pattern TASK_ID = Pattern.compile(
             "^task_([0-9a-f]{64})$");
+    /** The task kinds a child Session of their own runs (H4b, H4c). */
+    private static final Set<String> CHILD_SESSION_TASK_KINDS = Set.of(
+            "child_agent", "workflow");
     private static final Set<String> SESSION_KEY_FIELDS = Set.of("tenantId",
             "workspaceId", "sessionId");
     private static final Set<String> PAYLOAD_FIELDS = Set.of("domain",
@@ -132,8 +135,9 @@ public class ManagedExtensionRecordStore {
         this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
+    /** A task's projection row and the resource holding its record's latest committed body. */
     public record TaskRow(String taskId, String kind,
-            TaskProjection projection) {
+            TaskProjection projection, String resourceId) {
     }
 
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
@@ -778,6 +782,21 @@ public class ManagedExtensionRecordStore {
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 recordKey).stream().findFirst();
+    }
+
+    /**
+     * #13746 F2: the child Session that runs a child agent or workflow task, once the run's
+     * committed record names it (the attach, or a verdict that names a minted child), else null.
+     * The record body is the only place that fact lives; no other kind has a child Session.
+     */
+    public String childSessionId(String tenantId, String sessionId,
+            TaskRow task) {
+        if (!CHILD_SESSION_TASK_KINDS.contains(task.kind())) {
+            return null;
+        }
+        JsonNode named = readBody(readResource(tenantId, sessionId,
+                task.resourceId())).get("childSessionId");
+        return named == null || named.isNull() ? null : named.textValue();
     }
 
     /**
@@ -1434,7 +1453,8 @@ public class ManagedExtensionRecordStore {
         }
         return new TaskRow(ManagedExtensionProjection.taskId(
                 result.getString("record_key")),
-                result.getString("task_kind"), projection(result));
+                result.getString("task_kind"), projection(result),
+                result.getString("record_resource_id"));
     }
 
     private static StoredRow storedRow(ResultSet result, int row)

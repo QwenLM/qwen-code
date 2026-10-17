@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -684,8 +685,10 @@ class HostedSessionRelayFaultGatesIT {
 
     /** One outbound chain on the member, exactly one inbound receipt at
      * revision 1 on the lead, one delivery ledger row. */
-    private void assertSingleCommandChain(String lead, String member) {
+    private void assertSingleCommandChain(String lead, String member)
+            throws Exception {
         String session = memberSession(lead, member);
+        assertTaskLinksChildSession(lead, member, session);
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT record_id, revision FROM ma_session_record"
                         + " WHERE tenant_id = ? AND session_id = ? AND"
@@ -1641,6 +1644,23 @@ class HostedSessionRelayFaultGatesIT {
             }
             assertThat(status).isEqualTo(200);
         });
+    }
+
+    /** #13746 F2: the member's task on the lead names the member's child
+     * Session publicly, and that Session reads through the public route. */
+    private void assertTaskLinksChildSession(String lead, String member,
+            String session) throws Exception {
+        String runId = childRunIdOf(lead, member);
+        String taskId = "task_" + ManagedExtensionProjection.recordKey(lead,
+                "child_run", runId);
+        JsonNode task = request("GET", "/v1/agents/sessions/" + lead
+                + "/tasks/" + taskId, null, null, 200);
+        assertThat(task.path("kind").asText()).isEqualTo("child_agent");
+        assertThat(task.path("child_session_id").asText())
+                .as("the task view links the member's child Session")
+                .isEqualTo(session);
+        assertThat(request("GET", "/v1/agents/sessions/" + session, null,
+                null, 200).path("id").asText()).isEqualTo(session);
     }
 
     private JsonNode request(String method, String path, Object body,
