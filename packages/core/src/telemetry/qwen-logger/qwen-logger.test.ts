@@ -776,6 +776,9 @@ describe('QwenLogger', () => {
       // sink even when telemetry log prompts are on.
       const callArgs = enqueueSpy.mock.calls[0][0];
       expect(callArgs.properties).not.toHaveProperty('error');
+      const serializedEvent = JSON.stringify(callArgs);
+      expect(serializedEvent).not.toContain('error output');
+      expect(serializedEvent).not.toContain('Command failed');
     });
 
     it.each<[string, Parameters<typeof shortHook>, string]>([
