@@ -75,7 +75,7 @@ driver 保留现有三个 arming 原语并新增：
 - **Broker control 通道观测。** control 调用连同 body 的 `operation.kind` 一起记录，让 FG8d 能把「routine 臂什么都没停」断言为维护 wire 上的**缺席**，而不是时序赛跑。
 - **`brokerRequest` helper**，用于 `:release`（routine 与 drain），用捕获的身份与 `protocolVersion: 1`；应答以 `{status, code}` 回给 case 做标志位断言。
 
-FG8d 的 Session 使用 10 s writer lease（`CANCEL_DRAIN_LEASE_MS`），与 FG8c 崩溃 Session 的 lease 等长（`CRASH_LEASE_MS`，已由 #14407 合入）。FG8d 的六个 case 共用一个 tenant，夹具只允许四个活跃 capture（`active-captures=4`）。一个 case 留下的 OPEN capture，其过期时间由最后一次 grant 续约设定（取 writer lease 与 activation 中先到期的那个），而发起该 run 的工具调用一返回，grant 续约就停止，所以默认 60 s lease 下，case 结束后这个 capture 还会占着名额最长约一分钟。快机器跑到 `drain-release` 时，四个名额全被占着：它的 reservation 被拒（store 报 "Publication capacity exhausted"，Harness 日志里是 "The request is invalid."），run 根本没有启动。10 s lease 下，capture 在最后一次续约后十秒以内就不再计入名额。FG8d 唯一的 store 臂 `dropNextStopRevision` 只匹配一条 stop revision 提交，多出来的 writer 与 activation 续约不会误触发它。
+FG8d 的 Session 使用 10 s writer lease（`CANCEL_DRAIN_LEASE_MS`），与 FG8c 崩溃 Session 的 lease 等长（`CRASH_LEASE_MS`，已由 #14407 合入）。FG8d 的六个 case 共用一个 tenant，夹具只允许四个活跃 capture（`active-captures=4`）。一个 case 留下的 OPEN capture，其过期时间由最后一次 grant 续约设定（取 writer lease 与 activation 中先到期的那个），而发起该 run 的工具调用一返回，grant 续约就停止，所以默认 60 s lease 下，case 结束后这个 capture 还会占着名额最长约一分钟。快机器跑到 `drain-release` 时，四个名额全被占着：它的 reservation 被拒（store 报 "Publication capacity exhausted"，Harness 日志里当时只记为 "The request is invalid."），run 根本没有启动。10 s lease 下，capture 在最后一次续约后十秒以内就不再计入名额。FG8d 唯一的 store 臂 `dropNextStopRevision` 只匹配一条 stop revision 提交，多出来的 writer 与 activation 续约不会误触发它。
 
 step/diagnose/FIFO 纪律不变；每个新等待都是状态而不是 sleep；producer 提供 `bg-started.txt`、`progress.txt` 与 gate FIFO；每 case 目录仍是冷加载证据基件（一个后来才启动的 case，其文件必须缺席，而不仅是读不出）。
 
