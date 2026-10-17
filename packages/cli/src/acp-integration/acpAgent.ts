@@ -4002,6 +4002,11 @@ class QwenAgent implements Agent {
   >();
   private managedShuttingDown = false;
   /**
+   * A workspace change is being applied. New prompts wait for it, so no turn
+   * is admitted under the revision the change replaces.
+   */
+  private workspaceChangeInFlight = 0;
+  /**
    * The reasons this Managed engine admits no new work: one per Runtime
    * worker stop nobody could prove, lifted by the same reason once the
    * group's death is proven.
@@ -7034,6 +7039,13 @@ class QwenAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    if (this.workspaceChangeInFlight > 0) {
+      throw new RequestError(
+        -32000,
+        'A workspace change is being applied; retry the prompt.',
+        { errorKind: 'workspace_change_in_progress' },
+      );
+    }
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -10630,77 +10642,82 @@ class QwenAgent implements Agent {
         }
         const changeCwd =
           typeof params['cwd'] === 'string' ? params['cwd'] : cwd;
-        // A tightening change asks a turn that cannot be revalidated to
-        // cancel, so the idle-only reload paths below reach it.
-        if (params['tightening'] === true) {
-          await Promise.allSettled(
-            [...this.sessions.values()]
-              .filter((session) => !session.isIdle())
-              .map((session) => session.cancelPendingPrompt()),
-          );
-        }
-        switch (kind) {
-          case 'permissions': {
-            // A settings reload alone does not touch the live permission
-            // managers, so diff the rule sets the control engine persisted
-            // and sync them the way the permission-rule route does.
-            const before = readPermissionRuleSet(this.settings.merged);
-            if (
-              !this.settings.reloadScopesFromDiskAtomically([
-                SettingScope.User,
-                SettingScope.Workspace,
-              ])
-            ) {
-              throw new Error(
-                'The permission rules could not be reloaded for a workspace change.',
-              );
-            }
-            const after = readPermissionRuleSet(this.settings.merged);
-            this.syncLivePermissionManagers(
-              before,
-              after,
-              SettingScope.User,
-              changeCwd,
+        this.workspaceChangeInFlight += 1;
+        try {
+          // A tightening change asks a turn that cannot be revalidated to
+          // cancel, so the idle-only reload paths below reach it.
+          if (params['tightening'] === true) {
+            await Promise.allSettled(
+              [...this.sessions.values()]
+                .filter((session) => !session.isIdle())
+                .map((session) => session.cancelPendingPrompt()),
             );
-            this.syncLivePermissionManagers(
-              before,
-              after,
-              SettingScope.Workspace,
-              changeCwd,
-            );
-            break;
           }
-          case 'settings':
-            await this.extMethodInternal(
-              SERVE_CONTROL_EXT_METHODS.workspaceReload,
-              { cwd: changeCwd },
-            );
-            break;
-          case 'sessionWorkflow':
-            await this.extMethodInternal(
-              SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
-              { cwd: changeCwd, enabled: params['enabled'] === true },
-            );
-            break;
-          case 'modelProviders':
-            await this.extMethodInternal(
-              SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
-              { cwd: changeCwd },
-            );
-            break;
-          case 'skills':
-            await this.extMethodInternal(
-              SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-              { cwd: changeCwd, reason: params['reason'] ?? 'all' },
-            );
-            break;
-          default:
-            throw RequestError.invalidParams(
-              undefined,
-              `Unknown workspace change kind: ${String(kind)}`,
-            );
+          switch (kind) {
+            case 'permissions': {
+              // A settings reload alone does not touch the live permission
+              // managers, so diff the rule sets the control engine persisted
+              // and sync them the way the permission-rule route does.
+              const before = readPermissionRuleSet(this.settings.merged);
+              if (
+                !this.settings.reloadScopesFromDiskAtomically([
+                  SettingScope.User,
+                  SettingScope.Workspace,
+                ])
+              ) {
+                throw new Error(
+                  'The permission rules could not be reloaded for a workspace change.',
+                );
+              }
+              const after = readPermissionRuleSet(this.settings.merged);
+              this.syncLivePermissionManagers(
+                before,
+                after,
+                SettingScope.User,
+                changeCwd,
+              );
+              this.syncLivePermissionManagers(
+                before,
+                after,
+                SettingScope.Workspace,
+                changeCwd,
+              );
+              break;
+            }
+            case 'settings':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceReload,
+                { cwd: changeCwd },
+              );
+              break;
+            case 'sessionWorkflow':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                { cwd: changeCwd, enabled: params['enabled'] === true },
+              );
+              break;
+            case 'modelProviders':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+                { cwd: changeCwd },
+              );
+              break;
+            case 'skills':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+                { cwd: changeCwd, reason: params['reason'] ?? 'all' },
+              );
+              break;
+            default:
+              throw RequestError.invalidParams(
+                undefined,
+                `Unknown workspace change kind: ${String(kind)}`,
+              );
+          }
+          return { v: 1, revision, acknowledged: true };
+        } finally {
+          this.workspaceChangeInFlight -= 1;
         }
-        return { v: 1, revision, acknowledged: true };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
