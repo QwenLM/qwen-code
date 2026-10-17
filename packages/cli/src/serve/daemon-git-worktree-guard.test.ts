@@ -2697,6 +2697,192 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     }
   });
 
+  // A heredoc fed to a shell or interpreter is its program, not data: the
+  // strip would hide every body line from every later stage, and the guard
+  // has no reader for a program that arrives over stdin. #13705: those
+  // receivers fail closed, on quoted and unquoted delimiters alike.
+  it.runIf(bashSemanticsLane)(
+    'fails closed when a heredoc feeds a shell interpreter its program',
+    async () => {
+      const guard = createDaemonToolGuard();
+      const payload = `git -C ${cmdPath(outsideRepo)} reset --hard`;
+
+      // The reported repro: the stripped shape resolved allowed while the
+      // same git command after the heredoc is denied.
+      await expect(
+        guard(request(`bash <<'EOF'\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('heredoc'),
+      });
+      for (const opener of [
+        'sh',
+        'zsh',
+        'dash',
+        'python3 -',
+        'python -',
+        'perl -',
+        'ruby -',
+        'node -',
+      ]) {
+        await expect(
+          guard(request(`${opener} <<'SCRIPT'\n${payload}\nSCRIPT`)),
+        ).resolves.toMatchObject({ allowed: false });
+      }
+      // Assignment prefixes and env wrappers still land on the interpreter.
+      await expect(
+        guard(request(`FOO=bar bash <<'EOF'\necho hi\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request(`env bash <<'EOF'\necho hi\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      // The receiver check fires before the strip, so an unterminated body
+      // to an interpreter is denied too.
+      await expect(
+        guard(request(`bash <<'EOF'\necho hi`)),
+      ).resolves.toMatchObject({ allowed: false });
+
+      // One case per entrance class that reviewed fail-open on the first
+      // iteration of this gate: receivers behind separators or
+      // substitutions, wrappers with their own options, quoted and escaped
+      // words, shell option vocabularies, glued fd redirects, stdin script
+      // paths, shell keywords, groups, line continuations, unlisted
+      // interpreters, and eval forwarding.
+      for (const spelling of [
+        'cd /tmp && bash',
+        'true || python3 -',
+        'echo "a;b" && sh',
+        'x=$(date) && bash',
+        'exec bash',
+        'nohup bash',
+        'setsid bash',
+        'timeout 30 bash',
+        'nice -n 5 bash',
+        'stdbuf -o0 bash',
+        'busybox sh',
+        'env -i bash',
+        'env -i FOO=bar bash',
+        '/usr/bin/env bash',
+        'sudo -u root bash',
+        'sudo -n bash',
+        'doas -u root bash',
+        'command -p bash',
+        '"bash"',
+        '\\bash',
+        'bash -e',
+        'sh -e',
+        'zsh -e',
+        'bash -s',
+        'bash -s foo',
+        'bash -euo pipefail',
+        'bash --norc',
+        'bash /dev/stdin',
+        'eval bash',
+        'perl -c',
+        'python3.12 -',
+        'fish',
+      ]) {
+        await expect(
+          guard(request(`${spelling} <<'EOF'\n${payload}\nEOF`)),
+        ).resolves.toMatchObject({ allowed: false });
+      }
+      // The fd glued to the marker, a keyword-led compound, a subshell
+      // group owning the redirect, and a marker on a continued line.
+      await expect(
+        guard(request(`bash 0<<'EOF'\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request(`if true; then bash <<'EOF'\n${payload}\nEOF\nfi`)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request(`(bash) <<'EOF'\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request(`bash \\\n<<'EOF'\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'fails closed on quoted markers, renamed receivers and pipe-fed shells',
+    async () => {
+      const guard = createDaemonToolGuard();
+      const payload = `git -C ${cmdPath(outsideRepo)} reset --hard`;
+
+      // A `<<` inside a quoted string earlier on the line is text, not the
+      // marker; the real marker still attributes to bash.
+      await expect(
+        guard(request(`echo "a << b"; bash <<'EOF'\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('heredoc'),
+      });
+      // …and with no real marker, a quoted `<<` alone gates nothing.
+      await expect(guard(request('git commit -m "a << b"'))).resolves.toEqual({
+        allowed: true,
+      });
+
+      // A function or alias in the same command can rename even a data
+      // receiver onto a shell; the strip fires before that table exists.
+      await expect(
+        guard(request(`cat() { bash; }\ncat <<'EOF'\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request(`alias b=bash\nb <<'EOF'\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+
+      // The owning command's stdout is the next stage's stdin: a data
+      // receiver piped into a shell feeds the shell the stripped program.
+      await expect(
+        guard(request(`cat <<'EOF' | bash\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request(`head -n 99 <<'EOF' | sh\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request(`tee /dev/null <<'EOF' | python3 -\n${payload}\nEOF`)),
+      ).resolves.toMatchObject({ allowed: false });
+      // Data receivers downstream keep the strip safe.
+      await expect(
+        guard(request(`cat <<'EOF' | tee log\nsome body\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`cat <<'EOF' | grep x\nsome body\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'still allows heredocs whose receiver consumes data',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // The program is visible to the wrapper scan or is a script file, so
+      // the heredoc is stdin data and the strip stays safe.
+      await expect(
+        guard(request(`bash -c 'echo hi' <<'EOF'\ndata\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`bash script.sh <<'EOF'\ndata\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`python3 script.py <<'PY'\ndata\nPY`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`python3 -m json.tool <<'PY'\ndata\nPY`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`sudo tee <<'EOF'\ndata\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`cat <<'EOF'\nsome body\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`git commit -F - <<'EOF'\nmessage\nEOF`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
   // Backgrounding, heredocs and function definitions are bash spellings the
   // Windows lanes deny at the divergent-syntax gate first.
   it.runIf(bashSemanticsLane)(

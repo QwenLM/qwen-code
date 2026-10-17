@@ -288,6 +288,8 @@ const DYNAMIC_RELOCATION_DENIAL =
   'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
 const UNPARSEABLE_COMMAND_DENIAL =
   'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const INTERPRETER_HEREDOC_DENIAL =
+  "Daemon shell guard denied a shell command whose heredoc may feed a shell or interpreter its program over stdin (bash <<'EOF', python3 - <<'PY', cat <<'EOF' | bash); the guard cannot evaluate a program it cannot see. Pass the program via -c or as ordinary commands.";
 const CMD_REWRITE_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
 const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
@@ -2260,20 +2262,582 @@ interface EvaluationScope {
  * A heredoc body is stdin data delivered to the command, not shell commands,
  * yet `splitCommands` has no heredoc state and would parse each body line as
  * its own segment — letting a body `cd` launder the tracked directory. Strip
- * `<<[-]WORD … WORD` bodies (quoted or not) before splitting. This is
- * best-effort: only the first heredoc on a line is handled, which is the
- * shape a model emits, and anything unrecognised is left untouched.
+ * `<<[-]WORD … WORD` bodies (quoted or not) before splitting.
+ *
+ * Quoting says nothing about the RECEIVER: fed to a shell or interpreter
+ * (`bash <<'EOF'`) even a literal body executes there, and the stripped
+ * program is invisible to every later stage. Attribution therefore asks "is
+ * the program positively visible?", not "is the receiver a known
+ * interpreter?": every stage of the pipeline owning the marker must resolve
+ * — through the tokenization and wrapper scans the rest of this file trusts
+ * — to a receiver whose stdin cannot become its program (a data consumer
+ * like `cat`, or a `-c`/script-file spelling). Anything else, including
+ * receivers the guard cannot attribute at all, fails closed instead of
+ * stripping.
+ *
+ * This is best-effort: only the first heredoc on a line is handled, which is
+ * the shape a model emits, and anything unrecognised is left untouched.
  */
-function stripHeredocBodies(command: string): string {
+// Receivers that consume stdin as data and never execute it, so the strip
+// only hides input, not a program. Anything outside this list, the shell
+// set, or the interpreter vocabularies below fails closed: the entrance
+// space of programs that run stdin is not enumerable.
+const HEREDOC_DATA_RECEIVERS = new Set([
+  'cat',
+  'tee',
+  'head',
+  'tail',
+  'grep',
+  'egrep',
+  'fgrep',
+  'sed',
+  'awk',
+  'gawk',
+  'mawk',
+  'sort',
+  'uniq',
+  'cut',
+  'tr',
+  'wc',
+  'jq',
+  'diff',
+  'comm',
+  'paste',
+  'column',
+  'fmt',
+  'fold',
+  'nl',
+  'less',
+  'more',
+  'git',
+]);
+
+// python carries a version suffix more often than not (`python3.12`), so it
+// matches by pattern; versioned spellings of the others are rare and simply
+// fail closed as unattributable.
+const PYTHON_PROGRAM_PATTERN = /^python\d*(?:\.\d+)*$/;
+const HEREDOC_PROGRAM_INTERPRETERS = new Set(['perl', 'ruby', 'node']);
+
+// Positional "script" spellings that are stdin wearing a path.
+const STDIN_SCRIPT_PATHS = new Set(['-', '/dev/stdin', '/dev/fd/0']);
+
+interface HeredocMarker {
+  readonly index: number;
+  readonly delimiter: string;
+  readonly stripTabs: boolean;
+}
+
+interface HeredocLineScan {
+  readonly marker: HeredocMarker | null;
+  // Top-level separators with their spans; `pipe` is a single `|` (or `|&`),
+  // which forwards the heredoc to the next stage.
+  readonly separators: ReadonlyArray<{
+    start: number;
+    end: number;
+    pipe: boolean;
+  }>;
+}
+
+// Locate the first `<<[-]WORD` that starts at top level — a `<<` inside a
+// quoted string or substitution is text, not a marker — and record the
+// top-level separators along the way, with the same quote discipline as
+// readTopLevelSeparators.
+function scanHeredocLine(line: string): HeredocLineScan {
+  let single = false;
+  let double = false;
+  let backtick = false;
+  let substitution = 0;
+  const quoteStack: Array<[boolean, boolean]> = [];
+  const separators: Array<{ start: number; end: number; pipe: boolean }> = [];
+  let marker: HeredocMarker | null = null;
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index]!;
+    const next = line[index + 1];
+    if (!single && character === '\\' && index + 1 < line.length) {
+      index++;
+      continue;
+    }
+    if (!single && character === '`') {
+      backtick = !backtick;
+      continue;
+    }
+    if (!single && !backtick && character === '$' && next === '(') {
+      quoteStack.push([single, double]);
+      single = false;
+      double = false;
+      substitution++;
+      index++;
+      continue;
+    }
+    if (
+      !backtick &&
+      substitution > 0 &&
+      character === ')' &&
+      !single &&
+      !double
+    ) {
+      const enclosing = quoteStack.pop();
+      single = enclosing?.[0] ?? false;
+      double = enclosing?.[1] ?? false;
+      substitution--;
+      continue;
+    }
+    if (!backtick && character === "'" && !double) {
+      single = !single;
+      continue;
+    }
+    if (!backtick && character === '"' && !single) {
+      double = !double;
+      continue;
+    }
+    if (single || double || backtick || substitution > 0) continue;
+    if (marker === null && character === '<' && next === '<') {
+      let cursor = index + 2;
+      // `<<<` is a here-string: its payload stays in argv, nothing to strip.
+      if (line[cursor] === '<') continue;
+      let stripTabs = false;
+      if (line[cursor] === '-') {
+        stripTabs = true;
+        cursor++;
+      }
+      while (line[cursor] === ' ' || line[cursor] === '\t') cursor++;
+      let quote: string | undefined;
+      if (line[cursor] === "'" || line[cursor] === '"') {
+        quote = line[cursor];
+        cursor++;
+      }
+      const wordStart = cursor;
+      while (cursor < line.length && /[A-Za-z0-9_]/.test(line[cursor]!)) {
+        cursor++;
+      }
+      if (cursor === wordStart || !/[A-Za-z_]/.test(line[wordStart]!)) {
+        continue;
+      }
+      if (quote !== undefined && line[cursor] !== quote) continue;
+      marker = { index, delimiter: line.slice(wordStart, cursor), stripTabs };
+      // Hop over the delimiter so its quotes never touch the state machine.
+      index = quote === undefined ? cursor - 1 : cursor;
+      continue;
+    }
+    if (character === '&' && next === '&') {
+      separators.push({ start: index, end: index + 2, pipe: false });
+      index++;
+      continue;
+    }
+    if (character === '|' && next === '|') {
+      separators.push({ start: index, end: index + 2, pipe: false });
+      index++;
+      continue;
+    }
+    if (character === '&') {
+      if (next === '>') {
+        // `&>` / `&>>` redirect both streams.
+        index += line[index + 2] === '>' ? 2 : 1;
+        continue;
+      }
+      if (line[index - 1] === '>' || line[index - 1] === '<') {
+        // `>&2` / `<&0` stay part of a redirect.
+        continue;
+      }
+      separators.push({ start: index, end: index + 1, pipe: false });
+      continue;
+    }
+    if (character === '|') {
+      if (line[index - 1] === '>') {
+        // `>|` is the clobber redirect.
+        continue;
+      }
+      if (next === '&') {
+        // `|&` pipes both streams.
+        separators.push({ start: index, end: index + 2, pipe: true });
+        index++;
+        continue;
+      }
+      separators.push({ start: index, end: index + 1, pipe: true });
+      continue;
+    }
+    if (character === ';' || character === '(' || character === ')') {
+      separators.push({ start: index, end: index + 1, pipe: false });
+    }
+  }
+  return { marker, separators };
+}
+
+// `alias b=bash`, `b() { …; }`, `function b { … }`: a definition in the same
+// command renames its word onto anything, and the strip decides before the
+// guard's own definition table (`definedBodies`) exists, so the names are
+// collected textually. A quoted or body-line lookalike over-collects, and
+// over-collecting only ever denies.
+function collectHeredocDefinedNames(command: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of command.matchAll(
+    /\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+  )) {
+    names.add(match[1]!);
+  }
+  for (const match of command.matchAll(
+    /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*[{(\n]/g,
+  )) {
+    names.add(match[1]!);
+  }
+  for (const match of command.matchAll(/(?:^|[;&|\n])\s*alias\s+/g)) {
+    const rest = command.slice((match.index ?? 0) + match[0].length);
+    for (const pair of rest.matchAll(/([A-Za-z_][A-Za-z0-9_]*)=/g)) {
+      names.add(pair[1]!);
+    }
+  }
+  return names;
+}
+
+// A POSIX shell invoked with no `-c` and no script file reads its program
+// from stdin; `-s` forces that even with a positional (`bash -s foo`). Only
+// `-c` (with its operand) or a real script positional makes the heredoc
+// data. `-o`/`-O` take values, so `bash -euo pipefail` has no positional.
+function heredocShellReadsStdinProgram(args: GuardToken[]): boolean {
+  let command = false;
+  let stdinForced = false;
+  let optionsEnded = false;
+  const positionals: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index]!;
+    if (token.redirect || token.ambiguousFd) continue;
+    // `bash -c$CMD` carries an unreadable program word; the `-c` scan fails
+    // the whole command closed downstream, and so does this gate.
+    if (token.dynamic) return true;
+    const text = token.text;
+    if (!optionsEnded && text === '--') {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && text.startsWith('--')) {
+      // No long option carries the program (`--norc`, `--posix`, …).
+      continue;
+    }
+    if (!optionsEnded && text.startsWith('-') && text !== '-') {
+      const bundle = text.slice(1);
+      for (let flag = 0; flag < bundle.length; flag++) {
+        const letter = bundle[flag]!;
+        if (letter === 'c') {
+          command = true;
+          break;
+        }
+        if (letter === 's') {
+          stdinForced = true;
+          continue;
+        }
+        if (letter === 'o' || letter === 'O') {
+          // `-o` consumes the rest of its bundle, or the next argv entry.
+          if (flag === bundle.length - 1) index++;
+          break;
+        }
+      }
+      continue;
+    }
+    positionals.push(text);
+  }
+  if (command) return false;
+  if (stdinForced) return true;
+  const script = positionals[0];
+  if (script === undefined) return true;
+  return STDIN_SCRIPT_PATHS.has(script);
+}
+
+// The same question for the interpreters the guard models, with the argv
+// vocabulary of each: `-e` carries the program for perl/ruby/node but is
+// errexit on a shell, and perl's `-c` still runs BEGIN blocks, so a shared
+// flag set misattributes both ways.
+function heredocInterpreterReadsStdinProgram(
+  program: string,
+  args: GuardToken[],
+): boolean {
+  const python = PYTHON_PROGRAM_PATTERN.test(program);
+  let carrier = false;
+  let optionsEnded = false;
+  const positionals: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index]!;
+    if (token.redirect || token.ambiguousFd) continue;
+    if (token.dynamic) return true;
+    const text = token.text;
+    if (!optionsEnded && text === '--') {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && text.startsWith('-') && text !== '-') {
+      if (text.startsWith('--')) {
+        if (program === 'node') {
+          if (text === '--eval' || text === '--print') {
+            carrier = true;
+            index++;
+          } else if (
+            text.startsWith('--eval=') ||
+            text.startsWith('--print=')
+          ) {
+            carrier = true;
+          }
+        }
+        continue;
+      }
+      if (python) {
+        // `-c`/`-m` carry the program, attached or as the next argv entry.
+        if (text === '-c' || text === '-m') {
+          carrier = true;
+          index++;
+          continue;
+        }
+        if (/^-[cm]./.test(text)) {
+          carrier = true;
+          continue;
+        }
+        if (text === '-W' || text === '-X') {
+          index++;
+          continue;
+        }
+        continue;
+      }
+      if (program === 'perl' || program === 'ruby') {
+        // `-e` (and perl's `-E`) carries the program, possibly bundled
+        // (`perl -pe'…'`); ruby's `-E` is an encoding value, not a carrier.
+        if (program === 'perl' && /^-[A-Za-z]*[eE]/.test(text)) {
+          carrier = true;
+          continue;
+        }
+        if (program === 'ruby' && /^-[A-Za-z]*e/.test(text)) {
+          carrier = true;
+          continue;
+        }
+        if (
+          text === '-I' ||
+          text === '-C' ||
+          (program === 'perl' && (text === '-M' || text === '-m')) ||
+          (program === 'ruby' &&
+            (text === '-r' || text === '-E' || text === '-K'))
+        ) {
+          index++;
+          continue;
+        }
+        continue;
+      }
+      // node: `-e`/`-p` carry the program, possibly bundled (`-pe'…'`).
+      if (/^-[A-Za-z]*[ep]/.test(text)) {
+        carrier = true;
+        continue;
+      }
+      if (
+        text === '-r' ||
+        text === '--require' ||
+        text === '--import' ||
+        text === '--conditions'
+      ) {
+        index++;
+        continue;
+      }
+      continue;
+    }
+    positionals.push(text);
+  }
+  if (carrier) return false;
+  const script = positionals[0];
+  if (script === undefined) return true;
+  return STDIN_SCRIPT_PATHS.has(script);
+}
+
+// True when one stage of the pipeline owning the heredoc runs a shell or
+// interpreter that reads its PROGRAM from stdin. The tokens come from the
+// same tokenizer the rest of the guard trusts, so `"bash"` and `\bash` are
+// just `bash` here, and the wrapper scans fail closed on their own
+// unrecognized options. Anything unattributable returns true: the strip is
+// irreversible, so the benefit of the doubt runs the other way.
+function heredocStageRunsStdinProgram(
+  tokens: GuardToken[],
+  definedNames: ReadonlySet<string>,
+): boolean {
+  const state: PrefixState = { relocations: [], unresolved: false };
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token.redirect || token.ambiguousFd) {
+      index++;
+      continue;
+    }
+    if (leadingEnvAssignmentKey(token.text) !== null) {
+      index++;
+      continue;
+    }
+    if (LEADING_SHELL_KEYWORDS.has(token.text)) {
+      index++;
+      continue;
+    }
+    if (token.dynamic) return true;
+    // A word this command itself defines can rename any receiver — even an
+    // allow-listed one like `cat` — onto a shell, and the definition table
+    // the guard resolves it through does not exist until after the strip.
+    if (definedNames.has(token.text)) return true;
+    const program = executableBaseName(token);
+    if (program === 'command' || program === 'builtin') {
+      index++;
+      while (index < tokens.length && tokens[index]!.text.startsWith('-')) {
+        index++;
+      }
+      continue;
+    }
+    if (program === 'env') {
+      const scan = consumeEnvWrapper(tokens, index, state);
+      if (state.unresolved || scan.undecidable) return true;
+      // An `-S` payload is a fresh argv string this scan cannot re-attribute.
+      if (scan.payload !== undefined) return true;
+      index = scan.next;
+      continue;
+    }
+    if (program === 'sudo' || program === 'doas') {
+      index = consumeSudoWrapper(tokens, index, state).next;
+      if (state.unresolved) return true;
+      continue;
+    }
+    if (program === 'timeout') {
+      index = consumeTimeoutWrapper(tokens, index);
+      continue;
+    }
+    if (program === 'nohup' || program === 'setsid' || program === 'busybox') {
+      index++;
+      continue;
+    }
+    if (program === 'exec') {
+      index++;
+      while (index < tokens.length) {
+        const text = tokens[index]!.text;
+        if (text === '-a' || text === '--argv0') {
+          index += 2;
+          continue;
+        }
+        if (text.startsWith('-')) {
+          index++;
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+    if (program === 'nice') {
+      index++;
+      while (index < tokens.length) {
+        const text = tokens[index]!.text;
+        if (text === '-n' || text === '--adjustment') {
+          index += 2;
+          continue;
+        }
+        if (text.startsWith('--adjustment=') || /^-n\d/.test(text)) {
+          index++;
+          continue;
+        }
+        if (text.startsWith('-')) return true;
+        break;
+      }
+      continue;
+    }
+    if (program === 'stdbuf') {
+      index++;
+      while (index < tokens.length) {
+        const text = tokens[index]!.text;
+        if (text === '-o' || text === '-e' || text === '-i') {
+          index += 2;
+          continue;
+        }
+        if (/^-[oei]./.test(text)) {
+          index++;
+          continue;
+        }
+        if (text.startsWith('-')) return true;
+        break;
+      }
+      continue;
+    }
+    // `eval` forwards its argv: `eval bash` runs bash, which then reads the
+    // heredoc. `eval "$CMD"` fails closed on the dynamic token.
+    if (program === 'eval') {
+      index++;
+      continue;
+    }
+    if (SHELL_WRAPPER_PROGRAMS.has(program)) {
+      return heredocShellReadsStdinProgram(tokens.slice(index + 1));
+    }
+    if (
+      PYTHON_PROGRAM_PATTERN.test(program) ||
+      HEREDOC_PROGRAM_INTERPRETERS.has(program)
+    ) {
+      return heredocInterpreterReadsStdinProgram(
+        program,
+        tokens.slice(index + 1),
+      );
+    }
+    return !HEREDOC_DATA_RECEIVERS.has(program);
+  }
+  // No attributable program word at all.
+  return true;
+}
+
+// The heredoc is stdin for the stage owning the marker and flows through
+// every later stage joined by a pipe (`cat <<'EOF' | bash`); earlier stages
+// never see it. Every stage it can reach must be attributable to a receiver
+// that cannot execute it.
+function heredocPipelineRunsStdinProgram(
+  line: string,
+  scan: HeredocLineScan,
+  definedNames: ReadonlySet<string>,
+): boolean {
+  const marker = scan.marker;
+  if (marker === null) return false;
+  const stageStarts: number[] = [];
+  const stages: string[] = [];
+  const pipesAfter: boolean[] = [];
+  let start = 0;
+  for (const separator of scan.separators) {
+    stageStarts.push(start);
+    stages.push(line.slice(start, separator.start));
+    pipesAfter.push(separator.pipe);
+    start = separator.end;
+  }
+  stageStarts.push(start);
+  stages.push(line.slice(start));
+  const owner = stageStarts.findIndex(
+    (stageStart, index) =>
+      stageStart <= marker.index &&
+      marker.index < stageStart + stages[index]!.length,
+  );
+  if (owner === -1) return true;
+  let last = owner;
+  while (last < pipesAfter.length && pipesAfter[last]!) last++;
+  for (let index = owner; index <= last; index++) {
+    const parsed = tokenizeSegment(stages[index]!, 0);
+    if (parsed === null) return true;
+    const run = parsed.runs[0];
+    if (
+      run === undefined ||
+      heredocStageRunsStdinProgram(run.tokens, definedNames)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+type HeredocStrip =
+  | { readonly kind: 'ok'; readonly text: string }
+  | { readonly kind: 'interpreter-stdin' };
+
+function stripHeredocBodies(command: string): HeredocStrip {
+  const definedNames = collectHeredocDefinedNames(command);
   const lines = command.split('\n');
   const out: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     out.push(line);
-    const match = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
-    if (!match) continue;
-    const delimiter = match[2]!;
-    const stripTabs = line.includes('<<-');
+    const scan = scanHeredocLine(line);
+    if (scan.marker === null) continue;
+    if (heredocPipelineRunsStdinProgram(line, scan, definedNames)) {
+      return { kind: 'interpreter-stdin' };
+    }
+    const { delimiter, stripTabs } = scan.marker;
     // Consume the body up to the delimiter line, dropping it from the output.
     while (index + 1 < lines.length) {
       index++;
@@ -2282,7 +2846,7 @@ function stripHeredocBodies(command: string): string {
       if (trimmed === delimiter) break;
     }
   }
-  return out.join('\n');
+  return { kind: 'ok', text: out.join('\n') };
 }
 
 function readTopLevelSeparators(command: string): string[] {
@@ -2525,7 +3089,16 @@ async function evaluateCommandWithCwd(
   // Heredocs are a POSIX shell construct: on the Windows lanes the marker
   // line's body lines are separate commands, so stripping them would hide
   // commands the executed text really runs.
-  const strippedCommand = windowsNative ? command : stripHeredocBodies(command);
+  const heredocStrip: HeredocStrip = windowsNative
+    ? { kind: 'ok', text: command }
+    : stripHeredocBodies(command);
+  if (heredocStrip.kind !== 'ok') {
+    return {
+      denial: { allowed: false, reason: INTERPRETER_HEREDOC_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
+  const strippedCommand = heredocStrip.text;
   if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
     return {
       denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },
