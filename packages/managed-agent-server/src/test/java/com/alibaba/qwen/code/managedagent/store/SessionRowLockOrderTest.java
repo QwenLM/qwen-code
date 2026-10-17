@@ -351,7 +351,8 @@ class SessionRowLockOrderTest {
                 "bindRecoveredHarness", "recordAdmission",
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
-                "cancelBeforeAdmission", "failTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
+                "failRecoveryBlockedTurn",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
                 // Main's rename-delivery family (#13682): each takes the
                 // session-row FOR UPDATE before its delivery-row work.
@@ -390,7 +391,8 @@ class SessionRowLockOrderTest {
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "findActiveTurns",
+                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn",
+                        "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
                         "findTurnSummary", "hasActiveTurn",
@@ -411,7 +413,7 @@ class SessionRowLockOrderTest {
                         // its Turn and takes no lock.
                         "turnInputAcceptance",
                         "updateHarnessCursor", "validateOperationStart",
-                        "withdrawSubmissionAttempted");
+                        "withdrawSubmissionAttempted", "cancelUnadmittedTurn");
         // The references the parse cannot resolve to one member —
         // ItemRow.toRecord behind the lambda parameter at the item read,
         // and main's this::renameDelivery RowMapper references (#13682),
@@ -437,8 +439,8 @@ class SessionRowLockOrderTest {
     // assertion still green. Pin the boundary on the R2 entry points.
     @Test
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
-        for (String name : List.of("recordAdmission", "failTurn",
-                "cancelBeforeAdmission")) {
+        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission")) {
             List<Method> entries = Arrays.stream(ManagedAgentStore.class
                     .getDeclaredMethods())
                     .filter(method -> method.getName().equals(name))

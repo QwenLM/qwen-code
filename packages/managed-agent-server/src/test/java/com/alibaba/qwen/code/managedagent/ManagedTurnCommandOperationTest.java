@@ -286,6 +286,22 @@ class ManagedTurnCommandOperationTest {
     }
 
     @Test
+    void failsTheInputOperationWhenRecoveryFailsItsTurn() {
+        Admission admitted = submit("submit-1", "digest-1");
+        claim(admitted);
+        assertThat(store.failRecoveryBlockedTurn(TENANT, sessionId,
+                admitted.turnId(), OWNER, "blocked")).isTrue();
+        OperationRecord operation = operation(admitted.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode())
+                .isEqualTo("managed_runtime_recovery_blocked");
+        assertThat(store.failRecoveryBlockedTurn(TENANT, sessionId,
+                admitted.turnId(), OWNER, "blocked")).isFalse();
+        assertThat(operation(admitted.operationId()))
+                .usingRecursiveComparison().isEqualTo(operation);
+    }
+
+    @Test
     void aCancelBeforeAdmissionCancelsTheInputAndCompletesInJava() {
         Admission admitted = submit("submit-1", "digest-1");
         Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
