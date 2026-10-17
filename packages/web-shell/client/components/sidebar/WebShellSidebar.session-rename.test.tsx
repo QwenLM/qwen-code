@@ -7,6 +7,7 @@ import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
+import { Popover as RadixPopover } from 'radix-ui';
 import {
   clickSidebarElement as click,
   flushSidebar,
@@ -186,6 +187,37 @@ const renameCapabilities = {
   qwenCodeVersion: '1.2.3',
   features: ['workspace_session_metadata'],
 };
+
+// The same Popover the sidebar renders (the app imports it from the
+// radix-ui package). It starts open and, by Radix design, a button-0
+// pointerdown + click outside the layer dismisses it through a deferred
+// native click on document — a click stopped before document (React
+// stopPropagation on the root) leaves it open.
+function ProbePopover({
+  onOpenChange,
+}: {
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [open, setOpen] = React.useState(true);
+  return (
+    <RadixPopover.Root
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        onOpenChange(next);
+      }}
+    >
+      <RadixPopover.Trigger asChild>
+        <button type="button">probe trigger</button>
+      </RadixPopover.Trigger>
+      <RadixPopover.Portal>
+        <RadixPopover.Content data-probe-popover>
+          probe popover content
+        </RadixPopover.Content>
+      </RadixPopover.Portal>
+    </RadixPopover.Root>
+  );
+}
 
 let root: Root;
 let container: HTMLDivElement;
@@ -726,5 +758,51 @@ describe('WebShellSidebar session title single-click rename (issue #14327)', () 
         !(input.getAttribute('aria-label') ?? '').startsWith('Rename:'),
     );
     expect(dialogInput).toBeDefined();
+  });
+
+  it('dismisses an already-open Radix popover when a title click starts the rename', async () => {
+    active.sessions = [makeSession('s1', { displayName: 'First session' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    const onOpenChange = vi.fn();
+    const probeHost = document.createElement('div');
+    document.body.appendChild(probeHost);
+    const probeRoot = createRoot(probeHost);
+    act(() => {
+      probeRoot.render(<ProbePopover onOpenChange={onOpenChange} />);
+    });
+    // DismissableLayer registers its document pointerdown listener in a
+    // setTimeout(0); let it land before the probe click.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const probeBefore = document.querySelector('[data-probe-popover]');
+    expect(probeBefore?.getAttribute('data-state')).toBe('open');
+
+    const label = findTitleLabel('First session');
+    await act(async () => {
+      label.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      label.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    await flushSidebar();
+
+    // The native click reached document: Radix's deferred outside-press
+    // dismissal fired and the popover closed.
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    const probeAfter = document.querySelector('[data-probe-popover]');
+    expect(probeAfter?.getAttribute('data-state')).not.toBe('open');
+    // ...and the click still did its job: the rename form opened without
+    // the session loading.
+    expect(renameInput()).not.toBeNull();
+    expect(loadSession).not.toHaveBeenCalled();
+
+    act(() => probeRoot.unmount());
+    probeHost.remove();
   });
 });

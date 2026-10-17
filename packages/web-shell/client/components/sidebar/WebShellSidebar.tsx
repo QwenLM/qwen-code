@@ -4879,6 +4879,14 @@ export function WebShellSidebar({
         (showExport && !inlineActionItems.has('export')) ||
         (showDelete && !inlineActionItems.has('delete'));
       const sessionActionCount = inlineActionCount + Number(showMoreActions);
+      // Live mirror of the title label's single-click gate — read at click
+      // time, not render time, because a text selection can appear after
+      // render. The label's click is taken by rename exactly when this
+      // holds; the row's open handler below consults it to stay quiet.
+      const titleClickStartsRename = () =>
+        showRename &&
+        !renameFormDisabled &&
+        window.getSelection()?.isCollapsed !== false;
       return withDetails(
         <div
           className={cx(
@@ -4895,11 +4903,24 @@ export function WebShellSidebar({
           role="button"
           tabIndex={0}
           aria-current={isCurrent ? 'page' : undefined}
-          onClick={() =>
-            standalone
-              ? standalone.onOpen()
-              : handleLoadSession(session.sessionId, session.workspaceCwd)
-          }
+          onClick={(event) => {
+            // The title label no longer stops propagation (the native
+            // click must reach document, where Radix DismissableLayer's
+            // deferred outside-press dismissal listens), so when the
+            // label just took the click for rename the row must not
+            // also open the session. Every fall-through case — rename
+            // unavailable, a pinned session's duplicate row, an active
+            // text selection — still opens as before.
+            if (
+              titleClickStartsRename() &&
+              event.target instanceof Element &&
+              event.target.closest('[data-web-shell-session-title-inner]')
+            ) {
+              return;
+            }
+            if (standalone) standalone.onOpen();
+            else handleLoadSession(session.sessionId, session.workspaceCwd);
+          }}
           onDoubleClick={() => {
             if (!showRename) return;
             if (standalone) standalone.onRename();
@@ -4991,7 +5012,8 @@ export function WebShellSidebar({
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span
                   className={styles.sessionTextInner}
-                  onClick={(event) => {
+                  data-web-shell-session-title-inner
+                  onClick={() => {
                     // A single click on the title opens the same rename entry
                     // point the row's double click uses; without rename
                     // available the click falls through to the row's open
@@ -5001,10 +5023,13 @@ export function WebShellSidebar({
                     // of stealing focus onto that other row. The search
                     // snippet and the container's blank space fall through
                     // the same way, as does a click that finishes a text
-                    // selection (SessionOverviewPanel's guard).
-                    if (!showRename || renameFormDisabled) return;
-                    if (window.getSelection()?.isCollapsed === false) return;
-                    event.stopPropagation();
+                    // selection (SessionOverviewPanel's guard). The click is
+                    // not stopped: the native click must still reach
+                    // document, where Radix DismissableLayer's deferred
+                    // outside-press dismissal listens; the row suppresses
+                    // its own open through the mirrored
+                    // titleClickStartsRename gate.
+                    if (!titleClickStartsRename()) return;
                     if (standalone) standalone.onRename();
                     else startRename(session);
                   }}
