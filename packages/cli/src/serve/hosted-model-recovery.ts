@@ -115,7 +115,6 @@ async function readHostedModelRequest(
     ) ||
     !Number.isSafeInteger(saved.round) ||
     saved.round < 0 ||
-    saved.round >= 16 ||
     !Number.isSafeInteger(saved.throughSequence) ||
     saved.throughSequence < 1 ||
     saved.throughSequence >= attempt.sequence ||
