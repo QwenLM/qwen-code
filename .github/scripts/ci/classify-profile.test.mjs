@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { posix } from 'node:path';
 import test from 'node:test';
 
 import {
   GITHUB_CI_ONLY_FILES,
+  TEST_READ_MARKDOWN,
   classifyChangedFiles,
 } from './classify-profile.mjs';
 
@@ -20,16 +24,89 @@ test('uses docs_only for markdown-only changes', () => {
 
 test('skips application tests for Markdown on any path outside src/ and fixtures', () => {
   for (const file of [
-    'AGENTS.md',
-    '.qwen/skills/triage/SKILL.md',
+    '.qwen/skills/example/SKILL.md',
     '.qwen/e2e-tests/web-shell/plan.md',
     '.github/pull_request_template.md',
     'packages/web-shell/README.md',
-    'packages/cua-driver/docs/tool-output-format.md',
     'integrations/external-context/GUIDE.MD',
   ]) {
     assert.equal(classifyChangedFiles([file]), 'github_ci_only', file);
   }
+});
+
+test('keeps Markdown that tests read by path on the full profile', () => {
+  for (const file of TEST_READ_MARKDOWN) {
+    assert.equal(classifyChangedFiles([file]), 'full', file);
+  }
+  assert.equal(
+    classifyChangedFiles(['AGENTS.md', '.qwen/skills/example/SKILL.md']),
+    'full',
+  );
+});
+
+// Matches a test that names a Markdown file by its path, by its last two
+// segments (joined with `/` or as separate quoted arguments, which covers
+// path.join(root, 'packages', 'x', 'README.md')), or by a relative literal
+// resolved against the test file.
+test('lists every lightweight Markdown a test names in TEST_READ_MARKDOWN', () => {
+  const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    encoding: 'utf8',
+  }).trim();
+  const tracked = execFileSync('git', ['ls-files', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 1 << 28,
+  })
+    .split('\0')
+    .filter(Boolean);
+  const lightweight = new Set(
+    tracked.filter(
+      (file) =>
+        /\.md$/i.test(file) &&
+        classifyChangedFiles([file]) === 'github_ci_only',
+    ),
+  );
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const separator = String.raw`(?:/|['"\x60]\s*,\s*['"\x60])`;
+  const matchers = [...lightweight].map((file) => {
+    const tail = file.split('/').slice(-2).map(escape).join(separator);
+    return [
+      file,
+      posix.basename(file),
+      new RegExp(String.raw`(?<![\w.-])${tail}(?![\w/-])`),
+    ];
+  });
+  const named = new Set();
+  for (const testFile of tracked) {
+    if (
+      testFile === '.github/scripts/ci/classify-profile.test.mjs' ||
+      !(
+        /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(testFile) ||
+        /^(?:scripts\/tests|integration-tests)\/.*\.[cm]?[jt]sx?$/.test(
+          testFile,
+        )
+      ) ||
+      !existsSync(posix.join(root, testFile))
+    ) {
+      continue;
+    }
+    const source = readFileSync(posix.join(root, testFile), 'utf8');
+    if (!/\.md/i.test(source)) continue;
+    for (const [file, basename, pattern] of matchers) {
+      if (source.includes(basename) && pattern.test(source)) {
+        named.add(`${file} <- ${testFile}`);
+      }
+    }
+    for (const [, relative] of source.matchAll(
+      /['"\x60]((?:\.\.?\/)+[^'"\x60\s]*\.md)['"\x60]/gi,
+    )) {
+      const file = posix.normalize(
+        posix.join(posix.dirname(testFile), relative),
+      );
+      if (lightweight.has(file)) named.add(`${file} <- ${testFile}`);
+    }
+  }
+  assert.deepEqual([...named].sort(), []);
 });
 
 test('keeps Markdown that ships in src/ or feeds fixtures on the full profile', () => {
@@ -246,7 +323,11 @@ test('never downgrades review for runtime markdown assets and instruction files'
     classifyChangedFiles(['packages/core/src/skills/bundled/foo/SKILL.md']),
     'full',
   );
-  assert.equal(classifyChangedFiles(['AGENTS.md']), 'github_ci_only');
+  assert.equal(classifyChangedFiles(['AGENTS.md']), 'full');
+  assert.equal(
+    classifyChangedFiles(['.qwen/skills/example/SKILL.md']),
+    'github_ci_only',
+  );
 });
 
 test('reserved prose basenames classify docs_only only with inert extensions', () => {

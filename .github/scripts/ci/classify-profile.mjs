@@ -38,6 +38,35 @@ function isDocsOnlyFile(file) {
   );
 }
 
+// Markdown that a test names by path. Those tests run only on the full
+// profile, so this Markdown keeps it; classify-profile.test.mjs fails when a
+// test names Markdown on the lightweight path that is missing here.
+export const TEST_READ_MARKDOWN = new Set([
+  '.github/workflows/qwen-autofix.md',
+  '.qwen/skills/autofix/SKILL.md',
+  '.qwen/skills/bugfix/SKILL.md',
+  '.qwen/skills/ci-flaky-patrol/SKILL.md',
+  '.qwen/skills/deflake/SKILL.md',
+  '.qwen/skills/e2e-testing/SKILL.md',
+  '.qwen/skills/prepare-pr/SKILL.md',
+  '.qwen/skills/triage/SKILL.md',
+  '.qwen/skills/triage/references/issue-workflow.md',
+  '.qwen/skills/triage/references/pr-workflow.md',
+  '.qwen/skills/verify-pr/SKILL.md',
+  '.qwen/skills/verify-pr/references/android.md',
+  'AGENTS.md',
+  'CLAUDE.md',
+  'integrations/test-failure-explorer/skills/test-failure-explorer/SKILL.md',
+  'packages/cua-driver/docs/tool-output-format.md',
+  'packages/cua-driver/scripts/README.md',
+  'packages/managed-agent-server/README.md',
+  'packages/sdk-java/client/QWEN.md',
+  'packages/sdk-java/qwencode/RELEASE.md',
+  'packages/sdk-python/README.md',
+  'packages/sdk-typescript/README.md',
+  'scripts/installation/INSTALLATION_GUIDE.md',
+]);
+
 // Markdown outside docs/ skips application tests but keeps full-effort
 // review: it is often runtime instructions (skills, AGENTS.md), so it must not
 // share docs_only's review downgrade. src/ and fixture trees are excluded
@@ -47,6 +76,7 @@ function isTestFreeMarkdown(file) {
   const normalized = file.replace(/\\/g, '/');
   return (
     /\.md$/i.test(normalized) &&
+    !TEST_READ_MARKDOWN.has(normalized) &&
     !/(?:^|\/)(?:src|[^/]*fixtures)\//i.test(normalized)
   );
 }
