@@ -358,7 +358,10 @@
                                  measuring 308–314 s healthy locally on
                                  JDK 21 + MySQL 8.4 (~534 s budgeted at
                                  the same 1.7×), which the same fork
-                                 still covers. -->
+                                 still covers. The FG8c process-crash
+                                 letter (seven cases, 144 s healthy
+                                 locally on a fresh MySQL 8.4.6) rides
+                                 inside the same envelope. -->
                             <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
@@ -441,8 +444,9 @@
                 <configuration>
                     <includes><include>**/HostedMonitorRun*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's five letters (fg8e/fg8f/fg8a/fg8b/fg8d)
-                         are independent fixtures sharing one fork: each
+                    <!-- The class's six letters (fg8e/fg8f/fg8a/fg8b/fg8d
+                         and fg8c) are independent fixtures sharing one
+                         fork: each
                          letter's @Timeout ceiling (600 s) plus the healthy
                          runtime must fit, the per-ceiling relation the CI
                          profile pins. Fork measured on the lane (run
