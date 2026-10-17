@@ -9,9 +9,12 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -47,7 +50,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * delivery line, so the request can never land later;</li>
  * <li>a live run without one takes the stop request through the Hosted
  * Harness's child operation route, which commits it on the parent's
- * journal, and is read again.</li>
+ * journal, and is read again;</li>
+ * <li>a live background Shell or Monitor watch is stopped through the
+ * Runtime Broker, whose worker answers only after the stop-marked finalize
+ * settled the record: the record's own stop is the authority's statement,
+ * a request revision for a Shell, the {@code stop_requested} settlement
+ * for a Monitor, whose record carries no request.</li>
  * </ul>
  * A delivery whose outcome stays unproven retries with the dispatch
  * backoff, bounded at {@link #ATTEMPT_BUDGET} claims; past it the
@@ -81,10 +89,14 @@ public class TaskCancelCoordinator {
     static final Duration ATTEMPT_DEADLINE = Duration.ofMinutes(5);
     static final String ALREADY_SETTLED = "task_already_settled";
     static final String UNCONFIRMED = "task_cancel_unconfirmed";
+    /** The kinds whose physical owner is a background process. */
+    private static final Set<String> BACKGROUND_TASK_KINDS = Set.of(
+            "background_shell", "monitor");
 
     private final AgentStateStore store;
     private final ManagedExtensionRecordStore records;
     private final HarnessConnector harness;
+    private final RuntimeBrokerService broker;
     private final ExecutorService executor;
     private final Clock clock;
     private final ManagedAgentProperties.Dispatch dispatch;
@@ -106,9 +118,11 @@ public class TaskCancelCoordinator {
     @Autowired
     public TaskCancelCoordinator(AgentStateStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
+            ObjectProvider<RuntimeBrokerService> broker,
             ExecutorService executor, Clock clock,
             ManagedAgentProperties properties) {
-        this(store, records, harness, executor, clock, properties,
+        this(store, records, harness, broker.getIfAvailable(), executor,
+                clock, properties,
                 deadlineFor(properties.getHarness().getRequestTimeout()));
     }
 
@@ -128,11 +142,13 @@ public class TaskCancelCoordinator {
 
     TaskCancelCoordinator(AgentStateStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
-            ExecutorService executor, Clock clock,
-            ManagedAgentProperties properties, Duration attemptDeadline) {
+            RuntimeBrokerService broker, ExecutorService executor,
+            Clock clock, ManagedAgentProperties properties,
+            Duration attemptDeadline) {
         this.store = store;
         this.records = records;
         this.harness = harness;
+        this.broker = broker;
         this.executor = executor;
         this.clock = clock;
         this.dispatch = properties.getDispatch();
@@ -210,7 +226,9 @@ public class TaskCancelCoordinator {
             return new Verdict(TaskCancelOutcome.failed(
                     "task_action_unavailable"), target);
         }
-        if (target.body().path("stopRequested").asBoolean(false)) {
+        if (target.body().path("stopRequested").asBoolean(false)
+                || "stop_requested".equals(
+                        target.body().path("stopReason").textValue())) {
             return new Verdict(TaskCancelOutcome.completed(), target);
         }
         if (Set.of("completed", "failed", "cancelled")
@@ -272,8 +290,18 @@ public class TaskCancelCoordinator {
                 verdict = new Verdict(null, null);
             }
             if (verdict.live()) {
-                retryOrPark(claimed, error.getClass().getSimpleName() + ": "
-                        + error.getMessage());
+                String failure = error.getClass().getSimpleName() + ": "
+                        + error.getMessage();
+                if (runtimeNotHere(error)) {
+                    // A Broker that holds no context for the Runtime Session
+                    // (a fresh process before a turn or the close acquires
+                    // it again) cannot stop the process on any retry: park
+                    // now rather than hold the Session's operation slot,
+                    // and with it the close, for the whole budget.
+                    park(claimed, failure);
+                } else {
+                    retryOrPark(claimed, failure);
+                }
                 return;
             }
         }
@@ -357,8 +385,21 @@ public class TaskCancelCoordinator {
         }
     }
 
-    /** The stop request onto the parent's journal; replay-safe there. */
+    /**
+     * A child Session run's stop request onto the parent's journal, or a
+     * background process's stop through the Broker; both replay-safe.
+     */
     private void send(OperationRecord operation, TaskTarget target) {
+        if (BACKGROUND_TASK_KINDS.contains(target.kind())) {
+            if (broker == null) {
+                throw new IllegalStateException(
+                        "The Runtime Broker is not available");
+            }
+            broker.stopBackgroundProcess(operation.tenantId(),
+                    operation.sessionId(), target.recordId())
+                    .toCompletableFuture().join();
+            return;
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("operationId", UUID.nameUUIDFromBytes(("qwen-task-cancel:\0"
                 + operation.operationId() + "\0" + operation.attemptCount())
@@ -369,19 +410,34 @@ public class TaskCancelCoordinator {
                 operation.sessionId(), body);
     }
 
+    private static boolean runtimeNotHere(Throwable error) {
+        for (Throwable cause = error; cause != null;
+                cause = cause.getCause()) {
+            if (cause instanceof RuntimeBrokerException broker
+                    && "runtime_session_not_found".equals(broker.getCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void park(OperationRecord operation, String failure) {
+        boolean parked = store.settleTaskCancel(operation.tenantId(),
+                operation.sessionId(), operation.operationId(), owner,
+                operation.claimGeneration(),
+                TaskCancelOutcome.recoveryBlocked(UNCONFIRMED),
+                Math.addExact(clock.millis(), PARKED_RECHECK.toMillis()));
+        LOG.warn("Task cancel {} unconfirmed tenant={} session={}"
+                        + " operation={} claims={} failure={}",
+                parked ? "parks" : "lost its claim before parking",
+                operation.tenantId(), operation.sessionId(),
+                operation.operationId(), operation.claimGeneration(),
+                failure);
+    }
+
     private void retryOrPark(OperationRecord operation, String failure) {
         if (operation.claimGeneration() >= ATTEMPT_BUDGET) {
-            boolean parked = store.settleTaskCancel(operation.tenantId(),
-                    operation.sessionId(), operation.operationId(), owner,
-                    operation.claimGeneration(),
-                    TaskCancelOutcome.recoveryBlocked(UNCONFIRMED),
-                    Math.addExact(clock.millis(), PARKED_RECHECK.toMillis()));
-            LOG.warn("Task cancel {} unconfirmed tenant={} session={}"
-                            + " operation={} claims={} failure={}",
-                    parked ? "parks" : "lost its claim before parking",
-                    operation.tenantId(), operation.sessionId(),
-                    operation.operationId(), operation.claimGeneration(),
-                    failure);
+            park(operation, failure);
             return;
         }
         long delay = HarnessCoordinator.retryDelay(

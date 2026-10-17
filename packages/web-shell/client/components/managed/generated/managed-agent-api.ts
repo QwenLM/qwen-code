@@ -1121,7 +1121,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent and 1.46 for workflow, tasks of those kinds in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent, 1.46 for workflow and 1.54 for background_shell and monitor, tasks of those kinds in pending, running, waiting or degraded, in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -1130,6 +1130,11 @@ export interface components {
             taskId: string;
             /** Format: uuid */
             sessionId: string;
+            /**
+             * Format: uuid
+             * @description The child Session that runs this task: present for a child_agent or workflow task once the run's committed record names it (the child's attach, or a terminal verdict that names a minted child), and absent for every other kind and before then. The child is a Session in the same Workspace, readable by exactly the callers that can read this task, so its Turns, items and events are the task's own output; reading them needs no other grant.
+             */
+            childSessionId?: string;
             kind: components["schemas"]["TaskKind"];
             state: components["schemas"]["TaskState"];
             /**
@@ -1158,7 +1163,7 @@ export interface components {
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];
-        } & (unknown & unknown & unknown & unknown);
+        } & (unknown & unknown & unknown & unknown & unknown);
         WebShellTaskPage: {
             data: components["schemas"]["WebShellTask"][];
             hasMore: boolean;
