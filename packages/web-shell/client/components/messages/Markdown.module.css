@@ -1,4 +1,5 @@
 .content {
+  unicode-bidi: plaintext;
   font-size: 14px;
   line-height: 1.6;
   color: var(--foreground);
@@ -133,6 +134,7 @@
 }
 
 .inlineCode {
+  unicode-bidi: isolate;
   font-family: var(--font-mono);
   font-size: 0.9em;
   font-weight: 500;
@@ -242,6 +244,7 @@
 }
 
 .codeBlockContent {
+  unicode-bidi: plaintext;
   max-width: 100%;
   max-height: none;
   padding: 8px 12px;
@@ -254,6 +257,7 @@
 }
 
 .codeBlockContent pre {
+  unicode-bidi: plaintext;
   margin: 0;
 }
 
@@ -274,6 +278,7 @@
 }
 
 .codeBlockContent :global(.shiki) code {
+  unicode-bidi: plaintext;
   display: block;
   white-space: pre-wrap;
   word-break: break-word;
