@@ -128,6 +128,8 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                     }
                     case "state" -> state(sessionId);
                     case "ledger" -> ledger(sessionId);
+                    case "workers" -> workers();
+                    case "runtime" -> runtime(sessionId);
                     default -> throw new IllegalArgumentException(route[3]);
                 };
                 byte[] bytes = JSON.writeValueAsBytes(response);
@@ -215,32 +217,43 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                 // arms the store-proxy faults.
                 "resources", jdbc.queryForList(
                         "SELECT resource_id, kind, byte_length, sha256 FROM"
-                                + " ma_resource WHERE"
-                                + " tenant_id = ? AND session_id = ? AND kind"
-                                + " LIKE 'managed-tool-result-%' ORDER BY"
-                                + " gmt_create, resource_id", tenant,
-                        sessionId),
+                                + " ma_resource WHERE session_scope_key = ?"
+                                + " AND tenant_id = ? AND session_id = ? AND"
+                                + " kind LIKE 'managed-tool-result-%' ORDER"
+                                + " BY gmt_create, resource_id",
+                        scopeKey(sessionId), tenant, sessionId),
                 "relayAlive", relay != null && !relay.isDone(),
                 "relayFailure", relayFailure == null ? ""
                         : relayFailure.toString());
+    }
+
+    // ma_resource keys on the Session's scope key and holds the inline
+    // capture bytes, and the drivers poll these reads: filtered by the
+    // unindexed tenant and session columns alone, each poll scans all the
+    // bytes the lane has written so far (FG8f alone inlines tens of MiB a
+    // case), so each later letter polls slower. The record read leads with
+    // the same key.
+    private String scopeKey(String sessionId) {
+        return com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                .sessionScopeKey(tenant, sessionId);
     }
 
     private List<JsonNode> extensionRecords(String sessionId, String domain) {
         try {
             var rows = jdbc.queryForList(
                     "SELECT record_id, record_resource_id FROM"
-                            + " ma_session_record WHERE"
-                            + " tenant_id = ? AND session_id = ? AND domain"
-                            + " = ? ORDER BY gmt_create, record_id", tenant,
-                    sessionId, domain);
+                            + " ma_session_record WHERE session_scope_key = ?"
+                            + " AND tenant_id = ? AND session_id = ? AND"
+                            + " domain = ? ORDER BY gmt_create, record_id",
+                    scopeKey(sessionId), tenant, sessionId, domain);
             var records = new java.util.ArrayList<JsonNode>();
             for (var row : rows) {
                 var resources = jdbc.queryForList(
                         "SELECT CONVERT(inline_bytes USING utf8mb4) AS body"
-                                + " FROM ma_resource WHERE"
-                                + " tenant_id = ? AND session_id = ? AND"
-                                + " resource_id = ?", tenant, sessionId,
-                        row.get("record_resource_id"));
+                                + " FROM ma_resource WHERE session_scope_key"
+                                + " = ? AND resource_id = ? AND tenant_id = ?"
+                                + " AND session_id = ?", scopeKey(sessionId),
+                        row.get("record_resource_id"), tenant, sessionId);
                 assertThat(resources).as(domain + " record body").hasSize(1);
                 records.add(JSON.readTree(
                         resources.getFirst().get("body").toString()));
@@ -249,6 +262,62 @@ final class HostedMonitorRunProbe implements AutoCloseable {
         } catch (java.io.IOException failure) {
             throw new IllegalStateException(failure);
         }
+    }
+
+    // FG8c: the in-JVM embedded broker spawns each binding's managed worker
+    // as a direct child of this JVM, so the live worker set is exactly the
+    // JVM's children carrying the worker argument. The driver diffs it
+    // around a case's first dispatch to name the one worker it signals.
+    private List<Long> workers() {
+        return ProcessHandle.current().children()
+                .filter(ProcessHandle::isAlive)
+                .filter(process -> List.of(process.info().arguments()
+                        .orElse(new String[0]))
+                        .contains("managed-runtime-worker"))
+                .map(ProcessHandle::pid).sorted().toList();
+    }
+
+    // FG8c's generation ground truth: the Session's bindings (isolation is
+    // per Harness Session), their slots and Runtime Sessions, and the full
+    // loss fields of its execution rows.
+    private Map<String, Object> runtime(String sessionId) {
+        var bindings = jdbc.queryForList(
+                "SELECT CAST(binding_id AS CHAR) AS binding_id, request_key,"
+                        + " binding_state, runtime_generation,"
+                        + " loss_evidence_json IS NOT NULL AS loss_evidence,"
+                        + " stop_evidence_json IS NOT NULL AS stop_evidence,"
+                        + " drain_requested FROM ma_runtime_binding WHERE"
+                        + " tenant_id = ? AND isolation_key = ? ORDER BY"
+                        + " runtime_generation", tenant, sessionId);
+        var slots = new java.util.ArrayList<Map<String, Object>>();
+        for (var key : bindings.stream().map(row -> row.get("request_key"))
+                .distinct().toList()) {
+            slots.addAll(jdbc.queryForList(
+                    "SELECT request_key, last_generation,"
+                            + " CAST(active_binding_id AS CHAR) AS"
+                            + " active_binding_id FROM ma_runtime_slot"
+                            + " WHERE request_key = ?", key));
+        }
+        return Map.of("bindings", bindings, "slots", slots,
+                "runtimeSessions", jdbc.queryForList(
+                        "SELECT CAST(runtime_session_id AS CHAR) AS"
+                                + " runtime_session_id, session_state,"
+                                + " runtime_generation FROM"
+                                + " ma_runtime_session WHERE tenant_id = ?"
+                                + " AND harness_session_id = ? ORDER BY"
+                                + " last_active_at", tenant, sessionId),
+                "executions", jdbc.queryForList(
+                        "SELECT CAST(execution_call_id AS CHAR) AS"
+                                + " execution_call_id, execution_state,"
+                                + " execution_status, runtime_generation,"
+                                + " CAST(runtime_session_id AS CHAR) AS"
+                                + " runtime_session_id, CAST(loss_evidence_id"
+                                + " AS CHAR) AS loss_evidence_id,"
+                                + " abandoned_at IS NOT NULL AS abandoned,"
+                                + " CAST(result_json AS CHAR) AS result_json"
+                                + " FROM ma_tool_execution WHERE"
+                                + " harness_session_id = ? ORDER BY"
+                                + " execution_call_id", sessionId));
     }
 
     private List<Map<String, Object>> ledger(String sessionId) {
