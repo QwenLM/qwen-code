@@ -272,11 +272,16 @@ public class HarnessCoordinator {
             if ("await_action".equals(error.getReason())) {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error, true);
-            } else if (recoveryPath.get() && isWorkflowLaunchTurn(claimed)) {
+            } else if (recoveryPath.get()
+                    && !"CANCELLING".equals(claimed.status())
+                    && isWorkflowLaunchTurn(claimed)) {
                 // #14387: a decline is terminal for a workflow Turn — the
                 // in-process executor died with its generation and no
                 // retry re-creates it — so the Turn parks blocked, never
-                // FAILED as if its outcome were observed.
+                // FAILED as if its outcome were observed. A CANCELLING
+                // Turn keeps the cancel's own bounded path: the mark
+                // cannot park it (the sweep re-admits CANCELLING rows),
+                // so writing it would only spin the cancel forever.
                 terminal = blockWorkflowRecovery(claimed, leaseLost);
             } else {
                 // The reason is remote-supplied; the terminal write lands
@@ -321,7 +326,8 @@ public class HarnessCoordinator {
             // flight) keeps the retry path: it is not evidence the
             // workflow cannot be observed, and a committed result may
             // already sit journaled behind it.
-            if (recoveryPath.get() && isWorkflowLaunchTurn(claimed)
+            if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
+                    && isWorkflowLaunchTurn(claimed)
                     && "hosted_turn_recovery_required".equals(
                             error.getErrorCode())
                     && "takeover_unrecovered".equals(

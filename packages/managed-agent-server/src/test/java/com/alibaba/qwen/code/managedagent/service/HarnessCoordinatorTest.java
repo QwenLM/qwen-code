@@ -1050,6 +1050,100 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong(), anyBoolean());
     }
 
+    // A CANCELLING workflow Turn whose takeover load declines keeps the
+    // cancel's bounded path: the block sites never write the mark for it
+    // — the mark cannot park a CANCELLING row (findDispatchable re-admits
+    // it by design), so writing it would re-open the claim-refuse-release
+    // spin this fix exists to close (P1 review finding on #14461).
+    @Test
+    void aCancellingWorkflowTurnKeepsItsBoundedPathWhenTheTakeoverDeclines() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "CANCELLING", true, "epoch-old",
+                1L, "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null,
+                null, 1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", true))
+                .thenThrow(new HostedHarnessRecoveryDeclinedException(
+                        "model_start"));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        // The cancel keeps its bounded terminal path — and the mark that
+        // cannot park a CANCELLING row is never written.
+        verify(store, never()).markTurnRecoveryBlocked(anyString(),
+                anyString(), anyString(), anyString(), anyString(),
+                anyString());
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("managed_runtime_recovery_blocked"),
+                anyString());
+    }
+
+    // The same guard on the coded 409 arm: a CANCELLING workflow Turn
+    // keeps its bounded retry, never the mark.
+    @Test
+    void aCancellingWorkflowTurnKeepsItsBoundedPathWhenTheTakeoverRefuses() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt",
+                List.of(Map.of("type", "workflow_launch", "script",
+                        "return 1;")),
+                "sha256:" + "a".repeat(64), "CANCELLING", true, "epoch-old",
+                1L, "previous-owner", Long.MAX_VALUE, 0, 0, 0, null, null,
+                null, 1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        DaemonHttpException refused = mock(DaemonHttpException.class);
+        when(refused.getStatusCode()).thenReturn(409);
+        when(refused.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        when(refused.getBodyField("reason")).thenReturn("takeover_unrecovered");
+        when(harness.recoverManagedRuntime("tenant", "session", true))
+                .thenThrow(refused);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store, never()).markTurnRecoveryBlocked(anyString(),
+                anyString(), anyString(), anyString(), anyString(),
+                anyString());
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong(), anyBoolean());
+    }
+
     // Once refused, the durable mark ends every later re-claim before any
     // attach: the scan stays a cheap claim-skip-release until the child
     // Session's close settles the Turn.
