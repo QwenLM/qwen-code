@@ -2040,6 +2040,12 @@ describe('HTTP Managed Session store', () => {
       await expect(first.close()).rejects.toThrow('backend down');
       expect(server.sealCount).toBe(1);
       expect(server.state).toBe('ACTIVE');
+      // `first` is the only writer in this window, so any renewal here is
+      // the failed close's cadence surviving; the later assertions cannot
+      // see it, because both stores share one writer identity (review round
+      // 2, R2-10).
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.renewCount).toBe(1);
 
       // The broker redrives the attach with byte-identical credentials; the
       // backend replays the live lease and hands over the same generation.
