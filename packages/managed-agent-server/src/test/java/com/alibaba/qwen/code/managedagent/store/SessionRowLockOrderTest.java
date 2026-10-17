@@ -406,10 +406,12 @@ class SessionRowLockOrderTest {
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
                         "findTurnSummary", "hasActiveTurn",
-                        // #14387's lifecycle gate counts live Turns, and
-                        // its recovery-blocked verdict parks the Turn row
-                        // alone: neither takes the session row lock, so
-                        // the session-first order has nothing to bite on.
+                        // #14387's lifecycle gate counts live Turns under
+                        // its caller's session-row lock. Its recovery-blocked
+                        // verdict can take the session-row lock through the
+                        // cross-file legacy guard before the Turn update, a
+                        // lock this same-file parse cannot see; both pin here
+                        // as Turn-row accessors, not lockers.
                         "hasLiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",
