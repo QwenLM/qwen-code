@@ -504,6 +504,22 @@ happen.
   mark retries on its own path regardless of the code — the budget never
   consulted those Turns (that is `transientFailure`'s contract, not a
   lease exemption).
+  A generation change (`HostedHarnessGenerationException`) on a bound
+  Session is the other exempt wait, before and after admission: a single
+  change is bounded by the prior generation's lease. A Harness that restarts
+  between every attempt keeps throwing it, though, so the exemption lapses
+  once the Turn has gone four budgets without journaled progress
+  (`consecutive_failures` reaching 4 × `max-pre-admission-retries` or
+  4 × `max-post-admission-retries`). The Turn then fails as a spent budget
+  would, `hosted_harness_unavailable` or
+  `hosted_harness_unavailable_after_admission`, rather than retrying forever
+  indistinguishable from a healthy retry (#13182 follow-up, R3-6). The cap
+  counts every attempt of the run, whatever wait filled it: no counter tells
+  the wait families apart, so a Turn that waited out a predecessor's
+  lease-bounded 409 or an approval for four budgets fails on the first
+  generation change that follows, while those other waits stay uncapped as
+  long as they are the current failure. A zero budget is floored to one, so
+  even then a single change still re-attaches (the cap is four attempts).
 - **D9b, request timeout vs takeover load.** `HostedHarnessClient.loadSession`
   uses a dedicated `load-timeout` (default 120 s, env-overridable like the
   other knobs) only when the request carries a recovery flag
