@@ -368,6 +368,25 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('fireFileChangedEvent', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'includes the observed path and %s event',
+      async (event) => {
+        const input = await captureInput(() =>
+          hookEventHandler.fireFileChangedEvent(
+            '/outside/memory/topic.md',
+            event,
+          ),
+        );
+        expectPlanned(HookEventName.FileChanged, {
+          filePath: '/outside/memory/topic.md',
+        });
+        expectFields(input, { file_path: '/outside/memory/topic.md', event });
+        expect(input).not.toHaveProperty('tool_use_id');
+      },
+    );
+  });
+
   describe('fireUserPromptExpansionEvent', () => {
     const fire = () =>
       hookEventHandler.fireUserPromptExpansionEvent(

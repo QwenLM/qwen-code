@@ -2677,7 +2677,8 @@ export class LlmClient {
     if (
       this.config.getDisableAllHooks() ||
       !hookSystem ||
-      !this.config.hasHooksForEvent('SessionStart')
+      (!this.config.hasHooksForEvent('SessionStart') &&
+        !this.config.hasHooksForEvent('FileChanged'))
     ) {
       return undefined;
     }

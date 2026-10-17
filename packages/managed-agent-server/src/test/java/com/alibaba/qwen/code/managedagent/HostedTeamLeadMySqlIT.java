@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -798,7 +799,7 @@ class HostedTeamLeadMySqlIT {
         startHarness(cli, node, decoy, harnessPort, brokerPort);
     }
 
-    private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort, int brokerPort) {
+    private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort, int brokerPort) throws IOException {
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -843,6 +844,7 @@ class HostedTeamLeadMySqlIT {
         .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
         if ("Linux".equals(System.getProperty("os.name"))) {
+            WorkspaceTestStorage.prepareNativeRoot(workspace);
             spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }

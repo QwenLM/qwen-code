@@ -382,7 +382,7 @@ describe('mcp reconnect command', () => {
   });
 
   describe('process scope (issue #9944)', () => {
-    it('initializes the throwaway config without background MCP discovery', async () => {
+    it('initializes the throwaway config without background discovery or file hooks', async () => {
       // The command runs its own targeted `discoverToolsForServer`; the
       // background incremental pass would race `config.shutdown()` and
       // re-arm health-check timers that keep the process alive forever.
@@ -401,6 +401,7 @@ describe('mcp reconnect command', () => {
 
       expect(mockConfig.initialize).toHaveBeenCalledWith({
         skipMcpDiscovery: true,
+        skipFileWatching: true,
       });
     });
 

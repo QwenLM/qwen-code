@@ -5,6 +5,7 @@
  */
 
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
+import path from 'node:path';
 import type { HookExecutionOwner } from './hook-execution-context.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
@@ -78,6 +79,12 @@ export function getHookMatcherTarget(
 
     case HookEventName.InstructionsLoaded:
       return { kind: 'filePath', target: context?.filePath ?? '' };
+
+    case HookEventName.FileChanged:
+      return {
+        kind: 'filePath',
+        target: path.basename(context?.filePath ?? ''),
+      };
 
     case HookEventName.UserPromptExpansion:
       // Unlike UserPromptSubmit, command expansions are matchable by the slash

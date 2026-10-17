@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -121,6 +122,7 @@ class HostedShellLifecycleRecoveryIT {
         private void run() throws Exception {
             startHarness();
             startSpring();
+            WorkspaceTestStorage.prepareNativeRoot(root.resolve("workspace"));
             var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
             storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
             storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
@@ -243,6 +245,7 @@ class HostedShellLifecycleRecoveryIT {
                 assertThat(((Number) writerIdentity().get("writer_generation")).longValue())
                         .isEqualTo(((Number) writer.get("writer_generation")).longValue());
             }
+            assertThat(writerIdentity()).containsEntry("writer_id", null).containsEntry("lease_token_hash", null);
             assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, session)).isEqualTo("DELETED");
             assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation WHERE operation_id = ?",
