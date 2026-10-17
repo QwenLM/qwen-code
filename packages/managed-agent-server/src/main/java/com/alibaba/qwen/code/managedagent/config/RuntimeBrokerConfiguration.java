@@ -38,7 +38,8 @@ public class RuntimeBrokerConfiguration {
         require(broker.getCredentialKey(),
                 "Runtime Broker credential key");
         return AesGcmSecretProtector.fromBase64(
-                broker.getCredentialKeyId(), broker.getCredentialKey());
+                broker.getCredentialKeyId(), broker.getCredentialKey(),
+                broker.getPreviousCredentialKeys());
     }
 
     @Bean
@@ -76,11 +77,14 @@ public class RuntimeBrokerConfiguration {
             ToolExecutionRepository executionRepository,
             WorkspaceExecutionStore workspaceExecutionStore,
             org.springframework.beans.factory.ObjectProvider<ToolPublicationStore> publications,
-            org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationData) {
+            org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager,
+            com.alibaba.qwen.code.managedagent.service.SshWorkspaceService ssh) {
         return new EmbeddedRuntimeBroker(store, properties,
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
-                publicationData.getIfAvailable());
+                publicationData.getIfAvailable(), jdbc, manager, ssh);
     }
 
     // The child result relay and the close cascade probe bindings across

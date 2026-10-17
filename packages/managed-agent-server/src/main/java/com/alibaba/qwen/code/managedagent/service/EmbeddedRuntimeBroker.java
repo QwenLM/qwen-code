@@ -55,9 +55,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final AgentStateStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
+    private final com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces residents;
+    private final boolean resident;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
     private static final Set<String> LIFECYCLE_FENCED = Set.of("CLOSING",
             "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
+    private final SshWorkspaceService ssh;
+    private final RuntimeProvisioner localProvisioner;
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties,
@@ -85,9 +89,67 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             WorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, null, null, null, null);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store,
+            ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications,
+            ToolPublicationDataStore publicationData,
+            SshWorkspaceService ssh) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, null, null, null, ssh);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, jdbc, manager, null, null);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, jdbc, manager, null, ssh);
+    }
+
+    EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager,
+            RuntimeProvisioner residentProvisioner) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository,
+                workspaceExecutionStore, publications, publicationData, jdbc, manager, residentProvisioner, null);
+    }
+
+    private EmbeddedRuntimeBroker(AgentStateStore store, ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
+            org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.transaction.PlatformTransactionManager manager,
+            RuntimeProvisioner residentProvisioner, SshWorkspaceService ssh) {
         this.store = store;
+        this.ssh = ssh;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
+        this.residents = new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(broker.getResidentWorkspaces());
+        this.resident = "kubernetes-workspace".equals(broker.getProvisioner());
         require(broker.getToken(), "Runtime Broker token");
         require(broker.getWorkspaceGeneration(),
                 "Runtime Broker workspace generation");
@@ -107,17 +169,57 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         String workspaceId = resolveWorkspaceId(broker, workspaceCwd);
         require(properties.getHarness().getCapabilityDigest(),
                 "Hosted Harness capability digest");
-        HttpRuntimeTransport http = new HttpRuntimeTransport();
+        boolean remote = ssh != null && ssh.configured();
+        if (resident && remote) {
+            throw new IllegalStateException("Resident Workspace and SSH nodes require separate Broker configurations");
+        }
+        HttpRuntimeTransport http = remote ? new HttpRuntimeTransport(ssh.connections()::resolveEndpoint) : new HttpRuntimeTransport();
         this.workspaces = workspaceExecutionStore == null ? null
-                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties);
+                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh);
         WorkspaceRuntimeResolver workspaces = this.workspaces;
         this.childWorkspaces = broker.isChildWorkspacesEnabled()
                 ? childWorkspaces(workspaces, broker) : null;
         RuntimeTransport transport = workspaces == null ? http
                 : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository);
-        RuntimeProvisioner baseProvisioner = provisioner(broker, http);
-        RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
+        RuntimeProvisioner baseProvisioner;
+        if (resident) {
+            if (!(bindingRepository instanceof com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository original)
+                    || jdbc == null || manager == null || workspaceExecutionStore == null
+                    || !original.usesDataSource(jdbc.getDataSource())) {
+                throw new IllegalStateException("Resident Workspace requires original JDBC authority");
+            }
+            if (residentProvisioner != null
+                    && !"kubernetes-workspace".equals(residentProvisioner.kind())) {
+                throw new IllegalArgumentException("Resident provisioner kind differs");
+            }
+            baseProvisioner = residentProvisioner == null
+                    ? new ResidentWorkspaceProvisioner(properties, jdbc, manager, original)
+                    : residentProvisioner;
+        } else {
+            if (residentProvisioner != null) {
+                throw new IllegalArgumentException("Resident provisioner requires resident configuration");
+            }
+            if (!broker.getResidentWorkspaces().isEmpty()) {
+                throw new IllegalStateException("Resident mappings require kubernetes-workspace provisioner");
+            }
+            baseProvisioner = provisioner(broker, remote ? new HttpRuntimeTransport() : http);
+        }
+        this.localProvisioner = baseProvisioner;
+        if (remote) {
+            RuntimeProvisioner local = baseProvisioner;
+            var remoteProvisioner = new com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner(
+                    ssh::node, ssh::runtimeStorage, ssh.connections(), http);
+            baseProvisioner = new com.alibaba.qwen.code.runtimebroker.RoutingRuntimeProvisioner(
+                    java.util.Map.of(local.kind(), local, com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND, remoteProvisioner),
+                    scope -> ssh.runtimeStorage(scope) == null ? local.kind() : com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND,
+                    (kind, lease) -> {
+                        if (!com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND.equals(kind)) {
+                            ssh.connections().registerDirect(lease);
+                        }
+                    }, ssh.connections()::forget);
+        }
+        RuntimeProvisioner provisioner = workspaces == null || resident ? baseProvisioner
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
             @Override
@@ -205,8 +307,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                         var binding = publications.verifyDispatch(execution, id, token);
                         var fields = mapper.convertValue(binding,
                                 new TypeReference<java.util.Map<String, Object>>() { });
-                        return new RuntimePublicationGrant(id, token,
-                                properties.getToolPublication().getServiceBaseUrl(), fields);
+                        var runtime = bindingRepository.findById(execution.getBindingId());
+                        var storage = remote && runtime != null ? ssh.runtimeStorage(runtime.getRequest().getScope()) : null;
+                        String publicationUrl = storage == null ? properties.getToolPublication().getServiceBaseUrl()
+                                : ssh.connections().publicationEndpoint(ssh.node(storage.nodeId())).toString();
+                        return new RuntimePublicationGrant(id, token, publicationUrl, fields);
                     }
 
                     @Override
@@ -285,7 +390,24 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     @Override
     public boolean supportsWorkspaceClose() {
-        return service.supportsDrainedStop();
+        return service.supportsDrainedStop() || resident;
+    }
+
+    @Override
+    public boolean supportsWorkspaceCwdChange(ContextBinding binding) {
+        return residents.find(binding) == null;
+    }
+
+    @Override
+    public boolean supportsWorkspaceClose(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
+        if (resident && residents.find(binding) != null) {
+            return true;
+        }
+        if (binding != null && ssh != null && ssh.runtimeStorage(binding) != null) {
+            ssh.node(ssh.runtimeStorage(binding).nodeId());
+            return true;
+        }
+        return localProvisioner.supportsDrainedStop();
     }
 
     @Override
@@ -295,6 +417,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     @Override
     public CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
+        var session = store.findSessionById(sessionId).orElse(null);
+        if (resident) {
+            if (session == null || !tenantId.equals(session.tenantId()) || residents.find(session.workspace()) == null) {
+                return CompletableFuture.failedFuture(com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore.unavailable());
+            }
+            return service.closeResidentHarnessSession(residents.request(session.workspace()), sessionId);
+        }
         return service.drainHarnessSession(tenantId, sessionId);
     }
 
@@ -436,7 +565,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     broker.getStaticToken(), broker.getStaticLeaseId(),
                     broker.getStaticEpoch()));
         }
-        if ("kubernetes".equals(broker.getProvisioner())) {
+        if ("kubernetes".equals(broker.getProvisioner()) || "kubernetes-workspace".equals(broker.getProvisioner())) {
             throw new IllegalStateException("Kubernetes Runtime provisioner"
                     + " is not supported (supported: local-process, static)");
         }
@@ -450,6 +579,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             Path candidate = java.nio.file.Files.exists(directory) ? directory.toRealPath()
                     : directory.getParent().toRealPath().resolve(directory.getFileName());
             if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
+                throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
+            }
+            if (!broker.getWorkspaceCreationRoot().isBlank()
+                    && candidate.startsWith(Path.of(broker.getWorkspaceCreationRoot()).toRealPath())) {
                 throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
             }
             for (var mount : broker.getWorkspaceMounts()) {
@@ -471,7 +604,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     private static String resolveWorkspaceCwd(
             ManagedAgentProperties.RuntimeBroker broker) {
-        if ("kubernetes".equals(broker.getProvisioner())) {
+        if ("kubernetes".equals(broker.getProvisioner()) || "kubernetes-workspace".equals(broker.getProvisioner())) {
             Path configured = Path.of(broker.getWorkspaceCwd());
             if (!configured.isAbsolute()
                     || !configured.normalize().toString().equals(

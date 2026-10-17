@@ -60,18 +60,18 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
     public AliyunToolPublicationObjectStore(OSS client, String bucket) {
         this.client = Objects.requireNonNull(client);
         this.bucket = Objects.requireNonNull(bucket);
-        requireUnversioned();
+        validateConfiguration();
         if (read(() -> client.getBucketAcl(bucket), () -> {}).getCannedACL() != CannedAccessControlList.Private) {
             throw new IllegalStateException("Tool publication bucket must be private");
         }
     }
 
     @Override
-    public void requireUnversioned() {
-        requireUnversioned(() -> {});
+    public void validateConfiguration() {
+        validateConfiguration(() -> {});
     }
 
-    private void requireUnversioned(Runnable guard) {
+    private void validateConfiguration(Runnable guard) {
         BucketVersioningConfiguration versioning = read(() -> client.getBucketVersioning(bucket), guard);
         String state = versioning == null ? null : versioning.getStatus();
         if (BucketVersioningConfiguration.ENABLED.equals(state)
@@ -82,7 +82,7 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
 
     @Override
     public void putIfAbsent(String key, byte[] bytes) {
-        requireUnversioned();
+        validateConfiguration();
         ObjectMetadata metadata = new ObjectMetadata();
         metadata.setContentLength(bytes.length);
         metadata.setHeader("x-oss-forbid-overwrite", "true");
@@ -92,15 +92,21 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
             client.putObject(request);
         } catch (OSSException error) {
             if (!"FileAlreadyExists".equals(error.getErrorCode())) {
-                throw error;
+                throw storageFailure(error);
             }
+        } catch (ClientException error) {
+            throw storageFailure(error);
         }
     }
 
     @Override
     public void deleteIfPresent(String key) {
-        requireUnversioned();
-        client.deleteObject(bucket, key);
+        validateConfiguration();
+        try {
+            client.deleteObject(bucket, key);
+        } catch (OSSException | ClientException error) {
+            throw storageFailure(error);
+        }
     }
 
     @Override
@@ -110,7 +116,7 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
 
     @Override
     public InputStream open(String key, Runnable guard) {
-        requireUnversioned(guard);
+        validateConfiguration(guard);
         return read(() -> client.getObject(bucket, key), guard).getObjectContent();
     }
 
@@ -121,19 +127,19 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
                 return request.get();
             } catch (TransientReadException error) {
                 if (retries >= ClientConfiguration.DEFAULT_MAX_RETRIES) {
-                    throw error.original;
+                    throw storageFailure(error.original);
                 }
             } catch (OSSException error) {
                 if (retries >= ClientConfiguration.DEFAULT_MAX_RETRIES
                         || error.getErrorCode() == null
                         || !TRANSIENT_SERVICE_ERRORS.contains(error.getErrorCode())) {
-                    throw error;
+                    throw storageFailure(error);
                 }
             } catch (ClientException error) {
                 if (retries >= ClientConfiguration.DEFAULT_MAX_RETRIES
                         || error.getErrorCode() == null
                         || !TRANSIENT_CLIENT_ERRORS.contains(error.getErrorCode())) {
-                    throw error;
+                    throw storageFailure(error);
                 }
             }
             try {
@@ -143,5 +149,11 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
                 throw new IllegalStateException("Publication read retry interrupted", error);
             }
         }
+    }
+
+    private static ToolPublicationStorageException storageFailure(RuntimeException error) {
+        var reason = error instanceof OSSException service && "AccessDenied".equals(service.getErrorCode())
+                ? ToolPublicationStorageException.Reason.ACCESS_DENIED : ToolPublicationStorageException.Reason.FAILURE;
+        return new ToolPublicationStorageException(reason, error);
     }
 }

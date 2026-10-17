@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -235,15 +236,20 @@ describe.skipIf(process.platform === 'win32')('smoke-packaged teardown', () => {
     expect(isAlive(recordedPid(pidFile))).toBe(false);
   });
 
-  it('reports a workspace it cannot delete without failing a passed check', () => {
-    const result = runSmoke(fakeApp, {
-      SMOKE_FIXTURE_PID_FILE: path.join(fixtureRoot, 'locked.pid'),
-      SMOKE_FIXTURE_LOCK_WORKSPACE: '1',
-    });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toContain('left the workspace behind');
-    expect(result.created.length).toBe(1);
-  });
+  // The locked directory only stops the removal where permission bits
+  // bind: not for root with its DAC capabilities.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'reports a workspace it cannot delete without failing a passed check',
+    () => {
+      const result = runSmoke(fakeApp, {
+        SMOKE_FIXTURE_PID_FILE: path.join(fixtureRoot, 'locked.pid'),
+        SMOKE_FIXTURE_LOCK_WORKSPACE: '1',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('left the workspace behind');
+      expect(result.created.length).toBe(1);
+    },
+  );
 
   it('keeps the workspace for debugging when the app dies before readiness', () => {
     const deadApp = writeFixture(
