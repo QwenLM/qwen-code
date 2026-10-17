@@ -73,7 +73,8 @@ class HostedWorkflowFaultGatesIT {
             throws Exception {
         runLetter("fg10a", List.of("tampered-script-refused",
                 "same-length-substitution-refused",
-                "fractional-args-admitted"));
+                "fractional-args-admitted",
+                "substitute-script-baseline"));
     }
 
     private void runLetter(String letter, List<String> allCases)
@@ -307,8 +308,14 @@ class HostedWorkflowFaultGatesIT {
             case "fractional-args-admitted" -> {
                 // The fractional-args launch crossed the daemon/SDK
                 // admission digest byte-identically: the child Turn
-                // completed, never wedging on invalid_hosted_prompt — the
-                // substrate carried 0.1 and 5e-324 in ECMAScript form.
+                // completed, never wedging on invalid_hosted_prompt — and
+                // the values provably reached the execution end: the
+                // Turn's final content echoes them. The wire rendering
+                // varies by hop (the store renders the subnormal
+                // 4.9E-324, the sandbox echoes 5e-324, keys arrive
+                // sorted), so the driver parses the echo and compares
+                // values exactly; here the raw output must carry the
+                // echo and each value's exact ECMAScript rendering.
                 assertThat(report.path("childTurnStatus").asText())
                         .as(name + " child Turn completed")
                         .isEqualTo("COMPLETED");
@@ -316,6 +323,26 @@ class HostedWorkflowFaultGatesIT {
                         .asBoolean())
                         .as(name + " never wedged on invalid_hosted_prompt")
                         .isFalse();
+                assertThat(report.path("turnOutput").asText())
+                        .as(name + " the fractional args echoed back with"
+                                + " exact values")
+                        .contains("FG10_ARGS_ECHO")
+                        .contains("\\\"temperature\\\":0.1")
+                        .contains("\\\"tiny\\\":5e-324")
+                        .contains("\\\"label\\\":\\\"fg10\\\"");
+            }
+            case "substitute-script-baseline" -> {
+                // The script the substitution tamper injects is a
+                // syntactically valid, runnable workflow: launched
+                // honestly it completes and returns its own sentinel.
+                // This is what makes the substitution case's refusal
+                // attributable to the digest mismatch alone.
+                assertThat(report.path("childTurnStatus").asText())
+                        .as(name + " child Turn completed")
+                        .isEqualTo("COMPLETED");
+                assertThat(report.path("turnOutput").asText())
+                        .as(name + " the substitute script really ran")
+                        .contains("FG10_SUBSTITUTED_OKAY");
             }
             default -> throw new IllegalArgumentException(name);
         }

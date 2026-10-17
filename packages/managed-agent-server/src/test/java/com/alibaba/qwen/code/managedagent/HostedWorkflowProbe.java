@@ -45,6 +45,7 @@ final class HostedWorkflowProbe implements AutoCloseable {
                     case "tamper-envelope" -> tamperEnvelope(sessionId,
                             JSON.readTree(exchange.getRequestBody()));
                     case "relay-create" -> relayCreate(sessionId);
+                    case "child-turn-output" -> childTurnOutput(sessionId);
                     default -> throw new IllegalArgumentException(route[3]);
                 };
                 byte[] bytes = JSON.writeValueAsBytes(response);
@@ -151,27 +152,32 @@ final class HostedWorkflowProbe implements AutoCloseable {
         ObjectNode envelope = (ObjectNode) JSON.readTree(
                 envelopeRows.getFirst().get("body").toString());
         String script = envelope.required("script").asText();
-        StringBuilder rewritten = new StringBuilder(script.length());
-        for (int index = 0; index < script.length(); index++) {
-            char c = script.charAt(index);
-            if (substitute) {
-                // A wholesale same-length substitution.
-                rewritten.append(Character.isUpperCase(c) ? 'X'
-                        : Character.isLowerCase(c) ? 'x' : c);
-            } else {
-                // A single-byte corruption inside the sentinel.
-                rewritten.append(c == 'O' && script.startsWith(
+        String rewritten;
+        if (substitute) {
+            // A wholesale same-length substitution with a syntactically
+            // valid, runnable script the driver authors — the letter's
+            // substitute-script-baseline case proves it runs to
+            // completion under a matching digest, so the refusal here is
+            // attributable to the digest alone, never to a parse error.
+            rewritten = request.required("script").asText();
+        } else {
+            // A single-byte corruption inside the sentinel.
+            StringBuilder flipped = new StringBuilder(script.length());
+            for (int index = 0; index < script.length(); index++) {
+                char c = script.charAt(index);
+                flipped.append(c == 'O' && script.startsWith(
                         "FG10_SHOULD_NEVER_RUN", index - "FG10_SH".length())
                         ? '0' : c);
             }
+            rewritten = flipped.toString();
         }
-        assertThat(rewritten.toString().getBytes(StandardCharsets.UTF_8))
+        assertThat(rewritten.getBytes(StandardCharsets.UTF_8))
                 .as("the tamper preserves the script's byte length")
                 .hasSize(script.getBytes(StandardCharsets.UTF_8).length);
-        assertThat(rewritten.toString())
+        assertThat(rewritten)
                 .as("the tamper actually changed the script")
                 .isNotEqualTo(script);
-        envelope.put("script", rewritten.toString());
+        envelope.put("script", rewritten);
         byte[] bytes = JSON.writeValueAsBytes(envelope);
         String shaAfter = java.util.HexFormat.of().formatHex(
                 MessageDigest.getInstance("SHA-256").digest(bytes));
@@ -221,6 +227,41 @@ final class HostedWorkflowProbe implements AutoCloseable {
         }
         throw new IllegalStateException(
                 "the relay's single scan never created the child session");
+    }
+
+    // The child Turn's final content: the workflow executor commits it as
+    // the child session journal's assistant message (model == "workflow").
+    // FG10a's positive and baseline cases assert the script's own return
+    // value made it back out — the fractional args' exact ECMAScript
+    // rendering, and the substitute script's sentinel.
+    private Map<String, Object> childTurnOutput(String sessionId)
+            throws Exception {
+        var children = jdbc.queryForList(
+                "SELECT session_id FROM ma_session WHERE tenant_id = ?"
+                        + " AND parent_session_id = ?", tenant, sessionId);
+        assertThat(children).as("the child session").hasSize(1);
+        String child = children.getFirst().get("session_id").toString();
+        var bodies = jdbc.queryForList(
+                "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
+                        + " ma_resource WHERE tenant_id = ? AND session_id"
+                        + " = ?", tenant, child);
+        List<String> texts = new java.util.ArrayList<>();
+        for (var row : bodies) {
+            JsonNode body = JSON.readTree(row.get("body").toString());
+            if (!"assistant".equals(body.path("type").asText())
+                    || !"workflow".equals(body.path("model").asText())) {
+                continue;
+            }
+            for (JsonNode part : body.required("message")
+                    .required("parts")) {
+                if (part.hasNonNull("text")) {
+                    texts.add(part.required("text").asText());
+                }
+            }
+        }
+        assertThat(texts).as("the child Turn's workflow output message")
+                .hasSize(1);
+        return Map.of("text", texts.getFirst());
     }
 
     private static String sha256Hex(byte[] bytes) {

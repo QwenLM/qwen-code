@@ -44,13 +44,26 @@ const config = JSON.parse(await readFile(configPath, 'utf8')) as {
 };
 
 // The canned scripts. Every one is plain ASCII so the probe's in-place
-// byte rewrite never meets a JSON escape. The refusal cases' sentinel is
-// what the tamper rewrites; the positive case echoes its args so the
-// ECMAScript rendering of fractional values is asserted end to end.
+// byte rewrite never meets a JSON escape. The flip case corrupts the
+// refusal script's sentinel; the substitution case swaps in
+// SUBSTITUTE_SCRIPT — a syntactically valid, byte-length-equal script the
+// substitute-script-baseline case proves runs to completion, so the
+// substitution's refusal is attributable to the digest alone, never to a
+// parse error. The positive case echoes its args so the ECMAScript
+// rendering of fractional values is asserted end to end.
 const REFUSAL_SCRIPT = [
   'export const meta = { name: "fg10tamper", description: "fg10a" };',
   'return "FG10_SHOULD_NEVER_RUN";',
 ].join('\n');
+const SUBSTITUTE_SCRIPT = [
+  'export const meta = { name: "fg10substX", description: "fg10a" };',
+  'return "FG10_SUBSTITUTED_OKAY";',
+].join('\n');
+assert.equal(
+  Buffer.byteLength(SUBSTITUTE_SCRIPT, 'utf8'),
+  Buffer.byteLength(REFUSAL_SCRIPT, 'utf8'),
+  'the substitution is byte-length preserving: only the digest can catch it',
+);
 const POSITIVE_SCRIPT = [
   'export const meta = { name: "fg10probe", description: "fg10a" };',
   'return "FG10_ARGS_ECHO " + JSON.stringify(args);',
@@ -64,6 +77,8 @@ function scriptFor(name: string): { script: string; args?: unknown } {
     case 'tampered-script-refused':
     case 'same-length-substitution-refused':
       return { script: REFUSAL_SCRIPT };
+    case 'substitute-script-baseline':
+      return { script: SUBSTITUTE_SCRIPT };
     case 'fractional-args-admitted':
       return { script: POSITIVE_SCRIPT, args: POSITIVE_ARGS };
     default:
@@ -345,15 +360,17 @@ async function runDigestCase() {
       );
     }, 120_000);
     step('child_run record committed');
+    const refusal =
+      current.name === 'tampered-script-refused' ||
+      current.name === 'same-length-substitution-refused';
     let tamperProof: Record<string, unknown> | undefined;
-    if (current.name !== 'fractional-args-admitted') {
+    if (refusal) {
       tamperProof = await probe<Record<string, unknown>>(
         current.sessionId,
         'tamper-envelope',
-        {
-          mode:
-            current.name === 'tampered-script-refused' ? 'flip' : 'substitute',
-        },
+        current.name === 'tampered-script-refused'
+          ? { mode: 'flip' }
+          : { mode: 'substitute', script: SUBSTITUTE_SCRIPT },
       );
       console.log(
         `FG10_TAMPERED ${String(tamperProof['resourceId'])} ` +
@@ -385,6 +402,7 @@ async function runDigestCase() {
     const state = await probe<ProbeState>(current.sessionId, 'state');
     const run = childRunOf(state);
     const expectedSha = sha256(scriptFor(current.name).script);
+    let turnOutput: string | null = null;
     if (current.name === 'fractional-args-admitted') {
       assert.equal(
         childTurnStatus,
@@ -395,6 +413,44 @@ async function runDigestCase() {
         cli.output.includes('invalid_hosted_prompt'),
         false,
         'the launch never wedged on invalid_hosted_prompt',
+      );
+      // Not just "did not wedge": the special values must reach the
+      // execution end. The child Turn's final content echoes the args —
+      // parse the echo out of the Result line and compare VALUES exactly.
+      // The wire rendering varies by hop (the server-side store renders
+      // the subnormal as 4.9E-324, the sandbox echoes 5e-324, and the
+      // canonical substrate sorts the keys) but every hop's rendering
+      // parses to the identical double — so the assertion is on the
+      // parsed values, never the raw text. A relay that dropped or
+      // normalised the args fails this comparison.
+      turnOutput = (
+        await probe<{ text: string }>(current.sessionId, 'child-turn-output')
+      ).text;
+      const marker = 'FG10_ARGS_ECHO ';
+      const resultLine = turnOutput
+        .split('\n')
+        .find((line) => line.includes(marker));
+      assert.ok(resultLine, `the child Turn echoed its args: ${turnOutput}`);
+      const echoed = JSON.parse(
+        (JSON.parse(resultLine) as string).slice(marker.length),
+      );
+      assert.deepEqual(
+        echoed,
+        POSITIVE_ARGS,
+        `the fractional args reached the child with exact values: ${turnOutput}`,
+      );
+    } else if (current.name === 'substitute-script-baseline') {
+      assert.equal(
+        childTurnStatus,
+        'COMPLETED',
+        'the substitute script launched honestly must complete',
+      );
+      turnOutput = (
+        await probe<{ text: string }>(current.sessionId, 'child-turn-output')
+      ).text;
+      assert.ok(
+        turnOutput.includes('FG10_SUBSTITUTED_OKAY'),
+        `the substitute script really ran: ${turnOutput}`,
       );
     } else {
       assert.equal(
@@ -424,11 +480,9 @@ async function runDigestCase() {
       stopReason: run?.stopReason ?? null,
       scriptSha256: expectedSha,
       recordDigest: run?.run?.definition?.definitionDigest ?? null,
-      refusalNamed:
-        current.name === 'fractional-args-admitted'
-          ? null
-          : await refusalNamed(cli),
+      refusalNamed: refusal ? await refusalNamed(cli) : null,
       invalidHostedPromptSeen: cli.output.includes('invalid_hosted_prompt'),
+      turnOutput,
       tamperProof: tamperProof ?? null,
     };
   } catch (cause) {
