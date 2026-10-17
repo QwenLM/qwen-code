@@ -707,6 +707,28 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'pull_request',
       ['push', 'workflow_dispatch'],
     ],
+    // managed-agent-gate.yml calls sdk-java.yml on an approval, whose event
+    // a fork PR can raise too: approving one must not put it on the pool.
+    [
+      'sdk-java.yml',
+      'mysql-integration',
+      'pull_request_review',
+      ['push', 'merge_group', 'workflow_dispatch'],
+    ],
+    // The gate's own jobs report the would-be required check, so a starved
+    // hosted queue must not hold them; fork PRs and fork approvals stay hosted.
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request',
+      ['push', 'merge_group'],
+    ],
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request_review',
+      ['push', 'merge_group'],
+    ],
     [
       'sdk-java.yml',
       'event-transport-broker',
@@ -717,6 +739,19 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'sdk-java.yml',
       'event-transport-multi-node',
       'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    // Both gate lanes also run in the gate's approval-triggered full tier.
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request_review',
       ['schedule', 'workflow_dispatch'],
     ],
     [
