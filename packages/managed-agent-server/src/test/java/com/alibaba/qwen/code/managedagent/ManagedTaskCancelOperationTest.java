@@ -58,6 +58,7 @@ class ManagedTaskCancelOperationTest {
     private static final String WORKFLOW = "task_" + "e".repeat(64);
     private static final String SHELL = "task_" + "f".repeat(64);
     private static final String MONITOR = "task_" + "9".repeat(64);
+    private static final String DELIVERY = "task_" + "8".repeat(64);
     private final AtomicLong now = new AtomicLong(1_000_000);
     private ManagedAgentStore store;
     private JdbcTemplate jdbc;
@@ -235,6 +236,28 @@ class ManagedTaskCancelOperationTest {
                         "task_action_unavailable");
             }
         }
+    }
+
+    // #13746 F3: a channel delivery admits a cancel only while pending —
+    // planned, with no adapter claim — and the retained key replays.
+    @Test
+    void aDeliveryTaskAdmitsCancelOnlyWhilePending() {
+        task(DELIVERY, "channel_delivery", "channel_delivery", "pending");
+        OperationAdmission first = begin("delivery-1", "digest-1", DELIVERY);
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.operation().taskId()).isEqualTo(DELIVERY);
+        settle(first.operation(), TaskCancelOutcome.completed());
+        for (String state : new String[] {"running", "waiting", "degraded",
+                "completed", "failed", "cancelled", "recovery_blocked"}) {
+            jdbc.update("UPDATE ma_session_record SET"
+                    + " task_state = ? WHERE record_key = ?", state,
+                    "8".repeat(64));
+            refused(() -> begin("delivery-" + state, "digest-" + state,
+                    DELIVERY), HttpStatus.CONFLICT,
+                    "task_action_unavailable");
+        }
+        assertThat(begin("delivery-1", "digest-1", DELIVERY).replayed())
+                .isTrue();
     }
 
     // A bound Session under storage migration admits no new cancel, as
