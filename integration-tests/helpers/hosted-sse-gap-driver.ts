@@ -195,6 +195,8 @@ try {
     true,
   );
   await evidence('entered');
+  // The committed tool intent publishes the in-progress tool update before
+  // the tool body runs.
   await Promise.all([publicBefore.through(2), webBefore.through(2)]);
   await Promise.all([publicBefore.close(), webBefore.close()]);
   assert.deepEqual(
@@ -296,20 +298,21 @@ try {
   assert.equal(toolItems[0].attributes.toolCallId, 'effect');
   assert.equal(
     transcript.items
-      .flatMap((item: { content: Array<{ text: string }> }) =>
-        item.content.map((part) => part.text),
+      .flatMap((item: { content?: Array<{ text?: string }> }) =>
+        (item.content ?? []).map((part) => part.text ?? ''),
       )
       .join(''),
     'FG6e tool finished once.',
   );
+  // Progress frames materialize as transcript items, not transcript events.
+  const itemFrames = new Set([
+    'item.output_text.delta',
+    'item.tool_call.updated',
+  ]);
   assert.deepEqual(
     transcript.events,
     webFrames
-      .filter(
-        (frame) =>
-          frame.event !== 'item.output_text.delta' &&
-          frame.event !== 'item.tool_call.updated',
-      )
+      .filter((frame) => !itemFrames.has(frame.event))
       .map((frame) => frame.data),
   );
   assert.equal(
