@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
+import { clearAutoMemoryRootCache } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { registerWorkspaceLocalOpenRoutes } from './workspace-local-open.js';
 import { LocalPathOpenUnavailableError } from '../local-path-open.js';
 import type {
@@ -252,5 +256,103 @@ describe('POST /workspaces/:workspace/open', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('local_path_open_failed');
+  });
+});
+
+describe('POST /workspaces/:workspace/open (auto-memory target)', () => {
+  let tmp: string;
+  let cwd: string;
+  let globalBase: string;
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-local-open-'));
+    cwd = path.join(tmp, 'workspace');
+    globalBase = path.join(tmp, 'global');
+    await fs.mkdir(cwd, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = globalBase;
+    clearAutoMemoryRootCache();
+  });
+
+  afterEach(async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    clearAutoMemoryRootCache();
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('opens the project auto-memory directory and reports the scope', async () => {
+    const projectDir = path.join(cwd, '.qwen', 'memory');
+    await fs.mkdir(projectDir, { recursive: true });
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-local-open',
+      opened: true,
+      target: 'auto-memory',
+      scope: 'project',
+    });
+    expect(openPathLocally).toHaveBeenCalledWith(projectDir);
+  });
+
+  it('opens the user auto-memory directory for scope=user', async () => {
+    const userDir = path.join(globalBase, 'memories');
+    await fs.mkdir(userDir, { recursive: true });
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory', autoMemoryScope: 'user' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.scope).toBe('user');
+    expect(openPathLocally).toHaveBeenCalledWith(userDir);
+  });
+
+  it('returns 404 when the auto-memory directory does not exist yet', async () => {
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('auto_memory_dir_not_found');
+    expect(openPathLocally).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when the auto-memory path is not a directory', async () => {
+    await fs.mkdir(path.join(cwd, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(cwd, '.qwen', 'memory'), 'not a dir\n');
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('auto_memory_dir_not_directory');
+    expect(openPathLocally).not.toHaveBeenCalled();
   });
 });
