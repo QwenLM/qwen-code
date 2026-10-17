@@ -1065,6 +1065,178 @@ const WINDOWS_JOB = {
   steps: ['Run tests and generate reports'],
 };
 
+for (const { name, logs, jobs, coverage, spawn } of [
+  {
+    name: 'unavailable logs',
+    logs: [],
+    jobs: [WINDOWS_JOB],
+    coverage:
+      '- Job logs analyzed: 0 of 1 failed-job logs (incomplete coverage).',
+  },
+  {
+    name: 'available logs without recognized failures',
+    logs: ['Tests run: 12, all passed\nProcess exited with code 1'],
+    jobs: [WINDOWS_JOB],
+    coverage: '- Job logs analyzed: 1 of 1 failed-job logs.',
+  },
+  {
+    name: 'empty failed-job entries and no logs',
+    logs: [],
+    jobs: [],
+    coverage:
+      '- Job logs analyzed: 0; failed-job entries empty or unavailable.',
+  },
+  {
+    name: 'empty downloaded log',
+    logs: [''],
+    jobs: [WINDOWS_JOB],
+    coverage: '- Job logs analyzed: 1 of 1 failed-job logs.',
+  },
+  {
+    name: 'partial logs with identified failures',
+    spawn: true,
+    logs: [VITEST_LOG],
+    jobs: [WINDOWS_JOB, { name: 'Test (ubuntu-latest)', steps: ['Run tests'] }],
+    coverage:
+      '- Job logs analyzed: 1 of 2 failed-job logs (incomplete coverage).',
+  },
+  {
+    name: 'more logs than recorded failed jobs',
+    logs: [VITEST_LOG, VITEST_LOG, VITEST_LOG],
+    jobs: [WINDOWS_JOB],
+    coverage:
+      '- Job logs analyzed: 3 of 1 failed-job logs (incomplete coverage).',
+  },
+]) {
+  test(`analyze and plan preserve diagnostic uncertainty for ${name}`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sig-log-coverage-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const jobsPath = join(dir, 'jobs.tsv');
+    const analysisPath = join(dir, 'analysis.json');
+    writeFileSync(
+      jobsPath,
+      jobs.map((job) => [job.name, ...job.steps].join('\t')).join('\n'),
+    );
+    const logPaths = logs.map((log, index) => {
+      const path = join(dir, `${index}.log`);
+      writeFileSync(path, log);
+      return path;
+    });
+    const analyzeArgs = [
+      'analyze',
+      '--workflow',
+      'Qwen Code CI',
+      '--jobs',
+      jobsPath,
+      ...logPaths,
+    ];
+    const planArgs = [
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--sha',
+      OCCURRENCE.sha,
+      '--run-url',
+      OCCURRENCE.runUrl,
+      '--run-id',
+      OCCURRENCE.runId,
+      '--at',
+      OCCURRENCE.at,
+    ];
+    let plannedOutput;
+    if (spawn) {
+      const helper = fileURLToPath(
+        new URL('./main-failure-signature.mjs', import.meta.url),
+      );
+      const analyzed = spawnSync(process.execPath, [helper, ...analyzeArgs], {
+        encoding: 'utf8',
+      });
+      assert.equal(analyzed.status, 0, analyzed.stderr);
+      writeFileSync(analysisPath, analyzed.stdout);
+      const planned = spawnSync(process.execPath, [helper, ...planArgs], {
+        encoding: 'utf8',
+      });
+      assert.equal(planned.status, 0, planned.stderr);
+      plannedOutput = planned.stdout;
+    } else {
+      writeFileSync(analysisPath, captureStdout(analyzeArgs));
+      plannedOutput = captureStdout(planArgs);
+    }
+    const { body, searchMarkers } = JSON.parse(plannedOutput);
+    assert.ok(!body.includes('before any test result was'));
+    assert.ok(body.includes(coverage));
+    assert.ok(body.includes(OCCURRENCE.runUrl));
+    if (jobs.length) assert.ok(body.includes(WINDOWS_JOB.name));
+    if (logs.includes(VITEST_LOG)) {
+      assert.ok(body.includes(VITEST_TEST_ID));
+      assert.deepEqual(searchMarkers, [
+        `${TEST_MARKER_PREFIX}${testKey(VITEST_TEST_ID)}`,
+      ]);
+    } else {
+      assert.ok(
+        body.includes(
+          'No failing test identifiers were extracted from the available job logs',
+        ),
+      );
+      assert.deepEqual(searchMarkers, [
+        `${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha}`,
+      ]);
+    }
+  });
+}
+
+test('recurrences replace log coverage and retain investigation notes', () => {
+  const failedJobs = [
+    WINDOWS_JOB,
+    { name: 'Test (ubuntu-latest)', steps: ['Run tests'] },
+  ];
+  const first = analyzeLogs('Qwen Code CI', [VITEST_LOG], failedJobs);
+  const existingBody =
+    renderIssueBody({ analysis: first, occurrence: OCCURRENCE }) +
+    '\nInvestigation: check the Windows job first.\n';
+  const second = analyzeLogs(
+    'Qwen Code CI',
+    [VITEST_LOG, VITEST_LOG],
+    failedJobs,
+  );
+  const body = renderIssueBody({
+    analysis: second,
+    occurrence: { ...OCCURRENCE, runId: '302' },
+    existingBody,
+  });
+  assert.ok(body.includes('- Job logs analyzed: 2 of 2 failed-job logs.'));
+  assert.ok(!body.includes('incomplete coverage'));
+  assert.equal(body.split('- Job logs analyzed:').length - 1, 1);
+  assert.ok(body.includes('Investigation: check the Windows job first.'));
+  assert.equal(occurrenceLines(body).length, 2);
+});
+
+test('recurrences preserve human notes starting with the log coverage prefix', () => {
+  const failedJobs = [WINDOWS_JOB];
+  const analysis = analyzeLogs('Qwen Code CI', [VITEST_LOG], failedJobs);
+  const humanNote =
+    '- Job logs analyzed: triage note: keep runner evidence until reviewed.';
+  const otherNote = 'Investigation: check the Windows job first.';
+  let body =
+    renderIssueBody({ analysis, occurrence: OCCURRENCE }) +
+    `\n${humanNote}\n${otherNote}\n`;
+
+  for (const runId of ['302', '303']) {
+    body = renderIssueBody({
+      analysis,
+      occurrence: { ...OCCURRENCE, runId },
+      existingBody: body,
+    });
+    assert.ok(body.includes(humanNote), `human note survives run ${runId}`);
+    assert.ok(body.includes(otherNote));
+  }
+  assert.equal(
+    body.split('<!-- qwen-main-ci-failure-coverage -->').length - 1,
+    1,
+  );
+  assert.equal(occurrenceLines(body).length, 3);
+});
+
 function captureStdout(argv) {
   let output = '';
   const original = process.stdout.write;
@@ -1302,6 +1474,12 @@ test('runCli analyze still plans when the jobs file is missing', () => {
     ]),
   );
   assert.deepEqual(analysis.failedJobs, []);
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(
+    body.includes(
+      '- Job logs analyzed: 0; failed-job entries empty or unavailable.',
+    ),
+  );
 });
 
 test('runCli plan renders the named job into the filed body', () => {

@@ -56,4 +56,12 @@ This workflow handles the process of packaging and publishing new versions of Qw
 - **What you should do**:
   - As a contributor, you don't need to do anything for this process. You can be confident that once your PR is merged into the `main` branch, your changes will be included in the very next nightly release.
 
+### 4. Main-branch CI failure reports
+
+`.github/workflows/main-ci-failure-issue.yml` reports failed main-branch CI runs. When it identifies a failing test in the downloaded job logs, it groups recurrences by that test, matching on the first five identified tests. When no failing test can be identified, it tracks the failure by commit instead — except for `Desktop Checks`, where failures without a test identifier are grouped by failed job and step.
+
+New reports include a **Job logs analyzed** count, counting the downloaded log files supplied to the helper against the jobs reported with conclusion `failure`. A mismatch is marked as incomplete coverage: logs may be missing, or the job list may be incomplete. Equal counts do not establish that the log contents or the failing-test list are complete; empty logs still count, and cancelled or timed-out jobs are not counted in the failed-job total. With no failed-job entries, the report says the list was empty or unavailable: the helper cannot distinguish no matching jobs from a failed projection or an unreadable file. Reports grouped by test refresh the count when another recurrence is recorded. A per-commit report keeps its already-filed body for that commit, so its count describes the original analysis.
+
+No identified failure does not mean that tests never ran. A log download may have failed, or the available output may not contain a recognized failure identifier. Use the report's run link, together with its failed-job and step names when those entries are present, to investigate those cases.
+
 We hope this detailed overview is helpful. If you have any questions about our automation or processes, please don't hesitate to ask!

@@ -286,6 +286,7 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
   return {
     workflow: workflowName,
+    logCount: logTexts.length,
     tests,
     failedJobs,
     signature: tests.length
@@ -323,6 +324,9 @@ const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
 // two-space ones failedJobLines emits — the strip stops at the first line
 // that is not one, never consuming a human bullet that starts with `- `.
 const FAILED_JOBS_BLOCK = /\n*- Failed jobs:\n(?: {2}- [^\n]*\n?)+/;
+// Only refresh marked machine lines; human notes can quote the visible text.
+const JOB_LOG_COVERAGE_LINE =
+  /^- Job logs analyzed:[^\n]*<!-- qwen-main-ci-failure-coverage -->\n?/gm;
 
 // The same split/merge contract — head / recorded occurrences / tail around
 // the marker, human text kept verbatim, occurrences newest-first and capped —
@@ -359,9 +363,18 @@ function failedJobLines(failedJobs) {
   });
 }
 
+function jobLogCoverageLine(analysis) {
+  const { logCount, failedJobs } = analysis;
+  if (!failedJobs.length) {
+    return `- Job logs analyzed: ${logCount}; failed-job entries empty or unavailable. <!-- qwen-main-ci-failure-coverage -->`;
+  }
+  const incomplete =
+    logCount === failedJobs.length ? '' : ' (incomplete coverage)';
+  return `- Job logs analyzed: ${logCount} of ${failedJobs.length} failed-job logs${incomplete}. <!-- qwen-main-ci-failure-coverage -->`;
+}
+
 /**
- * A run that failed before any test result was reported — an install or build
- * break — has nothing to dedupe on, so it keeps the original per-commit marker
+ * A run with no identifiable failing test keeps the original per-commit marker
  * and title. The failed job and step still go in the body: they are what tells
  * a reader which lane broke when no test name survived to say so.
  */
@@ -369,10 +382,12 @@ function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
     '',
-    'A main-branch CI run failed on `main` before any test result was',
-    'reported, so this issue is tracked per commit.',
+    'A main-branch CI run failed on `main`.',
+    'No failing test identifiers were extracted from the available job logs,',
+    'so this issue is tracked per commit. This does not establish whether tests ran.',
     '',
     `- Workflow: ${analysis.workflow}`,
+    jobLogCoverageLine(analysis),
     ...(analysis.failedJobs.length
       ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
       : []),
@@ -438,6 +453,7 @@ export function renderIssueBody({
       ...(analysis.failedJobs.length
         ? ['', '- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
         : []),
+      jobLogCoverageLine(analysis),
       '',
       '## Failing tests',
       '',
@@ -472,6 +488,7 @@ export function renderIssueBody({
   const strippedProse = prose
     .replace(ALSO_FAILING_BLOCK, '')
     .replace(FAILED_JOBS_BLOCK, '\n')
+    .replace(JOB_LOG_COVERAGE_LINE, '')
     .trimEnd();
 
   // Record markers for tests that joined the failure set after the issue was
@@ -490,9 +507,10 @@ export function renderIssueBody({
   const withJobs = analysis.failedJobs.length
     ? `${withMarkers}\n\n- Failed jobs:\n${failedJobLines(analysis.failedJobs).join('\n')}`
     : withMarkers;
+  const withCoverage = `${withJobs}\n${jobLogCoverageLine(analysis)}`;
   const withTests = missingTests.length
-    ? `${withJobs}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
-    : withJobs;
+    ? `${withCoverage}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
+    : withCoverage;
 
   // A re-run of the same run must not add a second line for it. Match the
   // `[run <id>]` link text, not the run URL: `/301` is a substring of `/3010`,
