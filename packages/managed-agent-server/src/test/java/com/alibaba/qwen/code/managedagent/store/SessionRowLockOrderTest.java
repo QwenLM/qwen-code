@@ -211,8 +211,12 @@ class SessionRowLockOrderTest {
                             Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("SessionResourceCollectionCollector.java",
                             Set.of("SessionResourceCollectionCollector.runOnce/0")),
+                    // D7-2's parked registration asks its record whether it
+                    // reserved, through a record accessor the parse cannot
+                    // resolve.
                     Map.entry("SshWorkspaceStore.java",
-                            Set.of("SshWorkspaceStore.physicalKey/1")),
+                            Set.of("Parked.reserved/0",
+                                    "SshWorkspaceStore.physicalKey/1")),
                     Map.entry("ToolPublicationAdmissionStore.java",
                             Set.of("AcknowledgementBundle.captureIdentity/0",
                                     "AcknowledgementBundle.finished/0",
@@ -347,7 +351,8 @@ class SessionRowLockOrderTest {
                 "bindRecoveredHarness", "recordAdmission",
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
-                "cancelBeforeAdmission", "failTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
+                "failRecoveryBlockedTurn",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
                 // Main's rename-delivery family (#13682): each takes the
                 // session-row FOR UPDATE before its delivery-row work.
@@ -386,7 +391,8 @@ class SessionRowLockOrderTest {
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "findActiveTurns",
+                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn",
+                        "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
                         "findTurnSummary", "hasActiveTurn",
@@ -403,8 +409,11 @@ class SessionRowLockOrderTest {
                         "requireTurnForUpdate", "requireIdlePolicyChange", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",
+                        // D7-2's journal evidence for a parked input reads
+                        // its Turn and takes no lock.
+                        "turnInputAcceptance",
                         "updateHarnessCursor", "validateOperationStart",
-                        "withdrawSubmissionAttempted");
+                        "withdrawSubmissionAttempted", "cancelUnadmittedTurn");
         // The references the parse cannot resolve to one member —
         // ItemRow.toRecord behind the lambda parameter at the item read,
         // and main's this::renameDelivery RowMapper references (#13682),
@@ -430,8 +439,8 @@ class SessionRowLockOrderTest {
     // assertion still green. Pin the boundary on the R2 entry points.
     @Test
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
-        for (String name : List.of("recordAdmission", "failTurn",
-                "cancelBeforeAdmission")) {
+        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission")) {
             List<Method> entries = Arrays.stream(ManagedAgentStore.class
                     .getDeclaredMethods())
                     .filter(method -> method.getName().equals(name))

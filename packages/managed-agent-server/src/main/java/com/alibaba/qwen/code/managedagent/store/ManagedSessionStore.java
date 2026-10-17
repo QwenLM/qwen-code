@@ -2895,7 +2895,7 @@ public class ManagedSessionStore {
         return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scopeKey, resourceId);
     }
 
-    private static String commandKeyHash(String operation,
+    static String commandKeyHash(String operation,
             String commandId) {
         return sha256((operation + "\u0000" + commandId)
                 .getBytes(StandardCharsets.UTF_8));

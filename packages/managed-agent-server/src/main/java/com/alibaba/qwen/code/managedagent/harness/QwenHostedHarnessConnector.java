@@ -1102,7 +1102,35 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId) {
         SessionRecord session = requireRecoverableSession(tenantId, sessionId,
                 true);
-        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        return loadCancellationTakeover(session);
+    }
+
+    @Override
+    public Attachment recoverManagedFailureCancellation(String tenantId,
+            String sessionId, String turnId, String dispatchOwner) {
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
+        if (session.workspace() == null || !isWorkspaceFilesAvailable()
+                || actions == null) {
+            throw new IllegalStateException("Hosted Workspace files are unavailable");
+        }
+        workspaceExecution.authorizeRecoveryCancellation(session, turnId, dispatchOwner);
+        try {
+            return loadCancellationTakeover(session);
+        } catch (DaemonHttpException error) {
+            if (error.getStatusCode() == 409
+                    && HostedHarnessRecoveryDeclinedException.CODE.equals(error.getErrorCode())) {
+                throw new HostedHarnessRecoveryDeclinedException(error.getBodyField("reason"));
+            }
+            throw error;
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Attachment loadCancellationTakeover(SessionRecord session) {
+        AttachmentKey key = new AttachmentKey(session.tenantId(), session.sessionId());
         // A Session THIS Harness already serves can still park a dead
         // generation's Turn: the plain cancel route settles nothing there
         // and answered the coded refusal, so the cancellation load always
