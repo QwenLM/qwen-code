@@ -642,11 +642,16 @@ export class HostedWorkspaceBroker {
    * Read-only execution state. Only a definitive not-found resolves to
    * undefined; an unknown outcome is not proof that execution stopped, and a
    * terminally abandoned record reaches the caller as the distinct
-   * `abandoned` state rather than folding into that sentinel.
+   * `abandoned` state rather than folding into that sentinel. A settled
+   * record also names its result's execution status.
    */
-  async status(
-    id: string,
-  ): Promise<{ state: HostedBrokerExecutionState } | undefined> {
+  async status(id: string): Promise<
+    | {
+        state: HostedBrokerExecutionState;
+        executionStatus?: string;
+      }
+    | undefined
+  > {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
@@ -678,7 +683,18 @@ export class HostedWorkspaceBroker {
       !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
     )
       throw new Error('Runtime execution outcome is unknown.');
-    return { state: state as HostedBrokerExecutionState };
+    const result = status['result'];
+    const executionStatus =
+      state === 'settled' &&
+      typeof result === 'object' &&
+      result !== null &&
+      typeof (result as Record<string, unknown>)['executionStatus'] === 'string'
+        ? ((result as Record<string, unknown>)['executionStatus'] as string)
+        : undefined;
+    return {
+      state: state as HostedBrokerExecutionState,
+      ...(executionStatus === undefined ? {} : { executionStatus }),
+    };
   }
 
   /**
