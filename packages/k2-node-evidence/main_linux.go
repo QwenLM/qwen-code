@@ -156,6 +156,14 @@ func runGateway(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	systemd, err := installed.Host("systemd")
+	if err != nil {
+		return err
+	}
+	files.unit, err = openEffectiveUnit(ctx, "gateway", path, systemd)
+	if err != nil {
+		return err
+	}
 	self, err := os.Executable()
 	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil {
 		return errors.New("actual gateway executable or confinement differs from the protected installation")
@@ -223,6 +231,14 @@ func runSource(ctx context.Context, path string) error {
 	}
 	defer shimConfiguration.Close()
 	installed, observed, err := loadInstalledArtifacts("source", path, files)
+	if err != nil {
+		return err
+	}
+	systemd, err := installed.Host("systemd")
+	if err != nil {
+		return err
+	}
+	files.unit, err = openEffectiveUnit(ctx, "source", path, systemd)
 	if err != nil {
 		return err
 	}

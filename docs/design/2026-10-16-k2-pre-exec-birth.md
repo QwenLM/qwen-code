@@ -197,6 +197,12 @@ gap-free installed lifecycle. It does not add an installation authority, grant f
 fence. Source/7 records these byte facts; further actual live installation facts
 and their external trust root remain required.
 
+The [effective service identity check](2026-10-17-k2-effective-service-identity.md)
+also reads each role's actual systemd Unit/Service properties through one
+retained original PID-1 connection. It checks the own invocation, process,
+command and selected security properties at existing operation boundaries;
+this does not qualify every effective setting or the installation.
+
 ## Source and release dependency
 
 The offline profile stage consumes the exact version-2 artifact manifest, both

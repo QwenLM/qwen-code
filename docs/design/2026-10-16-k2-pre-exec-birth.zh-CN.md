@@ -113,6 +113,8 @@ runtime 身份协议升级为第2版。gateway 字节观察包含完整原 insta
 
 此步将真实保留运行时输入与生成工件图关联，不证明 daemon 有效 handler、实际加载 unit 配置、外部 actor 排除、宿主反向策略、CSI 独占接线或无间隙生命周期；不创建安装 authority，不授予最终释放或放宽复用门。source/7 记录这些字节事实；其他真实 live 安装事实及外部信任根仍待补齐。
 
+[有效服务身份检查](2026-10-17-k2-effective-service-identity.zh-CN.md)进一步通过唯一持有的原 PID-1 连接，读取各角色实际 systemd Unit/Service 属性。在既有操作边界核对自身 invocation、进程、command 及部分安全属性；这不代表所有有效设置或安装已资格化。
+
 ## 来源与释放依赖
 
 离线策略阶段消费准确的第2版工件清单、两份镜像目录及 shim 配置，以及已审目标事实、原私有 Runtime 请求和两份实际服务配置。生成器输出单一五角色策略源码及服务 unit，unit 的 argv 使用同一配置路径。权限语法由生成器拥有，不接受调用者规则、include 或 AppArmor 模式。配置及密钥路径不能落入可写的 inputs、journal、socket 或 worker 根，不同角色私钥不能别名；宿主 peer 哈希必须与实际 source/gateway 配置一致。

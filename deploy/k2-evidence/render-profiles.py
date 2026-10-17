@@ -291,6 +291,7 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
         entries[role] += ['"/etc/" r,', '"/etc/qwen-k2/{,artifacts/}" r,', '"/etc/qwen-k2/artifacts/{' + artifact_names + '}" r,']
         unit = "qwen-k2-node-source.service" if role == "source" else "qwen-k2-runtime-gateway.service"
         entries[role] += ['"/etc/systemd/system/' + unit + '" r,']
+        entries[role] += ['"/run/systemd/private" rw,', file_literal(hosts["systemd"]["path"]) + " r,", "ptrace (read) peer=" + peer("systemd") + ",", "unix (connect,send,receive) type=stream peer=(addr=\"/run/systemd/private\" label=" + peer("systemd") + "),"]
     src = entries["source"]
     for root in ("/sys/kernel/security/apparmor/policy", facts["apparmorExportRoot"]):
         src += [quoted(root + suffix) + " r," for suffix in ("/", "/revision", "/profiles/", "/profiles/*/", "/profiles/*/{name,mode,raw_data,raw_abi,raw_sha256}", "/raw_data/", "/raw_data/[0-9]*/", "/raw_data/[0-9]*/{raw_data,abi,revision,sha256}")]

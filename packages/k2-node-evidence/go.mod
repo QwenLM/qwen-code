@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/container-storage-interface/spec v1.11.0
 	github.com/containerd/containerd/api v1.11.1
+	github.com/godbus/dbus/v5 v5.1.0
 	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.80.0
 	k8s.io/cri-api v0.36.3
@@ -23,7 +24,6 @@ require (
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
-	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mdlayher/vsock v1.2.1 // indirect

@@ -15,6 +15,7 @@ import (
 type roleFiles struct {
 	files       map[string]*birth.ProtectedFile
 	directories []*birth.ProtectedDirectory
+	unit        *effectiveUnit
 }
 
 func loadRoleConfiguration(path string, target any) (*roleFiles, error) {
@@ -78,11 +79,17 @@ func (p *roleFiles) verify() error {
 			return err
 		}
 	}
+	if p.unit != nil {
+		return p.unit.verify()
+	}
 	return nil
 }
 
 func (p *roleFiles) close() error {
 	var err error
+	if p.unit != nil {
+		p.unit.close()
+	}
 	for _, f := range p.files {
 		err = errors.Join(err, f.Close())
 	}
