@@ -160,11 +160,13 @@ hostname-gated, so it applies wherever the user opted in.
   `parameters` object stays out of the opt-in and is unaffected: with the
   setting off the map does not run at all. A route that never opts in is still
   not untouched by this change, because MiniMax requires the field and calls the
-  shared map whatever this setting says. Its guards leave an `extra_body` entry
-  that claims `type: 'function'` while carrying no `function` object alone
-  instead of aborting request building with a `TypeError` naming no tool, as the
-  unguarded MiniMax map did. That malformed entry is the one place where the
-  setting being off is not the whole story about what changed.
+  shared map whatever this setting says. Its guards leave a malformed
+  `extra_body` list alone — a nullish member, an entry claiming
+  `type: 'function'` with no `function` object, or one whose `function` key is
+  present but null — instead of aborting request building with a `TypeError`
+  naming no tool, as the unguarded MiniMax map did. Those malformed entries are
+  the one place where the setting being off is not the whole story about what
+  changed.
 - The injected `properties` object is added after conversion, so it survives the
   step where `relaxSchemaForFunctionCalling` strips an empty `properties` from a
   schema whose source validated locally. A server that rejects an empty
@@ -197,14 +199,23 @@ hostname-gated, so it applies wherever the user opted in.
   the entry explicitly sets `false`, and the schema when opted in, including a
   tool that declares no schema at all. DashScope asserts the opt-in, the
   explicit `false` opt-out and the default omission; MiniMax asserts the
-  injection with and without the opt-in, and that an `extra_body` entry claiming
-  `type: 'function'` with no `function` object is left alone on that route with
-  the setting off — the one case where a guard, not the flag, is what keeps
-  request building alive. A declared schema passes through unchanged and a
-  request without tools stays tool-free. With the repair
+  injection with the setting unset, opted in, and explicitly set to `false`,
+  the last of these being the only thing pinning the published promise that the
+  injection cannot be turned off on that route. It also asserts that an
+  `extra_body` entry claiming `type: 'function'` with no `function` object is
+  left alone on that route with the setting off — the one case where a guard,
+  not the flag, is what keeps request building alive. The shared helper is also
+  called directly with a nullish member and a null `function` beside a
+  converter-shaped entry, so every guard conjunct has a case that fails when
+  that conjunct alone is removed. A declared schema passes through unchanged and
+  a request without tools stays tool-free. With the repair
   disabled every flag-gated case goes red while the MiniMax, omission and
   passthrough cases stay green, so the suite discriminates on the flag rather
   than on the provider class.
+- The settings schema pins its own default: the flag ships `false`, and no
+  provider test reads the schema, so the value that keeps the default omission
+  is asserted where it is declared. The generated JSON Schema is regenerated
+  from that entry, never hand-edited.
 - Existing converter tests still pin the default omission, including
   `expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters')`.
 - The three shapes this carve-out reasons about are settled at the converter

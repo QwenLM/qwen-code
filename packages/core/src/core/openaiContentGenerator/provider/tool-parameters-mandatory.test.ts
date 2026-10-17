@@ -48,6 +48,15 @@ const FLAT_FUNCTION_TOOL = {
   type: 'function',
 } as unknown as OpenAI.Chat.ChatCompletionTool;
 
+// The two other ways a hand-written extra_body list can be malformed: a nullish
+// member, and a `function` key that is present but null, which a key-presence
+// test alone would let through to a null dereference.
+const NULL_TOOL = null as unknown as OpenAI.Chat.ChatCompletionTool;
+const NULL_FUNCTION_TOOL = {
+  type: 'function',
+  function: null,
+} as unknown as OpenAI.Chat.ChatCompletionTool;
+
 function createConfig(
   model: string,
   baseUrl: string,
@@ -355,6 +364,27 @@ describe('generationConfig.toolParametersMandatory', () => {
       ]);
     });
 
+    it('passes a nullish member and a null function object through when the helper is called directly', () => {
+      const request = withEmptyToolParameters({
+        model: 'local-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+        tools: [CONVERTER_SHAPE, NULL_TOOL, NULL_FUNCTION_TOOL],
+      });
+
+      expect(request.tools).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'cron_list',
+            description: 'desc',
+            parameters: EMPTY_PARAMETERS,
+          },
+        },
+        null,
+        NULL_FUNCTION_TOOL,
+      ]);
+    });
+
     it('repairs a tool merged from extra_body and leaves a custom tool intact', () => {
       const config: ContentGeneratorConfig = {
         ...createConfig('local-model', 'http://localhost:5000/v1', true),
@@ -476,6 +506,26 @@ describe('generationConfig.toolParametersMandatory', () => {
         'local-model',
         'https://api.minimaxi.com/v1',
         true,
+      );
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
+      );
+      expect(request.max_tokens).toBe(32_000);
+    });
+
+    // The published description promises that this setting "cannot turn that
+    // off" on a MiniMax host, so an explicit false must not gate the injection
+    // the way it gates every other route.
+    it('emits the schema on MiniMax when the entry explicitly sets false', () => {
+      const config = createConfig(
+        'local-model',
+        'https://api.minimaxi.com/v1',
+        false,
       );
       const provider = determineProvider(config, mockCliConfig);
 

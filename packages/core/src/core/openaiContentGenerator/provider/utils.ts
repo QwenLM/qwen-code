@@ -56,8 +56,9 @@ export function stripReasoningContent(
 // admit only function tools, but `generationConfig.extra_body` is a user knob
 // merged into the request ahead of this repair, so a grammar or custom tool can
 // reach the map and has no `function` to dereference — and a hand-written entry
-// in the flat Responses shape claims `type: 'function'` while still lacking the
-// `function` object.
+// in the flat Responses shape claims `type: 'function'` while still carrying a
+// missing or null `function`. A nullish entry is left exactly as written: this
+// repair rewrites tool schemas, it does not vet a user's own list.
 export function withEmptyToolParameters(
   request: OpenAI.Chat.ChatCompletionCreateParams,
 ): OpenAI.Chat.ChatCompletionCreateParams {
@@ -66,8 +67,9 @@ export function withEmptyToolParameters(
   return {
     ...request,
     tools: request.tools.map((tool) =>
+      tool != null &&
       tool.type === 'function' &&
-      tool.function !== undefined &&
+      tool.function != null &&
       tool.function.parameters === undefined
         ? {
             ...tool,
