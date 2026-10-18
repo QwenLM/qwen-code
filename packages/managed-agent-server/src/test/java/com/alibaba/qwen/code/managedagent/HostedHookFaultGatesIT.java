@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -100,6 +101,9 @@ class HostedHookFaultGatesIT {
         assertThat(running(hook)).isTrue();
         assertThat(running(child)).isTrue();
         assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+        JsonNode executionBefore = hookExecution(session);
+        String executionId = executionBefore.path("hookExecutionId").asText();
+        String runtimeSessionId = executionBefore.path("runtimeSessionId").asText();
         JsonNode worker = worker(session);
         int generation = generation(session);
 
@@ -118,10 +122,16 @@ class HostedHookFaultGatesIT {
         // Hook from the original worker's receipt.
         api("POST", "/v1/agents/sessions/" + session + "/events",
                 Map.of("type", "agent.session.cancel", "turn_id", firstTurn), "cancel", 202);
-        waitFor(() -> assertThat(turnStatus(session, firstTurn)).isIn("CANCELLED", "FAILED", "COMPLETED"));
+        // The cancel waits for the dead Harness's lease renewal; the
+        // coordinator lands it about six seconds after the shared 60 s bound.
+        waitFor(Duration.ofSeconds(120),
+                () -> assertThat(turnStatus(session, firstTurn)).isIn("CANCELLED", "FAILED", "COMPLETED"));
         submit(session, "FG13_RECONCILE");
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
-        assertThat(hookExecution(session).path("resultRef").isNull()).isFalse();
+        JsonNode executionAfter = hookExecution(session);
+        assertThat(executionAfter.path("resultRef").isNull()).isFalse();
+        assertThat(executionAfter.path("hookExecutionId").asText()).isEqualTo(executionId);
+        assertThat(executionAfter.path("runtimeSessionId").asText()).isEqualTo(runtimeSessionId);
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).hasSize(1);
         assertHookUnitsEmpty();
@@ -145,6 +155,7 @@ class HostedHookFaultGatesIT {
         JsonNode worker = worker(session);
         int generation = generation(session);
 
+        assertThat(running(worker)).as("worker alive before SIGKILL").isTrue();
         assertThat(ProcessHandle.of(worker.path("pid").asLong()).orElseThrow().destroyForcibly()).isTrue();
         waitFor(() -> assertThat(running(worker)).isFalse());
         waitFor(() -> {
@@ -164,6 +175,9 @@ class HostedHookFaultGatesIT {
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, session)).isNotEqualTo("CLOSED");
         assertThat(generation(session)).isEqualTo(generation);
+        JsonNode after = hookExecution(session);
+        assertThat(after.at("/run/state").asText()).isEqualTo("recovery_blocked");
+        assertThat(after.at("/run/execution").asText()).isEqualTo("outcome_unknown");
         assertThat(modelFailure.get()).isNull();
     }
 
@@ -177,6 +191,7 @@ class HostedHookFaultGatesIT {
         waitFor(() -> assertThat(events("hook.call")).hasSize(1));
         JsonNode hook = events("hook.call").getFirst();
         assertThat(running(hook)).isTrue();
+        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
         assertThat(ProcessHandle.of(hook.path("pid").asLong()).orElseThrow().destroyForcibly()).isTrue();
         waitFor(() -> assertThat(running(hook)).isFalse());
         waitFor(() -> {
@@ -186,6 +201,7 @@ class HostedHookFaultGatesIT {
         });
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.child")).isEmpty();
+        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("non_blocking_error");
         // The decision gate turned the killed command into a block: the tool
         // never reached the model as an executed read.
         waitFor(() -> assertThat(modelRequests.toString()).contains("Hook evaluation failed."));
@@ -324,8 +340,19 @@ class HostedHookFaultGatesIT {
         List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
                 .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
                 .toList();
-        assertThat(records).as("hook execution records").isNotEmpty();
+        assertThat(records).as("hook execution records").hasSize(1);
+        assertThat(records.getFirst().path("eventName").asText()).isEqualTo("PreToolUse");
         return records.getFirst();
+    }
+
+    private JsonNode hookResult(String session) throws Exception {
+        JsonNode ref = hookExecution(session).path("resultRef");
+        assertThat(ref.isNull()).as("hook result ref").isFalse();
+        String body = jdbc.queryForObject("SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
+                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(tenant, session),
+                ref.path("resourceId").asText(), tenant, session);
+        return json.readTree(body);
     }
 
     private int generation(String session) {
@@ -494,7 +521,11 @@ class HostedHookFaultGatesIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(Duration.ofSeconds(60)).ignoreException(java.net.ConnectException.class).failFast(() -> {
+        waitFor(Duration.ofSeconds(60), assertion);
+    }
+
+    private void waitFor(Duration atMost, org.junit.jupiter.api.function.Executable assertion) {
+        await().atMost(atMost).ignoreException(java.net.ConnectException.class).failFast(() -> {
             if (modelFailure.get() != null) {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }
