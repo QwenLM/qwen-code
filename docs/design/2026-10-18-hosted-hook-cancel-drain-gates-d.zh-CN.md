@@ -42,6 +42,9 @@ owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，
   记录也无法如实报告 `cancelled`。
 - `timeout-held-command`：超时分支跳过终止，单元被留在运行状态；cgroup 断言
   失败，而记录仍会结算 `timeout`。
+- `early-terminal`（两格）：在 `processUnit.terminate` 返回前先发布结果，使
+  记录在单元仍被占据时就进入终态。`awaitTerminalDrained` 检查首次终态观测，
+  两格都会因单元非空而失败。
 
 ## 非目标
 

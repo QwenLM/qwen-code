@@ -106,16 +106,10 @@ class HostedHookCancelFaultGatesIT {
 
         JsonNode cancelled = cancelHook(session, executionId);
         assertThat(cancelled.path("cancelRequested").asBoolean()).isTrue();
-        waitFor(() -> {
-            JsonNode execution = hookExecution(session);
-            assertThat(execution.at("/run/state").asText()).isEqualTo("cancelled");
-            assertThat(execution.at("/run/execution").asText()).isEqualTo("settled");
-        });
         // The command dies on the graceful SIGTERM; its descendant ignores
         // it, so only the unit-wide cgroup.kill can empty the unit, and the
         // record may only say cancelled once that happened.
-        waitFor(() -> assertThat(running(child)).isFalse());
-        assertHookUnitsEmpty();
+        awaitTerminalDrained(session, "cancelled", child);
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
         assertThat(hookResult(session).path("outcome").asText()).isEqualTo("cancelled");
@@ -138,22 +132,36 @@ class HostedHookCancelFaultGatesIT {
         JsonNode hook = events("hook.call").getFirst();
         assertThat(running(hook)).isTrue();
         assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
-        waitFor(() -> {
-            JsonNode execution = hookExecution(session);
-            assertThat(execution.at("/run/state").asText()).isEqualTo("settled");
-            assertThat(execution.at("/run/execution").asText()).isEqualTo("settled");
-        });
-        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("timeout");
         // The timed-out command and its TERM-ignoring descendant must be
-        // gone before the unit counts as drained.
+        // gone before the unit counts as drained, and the record may only
+        // report the terminal state once that happened.
         JsonNode child = events("hook.child").getFirst();
-        waitFor(() -> assertThat(running(child)).isFalse());
-        assertHookUnitsEmpty();
+        awaitTerminalDrained(session, "settled", child);
+        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("timeout");
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
         waitFor(() -> assertThat(modelRequests.toString()).contains("Hook evaluation failed."));
         assertThat(modelRequests.toString()).doesNotContain(PROOF);
         assertThat(modelFailure.get()).isNull();
+    }
+
+    // The record may report a terminal state only once the unit is empty:
+    // inspect the first observation, not a later poll, so a regression that
+    // settles early while the drain continues still fails the cell.
+    private void awaitTerminalDrained(String session, String state, JsonNode child) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        while (System.nanoTime() < deadline) {
+            JsonNode execution = hookExecution(session);
+            if (state.equals(execution.at("/run/state").asText())) {
+                assertThat(execution.at("/run/execution").asText()).isEqualTo("settled");
+                assertThat(running(child))
+                        .as("descendant alive when the record first reports %s", state).isFalse();
+                assertHookUnitsEmpty();
+                return;
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("The Hook record never reported " + state);
     }
 
     private void boot(String timeoutMs, String holdMs, String signalMode) throws Exception {

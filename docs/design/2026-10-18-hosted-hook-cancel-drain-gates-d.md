@@ -49,6 +49,10 @@ Each witness must turn its cell red before the slice merges.
 - `timeout-held-command`: skip termination on the timed-out branch so the
   unit is left running. The cgroup assertion fails while the record still
   settles `timeout`.
+- `early-terminal` (both cells): publish the result before
+  `processUnit.terminate` returns, so the record reaches its terminal state
+  while the unit is still populated. `awaitTerminalDrained` inspects the
+  first terminal observation, so both cells fail on the populated unit.
 
 ## Non-goals
 
