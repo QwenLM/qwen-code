@@ -163,3 +163,11 @@ Ownership 投影已独立编译，并使用此前封存的真实 application DRA
 原 owner 投影保留未改变的 DRAINING binding、slot 和完整原 holder，不能使用未来 RELEASED 投影。专用保留 owner 扫描要求恰好一个原 holder，以同一组原强引用根核对其完整固定键 bytes。独立六列 physical catalog 只允许至多一条与原 retirement/binding/physical 身份相符的记录，以原严格 progress decoder 恢复 plan、raw bytes、digest 和 version；完整物理候选扫描只豁免已验证且 bytes 精确相同的原记录。外来行继续执行原 owner/reference 检查。没有进度时也必须完整验证原应用闭包后才能报告 UNPLANNED。
 
 读结果仅供查看。plan/intent/delete/observe 继续使用原活动权限事务。该读端不写进度、不生成 source、不联系 worker/Kubernetes 节点、不授予 RELEASED/复用权限。实际 RELEASED binding 和未资格化最终结果仍拒绝。H2 控制不证明真实 MySQL snapshot：真实 H2 忽略 read-only，必须拒绝；任何建模只读夹具均须明确标注。
+
+## 当前软件验收续项
+
+SQL/file-worker 集成使用两个独立原件，均由当前 provisioner 生成 Secret boot/6 并实际证明 handle/4。一个保留普通工具拒绝探针；另一个只包含有效工作，执行完整 application retirement。无授权工作注入会永久阻止该原件 join finalize，因此不能将它用作正向原件，也不能清除失败标志来修复。两个场景均保留真实 mount/root-directory 的打开、retirement inspection 和 FD 关闭生命周期，仅以明确夹具映射内核、placement 与 loopback 地址。不会重标旧 handle、修改已保存阶段/版本、提供虚构 terminal receipt 或安装资格。
+
+完整场景要求实际 DRAINED/4 及原逻辑 Runtime Session 已释放，binding、占用 slot 和物理 holder 仍保留原 DRAINING ownership。它在 worker 关闭前后分别新建 retained-progress reader 和真实只读 repeatable-read MySQL Connection，再检查长度合法但值错误的凭据、错误 tenant/workspace/Session/retirement、重算摘要的 frozen/cut/finalizer 字节、被修改或缺失的原生 journal 数据及不支持的外来载体。Reader 的每个 SQL 调用都必须是无锁 SELECT，全库指纹及 Kubernetes、worker、native-read、renewal 计数均须不变。负向 SQL 控制在 reader 外执行，每次控制后恢复完整有效像，再开始下一控制；最后一次有效读取必须再次成功。证据输出分别保存普通场景与终止场景结果。
+
+UNPLANNED 对应空 physical catalog；只有存在 physical companion 时，该读端才要求 published source association。当前生产者到消费方的完整链已在真实 MySQL 上观测通过，也覆盖 worker endpoint 关闭后。API、placement 和 mount 观察仍是软件协议夹具，不能资格化原生 CSI、隔离、云端安装、物理释放或复用。最终 authority 生产者与四行 release writer 仍以实际安装事实为前置条件。

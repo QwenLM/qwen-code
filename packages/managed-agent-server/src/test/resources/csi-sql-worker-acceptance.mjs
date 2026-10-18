@@ -88,10 +88,9 @@ const broker = (route, body = {}) =>
 // This platform facade delegates all file operations to real handles/inodes.
 // It does not intercept authentication, SQL native fetch, composition, tools or results.
 const native = Object.fromEntries(
-  ['open', 'lstat', 'mkdir', 'readdir', 'unlink'].map((name) => [
-    name,
-    fs[name],
-  ]),
+  ['open', 'lstat', 'mkdir', 'readdir', 'unlink', 'realpath', 'access'].map(
+    (name) => [name, fs[name]],
+  ),
 );
 const actualPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
 const workspace = await fs.realpath(
@@ -120,6 +119,8 @@ const opened = new Set();
 // or not the host really exposes /proc/self/fd.
 const mappedAddress = (file) => {
   if (process.platform !== 'linux' || typeof file !== 'string') return file;
+  if (file === '/workspace' || file.startsWith('/workspace/'))
+    return path.join(workspace, file.slice('/workspace'.length));
   const matched = /^\/proc\/self\/fd\/(\d+)(?:\/(.*))?$/.exec(file);
   if (!matched) return file;
   const address = handles.get(Number(matched[1]));
@@ -133,7 +134,7 @@ const nativeListen = Server.prototype.listen;
 let worker,
   stores,
   session,
-  closedRoot = false;
+  retirementJoined = false;
 try {
   await fs.writeFile(path.join(workspace, 'marker.txt'), 'alpha\n', {
     mode: 0o640,
@@ -143,7 +144,15 @@ try {
     value: 'linux',
     configurable: true,
   });
-  for (const name of ['open', 'lstat', 'mkdir', 'readdir', 'unlink']) {
+  for (const name of [
+    'open',
+    'lstat',
+    'mkdir',
+    'readdir',
+    'unlink',
+    'realpath',
+    'access',
+  ]) {
     fs[name] = async (file, ...args) => {
       const address = mappedAddress(file);
       const result = await native[name](address, ...args);
@@ -158,26 +167,20 @@ try {
           opened.delete(result);
         };
       }
+      if (
+        name === 'realpath' &&
+        typeof file === 'string' &&
+        (file === '/workspace' || file.startsWith('/workspace/'))
+      )
+        return file;
       return result;
     };
   }
-  Object.defineProperty(ManagedCsiMount.prototype, 'isAvailable', {
-    configurable: true,
-    get: () => !closedRoot,
+  ManagedCsiMount.prototype.kernelObservation = async () => ({
+    mountId: mount.mountId,
+    device: mount.device,
+    source: mount.source,
   });
-  ManagedCsiMount.prototype.rootDirectory = async () => workspace;
-  ManagedCsiMount.prototype.observe = async () => mount;
-  ManagedCsiMount.prototype.withVerifiedRoot = async function (operation) {
-    assert.equal(closedRoot, false);
-    assert.equal(
-      (await native.lstat(workspace, { bigint: true })).ino,
-      stats.ino,
-    );
-    const result = await operation(rootHandle, mount);
-    assert.equal((await rootHandle.stat({ bigint: true })).ino, stats.ino);
-    return result;
-  };
-  ManagedCsiMount.prototype.close = async () => {};
   Server.prototype.listen = function () {
     return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
   };
@@ -603,128 +606,131 @@ try {
               await fs.readFile(path.join(workspace, 'marker.txt')),
               workingBefore,
             );
-            const bindRequest = { ...request, action: 'bind', subject: null };
-            const nativeRoute = '/internal/runtime-broker/csi/v1/native:read';
-            await post(input.broker, nativeRoute, bindRequest, workerHeaders);
-            const foreignBinding = {
-              ...bindRequest.installedContext.binding,
-              workspaceId: 'foreign-workspace',
-            };
-            for (const [name, changed, override, code] of [
-              [
-                'SQL wrong token',
-                bindRequest,
-                { authorization: 'Bearer foreign' },
-                401,
-              ],
-              [
-                'SQL wrong owner',
-                {
-                  ...bindRequest,
-                  identity: {
-                    ...bindRequest.identity,
-                    sessionId: input.foreignOwnerSessionId,
-                  },
-                  installedContext: {
-                    ...bindRequest.installedContext,
-                    sessionId: input.foreignOwnerSessionId,
-                    operationId: input.foreignOwnerOperationId,
-                  },
-                },
-                {},
-                409,
-              ],
-              [
-                'SQL wrong context',
-                {
-                  ...bindRequest,
-                  context: {
-                    ...bindRequest.context,
-                    workspaceId: foreignBinding.workspaceId,
-                  },
-                  installedContext: {
-                    ...bindRequest.installedContext,
-                    binding: foreignBinding,
-                    contextDigest: computeManagedContextDigest(foreignBinding),
-                  },
-                },
-                {},
-                409,
-              ],
-            ]) {
-              await post(
-                input.broker,
-                nativeRoute,
-                changed,
-                { ...workerHeaders, ...override },
-                code,
-                name,
-              );
-              assert.deepEqual(
-                await fs.readFile(path.join(workspace, 'marker.txt')),
-                workingBefore,
-                name,
-              );
-              checks.push(name);
-            }
-            for (const [name, changed, override, code] of [
-              [
-                'wrong token',
-                request,
-                { authorization: 'Bearer foreign' },
-                401,
-              ],
-              [
-                'wrong lease',
-                request,
-                { 'x-qwen-managed-lease-epoch': '99' },
-                409,
-              ],
-              [
-                'wrong owner',
-                {
-                  ...request,
-                  identity: { ...request.identity, sessionId: randomUUID() },
-                },
-                {},
-                409,
-              ],
-              [
-                'wrong context',
-                {
-                  ...request,
-                  installedContext: {
-                    ...request.installedContext,
-                    binding: {
-                      ...request.installedContext.binding,
-                      contextRevision: 99,
+            if (!input.retirement) {
+              const bindRequest = { ...request, action: 'bind', subject: null };
+              const nativeRoute = '/internal/runtime-broker/csi/v1/native:read';
+              await post(input.broker, nativeRoute, bindRequest, workerHeaders);
+              const foreignBinding = {
+                ...bindRequest.installedContext.binding,
+                workspaceId: 'foreign-workspace',
+              };
+              for (const [name, changed, override, code] of [
+                [
+                  'SQL wrong token',
+                  bindRequest,
+                  { authorization: 'Bearer foreign' },
+                  401,
+                ],
+                [
+                  'SQL wrong owner',
+                  {
+                    ...bindRequest,
+                    identity: {
+                      ...bindRequest.identity,
+                      sessionId: input.foreignOwnerSessionId,
+                    },
+                    installedContext: {
+                      ...bindRequest.installedContext,
+                      sessionId: input.foreignOwnerSessionId,
+                      operationId: input.foreignOwnerOperationId,
                     },
                   },
-                },
-                {},
-                409,
-              ],
-              [
-                'ungranted execution',
-                { ...request, subject: randomUUID() },
-                {},
-                409,
-              ],
-            ]) {
-              await post(
-                worker.ready.context.url,
-                '/internal/managed-runtime/csi/v2/execute',
-                changed,
-                { ...workerHeaders, ...override },
-                code,
-                name,
-              );
-              assert.deepEqual(
-                await fs.readFile(path.join(workspace, 'marker.txt')),
-                workingBefore,
-                name,
-              );
-              checks.push(name);
+                  {},
+                  409,
+                ],
+                [
+                  'SQL wrong context',
+                  {
+                    ...bindRequest,
+                    context: {
+                      ...bindRequest.context,
+                      workspaceId: foreignBinding.workspaceId,
+                    },
+                    installedContext: {
+                      ...bindRequest.installedContext,
+                      binding: foreignBinding,
+                      contextDigest:
+                        computeManagedContextDigest(foreignBinding),
+                    },
+                  },
+                  {},
+                  409,
+                ],
+              ]) {
+                await post(
+                  input.broker,
+                  nativeRoute,
+                  changed,
+                  { ...workerHeaders, ...override },
+                  code,
+                  name,
+                );
+                assert.deepEqual(
+                  await fs.readFile(path.join(workspace, 'marker.txt')),
+                  workingBefore,
+                  name,
+                );
+                checks.push(name);
+              }
+              for (const [name, changed, override, code] of [
+                [
+                  'wrong token',
+                  request,
+                  { authorization: 'Bearer foreign' },
+                  401,
+                ],
+                [
+                  'wrong lease',
+                  request,
+                  { 'x-qwen-managed-lease-epoch': '99' },
+                  409,
+                ],
+                [
+                  'wrong owner',
+                  {
+                    ...request,
+                    identity: { ...request.identity, sessionId: randomUUID() },
+                  },
+                  {},
+                  409,
+                ],
+                [
+                  'wrong context',
+                  {
+                    ...request,
+                    installedContext: {
+                      ...request.installedContext,
+                      binding: {
+                        ...request.installedContext.binding,
+                        contextRevision: 99,
+                      },
+                    },
+                  },
+                  {},
+                  409,
+                ],
+                [
+                  'ungranted execution',
+                  { ...request, subject: randomUUID() },
+                  {},
+                  409,
+                ],
+              ]) {
+                await post(
+                  worker.ready.context.url,
+                  '/internal/managed-runtime/csi/v2/execute',
+                  changed,
+                  { ...workerHeaders, ...override },
+                  code,
+                  name,
+                );
+                assert.deepEqual(
+                  await fs.readFile(path.join(workspace, 'marker.txt')),
+                  workingBefore,
+                  name,
+                );
+                checks.push(name);
+              }
             }
             const parts = convertToFunctionResponse(
               fc.name,
@@ -852,9 +858,41 @@ try {
   );
   assert.equal(finalBytes, 'gamma\n');
   assert.equal(observation.state.snapshots.length, 2);
+  let retirementResult = {};
+  if (input.retirement) {
+    retirementJoined = true;
+    await stores.csiRetirement.joinWriter();
+    const terminalRecords = await session.authority.prepareOriginalCsiRelease();
+    await stores.csiRetirement.prepare(terminalRecords);
+    const retirement = await fixture('/fixture:retire');
+    const drained = await stores.csiRetirement.complete(
+      retirement.retirementId,
+    );
+    assert.equal(drained.stage, 'DRAINED');
+    assert.equal(drained.progressVersion, 4);
+    const retainedBeforeClose = await fixture('/fixture:retained', {
+      token: writerToken,
+      label: 'worker-open',
+    });
+    retirementResult = { retirement: drained, retainedBeforeClose };
+    await stores.stopLocal();
+  }
   const workerUrl = worker.ready.context.url;
   await worker.close();
   worker = undefined;
+  if (input.retirement) {
+    retirementResult.retainedAfterClose = await fixture('/fixture:retained', {
+      token: writerToken,
+      label: 'worker-closed',
+    });
+    retirementResult.retainedMatrix = await fixture(
+      '/fixture:retained-matrix',
+      {
+        token: writerToken,
+      },
+    );
+    assert.equal(retirementResult.retainedMatrix.length, 12);
+  }
   await assert.rejects(
     fetch(workerUrl, { signal: AbortSignal.timeout(2000) }),
     TypeError,
@@ -863,6 +901,7 @@ try {
     path.join(output, 'result.json'),
     JSON.stringify(
       {
+        ...retirementResult,
         completedTurns,
         nativeSqlGrant: true,
         workerClosed: true,
@@ -887,8 +926,11 @@ try {
 } finally {
   const cleanupErrors = [];
   for (const close of [
-    () => session?.close({ releaseActivation: false }),
-    () => stores?.close(),
+    () =>
+      retirementJoined
+        ? stores?.stopLocal()
+        : session?.close({ releaseActivation: false }),
+    () => (retirementJoined ? stores?.stopLocal() : stores?.close()),
   ]) {
     try {
       await close();
@@ -901,13 +943,16 @@ try {
         cleanupErrors.push(error);
     }
   }
-  await worker?.close();
+  try {
+    await worker?.close();
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
   Server.prototype.listen = nativeListen;
   Object.defineProperties(ManagedCsiMount.prototype, originalMount);
   Object.defineProperty(process, 'platform', actualPlatform);
   Object.assign(fs, native);
   for (const handle of opened) await handle.close();
-  closedRoot = true;
   await rootHandle.close();
   await fs.rm(workspace, { recursive: true, force: true });
   assert.deepEqual(cleanupErrors, [], 'Unexpected private cleanup refusal');
