@@ -452,8 +452,15 @@
                                  budgeted, a conservative 2.4x): the
                                  healthy sum becomes 5153 s, so the
                                  fork moves to 5763 s and the Verify
-                                 step to 107 minutes. -->
-                            <forkedProcessTimeoutInSeconds>5763</forkedProcessTimeoutInSeconds>
+                                 step to 107 minutes. The FG12f
+                                 stream-gap class (HostedMcpStreamGap
+                                 IT, three cases, three cold boots)
+                                 measures 104.6 s locally on JDK 21 +
+                                 MySQL 8.0.46 (~210 s budgeted at 2x):
+                                 the healthy sum becomes 5363 s, so
+                                 the fork moves to 5963 s and the
+                                 Verify step to 110 minutes. -->
+                            <forkedProcessTimeoutInSeconds>5963</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -607,7 +614,7 @@
                     <includes><include>**/HostedMcp*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
-                         per-class rule for the three MCP classes: the
+                         per-class rule for the four MCP classes: the
                          largest @Timeout ceiling (600 s) plus the
                          classes' healthy runtime must fit 1200 s. -->
                     <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>

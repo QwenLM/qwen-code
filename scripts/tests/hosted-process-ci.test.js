@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (107 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (110 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 187, 200],
+    ['hosted-harness-mysql', 190, 203],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -606,12 +606,15 @@ describe('Hosted real-process gates', () => {
       // the fork moves to 5643, still inside those 105 minutes; the FG12b
       // store-failure class measures 49.6 s locally on JDK 21 + MySQL
       // 8.0.46 (~120 s budgeted, a conservative 2.4x), so the fork moves to
-      // 5763 and the Verify step to 107 minutes):
+      // 5763 and the Verify step to 107 minutes; the FG12f stream-gap class
+      // measures 104.6 s locally on JDK 21 + MySQL 8.0.46 (~210 s budgeted
+      // at 2x), so the fork moves to 5963 and the Verify step to 110
+      // minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(5763);
+        expect(forkSeconds).toBe(5963);
       }
     },
   );
@@ -658,10 +661,14 @@ describe('Hosted real-process gates', () => {
   // of the class (four cases, three cold restarts), measure 62.1-72.4s across
   // three acceptance runs (~145s budgeted at 2x), so it becomes 5033s; the
   // FG12b store-failure class measures 49.6s locally on JDK 21 + MySQL
-  // 8.0.46 (~120s budgeted, a conservative 2.4x), so it becomes 5153s.
-  // A larger ceiling lets failsafe kill the fork mid-run, and the classes
-  // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 5153;
+  // 8.0.46 (~120s budgeted, a conservative 2.4x), so it becomes 5153s; the
+  // FG12f stream-gap class (HostedMcpStreamGapIT, three cases, three cold
+  // boots) measures 104.6s locally on the same stack (~210s budgeted at
+  // 2x), so it becomes 5363s. The largest ceiling (600s) plus that healthy
+  // sum still fits the fork. A larger ceiling lets failsafe kill the fork
+  // mid-run, and the classes left unrun never report, failing the gate
+  // undiagnosably (#13780).
+  const hostedForkHealthySeconds = 5363;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -732,6 +739,7 @@ describe('Hosted real-process gates', () => {
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
       'HostedMcpStoreFaultGatesIT',
+      'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',

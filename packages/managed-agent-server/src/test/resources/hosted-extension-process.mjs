@@ -11,8 +11,17 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 const [mode, evidence, revision] = process.argv.slice(2);
+// The process identity is only meaningful on the Linux lane; reading it
+// through a guard keeps the fixture runnable where /proc is absent.
+const readOrNull = (file) => {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+};
 const stat = () =>
-  readFileSync('/proc/self/stat', 'utf8').split(') ').at(-1).split(' ')[19];
+  readOrNull('/proc/self/stat')?.split(') ').at(-1).split(' ')[19] ?? null;
 // A held call blocks its own stdin loop on purpose: the stream gates need a
 // tool call that is still open while the client disconnects. The release
 // marker keeps that wait test-controlled instead of a fixed sleep.
@@ -42,8 +51,8 @@ function record(event, fields = {}) {
     pid: process.pid,
     parentPid: process.ppid,
     startTicks: stat(),
-    bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
-    cgroup: readFileSync('/proc/self/cgroup', 'utf8').trim(),
+    bootId: readOrNull('/proc/sys/kernel/random/boot_id')?.trim() ?? null,
+    cgroup: readOrNull('/proc/self/cgroup')?.trim() ?? null,
     cwd: process.cwd(),
     revision: Number(revision),
     ...fields,
