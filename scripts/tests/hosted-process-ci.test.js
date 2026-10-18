@@ -605,16 +605,17 @@ describe('Hosted real-process gates', () => {
       // minutes; FG11b slice 2's Harness-side store faults add ~145 s, so
       // the fork moves to 5643, still inside those 105 minutes; the
       // event-stream liveness gates add ~440 s, so the fork moves to 6083;
-      // the FG13d dropped-reply cancel cell adds 150 s and the FG12b
-      // store-failure class adds ~120 s (49.6 s measured locally on JDK 21 +
-      // MySQL 8.0.46), so the fork moves to 6353; the FG12f stream-gap class
-      // adds ~210 s (104.6 s measured on the same stack), so the fork moves
-      // to 6553 and the Verify step to 120 minutes):
+      // the FG13d dropped-reply cancel cell adds 150 s, so the fork moves to
+      // 6233; the FG12b store-failure class adds ~120 s (49.6 s measured
+      // locally on JDK 21 + MySQL 8.0.46), so the fork moves to 6353 and the
+      // Verify step to 116 minutes; the FG12f stream-gap class adds ~210 s
+      // (104.6 s measured on the same stack), so the fork moves to 6563 and
+      // the Verify step to 120 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(6553);
+        expect(forkSeconds).toBe(6563);
       }
     },
   );
@@ -664,14 +665,14 @@ describe('Hosted real-process gates', () => {
   // the shipped 15s keepalive and 45s bound) measure 214.4–215.0s for the
   // class locally on JDK 21 and 25 + MySQL 8.4.6 across four acceptance runs
   // (~440s budgeted at 2x), so it becomes 5473s; the FG13d dropped-reply
-  // cancel cell adds 150s, then the FG12b store-failure class adds ~120s
-  // (49.6s measured on JDK 21 + MySQL 8.0.46), so it becomes 5743s; the
-  // FG12f stream-gap class (HostedMcpStreamGapIT, three cases, three cold
-  // boots) measures 104.6s locally on the same stack (~210s budgeted), so it
-  // becomes 5953s. The largest ceiling (600s) plus that healthy sum still
-  // fits the fork. A larger ceiling lets failsafe kill the fork mid-run, and
-  // the classes left unrun never report, failing the gate undiagnosably
-  // (#13780).
+  // cancel cell adds 150s, so it becomes 5623s; the FG12b store-failure
+  // class adds ~120s (49.6s measured on JDK 21 + MySQL 8.0.46), so it
+  // becomes 5743s; the FG12f stream-gap class (HostedMcpStreamGapIT, three
+  // cases, three cold boots) measures 104.6s locally on the same stack
+  // (~210s budgeted), so it becomes 5953s. The largest ceiling (600s) plus
+  // that healthy sum still fits the fork. A larger ceiling lets failsafe
+  // kill the fork mid-run, and the classes left unrun never report, failing
+  // the gate undiagnosably (#13780).
   const hostedForkHealthySeconds = 5953;
   const hostedForkSeconds = () =>
     Number(

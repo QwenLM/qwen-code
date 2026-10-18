@@ -464,9 +464,9 @@
                                  three cold boots) measures 104.6 s
                                  locally on the same stack (~210 s
                                  budgeted): the healthy sum becomes
-                                 5953 s, so the fork moves to 6553 s
+                                 5953 s, so the fork moves to 6563 s
                                  and the Verify step to 120 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6553</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>6563</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
