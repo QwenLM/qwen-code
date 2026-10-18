@@ -357,6 +357,15 @@ vi.mock('./hosted-workflow-turn.js', async (importOriginal) => ({
 
 const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
+
+// Every turn-settling wait in this file polls the daemon until the pipeline
+// reports a terminal state. On a loaded runner that pipeline outlasts a 10 s
+// budget long before anything is wrong with it, which is how the same file
+// came to fail on different assertions on different days (#14406, #14023).
+// Use the slow-host policy the file already applies elsewhere instead of a
+// fresh number, and stay below the 60 s per-test ceiling so a genuine hang
+// still fails inside the test rather than at the runner's timeout.
+const SETTLE_TIMEOUT_MS = isSlowTestHost() ? 45_000 : 10_000;
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 
 async function enforceInlineResourceLimit() {
@@ -523,7 +532,7 @@ async function parkBlockedTextTurn(profile: boolean) {
       expect(status.body.recoveryBlocked).toBe(true);
       expect(status.body.hasActivePrompt).toBe(false);
     },
-    { timeout: 10_000 },
+    { timeout: SETTLE_TIMEOUT_MS },
   );
   await headers(supertest(server).delete(`/session/${SESSION_ID}`));
 }
@@ -1332,7 +1341,7 @@ describe('Hosted Harness no-tool session', () => {
         // The turn's settle crosses fsync-backed journal commits before the
         // active flag clears; the default 1s waitFor window flaked on a loaded
         // CI runner (#14101, #13219).
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
     await send().expect(202);
     await idle();
@@ -1424,7 +1433,7 @@ describe('Hosted Harness no-tool session', () => {
             ).set('X-Qwen-Client-Id', clientId);
             expect(result.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
       await send().expect(202);
       await idle();
@@ -1644,7 +1653,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', created.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
@@ -2179,7 +2188,7 @@ describe('Hosted Harness no-tool session', () => {
       // #14101: the admission crosses fsync-backed journal commits before
       // the model call; the default 1s waitFor window flaked on a loaded
       // CI runner (#13219).
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const original =
       LocalManagedSessionAuthority.prototype.appendExecutionEvent;
@@ -2214,7 +2223,7 @@ describe('Hosted Harness no-tool session', () => {
       // #14101: the cancelled turn's settle crosses fsync-backed journal
       // commits before the active flag clears; the default 1s waitFor
       // window flaked on a loaded CI runner (#13219).
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/detach`),
@@ -2257,7 +2266,7 @@ describe('Hosted Harness no-tool session', () => {
         // #14101: the admission crosses fsync-backed journal commits before
         // the model call; the default 1s waitFor window flaked on a loaded
         // CI runner (#13219).
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       state.authorizeOrdinary.mockClear();
       state.authorizeOrdinary.mockRejectedValue(cause);
@@ -2284,7 +2293,7 @@ describe('Hosted Harness no-tool session', () => {
         // #14101: the cancelled turn's settle crosses fsync-backed journal
         // commits before the active flag clears; the default 1s waitFor
         // window flaked on a loaded CI runner (#13219).
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       state.authorizeOrdinary.mockResolvedValue(undefined);
       await authorize(
@@ -2912,7 +2921,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(again.body.run.state).toBe('settled');
         expect(again.body.run.execution).toBe('settled');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     expect(state.model).toHaveBeenCalledTimes(1);
     const modelInput = state.model.mock.calls[0]![0] as {
@@ -3026,7 +3035,7 @@ describe('Hosted Harness no-tool session', () => {
       ).toBe(202);
       expect((await operations(fireBody())).status).toBe(202);
       await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       expect(signal.aborted).toBe(false);
       expect(
@@ -3047,7 +3056,7 @@ describe('Hosted Harness no-tool session', () => {
           expect((await operations(fireBody())).body.run.state).toBe(
             'cancelled',
           ),
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect((await cancel()).body.run.state).toBe('cancelled');
       expect(
@@ -3068,7 +3077,7 @@ describe('Hosted Harness no-tool session', () => {
             (await operations(fireBody(1, 'manual:later', 'manual'))).body.run
               .state,
           ).toBe('settled'),
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect((await cancel('manual:later')).body.run.state).toBe('settled');
       expect(state.model).toHaveBeenCalledTimes(2);
@@ -3108,7 +3117,7 @@ describe('Hosted Harness no-tool session', () => {
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
       await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       expect(
         (
@@ -3147,7 +3156,7 @@ describe('Hosted Harness no-tool session', () => {
               .state,
           ).toBe('settled');
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).toHaveBeenCalledTimes(2);
       expect(signal.aborted).toBe(false);
@@ -3179,7 +3188,7 @@ describe('Hosted Harness no-tool session', () => {
           execution: 'not_started_proven',
         });
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(state.model).not.toHaveBeenCalled();
   });
@@ -3720,7 +3729,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(replayed.body.run.state).toBe('failed');
         expect(replayed.body.run.execution).toBe('settled');
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const exploded = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
     // The next occurrence's wake turn never receives the exploded turn's
@@ -3732,7 +3741,7 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
     expect(fired.status).toBe(202);
     await vi.waitFor(() => expect(state.model).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     const modelInput = state.model.mock.calls.at(-1)![0] as {
       promptId?: string;
@@ -5775,7 +5784,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(modelEntered).toBe(true);
           expect(userRecordWritten).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // An overlap `skip` slot's reconcile while the turn runs: no
       // aftermath is in flight, so only the slot guard keeps the route
@@ -5807,7 +5816,7 @@ describe('Hosted Harness no-tool session', () => {
             );
             expect(idle.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         )
         .catch(() => undefined);
     }
@@ -5819,7 +5828,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(replayed.body.run.state).toBe('settled');
         expect(replayed.body.run.execution).toBe('settled');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     expect(state.model).toHaveBeenCalledTimes(1);
     expect(
@@ -6081,7 +6090,7 @@ describe('Hosted Harness no-tool session', () => {
     const authorize = (request: supertest.Test) =>
       headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
     await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
       interval: 50,
     });
     expect(
@@ -6097,7 +6106,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(again.status).toBe(202);
         expect(again.body.run.state).toBe('settled');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     const status = await authorize(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -6125,7 +6134,7 @@ describe('Hosted Harness no-tool session', () => {
         );
         expect(idle.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
@@ -6165,7 +6174,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(settled.status).toBe(202);
         expect(settled.body.run.state).toBe('settled');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
@@ -6239,7 +6248,7 @@ describe('Hosted Harness no-tool session', () => {
     const runId = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
     // The discriminating point of the F6 wall: which id reaches acquire.
     await vi.waitFor(() => expect(acquired.length).toBeGreaterThan(0), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
       interval: 50,
     });
     const expected = `wake-${createHash('sha256').update(`${runId}:input`).digest('hex')}`;
@@ -6393,7 +6402,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(replayed.body.run.state).toBe('failed');
           expect(replayed.body.run.execution).toBe('outcome_unknown');
         },
-        { timeout: 10_000, interval: 50 },
+        { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
       );
       await vi.waitFor(async () => {
         const journal = await LocalJsonlManagedSessionJournalStore.read(
@@ -6439,7 +6448,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(replayed.body.run.state).toBe('failed');
         expect(replayed.body.run.execution).toBe('outcome_unknown');
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const crashed = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
     // The settlement of that crash is also its release: once settled and
@@ -6455,7 +6464,7 @@ describe('Hosted Harness no-tool session', () => {
         ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
         expect(accepted.status).toBe(202);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const key = {
       tenantId: 'tenant',
@@ -6690,7 +6699,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(replayed.body.run.state).toBe('failed');
         expect(replayed.body.run.execution).toBe('settled');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
@@ -6714,7 +6723,7 @@ describe('Hosted Harness no-tool session', () => {
       async () => {
         expect((await operations(fireBody())).body.run.state).toBe('settled');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     const read = vi
       .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
@@ -6760,7 +6769,7 @@ describe('Hosted Harness no-tool session', () => {
         );
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
       204,
@@ -6784,7 +6793,7 @@ describe('Hosted Harness no-tool session', () => {
       async () => {
         expect((await operations(fireBody())).body.run.state).toBe('settled');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     // WritesStoppedError extends ManagedSessionRecordError: reordering the
     // arm below the plain-record arm would flip the answer to 400 — and
@@ -7758,7 +7767,7 @@ describe('Hosted Harness no-tool session', () => {
           stopReason: 'harness_interruption',
         });
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await vi.waitFor(
       async () => {
@@ -7769,7 +7778,7 @@ describe('Hosted Harness no-tool session', () => {
           .expect(200);
         expect(history.body.history?.pendingTurn ?? null).toBeNull();
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(
       vi.mocked(HostedWorkspaceBroker.prototype.status),
@@ -7782,7 +7791,7 @@ describe('Hosted Harness no-tool session', () => {
           vi.mocked(HostedWorkspaceBroker.prototype.release),
         ).toHaveBeenCalled();
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(
       (
@@ -7830,7 +7839,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(settled).toHaveLength(1);
         expect(settled[0]!.payload).toMatchObject({ outcome: 'cancelled' });
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The first attempt died at the fault; the busy retry proved the stop
     // on the second pass — never a terminal block.
@@ -7844,7 +7853,7 @@ describe('Hosted Harness no-tool session', () => {
           .expect(200);
         expect(history.body.history?.pendingTurn ?? null).toBeNull();
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(
       (
@@ -7898,7 +7907,7 @@ describe('Hosted Harness no-tool session', () => {
           ),
         ).toHaveLength(1);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The parked execution's journaled outcome is the honest unobservable
     // one — never the cancelled a witnessed stop would have earned.
@@ -7962,7 +7971,7 @@ describe('Hosted Harness no-tool session', () => {
       },
       // #14101: the parked chain crosses fsync-backed journal commits; the
       // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const journal = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
@@ -8034,7 +8043,7 @@ describe('Hosted Harness no-tool session', () => {
       () => {
         expect(status.mock.calls.length).toBeGreaterThan(0);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     blockSettleReads = true;
     releaseStatus();
@@ -8049,7 +8058,7 @@ describe('Hosted Harness no-tool session', () => {
           ),
         ).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const readSettled = async () =>
       (
@@ -8075,7 +8084,7 @@ describe('Hosted Harness no-tool session', () => {
       async () => {
         expect(await readSettled()).toHaveLength(1);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(
       (
@@ -8120,7 +8129,7 @@ describe('Hosted Harness no-tool session', () => {
       },
       // #14101: the debt settle crosses fsync-backed journal commits; the
       // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const parked = await readJournal();
     const terminals = parked.events.filter(
@@ -8281,7 +8290,7 @@ describe('Hosted Harness no-tool session', () => {
           ),
         ).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The terminal record lands while the pump's own busy epoch is still
     // closing out, so the close can answer 409 for one more tick — a
@@ -8296,7 +8305,7 @@ describe('Hosted Harness no-tool session', () => {
           ).status,
         ).toBe(204);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
   });
 
@@ -8405,7 +8414,7 @@ describe('Hosted Harness no-tool session', () => {
             .status,
         ).toBe(204);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
   });
 
@@ -8515,7 +8524,7 @@ describe('Hosted Harness no-tool session', () => {
             .status,
         ).toBe(204);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
   });
 
@@ -8861,7 +8870,7 @@ describe('Hosted Harness no-tool session', () => {
         expect((await settledOf('msg_running:message'))?.['outcome']).toBe(
           'cancelled',
         ),
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(await settledOf('msg_waiting:message')).toBeUndefined();
@@ -8964,7 +8973,7 @@ describe('Hosted Harness no-tool session', () => {
               event.payload['turnId'] === 'msg_runs:message',
           )?.payload['outcome'],
         ).toBe('completed'),
-      { timeout: 10_000, interval: 50 },
+      { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
     );
     const calls = state.model.mock.calls.length;
     const admitted = await load(store());
@@ -10517,7 +10526,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // Admission attached the record but nothing settled it: a live
     // observation loop is the only owner of its terminal write.
@@ -10676,7 +10685,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect((await readMonitorRun()).stopReason).toBeNull();
     expect((await readMonitorRun()).run.execution).toBe('running_attached');
@@ -10792,7 +10801,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // #13800: the blocked turn's mount lease must go back — a leaked
       // lease wedged every later tool turn on the same storage — while the
@@ -10898,7 +10907,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The cleanup keeps owing its full release; the mount is not held
     // hostage to it.
@@ -11002,7 +11011,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The full release stays owed behind the durable terminal; only the
     // mount goes back.
@@ -11089,7 +11098,7 @@ describe('Hosted Harness no-tool session', () => {
         // The designed hold is not a wedge: the Session stays healthy.
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(release).toHaveBeenCalledTimes(1);
     expect(release.mock.calls[0]).toEqual([]);
@@ -11184,7 +11193,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(
       (
@@ -11952,7 +11961,7 @@ describe('Hosted Harness no-tool session', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).toHaveBeenCalledOnce();
       await authorize(
@@ -12113,7 +12122,7 @@ describe('Hosted Harness no-tool session', () => {
             recoveryBlocked: true,
           });
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const child = requests.find((entry) => entry.kind === 'hook-execute')!;
       const originalWrite = ManagedSessionRecordSink.prototype.write;
@@ -12166,7 +12175,7 @@ describe('Hosted Harness no-tool session', () => {
             ).set('X-Qwen-Client-Id', loaded.body.clientId);
             expect(status.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         return;
       }
@@ -12206,7 +12215,7 @@ describe('Hosted Harness no-tool session', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/detach`),
@@ -12306,7 +12315,7 @@ describe('Hosted Harness no-tool session', () => {
             recoveryBlocked: true,
           });
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // Once the evaluation definitively ends the Runtime republishes its
       // receipt, and the next prompt reconciles the fence, settles the parked
@@ -12330,7 +12339,7 @@ describe('Hosted Harness no-tool session', () => {
             recoveryBlocked: false,
           });
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const transcript = await authorize(
         supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -12433,7 +12442,7 @@ describe('Hosted Harness no-tool session', () => {
             recoveryBlocked: true,
           });
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // Once the evaluation definitively ends the Runtime republishes its
       // receipt, and the next prompt reconciles the fence, settles the
@@ -12458,7 +12467,7 @@ describe('Hosted Harness no-tool session', () => {
             recoveryBlocked: false,
           });
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const transcript = await authorize(
         supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -12617,7 +12626,7 @@ describe('Hosted Harness no-tool session', () => {
             recoveryBlocked: true,
           });
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const child = requests.find((entry) => entry.kind === 'hook-execute')!;
       const originalWrite = ManagedSessionRecordSink.prototype.write;
@@ -12713,7 +12722,7 @@ describe('Hosted Harness no-tool session', () => {
               );
               expect(settled.body.hasActivePrompt).toBe(false);
             },
-            { timeout: 10_000 },
+            { timeout: SETTLE_TIMEOUT_MS },
           );
         if (!fail) return;
       }
@@ -12817,7 +12826,7 @@ describe('Hosted Harness no-tool session', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       await owner(
         supertest(recovered).post(`/session/${SESSION_ID}/detach`),
@@ -12878,7 +12887,7 @@ describe('Hosted Harness no-tool session', () => {
               recoveryBlocked: true,
             });
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
       await submit(PROMPT_ID).expect(202);
       await expectBlocked();
@@ -12937,7 +12946,7 @@ describe('Hosted Harness no-tool session', () => {
             expect(status.body.hasActivePrompt).toBe(false);
             expect(status.body.recoveryBlocked).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
       }
       const operation = {
@@ -13124,7 +13133,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const key = {
       tenantId: 'tenant',
@@ -13179,7 +13188,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const transcript = await restored(
       supertest(replacement).get(`/session/${SESSION_ID}/transcript`),
@@ -13205,7 +13214,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await restored(
       supertest(replacement).post(`/session/${SESSION_ID}/detach`),
@@ -13328,7 +13337,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).toHaveBeenCalledOnce();
       await owner(
@@ -13683,7 +13692,7 @@ describe('Hosted Harness no-tool session', () => {
           'The prompting client disconnected.',
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     control.mockImplementation(original);
     const deleted = await authorize(
@@ -13748,7 +13757,7 @@ describe('Hosted Harness no-tool session', () => {
           recoveryBlocked: true,
         });
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const child = requests.find((entry) => entry.kind === 'hook-execute')!;
     republished.set(child.operationId, {
@@ -13800,7 +13809,7 @@ describe('Hosted Harness no-tool session', () => {
             ),
           ).toHaveLength(2);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
     } finally {
       commits.mockRestore();
@@ -13824,7 +13833,7 @@ describe('Hosted Harness no-tool session', () => {
           recoveryBlocked: false,
         });
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const transcript = await authorize(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -14074,7 +14083,7 @@ describe('Hosted Harness no-tool session', () => {
       });
       try {
         await vi.waitFor(() => expect(configurationId).toBeDefined(), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         if (ending === 'cancel')
           expect(
@@ -14123,7 +14132,7 @@ describe('Hosted Harness no-tool session', () => {
                 )
               ).body.hasActivePrompt,
             ).toBe(false),
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         expect(
           requests
@@ -14150,7 +14159,7 @@ describe('Hosted Harness no-tool session', () => {
               true,
             );
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
       }
@@ -14593,7 +14602,7 @@ describe('Hosted Harness no-tool session', () => {
             ]),
           );
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(modelRequests).toBe(0);
       expect((await send(randomUUID())).status).toBe(202);
@@ -14605,7 +14614,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(modelRequests).toBe(1);
       expect(
@@ -14784,7 +14793,7 @@ describe('Hosted Harness no-tool session', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const transcript = await authorize(
         supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -14808,7 +14817,7 @@ describe('Hosted Harness no-tool session', () => {
             recoveryBlocked: false,
           });
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(
         requests.filter((entry) => entry.kind === 'mcp-configure'),
@@ -14998,7 +15007,7 @@ describe('Hosted Harness no-tool session', () => {
             expect(status.body.hasActivePrompt).toBe(false);
             expect(status.body.recoveryBlocked).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         expect(state.model).toHaveBeenCalledOnce();
       }
@@ -15054,7 +15063,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(admit).toHaveBeenCalledOnce();
     expect(state.model).toHaveBeenCalledOnce();
@@ -15221,7 +15230,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(firstDeclarations).toEqual([
       'read_file',
@@ -15286,7 +15295,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(resumedDeclarations).toEqual([
       'read_file',
@@ -15351,7 +15360,7 @@ describe('Hosted Harness no-tool session', () => {
             ).set('X-Qwen-Client-Id', clientId);
             expect(status.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         expect(names).toEqual([
           'read_file',
@@ -15483,7 +15492,7 @@ describe('Hosted Harness no-tool session', () => {
           ).set('X-Qwen-Client-Id', clientId);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(declared).toBeDefined();
       return declared!;
@@ -15569,7 +15578,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(declared).toBeDefined();
     return declared!;
@@ -15734,7 +15743,7 @@ describe('Hosted Harness no-tool session', () => {
             ending === 'execution-error',
           );
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       try {
         expect(descriptor).toBeDefined();
@@ -15834,7 +15843,7 @@ describe('Hosted Harness no-tool session', () => {
           ).set('X-Qwen-Client-Id', clientId);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // Availability clears first, exactly like the turn discipline
       // promises. The publisher is Session-scoped — nothing closes it at
@@ -15857,7 +15866,7 @@ describe('Hosted Harness no-tool session', () => {
       // actually parks while we assert on it.
       void deletion.catch(() => undefined);
       await vi.waitFor(() => expect(closeCalls).toBe(1), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       for (const resume of parkedResumers) resume();
       await deletion.expect(204);
@@ -16010,7 +16019,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', created.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -16113,7 +16122,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -17503,7 +17512,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     write.mockRestore();
     // A drive redrive keeps the typed decline.
@@ -17575,7 +17584,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', created.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(state.model).toHaveBeenCalledTimes(1);
 
@@ -17781,7 +17790,7 @@ describe('Hosted Harness no-tool session', () => {
           ).set('X-Qwen-Client-Id', created.body.clientId as string);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const transcript = await headers(
         supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
@@ -17873,7 +17882,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
       },
       // Settlement includes fsync-backed writes and can exceed 1s on busy CI.
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(state.model).toHaveBeenCalledTimes(1);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
@@ -17940,7 +17949,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
       },
       // Settlement includes fsync-backed writes and can exceed 1s on busy CI.
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
     const loaded = await headers(
@@ -18107,7 +18116,7 @@ describe('Hosted Harness no-tool session', () => {
             expect(status.body.hasActivePrompt).toBe(false);
             expect(status.body.recoveryBlocked).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
       };
       await send(PROMPT_ID);
@@ -18202,7 +18211,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(response?.['outputOmitted']).toBe(true);
     expect(response?.['executionStatus']).toBe('success');
@@ -18416,7 +18425,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(failed).toBe(true);
       expect(acknowledge).not.toHaveBeenCalled();
@@ -18597,7 +18606,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).toHaveBeenCalledTimes(2);
       expect(acknowledge).toHaveBeenCalledOnce();
@@ -18625,7 +18634,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(acknowledge).toHaveBeenCalledTimes(2);
       expect(state.model).toHaveBeenCalledTimes(2);
@@ -18751,7 +18760,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', created.body.clientId as string);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(failed).toBe(true);
     await headers(supertest(first).delete('/session/' + SESSION_ID)).expect(
@@ -18774,7 +18783,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(state.model).toHaveBeenCalledTimes(2);
     expect(acknowledge).not.toHaveBeenCalled();
@@ -18842,7 +18851,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(transcript.body.events.length).toBeGreaterThan(2);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
 
     const originalWrite = ServerResponse.prototype.write;
@@ -19055,7 +19064,7 @@ describe('Hosted Harness no-tool session', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(log).toHaveBeenCalledWith(
       `qwen serve: Hosted Harness turn ${PROMPT_ID} failed: Error: model initialization failed`,
@@ -19135,7 +19144,7 @@ describe('Hosted Harness no-tool session', () => {
             ]),
           );
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(failed).toBe(true);
       expect(state.model).toHaveBeenCalledTimes(modelCalls);
@@ -19179,7 +19188,7 @@ describe('Hosted Harness no-tool session', () => {
             ]),
           );
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).toHaveBeenCalledTimes(modelCalls + 1);
       await headers(supertest(server).delete(`/session/${SESSION_ID}`));
@@ -19220,7 +19229,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -19330,7 +19339,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -19412,7 +19421,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', clientId)
@@ -19498,7 +19507,7 @@ describe('Hosted Harness no-tool session', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
@@ -19561,7 +19570,7 @@ describe('Hosted Harness no-tool session', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The owed mount-handback chain stays alive for up to ~1 min and logs
     // a line per failed attempt; chains owned by other tests' blocked
@@ -19624,7 +19633,7 @@ describe('Hosted Harness no-tool session', () => {
           ),
         ).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const saved = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
@@ -19653,7 +19662,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', created.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
@@ -19722,7 +19731,7 @@ describe('Hosted Harness no-tool session', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const saved = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
@@ -19832,7 +19841,7 @@ describe('Hosted Harness no-tool session', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const saved = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
@@ -19897,7 +19906,7 @@ describe('Hosted Harness no-tool session', () => {
     const idle = () =>
       vi.waitFor(
         async () => expect((await status()).body.hasActivePrompt).toBe(false),
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
     const resident = capturedWakeSession();
     const owe = async (promptId = PROMPT_ID) => {
@@ -20059,7 +20068,7 @@ describe('Hosted Harness no-tool session', () => {
     });
     await f.submit(10_000);
     await vi.waitFor(() => expect(modelWaiting).toBe(true), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     await f
       .authorize(supertest(f.server).post(`/session/${SESSION_ID}/cancel`))
@@ -20098,7 +20107,7 @@ describe('Hosted Harness no-tool session', () => {
           expect(
             events().filter((event) => event.kind === 'turn.settled'),
           ).toHaveLength(1),
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(
         events().find((event) => event.kind === 'turn.settled')!.payload,
@@ -20158,7 +20167,9 @@ describe('Hosted Harness no-tool session', () => {
       })
       .then((response) => response);
     try {
-      await vi.waitFor(() => expect(reading).toBe(true), { timeout: 10_000 });
+      await vi.waitFor(() => expect(reading).toBe(true), {
+        timeout: SETTLE_TIMEOUT_MS,
+      });
       f.resident.mcpClosing = true;
       const closingRefusal = await headers(
         supertest(f.server).post(`/session/${SESSION_ID}/load`),
@@ -20309,11 +20320,11 @@ describe('Hosted Harness no-tool session', () => {
             expect(f.resident.cleanupBlocked).toBe(true);
             expect(releases.length).toBeGreaterThan(0);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         await vi.waitFor(
           () => expect(releases.filter((item) => item.failed)).toHaveLength(4),
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         expect(releases[3].at - releases[2].at).toBeGreaterThanOrEqual(400);
         expect(releases).toHaveLength(4);
@@ -20324,7 +20335,7 @@ describe('Hosted Harness no-tool session', () => {
             expect(f.resident.blocked).toBe(false);
             expect(f.resident.cleanupBlocked).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         expect(releases.filter((item) => !item.failed)).toHaveLength(1);
         expect(
@@ -20539,7 +20550,7 @@ describe('Hosted Harness tool approvals', () => {
   // Turns commit and sync several records, which can take over a second
   // on a busy host.
   const waitFor = <T>(check: () => T | Promise<T>) =>
-    vi.waitFor(check, { timeout: 10_000 });
+    vi.waitFor(check, { timeout: SETTLE_TIMEOUT_MS });
 
   beforeEach(async () => {
     vi.spyOn(
@@ -22523,7 +22534,7 @@ describe('Hosted Harness refusal reasons', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The worker dies mid-undo: the marker must stay so the next load still
     // refuses to settle a Shell the history never finished.
@@ -22769,7 +22780,7 @@ describe('Hosted Harness refusal reasons', () => {
         expect(status.body.recoveryBlocked).toBe(true);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(
       supertest(result).delete(`/session/${DECLINE_SESSION}`),
@@ -22992,7 +23003,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       .send({ prompt, promptId: PROMPT_ID, payloadDigest });
     expect(admitted.status).toBe(202);
     await vi.waitFor(() => expect(execute).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
       'X-Qwen-Client-Id',
@@ -23006,7 +23017,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     if (!retainOwner) {
       const closed = await headers(
@@ -23360,7 +23371,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           'await_agent',
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The owner "crashes": the cancellation reaches the abandoned fold,
     // whose write was sabotaged — the wait stays parked, and the durable
@@ -23377,7 +23388,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     sabotage.mockRestore();
     expect(
@@ -23709,7 +23720,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The Runtime batch committed as takeover-era work: the shell round's
     // own durable wait is what follows the adopted continue.
@@ -23781,7 +23792,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The swallowed-read shape would start the model round anyway; the
     // guarded one blocks the Turn first.
@@ -23839,7 +23850,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -24244,7 +24255,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(killed).toBe(true);
       vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
@@ -24299,7 +24310,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         // settlement write die, so the status converges to the named
         // failure rather than to a load refusal.
         await vi.waitFor(() => expect(resumed).toBeDefined(), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         // An empty replay is defined too: pin that the load really passed
         // the journaled siblings through, by the batch's own call ids.
@@ -24569,7 +24580,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(killed).toBe(true);
       vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
@@ -24624,7 +24635,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         // commit die, so the named failure comes from the turn's own
         // bookkeeping rather than from the latch marker.
         await vi.waitFor(() => expect(resumed).toBeDefined(), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         // An empty replay is defined too: pin that the load really passed
         // the journaled siblings through, by the batch's own call ids.
@@ -24901,7 +24912,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ),
         ).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
       'X-Qwen-Client-Id',
@@ -24915,7 +24926,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     sabotage.mockRestore();
     expect(
@@ -24979,7 +24990,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const transcript = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -25035,7 +25046,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The recovery fleet's own lane parks like the prompt route: the mount
     // goes back once, the READY identity stays for the next re-drive.
@@ -25102,7 +25113,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // The fault fired: the resume never answered call-1 itself.
       expect(injected).toHaveBeenCalled();
@@ -25530,7 +25541,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
 
     // After the continue settles, nothing is owed: a redrive answers the
@@ -25607,7 +25618,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     expect(admitted.status).toBe(202);
     await vi.waitFor(() => expect(state.model).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     await vi.waitFor(
       async () => {
@@ -25616,7 +25627,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         );
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // Phase 1: the parked user Turn (parkToolTurn's shape, inline).
     state.model.mockImplementationOnce(
@@ -25643,7 +25654,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).send({ prompt, promptId: PROMPT_ID, payloadDigest });
     expect(admittedPark.status).toBe(202);
     await vi.waitFor(() => expect(execute).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     await authorize(supertest(server).post(`/session/${SESSION_ID}/cancel`));
     await vi.waitFor(
@@ -25654,7 +25665,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const closed = await headers(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -25684,7 +25695,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
     expect(continued.status).toBe(200);
     await vi.waitFor(() => expect(state.model).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     const modelInput = state.model.mock.calls.at(-1)![0] as {
       promptId?: string;
@@ -25709,7 +25720,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(replacement).delete(`/session/${SESSION_ID}`),
@@ -25787,7 +25798,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ).set('X-Qwen-Client-Id', clientId);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(declarations).toEqual([
         'read_file',
@@ -25959,7 +25970,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         })
         .then((response) => response);
       await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledOnce(), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       // The parked recovery holds close()'s fence for its whole await, so a
       // DELETE without a client id is refused instead of racing the adoption:
@@ -26016,11 +26027,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
       try {
         firstLoad = passiveLoad();
         await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledOnce(), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         secondLoad = passiveLoad();
         await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledTimes(2), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         const bothInFlight = await headers(
           supertest(server).delete(`/session/${SESSION_ID}`),
@@ -26102,7 +26113,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         })
         .then((response) => response);
       await vi.waitFor(() => expect(status).toHaveBeenCalledOnce(), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       const closed = await headers(
         supertest(server).delete(`/session/${SESSION_ID}`),
@@ -26165,7 +26176,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         })
         .then((response) => response);
       await vi.waitFor(() => expect(acquireEntered).toBe(true), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       expect(acquireSpy).toHaveBeenCalledOnce();
       expect(
@@ -26302,7 +26313,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       async () => {
         expect((await getStatus()).body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The recovered Turn settled: the Session admits fresh Turns again.
     const nextPrompt = [{ type: 'text', text: 'after the takeover' }];
@@ -26331,7 +26342,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -26398,7 +26409,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', redriven.body.clientId as string);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const transcript = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -26823,7 +26834,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             'managed_session_store_unavailable',
           );
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
     } finally {
       failing.mockRestore();
@@ -27342,7 +27353,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The park is durable; the probe window below watches for the
     // projection's would-be terminal record.
@@ -27460,7 +27471,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       write.mockRestore();
       await headers(supertest(server).delete(`/session/${SESSION_ID}`));
@@ -27521,7 +27532,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
     },
   );
@@ -27562,7 +27573,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const originalWrite = ManagedSessionRecordSink.prototype.write;
       const write = vi
@@ -27589,7 +27600,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       write.mockRestore();
       await headers(supertest(server).delete(`/session/${SESSION_ID}`));
@@ -28107,7 +28118,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       // armed: no model Turn ran and the notification stays unsettled.
       await vi.waitFor(
         () => expect(kick.mock.calls.length).toBeGreaterThan(kicksAtLoad),
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).not.toHaveBeenCalled();
       const parkedJournal = await LocalJsonlManagedSessionJournalStore.read(
@@ -28150,12 +28161,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ).set('X-Qwen-Client-Id', clientId);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // The discharged marker must let the pump deliver the parked
       // notification: its model turn runs and its input settles.
       await vi.waitFor(() => expect(state.model).toHaveBeenCalled(), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       await vi.waitFor(
         async () => {
@@ -28175,7 +28186,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             ),
           ).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       await replacementHeaders(
         supertest(server).delete(`/session/${SESSION_ID}`),
@@ -28421,7 +28432,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(idle.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -28631,7 +28642,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -29046,7 +29057,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.recoveryBlocked).toBe(true);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The recovery-blocked exit keeps the adopted lease held: no handback is
     // attempted there, since a successful release would persist RELEASED and
@@ -29115,7 +29126,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.recoveryBlocked).toBe(true);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The blocked refusal keeps the lease too: the Turn is still parked, and
     // a release would persist RELEASED, wedging the next takeover's
@@ -29263,7 +29274,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(later.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -29722,7 +29733,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(release).toHaveBeenCalledTimes(1);
     // The execution's stop was never observed — the durable record must say
@@ -29895,7 +29906,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const settled = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -29979,7 +29990,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // …and the retirement it skipped stays owed: the admitted prompt's
     // admission drive retires the durable marker ahead of the new Turn (the
@@ -30097,7 +30108,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(settled.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const settled = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -30201,7 +30212,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(settled.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -30285,7 +30296,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const later = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -30364,7 +30375,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const later = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -30711,7 +30722,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const idle = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -30978,7 +30989,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The settled prompt is a terminal route: it must NOT have handed the
     // fresh adoption's lease back — the stale failure armed nothing.
@@ -31071,7 +31082,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
     expect(admitted.status).toBe(202);
     await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(2), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     // …and a cancel replay is one more terminal route retrying it — the
     // flag clears only on a confirmed handback, so the refusal above keeps
@@ -31079,7 +31090,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const replayed = await send();
     expect(replayed.status).toBe(200);
     await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(3), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     // The Broker then definitively forgot the session: its 404 satisfies
     // the handback instead of being retried with log noise forever.
@@ -31108,7 +31119,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(release).toHaveBeenCalledTimes(4);
     expect(new Set(releaseOwners).size).toBe(1);
@@ -31179,7 +31190,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.recoveryBlocked).toBe(true);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(release).toHaveBeenCalledTimes(1);
     // The owed lease survives to close(), whose handback is the
@@ -31282,7 +31293,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(execute.mock.calls.some((call) => call[0] === EXEC_B)).toBe(
           true,
         ),
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
       'X-Qwen-Client-Id',
@@ -31296,7 +31307,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
@@ -31337,7 +31348,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const continuedCall = state.model.mock.calls.find(
       (call) =>
@@ -31464,7 +31475,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The turn settled by now; the coordinator's replay must still answer
     // with the admission watermark, not the current sequence.
@@ -31545,7 +31556,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ).set('X-Qwen-Client-Id', clientId);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const historyAfter = await replacementHeaders(
         supertest(server).get(`/session/${SESSION_ID}/files/history`),
@@ -31614,7 +31625,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.recoveryBlocked).toBe(true);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // "accepted" is the only signal the coordinator ever got, but the Turn
     // will never settle — the replay must surface the refusal instead.
@@ -31681,7 +31692,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.recoveryBlocked).toBe(true);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // No terminal record landed: the Turn is still there to drive.
     const transcript = await replacementHeaders(
@@ -31760,7 +31771,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The durable record, not a spy: the marker the parked Turn left is
     // retired before the Session goes quiet.
@@ -31871,7 +31882,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
     // The replacement's reconciliation reads the parked execution as
@@ -31965,7 +31976,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // The fold's answer is durable: the committed team_create carries a
       // functionResponse in the projection, answered by what committed.
@@ -32042,7 +32053,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ).set('X-Qwen-Client-Id', clientId);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const settled = await replacementHeaders(
         supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -32172,7 +32183,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
               'managed_session_store_unavailable',
             );
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         // Both folds tried the answer, and only the first reached the store:
         // the fold's refusal is the stopped writer, not a second outage.
@@ -32242,7 +32253,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The failed drop left the settled Turn's marker pending…
     const owed = await replacementHeaders(
@@ -32268,7 +32279,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const retired = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/files/history`),
@@ -32315,7 +32326,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const admitted = await send();
     expect(admitted.status).toBe(200);
     await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     const replayed = await send();
     expect(replayed.status).toBe(200);
@@ -32330,7 +32341,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -32381,7 +32392,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await vi.waitFor(
       async () => {
@@ -32391,7 +32402,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(status.body.recoveryBlocked).toBe(false);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // …and the durable pending-Turn obligation retired with it: a cold load
     // after detach is admitted instead of refused forever, or one warm-up
@@ -32466,7 +32477,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await vi.waitFor(
       async () => {
@@ -32475,7 +32486,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/detach`),
@@ -32538,12 +32549,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The retirement failed at the settle point: it stays owed instead of
     // dragging the settled Turn down with it — and nothing blocks.
     await vi.waitFor(() => expect(dropSpy).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     const settledStatus = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -32556,7 +32567,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       .expect(204);
     // …and close retires it, so the cold load is still admitted.
     await vi.waitFor(() => expect(dropSpy).toHaveBeenCalledTimes(2), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     const reloaded = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -32670,7 +32681,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
               'Original file history marker is still owed',
             ),
           ),
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(release).not.toHaveBeenCalled();
       if (exit === 'DELETE') {
@@ -32768,10 +32779,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await vi.waitFor(() => expect(dropSpy).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     // The marker is still durable before the close…
     const before = await replacementHeaders(
@@ -32786,7 +32797,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     await vi.waitFor(
       () => expect(dropSpy.mock.calls.length).toBeGreaterThan(1),
       {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       },
     );
     commitSpy.mockRestore();
@@ -32859,10 +32870,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await vi.waitFor(() => expect(dropSpy).toHaveBeenCalled(), {
-      timeout: 10_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     // The drop was invoked, but the drive's busy flag clears only in its
     // finally — wait for that too, or the next /prompt can meet a 409.
@@ -32873,7 +32884,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // The new Turn's write needs an execution identity of its own — the
     // parked Turn's prepare mock still answers its own id.
@@ -32933,7 +32944,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     const after = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/status`),
@@ -32982,7 +32993,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ]),
         );
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     // A completed continuation already reconciled inside resumeCommittedResults:
     // the settle tail must not pay another fallible durable round trip that
@@ -33037,7 +33048,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining('Original file history snapshots changed.'),
@@ -33111,7 +33122,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       const admitted = await send(prompt, PROMPT_ID);
       expect(admitted.status).toBe(202);
       await vi.waitFor(() => expect(state.workflow).toHaveBeenCalledTimes(1), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       expect(state.workflow).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -33130,7 +33141,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).not.toHaveBeenCalled();
       // The user record's message resource carries the one-line summary,
@@ -33183,7 +33194,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       // The turn_result records a cancelled turn, never a failed one: the
       // registry torn down the start with this Turn's signal still live is
@@ -33266,7 +33277,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.workflow).toHaveBeenCalledTimes(1);
       expect(state.model).not.toHaveBeenCalled();
@@ -33301,7 +33312,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           );
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       const response = await send(workflowPrompt(), randomUUID());
       expect(response.status).toBe(400);
@@ -33432,7 +33443,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
     await vi.waitFor(
       () => expect(release.mock.calls.length).toBeGreaterThan(releasesBefore),
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -33518,7 +33529,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     // otherwise re-acquire it.
     await vi.waitFor(
       () => expect(release.mock.calls.length).toBeGreaterThan(releasesBefore),
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -33618,7 +33629,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
     await vi.waitFor(
       () => expect(release.mock.calls.length).toBeGreaterThan(releasesBefore),
-      { timeout: 10_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -33770,7 +33781,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
       expect(
@@ -33805,7 +33816,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         })
         .expect(202);
       await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), {
-        timeout: 10_000,
+        timeout: SETTLE_TIMEOUT_MS,
       });
       const answer = seen
         .filter(
@@ -33825,7 +33836,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
           expect(status.body.hasActivePrompt).toBe(false);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       await replacementHeaders(
         supertest(replacement).delete(`/session/${SESSION_ID}`),
@@ -33938,7 +33949,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             expect(status.body.hasActivePrompt).toBe(false);
             expect(status.body.recoveryBlocked).toBe(true);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
         expect(
@@ -34048,7 +34059,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           });
         expect(continued.status).toBe(200);
         await vi.waitFor(() => expect(resumed).toBeDefined(), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         expect(
           JSON.stringify(
@@ -34072,7 +34083,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
             expect(status.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         await replacementHeaders(
           supertest(replacement).delete(`/session/${SESSION_ID}`),
@@ -34180,7 +34191,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           expect(status.body.hasActivePrompt).toBe(false);
           expect(status.body.recoveryBlocked).toBe(true);
         },
-        { timeout: 10_000 },
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
       expect(
@@ -34525,7 +34536,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             expect(status.body.hasActivePrompt).toBe(false);
             expect(status.body.recoveryBlocked).toBe(true);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         expect(killed).toBe(true);
         vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
@@ -34544,7 +34555,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).send({ managedSessionStore: store() });
         expect(loaded.status).toBe(200);
         await vi.waitFor(() => expect(resumed).toBeDefined(), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         const answer = JSON.stringify(
           resumed!.find((part) => part.functionResponse?.id === 'call-2')
@@ -34571,7 +34582,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
             expect(status.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         await headers(supertest(second).delete(`/session/${SESSION_ID}`));
       } finally {
@@ -34730,7 +34741,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             ).set('X-Qwen-Client-Id', clientId);
             expect(status.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         expect(killed).toBe(true);
         vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
@@ -34766,7 +34777,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).send({ managedSessionStore: store() });
         expect(loaded.status).toBe(200);
         await vi.waitFor(() => expect(resumed).toBeDefined(), {
-          timeout: 10_000,
+          timeout: SETTLE_TIMEOUT_MS,
         });
         await vi.waitFor(
           async () => {
@@ -34775,7 +34786,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
             ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
             expect(status.body.hasActivePrompt).toBe(false);
           },
-          { timeout: 10_000 },
+          { timeout: SETTLE_TIMEOUT_MS },
         );
         const journal = await LocalJsonlManagedSessionJournalStore.read(
           path.join(state.root, `${SESSION_ID}.jsonl`),
