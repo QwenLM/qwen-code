@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -20,6 +22,7 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -117,10 +120,16 @@ class HostedHookFaultGatesIT {
         waitFor(() -> assertThat(running(child)).isFalse());
         assertThat(worker(session)).isEqualTo(worker);
         assertThat(generation(session)).isEqualTo(generation);
-        // The fresh prompt's admission runs reconcileUnsettled before it
-        // admits or refuses the new Turn; the pending Hook settles from the
-        // original receipt without waiting for the stalled Turn.
-        submit(session, "FG13_RECONCILE");
+        // The replacement Harness holds no receipt, but the record's
+        // runtimeSessionId still names the worker that does. Re-attach the
+        // Session and read the operation through the Harness status route:
+        // it asks that original owner and settles the record from the
+        // receipt still in the worker's memory.
+        HarnessConnector connector = spring.getBean(HarnessConnector.class);
+        connector.createOrLoad(tenant, session, true, true);
+        String clientId = harnessClientId(connector, session);
+        waitFor(() -> assertThat(harnessHookStatus(session, executionId, clientId).path("state").asText())
+                .isEqualTo("settled"));
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         JsonNode executionAfter = hookExecution(session);
         assertThat(executionAfter.path("resultRef").isNull()).isFalse();
@@ -342,6 +351,29 @@ class HostedHookFaultGatesIT {
                 String.class, ManagedSessionStore.sessionScopeKey(tenant, session),
                 ref.path("resourceId").asText(), tenant, session);
         return json.readTree(body);
+    }
+
+    // The Harness status route identifies the caller by the client id its
+    // attach minted; the connector keeps it on the private attachment ref.
+    private String harnessClientId(HarnessConnector connector, String session) throws Exception {
+        Field field = connector.getClass().getDeclaredField("attachments");
+        field.setAccessible(true);
+        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
+            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
+                return ref.getHarnessClientId();
+            }
+        }
+        throw new AssertionError("No Harness attachment for " + session);
+    }
+
+    private JsonNode harnessHookStatus(String session, String executionId, String clientId) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
+                        + "/session/" + session + "/hooks/operations/" + executionId))
+                .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Client-Id", clientId).GET().build();
+        var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).as("hook status: %s", response.body()).isEqualTo(200);
+        return json.readTree(response.body());
     }
 
     private int generation(String session) {
