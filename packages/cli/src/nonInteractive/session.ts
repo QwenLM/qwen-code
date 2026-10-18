@@ -921,39 +921,47 @@ class Session {
   private async drainAndShutdown(): Promise<void> {
     debugLogger.debug('[Session] Draining pending work before shutdown');
 
-    // Pending processing may already be waiting for memory inside a turn.
-    const memoryWaitTimer = setTimeout(
-      () => this.memoryWaitStopController.abort(),
-      EOF_MEMORY_WAIT_TIMEOUT_MS,
-    );
+    // The EOF window must bound the memory wait, never the foreground work
+    // still queued at EOF. An absolute deadline armed here would be spent
+    // by that work itself, and every memory wait beginning after it would
+    // enter an already-aborted signal and wait nothing, so the retained
+    // tasks never get their window (R7-1). Release the in-turn waits now —
+    // stopping a wait does not cancel its tasks — and give the final
+    // retained-memory drain its own fresh bounded window below.
+    this.memoryWaitStopController.abort();
+    // Abort monitors and stop callbacks first, then drain anything already
+    // queued so EOF does not remain coupled to monitor process lifetime.
+    this.abortTaskRegistries();
+    this.stopMonitorCallbacks();
+    await this.waitForAllPendingWork();
     try {
-      // Abort monitors and stop callbacks first, then drain anything already
-      // queued so EOF does not remain coupled to monitor process lifetime.
-      this.abortTaskRegistries();
-      this.stopMonitorCallbacks();
-      await this.waitForAllPendingWork();
-      try {
-        if (
-          this.configInitialized &&
-          !this.sessionAbortController.signal.aborted
-        ) {
-          const client = this.config.getLlmClient();
-          if (client) {
+      if (
+        this.configInitialized &&
+        !this.sessionAbortController.signal.aborted
+      ) {
+        const client = this.config.getLlmClient();
+        if (client) {
+          const finalMemoryWindow = new AbortController();
+          const finalMemoryWindowTimer = setTimeout(
+            () => finalMemoryWindow.abort(),
+            EOF_MEMORY_WAIT_TIMEOUT_MS,
+          );
+          try {
             await waitForPendingMemoryTasks(
               client,
               this.sessionAbortController.signal,
-              this.memoryWaitStopController.signal,
+              finalMemoryWindow.signal,
             );
+          } finally {
+            clearTimeout(finalMemoryWindowTimer);
           }
         }
-      } catch (error) {
-        if (!this.sessionAbortController.signal.aborted) throw error;
-      } finally {
-        this.abortTaskRegistries();
-        this.finishShutdown();
       }
+    } catch (error) {
+      if (!this.sessionAbortController.signal.aborted) throw error;
     } finally {
-      clearTimeout(memoryWaitTimer);
+      this.abortTaskRegistries();
+      this.finishShutdown();
     }
   }
 

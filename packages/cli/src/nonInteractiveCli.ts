@@ -136,6 +136,13 @@ const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
 
+/**
+ * The memory-wait window for a one-shot run whose caller supplied no stop
+ * signal (the `llm.tsx` shape). Mirrors the stream-JSON session's
+ * `EOF_MEMORY_WAIT_TIMEOUT_MS`; each drain arms its own window.
+ */
+const ONE_SHOT_MEMORY_WAIT_TIMEOUT_MS = 5_000;
+
 function isHeadlessLoopSentinel(prompt: string): boolean {
   return (
     detectLoopSentinel(prompt) !== null ||
@@ -615,12 +622,33 @@ export async function runNonInteractive(
       })();
       return chatRecordingSettlement;
     };
-    const drainPendingMemoryTasks = (): Promise<void> =>
-      waitForPendingMemoryTasks(
-        config.getLlmClient(),
-        abortController.signal,
-        options.memoryWaitStopSignal,
+    // A one-shot run has no session EOF moment, so a caller that supplies
+    // no memory-wait stop signal (the only `llm.tsx` shape) still gets a
+    // bounded window per drain: without it a failed `qwen -p` run with an
+    // extraction in flight stays alive after its error envelope is
+    // already on the wire. Each drain arms its own window — an absolute
+    // deadline armed at run start would be spent by the turn itself and
+    // the drain would enter it aborted, the same shape as R7-1.
+    const drainPendingMemoryTasks = (): Promise<void> => {
+      const client = config.getLlmClient();
+      if (options.memoryWaitStopSignal) {
+        return waitForPendingMemoryTasks(
+          client,
+          abortController.signal,
+          options.memoryWaitStopSignal,
+        );
+      }
+      const oneShotMemoryWindow = new AbortController();
+      const oneShotMemoryWindowTimer = setTimeout(
+        () => oneShotMemoryWindow.abort(),
+        ONE_SHOT_MEMORY_WAIT_TIMEOUT_MS,
       );
+      return waitForPendingMemoryTasks(
+        client,
+        abortController.signal,
+        oneShotMemoryWindow.signal,
+      ).finally(() => clearTimeout(oneShotMemoryWindowTimer));
+    };
     let resultEmitted = false;
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],

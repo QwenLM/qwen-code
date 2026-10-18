@@ -613,7 +613,7 @@ describe('runNonInteractiveStreamJson', () => {
       }
     });
 
-    it('shares one EOF deadline between active and final retained-memory waits', async () => {
+    it('releases the active memory wait at EOF and bounds the final retained wait with its own window', async () => {
       const { memory, llmClient, append } = memoryFixture();
       const laterMemory = deferred<number>();
       const closeInput = deferred<void>();
@@ -666,14 +666,20 @@ describe('runNonInteractiveStreamJson', () => {
       }
     });
 
-    it('preserves foreground and accepted queued work when the deadline precedes their memory waits', async () => {
+    it('preserves foreground work and gives its memory a fresh window when it outlasts EOF', async () => {
       const { memory, llmClient } = memoryFixture();
       const foreground = deferred<void>();
       const optionsSeen: MemoryRunOptions[] = [];
       runNonInteractiveMock.mockImplementation(async (...args: unknown[]) => {
         const options = args[4] as MemoryRunOptions;
         optionsSeen.push(options);
-        await foreground.promise;
+        if (optionsSeen.length === 1) {
+          await foreground.promise;
+        }
+        // The in-turn memory wait begins only after the foreground work,
+        // long past any absolute EOF deadline: the released EOF signal
+        // makes it skip without waiting, keeping the task identity for
+        // the final window.
         await waitForPendingMemoryTasks(
           llmClient,
           options.abortController.signal,
@@ -694,12 +700,16 @@ describe('runNonInteractiveStreamJson', () => {
         await flushPromises();
         expect(mockDispatcher.markInputClosed).toHaveBeenCalledOnce();
         expect(optionsSeen).toHaveLength(1);
-        await vi.advanceTimersByTimeAsync(5_000);
+        // Any absolute EOF deadline is long spent; the foreground turn is
+        // still running, un-aborted, and its queued successor still runs
+        // (R7-1: the window must bound the memory wait, not this work).
+        await vi.advanceTimersByTimeAsync(60_000);
         expect(finished).toBe(false);
         expect(optionsSeen[0].abortController.signal.aborted).toBe(false);
+        expect(optionsSeen[0].memoryWaitStopSignal?.aborted).toBe(true);
         foreground.resolve();
         await flushPromises();
-        expect(finished).toBe(true);
+        expect(finished).toBe(false);
         expect(optionsSeen).toHaveLength(2);
         expect(
           optionsSeen.every(
@@ -709,9 +719,14 @@ describe('runNonInteractiveStreamJson', () => {
         expect(optionsSeen[0].memoryWaitStopSignal).toBe(
           optionsSeen[1].memoryWaitStopSignal,
         );
-        expect(llmClient.getPendingMemoryTaskPromises()).toEqual([
-          memory.promise,
-        ]);
+        // The final retained-memory drain opened a fresh window and is
+        // still holding for the memory task past the old absolute bound.
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(finished).toBe(false);
+        memory.resolve(1);
+        await vi.waitFor(() => expect(finished).toBe(true), { timeout: 500 });
+        // The write landed: the settled task left the pending list.
+        expect(llmClient.getPendingMemoryTaskPromises()).toEqual([]);
         expect(mockDispatcher.shutdown).toHaveBeenCalledOnce();
         expect(vi.getTimerCount()).toBe(0);
       } finally {

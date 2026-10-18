@@ -4099,6 +4099,69 @@ describe('runNonInteractive', () => {
       },
     );
 
+    it('bounds the one-shot memory drain on a non-abort error terminal', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      // The one-shot shape (llm.tsx calls runNonInteractive with no
+      // options, so no memoryWaitStopSignal): a failed run whose memory
+      // extraction is in flight must not stay alive forever after its
+      // error envelope is already on the wire (R6-2).
+      const failure = new Error('gateway failed before any content');
+      mockLlmClient.sendMessageStream.mockImplementationOnce(
+        async function* () {
+          yield Promise.reject(failure);
+        },
+      );
+      let drainEntered!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        drainEntered = resolve;
+      });
+      let drainCalls = 0;
+      mockLlmClient.getPendingMemoryTaskPromises
+        .mockReset()
+        .mockImplementation(() => {
+          drainCalls += 1;
+          if (drainCalls === 1) {
+            drainEntered();
+            return [memoryTask];
+          }
+          return [];
+        });
+      let settled = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'fail with an extraction in flight',
+        'one-shot-error-drain',
+      )
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        // The drain holds the memory task and its bounded window just
+        // armed; vi.waitFor is avoided here because it advances the fake
+        // clock and would eat the window's budget.
+        await entered.promise;
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+        // The run settles with its original error outcome, and stopping
+        // the wait neither cancels the task nor drops its identity.
+        await expect(run).resolves.toBe(failure);
+        expect(
+          mockLlmClient.removePendingMemoryTaskPromises,
+        ).toHaveBeenCalledWith([]);
+      } finally {
+        vi.useRealTimers();
+        finishMemory(0);
+      }
+    });
+
     it.each([
       { interruption: 'during memory drain', mixed: false },
       { interruption: 'before catch drain', mixed: false },
@@ -4367,7 +4430,9 @@ describe('runNonInteractive', () => {
         );
         if (budget) {
           vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-          vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(10);
+          // Below the one-shot drain's default window (5 s) so the budget
+          // cancellation is still what releases the wait.
+          vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(2);
         }
         const abortController = new AbortController();
         const memoryWaitStopController = new AbortController();
