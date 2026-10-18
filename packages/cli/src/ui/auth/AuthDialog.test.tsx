@@ -12,7 +12,6 @@ import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
-import { setLanguageAsync } from '../../i18n/index.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
@@ -203,8 +202,12 @@ const QWENCLOUD_MAIN_LABEL = 'QwenCloud';
 const selectAlibabaModelStudio = async (
   stdin: { write: (s: string) => void },
   lastFrame: () => string | undefined,
+  // The first top-level entry is translated, so a zh-locale caller has to wait
+  // for the translated label rather than the English constant; the default
+  // keeps every English-locale navigation chain unchanged.
+  mainLabel: string = QWENCLOUD_MAIN_LABEL,
 ) => {
-  await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+  await waitForSelectedOption(lastFrame, mainLabel);
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Alibaba ModelStudio');
 };
 
@@ -1549,7 +1552,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
       try {
-        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+        // Under zh the first top-level entry paints its translation, so waiting
+        // on the English constant would time out here.
+        await waitForSelectedOption(lastFrame, '千问AI平台');
         stdin.write('\r');
         await waitForSelectedOption(lastFrame, 'Token Plan');
         // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
@@ -2116,11 +2121,14 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
 });
 
 /**
- * Module-scope `t()` calls run during import, before `initializeI18n()` is
- * awaited in the entry module, so they freeze whatever dictionary was loaded
- * at import time. `/auth` therefore painted a mixed-language dialog: the
- * sub-menu titles were translated (they call `t()` at render time) while the
- * main view title stayed in the import-time locale.
+ * A module-scope `t()` freezes the string it returns at the moment the module
+ * body evaluates, so a locale change made afterwards never reaches it. Both
+ * dialogs load behind dynamic imports that run *after* `initializeI18n()` has
+ * resolved, so a cold start was already correct; the repro is a runtime
+ * `/language` switch. After one, `/auth` painted a mixed-language dialog: the
+ * sub-menu titles followed the locale (they call `t()` while rendering) while
+ * the main-menu labels stayed in the locale in force when the module was first
+ * imported.
  *
  * These pins are deliberately keystroke-free and ungated: the keystroke
  * assertions elsewhere in this file sit behind `itWhenTuiInputReliable`, which
@@ -2157,27 +2165,17 @@ describe('AuthDialog locale resolution', { timeout: 15000 }, () => {
     await setLanguageAsync('en');
   });
 
-  it('resolves the main view title at render time, not at import time', async () => {
-    await setLanguageAsync('en');
-    const english = renderAuthDialog(buildSettings());
-    expect(english.lastFrame()).toContain('Connect a Provider');
-    english.unmount();
-
-    // The dialog is still open, only the locale changed: the title has to
-    // follow the locale in force when it renders.
-    await setLanguageAsync('zh');
-    const chinese = renderAuthDialog(buildSettings());
-    expect(chinese.lastFrame()).toContain('连接服务商');
-    chinese.unmount();
-  });
-
-  it('resolves the main menu entries at render time too', async () => {
+  // The view title is asserted by the ungated `(T1)` case above; what this diff
+  // actually unfroze are the main-menu labels and their descriptions, so this
+  // is the case that has to redden if `getMainItems()` is hoisted back to a
+  // module-scope `MAIN_ITEMS` array.
+  it('resolves the main menu entries at render time, not at import time', async () => {
     await setLanguageAsync('zh');
     const { lastFrame, unmount } = renderAuthDialog(buildSettings());
     const frame = lastFrame();
-    // The zh dictionary translates 'Connect a Provider' but leaves the entry
-    // labels themselves in English, so the title is the observable probe.
     expect(frame).toContain('连接服务商');
+    expect(frame).toContain('千问AI平台');
+    expect(frame).toContain('官方推荐配置：Token Plan 或 Standard API Key');
     expect(frame).not.toContain('Connect a Provider');
     unmount();
   });
