@@ -1034,8 +1034,9 @@ vi.mock('../config/settings.js', () => ({
     let enabled: boolean | undefined;
     for (const scope of ['SystemDefaults', 'User', 'System']) {
       enabled =
-        settings.forScope(scope as import('../config/settings.js').SettingScope)
-          .settings.security?.folderTrust?.enabled ?? enabled;
+        settings.forScope?.(
+          scope as import('../config/settings.js').SettingScope,
+        )?.settings.security?.folderTrust?.enabled ?? enabled;
     }
     return { security: { folderTrust: { enabled } } };
   },
