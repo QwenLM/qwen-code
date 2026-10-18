@@ -89,6 +89,7 @@ export interface OpenTuiAppHostDeps {
   /** Signals the shell to re-read (drives `useSyncExternalStore`). */
   onChange(): void;
   toggleVimEnabled(): Promise<boolean>;
+  toggleFocusMode?(): Promise<boolean | null>;
   reloadCommands(): void | Promise<void>;
   /** UI-side session rotation (new chat id + SessionStats refresh). */
   startNewSession(sessionId: string): void;
@@ -319,6 +320,10 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
 
   toggleVimEnabled(): Promise<boolean> {
     return this.deps.toggleVimEnabled();
+  }
+
+  get toggleFocusMode() {
+    return this.deps.toggleFocusMode;
   }
 
   reloadCommands(): void | Promise<void> {

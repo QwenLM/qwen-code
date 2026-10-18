@@ -68,12 +68,17 @@ import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js'
 import {
   getCachedStringWidth,
   sanitizeTerminalText,
+  truncateToWidth,
 } from '../utils/textUtils.js';
 import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
 import { formatClockTime, formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import type { ArenaAgentCardData } from '../types.js';
+import { getFocusToolSummary } from '../utils/focus-tool-summary.js';
+import { formatMemorySummary } from '../utils/memory-summary.js';
+import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
+import { PagedToolOutput, ToolOutputNavigation } from './paged-tool-output.js';
 
 /** ink HistoryItemDisplay picks between two hints by whether the card is
  *  clickable; `ui.mouseTracking: false` hands the pointer back to the
@@ -97,7 +102,10 @@ function goalColor(color: GoalCardColor): string {
 }
 
 export interface TranscriptViewProps {
+  canNavigateDetails?: boolean;
   items: readonly LiveHistoryItem[];
+  focusMode?: boolean;
+  fullDetail?: boolean;
   /** Width budget for ANSI grids / wrapping (defaults to a safe 80). */
   availableWidth?: number;
   /** Terminal height; per-item row caps follow ink staticAreaMaxItemHeight. */
@@ -457,7 +465,10 @@ export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
+  focusMode = false,
+  fullDetail = false,
   thoughtsExpanded = false,
+  canNavigateDetails = false,
   showToolCallArgs = false,
   showTimestamps = false,
   showToolCallDetails = true,
@@ -473,58 +484,69 @@ export function OpenTuiTranscriptView({
       !item.done &&
       item.id === awaitingCallId,
   )?.id;
+  const visibleItems = useMemo(
+    () =>
+      focusMode && !fullDetail
+        ? items.filter((item) => item.kind !== 'thinking')
+        : items,
+    [items, focusMode, fullDetail],
+  );
   const { rootRef, nodesRef, win } = useTranscriptWindow(
-    items,
+    visibleItems,
     availableTerminalHeight,
     initialAnchor,
   );
   return (
-    <box
-      flexDirection="column"
-      marginLeft={2}
-      marginRight={2}
-      ref={(el) => {
-        rootRef.current = el as Renderable | null;
-      }}
-    >
-      <box height={win.topPad} flexShrink={0} />
-      {items.slice(win.start, win.end).map((item) => {
-        const key = itemKey(item);
-        return (
-          <box
-            key={key}
-            flexDirection="column"
-            marginTop={itemMarginTop(item.kind)}
-            ref={(el) => {
-              if (el) {
-                nodesRef.current.set(key, { item, node: el as Renderable });
-              } else {
-                nodesRef.current.delete(key);
-              }
-            }}
-          >
-            <OpenTuiErrorBoundary
-              fallback={renderNothing}
-              onError={(error, info) => logItemFailure(error, item, info)}
+    <ToolOutputNavigation enabled={fullDetail && canNavigateDetails}>
+      <box
+        flexDirection="column"
+        marginLeft={2}
+        marginRight={2}
+        ref={(el) => {
+          rootRef.current = el as Renderable | null;
+        }}
+      >
+        <box height={win.topPad} flexShrink={0} />
+        {visibleItems.slice(win.start, win.end).map((item) => {
+          const key = itemKey(item);
+          return (
+            <box
+              key={key}
+              flexDirection="column"
+              marginTop={itemMarginTop(item.kind)}
+              ref={(el) => {
+                if (el) {
+                  nodesRef.current.set(key, { item, node: el as Renderable });
+                } else {
+                  nodesRef.current.delete(key);
+                }
+              }}
             >
-              <TranscriptItem
-                item={item}
-                maxRows={maxRows}
-                terminalHeight={availableTerminalHeight}
-                width={availableWidth}
-                thoughtsExpanded={thoughtsExpanded}
-                showToolCallArgs={showToolCallArgs}
-                showTimestamps={showTimestamps}
-                showToolCallDetails={showToolCallDetails}
-                mouseTracking={mouseTracking}
-                awaitingApproval={item.id === awaitingId}
-              />
-            </OpenTuiErrorBoundary>
-          </box>
-        );
-      })}
-      <box height={win.bottomPad} flexShrink={0} />
-    </box>
+              <OpenTuiErrorBoundary
+                fallback={renderNothing}
+                onError={(error, info) => logItemFailure(error, item, info)}
+              >
+                <TranscriptItem
+                  item={item}
+                  focusMode={focusMode && !fullDetail}
+                  fullDetail={fullDetail}
+                  maxRows={maxRows}
+                  terminalHeight={availableTerminalHeight}
+                  width={availableWidth}
+                  thoughtsExpanded={thoughtsExpanded}
+                  showToolCallArgs={showToolCallArgs}
+                  showTimestamps={showTimestamps}
+                  showToolCallDetails={showToolCallDetails}
+                  mouseTracking={mouseTracking}
+                  awaitingApproval={item.id === awaitingId}
+                />
+              </OpenTuiErrorBoundary>
+            </box>
+          );
+        })}
+        <box height={win.bottomPad} flexShrink={0} />
+      </box>
+    </ToolOutputNavigation>
   );
 }
 
@@ -533,6 +555,8 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  focusMode,
+  fullDetail,
   thoughtsExpanded,
   showToolCallArgs,
   showTimestamps,
@@ -541,6 +565,8 @@ function TranscriptItem({
   awaitingApproval,
 }: {
   item: LiveHistoryItem;
+  focusMode: boolean;
+  fullDetail: boolean;
   maxRows: number;
   terminalHeight: number;
   width: number;
@@ -563,10 +589,10 @@ function TranscriptItem({
         />
       );
     case 'thinking':
-      return (
+      return focusMode ? null : (
         <ThinkingRow
           item={item}
-          allExpanded={thoughtsExpanded}
+          allExpanded={thoughtsExpanded || fullDetail}
           mouseTracking={mouseTracking}
         />
       );
@@ -574,10 +600,11 @@ function TranscriptItem({
       return (
         <ToolCard
           item={item}
+          focusMode={focusMode}
+          fullDetail={fullDetail || thoughtsExpanded}
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
-          fullDetail={thoughtsExpanded}
           showToolCallArgs={showToolCallArgs}
           showToolCallDetails={showToolCallDetails}
           mouseTracking={mouseTracking}
@@ -726,7 +753,7 @@ function ThinkingRow({
     <box
       flexDirection="column"
       onMouseUp={() => {
-        if (item.done) setClickedOpen((v) => !v);
+        if (item.done && !allExpanded) setClickedOpen((v) => !v);
       }}
     >
       <box flexDirection="row">
@@ -757,6 +784,7 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  focusMode,
   fullDetail,
   showToolCallArgs,
   showToolCallDetails,
@@ -764,10 +792,11 @@ function ToolCard({
   awaitingApproval,
 }: {
   item: LiveToolItem;
+  focusMode: boolean;
+  fullDetail: boolean;
   maxRows: number;
   terminalHeight: number;
   width: number;
-  fullDetail: boolean;
   showToolCallArgs: boolean;
   showToolCallDetails: boolean;
   mouseTracking: boolean;
@@ -776,6 +805,17 @@ function ToolCard({
   const [clickedOpen, setClickedOpen] = useState(false);
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
+  const args = useMemo(() => {
+    if (!focusMode) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(item.args ?? '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+        return parsed as Record<string, unknown>;
+    } catch {
+      // Legacy replay may have only a display description.
+    }
+    return {};
+  }, [focusMode, item.args]);
   // ink's CollapsibleToolGroupMessage keeps a call open while it needs an
   // answer: the card is the only surface carrying the payload being approved.
   const collapsed =
@@ -784,7 +824,71 @@ function ToolCard({
     !fullDetail &&
     item.confirm !== 'pending';
   const description =
-    item.description ?? toolCardDescription(item.tool, item.args);
+    item.description ?? toolCardDescription(item.tool, item.args, args);
+  const memoryLabel =
+    focusMode && item.isMemoryOp
+      ? ` · ${formatMemorySummary(item.isMemoryOp === 'read' ? 1 : 0, item.isMemoryOp === 'write' ? 1 : 0)}`
+      : '';
+  const memory =
+    width - STATUS_INDICATOR_WIDTH - getCachedStringWidth(memoryLabel) >= 20
+      ? memoryLabel
+      : '';
+  const compact = focusMode
+    ? getFocusToolSummary(
+        [
+          {
+            name: item.tool,
+            description,
+            args,
+            status:
+              !item.done || item.confirm === 'pending'
+                ? 'pending'
+                : item.summary === 'cancelled' ||
+                    item.summary === 'canceled' ||
+                    item.summary === 'interrupted'
+                  ? 'cancelled'
+                  : item.success === false
+                    ? 'error'
+                    : 'success',
+            isUserInitiated: item.isUserInitiated,
+            isSubagent: item.isSubagent,
+            hasImages: Boolean(
+              item.imageMimeTypes?.length || item.omittedImageCount,
+            ),
+            hasNotice: Boolean(item.visionBridgeNotice) || item.hasNotice,
+          },
+        ],
+        {
+          maxWidth: Math.max(
+            20,
+            width - STATUS_INDICATOR_WIDTH - getCachedStringWidth(memory),
+          ),
+        },
+      )
+    : undefined;
+  if (compact)
+    return (
+      <box key="focus-summary" flexDirection="row">
+        <box width={STATUS_INDICATOR_WIDTH}>
+          <text
+            fg={status.color}
+            attributes={(status.strikethrough ? 128 : 0) | 1}
+          >
+            {status.glyph}
+          </text>
+        </box>
+        <text
+          fg={C.dim}
+          attributes={status.strikethrough ? 128 : 0}
+          {...selectionProps()}
+        >
+          {truncateToWidth(
+            compact.text + memory,
+            width - STATUS_INDICATOR_WIDTH,
+          )}
+        </text>
+      </box>
+    );
   // Measure on the same basis the render uses: a live description (e.g. a
   // shell command) can carry newlines that each become a physical row while
   // costing zero columns in the cap math, so fold them first like the
@@ -824,7 +928,7 @@ function ToolCard({
   // re-render drops, so a collapsed branch of its own shape would leave its
   // glyph box's width stuck on the reconciled header row and clip the title.
   return (
-    <box flexDirection="column">
+    <box key="tool-details" flexDirection="column">
       <box
         flexDirection="row"
         onMouseUp={() => {
@@ -887,8 +991,45 @@ function ToolCard({
               </text>
             </box>
           ) : null}
-          <ToolCardBody item={item} maxRows={maxRows} width={width} />
+          <ToolCardBody
+            item={item}
+            maxRows={maxRows}
+            width={width}
+            fullDetail={fullDetail}
+          />
         </>
+      )}
+      {!collapsed &&
+        fullDetail &&
+        cap.hiddenRows > 0 &&
+        item.confirm !== 'pending' && (
+          <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+            <PagedToolOutput
+              text={description}
+              maxRows={maxRows}
+              width={width - STATUS_INDICATOR_WIDTH}
+            />
+          </box>
+        )}
+      {collapsed ? null : (
+        <box paddingLeft={STATUS_INDICATOR_WIDTH} flexDirection="column">
+          {item.imageMimeTypes?.map((mimeType, index) => (
+            <text
+              key={index}
+              fg={C.dim}
+            >{`[inline image: ${sanitizeTerminalText(mimeType)}]`}</text>
+          ))}
+          {item.omittedImageCount ? (
+            <text fg={C.dim}>
+              {formatInlineImageOverflow(item.omittedImageCount)}
+            </text>
+          ) : null}
+          {item.visionBridgeNotice ? (
+            <text fg={C.dim}>
+              {sanitizeTerminalText(item.visionBridgeNotice)}
+            </text>
+          ) : null}
+        </box>
       )}
     </box>
   );
@@ -898,19 +1039,36 @@ function ToolCardBody({
   item,
   maxRows,
   width,
+  fullDetail,
 }: {
   item: LiveToolItem;
+  fullDetail: boolean;
   maxRows: number;
   width: number;
 }) {
-  if (item.todos) {
+  if (fullDetail && (!item.todos || item.detailedDisplay)) {
+    if (!item.detailedDisplay && !item.output && !item.diff && !item.ansi)
+      return null;
+    return (
+      <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+        <PagedToolOutput
+          text={item.detailedDisplay ?? item.diff?.fileDiff ?? item.output}
+          grid={item.detailedDisplay ? undefined : item.ansi?.grid}
+          diff={Boolean(item.diff)}
+          maxRows={maxRows}
+          width={width - STATUS_INDICATOR_WIDTH}
+        />
+      </box>
+    );
+  }
+  if (item.todos && !(fullDetail && item.detailedDisplay)) {
     return (
       <box paddingLeft={STATUS_INDICATOR_WIDTH}>
         <TodoRows todos={item.todos} />
       </box>
     );
   }
-  if (item.ansi) {
+  if (item.ansi && !(fullDetail && item.detailedDisplay)) {
     return (
       <box paddingLeft={STATUS_INDICATOR_WIDTH}>
         <AnsiRows
@@ -918,6 +1076,7 @@ function ToolCardBody({
           maxWidth={width - STATUS_INDICATOR_WIDTH}
           totalLines={item.ansi.totalLines}
           totalBytes={item.ansi.totalBytes}
+          fullDetail={fullDetail}
         />
       </box>
     );
@@ -942,7 +1101,7 @@ function ToolCardBody({
       </box>
     );
   }
-  if (item.diff) {
+  if (item.diff && !(fullDetail && item.detailedDisplay)) {
     const lines = renderDiffBody(item.diff.fileDiff);
     const window = tailWindow(lines, maxRows);
     return (
@@ -962,7 +1121,9 @@ function ToolCardBody({
       </box>
     );
   }
-  const output = truncateResultDisplayChars(item.output);
+  const output = fullDetail
+    ? (item.detailedDisplay ?? item.output)
+    : truncateResultDisplayChars(item.output);
   if (!output) return null;
   const lines = sanitizeTerminalText(output).split('\n');
   const window = tailWindow(lines, maxRows);
@@ -976,9 +1137,6 @@ function ToolCardBody({
           {line}
         </text>
       ))}
-      {item.visionBridgeNotice ? (
-        <text fg={C.dim}>{sanitizeTerminalText(item.visionBridgeNotice)}</text>
-      ) : null}
     </box>
   );
 }

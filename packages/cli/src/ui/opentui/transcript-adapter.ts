@@ -15,6 +15,8 @@
  */
 
 import { readFileSync } from 'node:fs';
+import type { Part } from '@google/genai';
+import { toolResultPresentation } from './tool-result-presentation.js';
 import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
   extractStructuredResult,
@@ -37,6 +39,7 @@ interface SessionLine {
 }
 
 export interface TranscribeOptions {
+  projectRoot?: string;
   /** Maps a raw tool name to a display title (e.g. registry displayName). */
   toolTitle?: (name: string) => string | undefined;
 }
@@ -61,6 +64,7 @@ export function transcribeSession(
   const prompts: string[] = [];
   let toolSeq = 0;
   const pendingIdlessIds: string[] = [];
+  const requests = new Map<string, { name: string; args?: unknown }>();
   for (const line of jsonl.split('\n')) {
     const t = line.trim();
     if (!t) continue;
@@ -77,6 +81,7 @@ export function transcribeSession(
         callId?: string;
         status?: string;
         resultDisplay?: unknown;
+        responseParts?: Part[];
       };
     };
     try {
@@ -128,18 +133,33 @@ export function transcribeSession(
     if (o.type === 'tool_result' && !isInternalCodeModeToolResult(o)) {
       const r = o.toolCallResult ?? {};
       const id = r.callId ?? pendingIdlessIds.shift() ?? `tool-${++toolSeq}`;
-      if (r.resultDisplay) {
-        // A structured payload rides as tool-result so the tool card keeps its
-        // own renderer; flattened text stays the incremental event, as in the
-        // live path. Bare `String(obj)` would render "[object Object]".
+      const presentation = toolResultPresentation(
+        r.resultDisplay,
+        r.responseParts ?? (parts as Part[]),
+        requests.get(id),
+        opts.projectRoot,
+        r.status === 'error' || r.status === 'cancelled',
+      );
+      requests.delete(id);
+      if (r.resultDisplay || Object.keys(presentation).length) {
+        // FileDiff results ride as structured payloads (colored diff lines in
+        // the tool card); everything else flattens to display text. Bare
+        // `String(obj)` would render "[object Object]".
         const structured = extractStructuredResult(r.resultDisplay);
         if (structured) {
-          events.push({ type: 'tool-result', id, display: '', ...structured });
+          events.push({
+            type: 'tool-result',
+            id,
+            display: '',
+            ...structured,
+            ...presentation,
+          });
         } else {
           events.push({
-            type: 'tool-output',
+            type: 'tool-result',
             id,
-            output: renderResultDisplay(r.resultDisplay),
+            display: renderResultDisplay(r.resultDisplay),
+            ...presentation,
           });
         }
       }
@@ -179,6 +199,7 @@ export function transcribeSession(
               tool: name,
               title: opts.toolTitle?.(name) ?? name,
             });
+            requests.set(id, { name, args: p.functionCall.args });
             const args = formatToolArgs(
               p.functionCall.args as Record<string, unknown> | undefined,
             );

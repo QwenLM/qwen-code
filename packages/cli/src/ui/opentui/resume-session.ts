@@ -40,6 +40,7 @@ function transcribe(
       ? config.getToolRegistry()
       : undefined;
   return transcribeSession(sessionToJsonl(sessionData), {
+    projectRoot: config?.getTargetDir?.(),
     toolTitle: registry
       ? (name) => registry.getTool(name)?.displayName
       : undefined,

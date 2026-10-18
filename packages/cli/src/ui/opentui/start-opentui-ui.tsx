@@ -87,6 +87,10 @@ import { useTerminalFocus } from './focus-tracking.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
+import {
+  FocusModeProvider,
+  useFocusModeEnabled,
+} from '../contexts/FocusModeContext.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
 import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
@@ -128,6 +132,12 @@ function OpenTuiEntryApp({
   capturedText,
   initialDialog,
 }: OpenTuiEntryAppProps) {
+  const focusMode = useFocusModeEnabled();
+  const [fullDetail, setFullDetail] = useState(false);
+  const toggleFullDetail = useCallback(
+    () => setFullDetail((value) => !value),
+    [],
+  );
   const { width, height } = useTerminalDimensions();
   const renderer = useRenderer();
   useEffect(() => {
@@ -265,6 +275,7 @@ function OpenTuiEntryApp({
     if (!matchesCommand(Command.TOGGLE_THINKING_EXPANDED, key)) return;
     key.preventDefault();
     setThoughtsExpanded((prev) => !prev);
+    toggleFullDetail();
   });
   useKeyboard((key: KeyEvent) => {
     if (!key.ctrl || (key.name !== 'c' && key.name !== 'd')) return;
@@ -293,15 +304,18 @@ function OpenTuiEntryApp({
 
   // --- seams handed to the shell ---------------------------------------------
   const renderMain = useCallback(
-    () => (
+    (canNavigateDetails: boolean) => (
       <box flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
           items={live.items}
+          focusMode={focusMode}
+          fullDetail={fullDetail}
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
+          canNavigateDetails={canNavigateDetails}
           showToolCallArgs={settings.merged.ui?.showToolCallArgs === true}
           showTimestamps={settings.merged.output?.showTimestamps === true}
           showToolCallDetails={
@@ -312,7 +326,16 @@ function OpenTuiEntryApp({
         />
       </box>
     ),
-    [live.items, live.waitingCalls, width, height, thoughtsExpanded, settings],
+    [
+      live.items,
+      live.waitingCalls,
+      width,
+      height,
+      thoughtsExpanded,
+      settings,
+      focusMode,
+      fullDetail,
+    ],
   );
 
   const handleRenderError = useCallback(
@@ -474,15 +497,17 @@ export async function startOpenTuiUI(
       createElement(SessionStatsProvider, {
         sessionId: config.getSessionId(),
         children: (
-          <OpenTuiEntryApp
-            config={config}
-            settings={settings}
-            runtime={runtime}
-            startupWarnings={startupWarnings}
-            extensionRefreshState={options.extensionRefreshState}
-            capturedText={capturedText}
-            initialDialog={initialDialog}
-          />
+          <FocusModeProvider settings={settings}>
+            <OpenTuiEntryApp
+              config={config}
+              settings={settings}
+              runtime={runtime}
+              startupWarnings={startupWarnings}
+              extensionRefreshState={options.extensionRefreshState}
+              capturedText={capturedText}
+              initialDialog={initialDialog}
+            />
+          </FocusModeProvider>
         ),
       }),
     );

@@ -30,6 +30,30 @@ describe('TestRig', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    [undefined, { focusMode: false }],
+    [
+      { useTerminalBuffer: true },
+      { focusMode: false, useTerminalBuffer: true },
+    ],
+    [{ focusMode: true }, { focusMode: true }],
+    [{ focusMode: undefined }, {}],
+  ])(
+    'isolates focus mode while preserving explicit UI overrides (%j)',
+    async (ui, expected) => {
+      const rig = new TestRig();
+      try {
+        await rig.setup('focus mode defaults', { settings: ui ? { ui } : {} });
+        const settings = JSON.parse(
+          readFileSync(join(rig.testDir!, '.qwen/settings.json'), 'utf8'),
+        );
+        expect(settings.ui).toEqual(expected);
+      } finally {
+        await rig.cleanup();
+      }
+    },
+  );
+
   it('resets a reused test directory during setup', async () => {
     const rig = new TestRig();
     await rig.setup('reused test directory');
