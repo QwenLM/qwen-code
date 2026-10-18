@@ -271,12 +271,6 @@ class HostedHookCancelFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202).path("turn_id").asText();
     }
 
-    /** The post-kill admission is refused while the Hook still runs. */
-    private void submitRefused(String session, String prompt) throws Exception {
-        api("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message",
-                "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 409);
-    }
-
     private JsonNode hookExecution(String session) {
         List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
                 .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
@@ -312,16 +306,6 @@ class HostedHookCancelFaultGatesIT {
         return null;
     }
 
-    private HttpResponse<String> hookStatus(String session, String executionId, HarnessAttach attach) throws Exception {
-        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
-                        + "/session/" + session + "/hooks/operations/" + executionId))
-                .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
-                .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
-        return http.send(request, HttpResponse.BodyHandlers.ofString());
-    }
-
     private JsonNode cancelHook(String session, String executionId) throws Exception {
         HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment before cancel").isNotNull();
@@ -335,20 +319,6 @@ class HostedHookCancelFaultGatesIT {
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("hook cancel: %s", response.body()).isEqualTo(200);
         return json.readTree(response.body());
-    }
-
-    private int generation(String session) {
-        return jdbc.queryForObject("SELECT runtime_generation FROM ma_runtime_binding WHERE tenant_id = ? AND isolation_key = ?",
-                Integer.class, tenant, session);
-    }
-
-    private void replaceHarness() throws Exception {
-        long original = harness.pid();
-        harness.destroyForcibly();
-        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
-        assertThat(harness.exitValue()).isEqualTo(137);
-        startHarness();
-        assertThat(harness.pid()).isNotEqualTo(original);
     }
 
     private void startHarness() throws Exception {
@@ -433,17 +403,6 @@ class HostedHookCancelFaultGatesIT {
         } finally {
             exchange.close();
         }
-    }
-
-    private JsonNode worker(String session) throws Exception {
-        String binding = jdbc.queryForObject("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ? AND isolation_key = ?",
-                String.class, tenant, session);
-        JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM ma_runtime_binding WHERE binding_id = ?",
-                String.class, binding));
-        JsonNode registration = json.readTree(Files.readString(temporary.resolve("broker").resolve(handle.path("resourceId").asText() + ".json")));
-        return json.createObjectNode().put("binding", binding).put("pid", registration.path("pid").asLong())
-                .put("startTicks", registration.path("started").asText().replace("ticks:", ""))
-                .put("bootId", handle.path("bootId").asText());
     }
 
     private boolean running(JsonNode process) throws Exception {
