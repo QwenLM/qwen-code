@@ -41,7 +41,8 @@ Hosted Session 通过 Session Store 为日志激活续租。控制面停机超�
   拒绝，都属被其他写者 fence。
 - **Hosted 路由把未结算追加当作存储故障。** automation、message、command、
   child、channel 路由都返回与存储故障相同的可重试 503，绝不返回 4xx 记录拒绝；
-  `send_message` 调用把它当作故障而不是拒绝。
+  `send_message` 与成员命令调用都把它当作故障而不是拒绝；成员的已停放等待保持
+  在 `await_command` 交给恢复。
 - **确定性失败仍然封闭日志。** 可回滚的提交拒绝保持可重试且不锁定；租户守卫
   预算耗尽、回执形状错误、头部回退、被其他写者 fence 仍然终止。
 - **续租不堆积。** 上一次续租仍在途时，激活续租定时器跳过本次 tick，避免停机
@@ -70,6 +71,9 @@ Hosted Session 通过 Session Store 为日志激活续租。控制面停机超�
   - 永久 fence 仍然停止保活。
 - `packages/cli/src/serve/hosted-harness-session.test.ts`
   - 未结算的消息追加返回 503 `session_message_failed`，而不是 409 记录拒绝。
+- `packages/cli/src/serve/hosted-workspace-tool-turn.commands.test.ts`
+  - 未结算的成员命令以 `HostedToolRecoveryRequiredError` 传播，并保留
+    `await_command` 的已停放等待。
 - `packages/core/src/managed-runtime/managed-session-assembly.test.ts`
   - 激活续租不会在慢请求后堆叠。
 

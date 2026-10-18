@@ -53,7 +53,8 @@ not, and keeps its existing fence.
 - **Hosted routes treat an unsettled append as a store fault.** Automation,
   message, command, child, and channel routes answer it with the retryable
   503 they use for a store outage, never a 4xx record refusal. A `send_message`
-  call treats it as a fault, not a refusal.
+  call and a member-command call treat it as a fault, not a refusal; the
+  member's parked wait stays in `await_command` for recovery.
 - **Definite failures still fence the log.** A rejected commit stays
   retriable without latching. A spent tenant-guard budget, a malformed receipt,
   a regressed head, and a fence by another writer remain terminal.
@@ -91,6 +92,9 @@ not, and keeps its existing fence.
 - `packages/cli/src/serve/hosted-harness-session.test.ts`
   - an unsettled message append answers 503 `session_message_failed`, not a
     409 record refusal.
+- `packages/cli/src/serve/hosted-workspace-tool-turn.commands.test.ts`
+  - an unsettled member command propagates `HostedToolRecoveryRequiredError`
+    and keeps the parked wait in `await_command`.
 - `packages/core/src/managed-runtime/managed-session-assembly.test.ts`
   - activation renewals do not stack behind one in flight.
 
