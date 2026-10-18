@@ -12,12 +12,18 @@ const mocks = vi.hoisted(() => {
     settings,
     workspaceByCwd,
     client: { workspaceByCwd },
+    capabilities: { features: [] as string[] },
+    status: 'connected',
     version: 0,
   };
 });
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
-  useWorkspace: () => ({ client: mocks.client }),
+  useWorkspace: () => ({
+    client: mocks.client,
+    capabilities: mocks.capabilities,
+    status: mocks.status,
+  }),
   useWorkspaceEventSignals: () => ({ settingsVersion: mocks.version }),
 }));
 const { useApprovalModes } = await import('./useApprovalModes');
@@ -65,6 +71,10 @@ beforeEach(() => {
   mocks.settings.mockReset().mockResolvedValue(status(['default']));
   mocks.workspaceByCwd.mockClear();
   mocks.client = { workspaceByCwd: mocks.workspaceByCwd };
+  mocks.capabilities = {
+    features: ['workspace_qualified_rest_core', 'workspace_settings'],
+  };
+  mocks.status = 'connected';
   mocks.version = 0;
 });
 afterEach(() => {
@@ -155,6 +165,31 @@ it('retries a failed read on the next settings event', async () => {
   await flush();
   expect(container.textContent).toBe('');
   mocks.version++;
+  render('/secondary');
+  await flush();
+  expect(mocks.settings).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('default');
+});
+
+it('keeps the default list and skips the read when the daemon lacks the qualified settings route', async () => {
+  mocks.capabilities = { features: [] };
+  render('/secondary');
+  await flush();
+  expect(mocks.workspaceByCwd).not.toHaveBeenCalled();
+  expect(container.textContent).toBe('default,auto-edit,auto,yolo');
+});
+
+it('retries a failed read when the workspace reconnects', async () => {
+  mocks.settings.mockRejectedValueOnce(new Error('unavailable'));
+  render('/secondary');
+  await flush();
+  expect(container.textContent).toBe('');
+  mocks.status = 'connecting';
+  render('/secondary');
+  await flush();
+  // No doomed request while the workspace is still reconnecting.
+  expect(mocks.settings).toHaveBeenCalledTimes(1);
+  mocks.status = 'connected';
   render('/secondary');
   await flush();
   expect(mocks.settings).toHaveBeenCalledTimes(2);

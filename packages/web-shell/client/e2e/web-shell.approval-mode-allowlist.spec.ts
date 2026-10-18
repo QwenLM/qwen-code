@@ -25,6 +25,7 @@ async function openShell(
   const scenario = createWebShellDaemonScenario({
     currentMode: options.currentMode ?? 'default',
   });
+  scenario.capabilities.features.push('workspace_qualified_rest_core');
   if (options.setting !== undefined) {
     scenario.settings.settings.push({
       key: 'ui.allowedApprovalModes',
@@ -226,6 +227,26 @@ test('dynamic host changes update an open picker @smoke', async ({
   expect(modeRequests(daemon)[0].body).toMatchObject({ mode: 'yolo' });
 });
 
+test('emptying the allowlist under an open picker hands focus to the composer @smoke', async ({
+  page,
+}, info) => {
+  await openShell(page, info);
+  await page.locator(modeButton).click();
+  await expect(page.locator(menuOptions)).toHaveCount(4);
+  // The trigger becomes disabled and the open menu closes in the same commit;
+  // the browser drops their focus to the body and the handoff must catch it.
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new CustomEvent('approval-modes-change', { detail: [] }),
+    ),
+  );
+  await expect(page.locator(menuOptions)).toHaveCount(0);
+  await expect(page.locator(modeButton)).toBeDisabled();
+  await expect(
+    page.locator('[data-web-shell-composer-editor] .cm-content'),
+  ).toBeFocused();
+});
+
 test('host allowlist applies to both split pane dropdowns @smoke', async ({
   page,
 }, info) => {
@@ -287,6 +308,7 @@ for (const split of [false, true]) {
         ],
       },
     });
+    scenario.capabilities.features.push('workspace_qualified_rest_core');
     const daemon = await installMockDaemon(page, scenario, {
       baseURL: String(info.project.use.baseURL),
     });
@@ -296,6 +318,9 @@ for (const split of [false, true]) {
       const path = new URL(route.request().url()).pathname;
       if (path === '/workspace/settings' || path === scopedPath) {
         if (path === scopedPath) scopedReads++;
+        // The routes answer differently on purpose: any code path applying
+        // the wrong workspace's read renders (default)/(yolo) and fails.
+        const effective = path === scopedPath ? ['auto'] : ['default', 'yolo'];
         await route.fulfill({
           json: {
             v: 1,
@@ -306,7 +331,7 @@ for (const split of [false, true]) {
                 label: 'Modes',
                 category: 'UI',
                 requiresRestart: false,
-                values: { effective: ['auto'] },
+                values: { effective },
               },
             ],
           },

@@ -754,6 +754,7 @@ function ToolbarPopover({
   header,
   submenu,
   compact = false,
+  modePopover = false,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -773,6 +774,7 @@ function ToolbarPopover({
     sectionLabel: string;
   };
   compact?: boolean;
+  modePopover?: boolean;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -923,6 +925,7 @@ function ToolbarPopover({
         data-web-shell-toolbar-popover
         data-web-shell-compact-overlay={compact ? '' : undefined}
         data-web-shell-reasoning-popover={submenu ? '' : undefined}
+        data-web-shell-mode-popover={modePopover ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
         onOpenAutoFocus={(event) => {
           if (!submenu) return;
@@ -1992,30 +1995,80 @@ export const ChatEditor = memo(
     }, [core.hasAttachments, onAttachmentsChange]);
 
     const planDescriptionId = useId();
+    const modeItems = useMemo<DropdownItem[]>(
+      () =>
+        EXECUTION_APPROVAL_MODES.filter((id) =>
+          availableModes.includes(id),
+        ).map((id) => ({
+          id,
+          label: getModeListLabel(id, t),
+          description: t(`mode.desc.${id}`),
+          icon: <ModeIcon mode={id} />,
+        })),
+      [availableModes, t],
+    );
+    const modeItemIds = modeItems.map((item) => item.id).join(',');
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+    // Focus held by the mode control is recorded rather than read back: the
+    // trigger is natively disabled the moment the list empties or the
+    // controls lock, and a focused element blurs to the body there and then,
+    // as does a popover row whose row unmounts. Any focus inside the control
+    // sets this; a blur that lands on another element ends the ownership, one
+    // that lands nowhere (the body) does not.
+    const modeControlHadFocusRef = useRef(false);
+    const previousModeItemIdsRef = useRef(modeItemIds);
     useEffect(() => {
-      if (!modeControlsDisabled && availableModes.length > 0) return;
-      setModeDropdownOpen(false);
-      // The trigger is natively disabled here, so focus held by it or by the
-      // open popover would drop to the body; hand it on, as the plan chip
-      // does when it unmounts. Focus anywhere else is left alone.
+      const rowsChanged = previousModeItemIdsRef.current !== modeItemIds;
+      previousModeItemIdsRef.current = modeItemIds;
+      const gone = modeControlsDisabled || availableModes.length === 0;
+      if (!gone && !rowsChanged) return;
+      // A narrowing keeps the picker open; only an empty or locked control
+      // closes it.
+      if (gone) setModeDropdownOpen(false);
+      const hadFocus = modeControlHadFocusRef.current;
+      modeControlHadFocusRef.current = false;
       const toolbar = toolbarLeadingRef.current;
+      const doc = toolbar?.ownerDocument;
       const active = getShadowAwareActiveElement(toolbar);
-      if (
-        !(active instanceof HTMLElement) ||
-        (!active.closest('[data-web-shell-mode-button]') &&
-          !active.closest('[data-web-shell-toolbar-popover]'))
-      )
+      if (active !== null && active !== doc?.body && active.isConnected) {
+        // Focus that is anywhere but lost is somewhere the user put it. The
+        // handoff takes it only from this instance's own mode control — the
+        // dedicated marker and the containment check keep this instance's
+        // other popovers and every other editor instance out of it — and only
+        // once the control is gone: a row that survived a narrowing and an
+        // enabled trigger both keep their focus.
+        if (!(active instanceof HTMLElement)) return;
+        const inModeControl = active.closest(
+          '[data-web-shell-mode-popover], [data-web-shell-mode-button]',
+        );
+        if (!gone || !inModeControl || toolbar?.contains(active) !== true)
+          return;
+      } else if (!hadFocus) {
+        // Nothing ties a body-level focus to this control without the ref.
         return;
+      }
       if (!disabled && !isCoarsePointerDevice()) {
         focusComposer();
         return;
       }
-      // The mode control itself is disabled, so it cannot be the target.
-      toolbar
-        ?.querySelector<HTMLElement>('[data-web-shell-model-button]')
-        ?.focus();
-    }, [availableModes.length, modeControlsDisabled, disabled, focusComposer]);
+      // The mode control itself is disabled, so it cannot be the target — and
+      // nor can a disabled control beside it. With none focusable, the
+      // enabled composer is still a better resting place than the body.
+      const target = toolbar?.querySelector<HTMLElement>(
+        '[data-web-shell-toolbar-popover-trigger]:not(:disabled), button[data-web-shell-plan-control]:not([data-disabled])',
+      );
+      if (target) {
+        target.focus();
+      } else if (!disabled) {
+        focusComposer();
+      }
+    }, [
+      modeItemIds,
+      availableModes.length,
+      modeControlsDisabled,
+      disabled,
+      focusComposer,
+    ]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     useEffect(() => {
       if (modelControlsDisabled) setModelDropdownOpen(false);
@@ -2124,18 +2177,6 @@ export const ChatEditor = memo(
       return () => resizeObserver.disconnect();
     }, [chatWidthToggleMin]);
 
-    const modeItems = useMemo<DropdownItem[]>(
-      () =>
-        EXECUTION_APPROVAL_MODES.filter((id) =>
-          availableModes.includes(id),
-        ).map((id) => ({
-          id,
-          label: getModeListLabel(id, t),
-          description: t(`mode.desc.${id}`),
-          icon: <ModeIcon mode={id} />,
-        })),
-      [availableModes, t],
-    );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
       const activeActions = visibleToolbarActions.filter((action) =>
@@ -3437,9 +3478,21 @@ export const ChatEditor = memo(
                       className={`${styles.dropdownWrapper} ${
                         showModeLabel ? '' : styles.dropdownWrapperCompact
                       }`}
+                      onFocus={() => {
+                        modeControlHadFocusRef.current = true;
+                      }}
+                      onBlur={(event) => {
+                        // A blur that lands nowhere is the browser dropping a
+                        // disabled or unmounted control's focus to the body —
+                        // the loss the handoff above exists to catch.
+                        if (event.relatedTarget instanceof HTMLElement) {
+                          modeControlHadFocusRef.current = false;
+                        }
+                      }}
                     >
                       <ToolbarPopover
                         compact={compactOverlays}
+                        modePopover
                         open={modeDropdownOpen}
                         items={modeItems}
                         activeId={currentMode}

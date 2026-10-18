@@ -153,6 +153,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => ({
     capabilities: connectionState.capabilities,
     client: paneWorkspaceClient,
+    status: connectionState.status,
     workspaceCwd: '/primary',
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
@@ -3986,6 +3987,12 @@ it.each(['builtin-command', 'project', 'missing'])(
 );
 
 describe('pane approval mode allowlist', () => {
+  beforeEach(() => {
+    connectionState.capabilities = {
+      features: ['workspace_qualified_rest_core', 'workspace_settings'],
+    };
+  });
+
   it('applies host choices to split and embedded side-task composers', async () => {
     connectionState.currentMode = 'yolo';
     render({ embedded: true }, { allowedApprovalModes: ['default', 'auto'] });

@@ -5,6 +5,10 @@ import {
   useWorkspaceEventSignals,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
+  QUALIFIED_CORE_FEATURE,
+  WORKSPACE_SETTINGS_FEATURE,
+} from '../voice/voice-workspace-target';
+import {
   resolveApprovalModes,
   type WebShellApprovalMode,
 } from '../utils/planMode';
@@ -24,11 +28,22 @@ export function useApprovalModes(
   cwd: string | undefined,
   allowedApprovalModes: readonly WebShellApprovalMode[] | undefined,
 ): readonly WebShellApprovalMode[] {
-  const { client } = useWorkspace();
+  const { client, capabilities, status } = useWorkspace();
   const settingsVersion = useWorkspaceEventSignals()?.settingsVersion;
   const [setting, setSetting] = useState<ScopedSetting>();
+  // The qualified settings route is registered only by daemons advertising
+  // these features; against an older daemon keep the default list rather
+  // than failing closed on a route that will never appear.
+  const scopedSettingsSupported = [
+    QUALIFIED_CORE_FEATURE,
+    WORKSPACE_SETTINGS_FEATURE,
+  ].every((feature) => capabilities?.features?.includes(feature));
   useEffect(() => {
-    if (allowedApprovalModes !== undefined || !cwd) return;
+    if (allowedApprovalModes !== undefined || !cwd || !scopedSettingsSupported)
+      return;
+    // A reconnect re-runs this effect and so retries a failed read; skip the
+    // doomed request while the workspace is still reconnecting.
+    if (status !== 'connected') return;
     let cancelled = false;
     void client
       .workspaceByCwd(cwd)
@@ -61,7 +76,14 @@ export function useApprovalModes(
     return () => {
       cancelled = true;
     };
-  }, [allowedApprovalModes, client, cwd, settingsVersion]);
+  }, [
+    allowedApprovalModes,
+    client,
+    cwd,
+    scopedSettingsSupported,
+    settingsVersion,
+    status,
+  ]);
   return useMemo(() => {
     if (allowedApprovalModes !== undefined)
       return resolveApprovalModes(allowedApprovalModes);

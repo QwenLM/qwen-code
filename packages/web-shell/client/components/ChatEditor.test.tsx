@@ -3008,6 +3008,10 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
     // The list emptying while the trigger holds focus must hand focus to the
     // composer; a disabled button cannot keep it and the body must not get it.
     act(() => modeButton.focus());
+    // A real browser blurs a focused button to the body the moment it becomes
+    // disabled; jsdom never does, so emulate the loss explicitly. The handoff
+    // must still find the composer.
+    act(() => modeButton.blur());
     composerCoreState.focus.mockClear();
     rerenderChatEditor(container, { ...props, availableModes: [] });
     expect(
@@ -3018,6 +3022,233 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
         ?.disabled,
     ).toBe(true);
     expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('leaves focus alone when the list is empty from the start', () => {
+    renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      availableModes: [],
+    });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('hands focus to the composer when a narrowing list unmounts the focused row', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto', 'yolo'],
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const rows = () =>
+      document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-mode-popover] button[title]',
+      );
+    expect(rows()).toHaveLength(3);
+    act(() => rows()[2]!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      ...props,
+      availableModes: ['default', 'auto'],
+    });
+    // The picker stays open with the surviving rows; focus cannot stay on the
+    // removed row, so it is handed on rather than dropped to the body.
+    expect(rows()).toHaveLength(2);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('keeps focus on a row that survives a narrowing', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto', 'yolo'],
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const rows = () =>
+      document.querySelectorAll<HTMLElement>(
+        '[data-web-shell-mode-popover] button[title]',
+      );
+    expect(rows()).toHaveLength(3);
+    act(() => rows()[0]!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      ...props,
+      availableModes: ['default', 'auto'],
+    });
+    expect(rows()).toHaveLength(2);
+    expect(document.activeElement).toBe(rows()[0]);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('leaves an open model dropdown alone when the mode list empties', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'model'] as const,
+      availableModes: ['default', 'auto'],
+      availableModels: [{ id: 'qwen' }, { id: 'other' }],
+      currentModel: 'qwen',
+    };
+    const container = renderChatEditor(props);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+        .click(),
+    );
+    const popover = () =>
+      document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover()).not.toBeNull();
+    const option = popover()!.querySelector<HTMLElement>('button[title]')!;
+    act(() => option.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(popover()).not.toBeNull();
+  });
+
+  it.each([
+    { flip: { disabled: true }, label: 'the input is disabled' },
+    { flip: { modeControlsDisabled: true }, label: 'the mode controls lock' },
+  ])(
+    'leaves an open model dropdown alone with an empty list when $label',
+    ({ flip }) => {
+      const props = {
+        visibleToolbarActions: ['approvalMode', 'model'] as const,
+        availableModes: [] as string[],
+        availableModels: [{ id: 'qwen' }, { id: 'other' }],
+        currentModel: 'qwen',
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+          .click(),
+      );
+      const popover = () =>
+        document.querySelector('[data-web-shell-toolbar-popover]');
+      expect(popover()).not.toBeNull();
+      const option = popover()!.querySelector<HTMLElement>('button[title]')!;
+      act(() => option.focus());
+      composerCoreState.focus.mockClear();
+      rerenderChatEditor(container, { ...props, ...flip });
+      expect(composerCoreState.focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(option);
+      expect(popover()).not.toBeNull();
+    },
+  );
+
+  it('does not pull focus from another editor instance when its own list empties', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const first = renderChatEditor(props);
+    act(() =>
+      first
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    const row = document.querySelector<HTMLElement>(
+      '[data-web-shell-mode-popover] button[title]',
+    )!;
+    act(() => row.focus());
+    const second = renderChatEditor(props);
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(second, { ...props, availableModes: [] });
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(row);
+    expect(
+      document.querySelector('[data-web-shell-mode-popover]'),
+    ).not.toBeNull();
+  });
+
+  it('hands focus past a disabled model control when the list empties', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'model'] as const,
+      availableModes: ['default', 'auto'],
+      availableModels: [{ id: 'qwen' }],
+      currentModel: 'qwen',
+      modelControlsDisabled: true,
+      disabled: true,
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    )!;
+    expect(modelButton.disabled).toBe(true);
+    act(() => modeButton.focus());
+    const modelFocus = vi.spyOn(modelButton, 'focus');
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    // The disabled model control cannot take focus, and with the input
+    // disabled too the handoff goes nowhere rather than to a dead target.
+    expect(modelFocus).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('hands focus to an enabled model control when the list empties with the input disabled', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode', 'model'] as const,
+      availableModes: ['default', 'auto'],
+      availableModels: [{ id: 'qwen' }],
+      currentModel: 'qwen',
+      disabled: true,
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    )!;
+    expect(modelButton.disabled).toBe(false);
+    act(() => modeButton.focus());
+    const modelFocus = vi.spyOn(modelButton, 'focus');
+    rerenderChatEditor(container, { ...props, availableModes: [] });
+    expect(modelFocus).toHaveBeenCalled();
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the composer on a coarse pointer when no toolbar control can take focus', () => {
+    const props = {
+      visibleToolbarActions: ['approvalMode'] as const,
+      availableModes: ['default', 'auto'],
+    };
+    const container = renderChatEditor(props);
+    const modeButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mode-button]',
+    )!;
+    act(() => modeButton.focus());
+    composerCoreState.focus.mockClear();
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      rerenderChatEditor(container, { ...props, availableModes: [] });
+      expect(composerCoreState.focus).toHaveBeenCalled();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
   });
 
   it('keeps permission and Plan controls operable while approval disables input', () => {

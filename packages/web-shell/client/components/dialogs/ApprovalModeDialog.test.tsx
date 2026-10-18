@@ -131,6 +131,55 @@ it('uses the supplied choices for rendering and keyboard confirmation', () => {
   expect(onSelect).toHaveBeenLastCalledWith('auto');
 });
 
+it('re-anchors the highlight when a same-length swap replaces the highlighted row', () => {
+  const onSelect = vi.fn();
+  mount(
+    <ApprovalModeDialog
+      currentMode="default"
+      availableModes={['default', 'auto']}
+      onSelect={onSelect}
+    />,
+  );
+  press('ArrowDown');
+  expect(activeDescendant()).toBe('mode-opt-1');
+  rerender(
+    <ApprovalModeDialog
+      currentMode="default"
+      availableModes={['default', 'yolo']}
+      onSelect={onSelect}
+    />,
+  );
+  // The highlighted row left the list: the highlight re-anchors to the
+  // current mode instead of sitting on a row the user never chose.
+  expect(activeDescendant()).toBe('mode-opt-0');
+  press('Enter');
+  expect(onSelect).toHaveBeenCalledWith('default');
+  expect(onSelect).not.toHaveBeenCalledWith('yolo');
+});
+
+it('follows the highlighted row when a swap keeps it', () => {
+  const onSelect = vi.fn();
+  mount(
+    <ApprovalModeDialog
+      currentMode="default"
+      availableModes={['default', 'auto']}
+      onSelect={onSelect}
+    />,
+  );
+  press('ArrowDown');
+  expect(activeDescendant()).toBe('mode-opt-1');
+  rerender(
+    <ApprovalModeDialog
+      currentMode="default"
+      availableModes={['auto', 'default']}
+      onSelect={onSelect}
+    />,
+  );
+  expect(activeDescendant()).toBe('mode-opt-0');
+  press('Enter');
+  expect(onSelect).toHaveBeenCalledWith('auto');
+});
+
 it('keeps keyboard confirmation valid when an open list shrinks', () => {
   const onSelect = vi.fn();
   mount(<ApprovalModeDialog currentMode="yolo" onSelect={onSelect} />);
