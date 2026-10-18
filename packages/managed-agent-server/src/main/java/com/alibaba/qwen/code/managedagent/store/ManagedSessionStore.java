@@ -536,7 +536,7 @@ public class ManagedSessionStore {
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query(
                         "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ? AND"
-                                + " workspace_id IS NOT NULL FOR UPDATE",
+                                + " (workspace_id IS NOT NULL OR session_kind = 'PUBLIC') FOR UPDATE",
                 (row, index) -> row.getString("status"), tenantId, sessionId);
         if (authority == null && !closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
             throw conflict("managed_session_not_writable", "The Session is closing or closed.");
@@ -1099,6 +1099,8 @@ public class ManagedSessionStore {
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
+                        + " wake_pending = wake_pending OR ?,"
+                        + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
                         + " latest_checkpoint_resource_id),"
@@ -1108,7 +1110,9 @@ public class ManagedSessionStore {
                         + " activation_head_revision = ?, storage_version = ?, gmt_modified = ?"
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ?",
-                revision, request.lastSequence(), request.commitDigest(),
+                revision, request.lastSequence(),
+                WakeRecoveryStore.hasWakeInput(validated.recordBytes(), request.eventCount()),
+                head.journalRevision(), revision, request.commitDigest(),
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()

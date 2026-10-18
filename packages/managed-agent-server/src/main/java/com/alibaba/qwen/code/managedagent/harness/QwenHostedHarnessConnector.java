@@ -880,6 +880,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void recoverForWake(String tenantId, String sessionId) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            // Passive load always makes a round trip, even with a cached ref, and never
+            // drives an unrelated foreground Turn. The loaded wake pump owns its inputs.
+            doCreateOrLoad(tenantId, sessionId, true, true, false);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public boolean activateForWake(String tenantId, String sessionId) {
         try {
             // An attachment held here is not this verb's to evict: a wake

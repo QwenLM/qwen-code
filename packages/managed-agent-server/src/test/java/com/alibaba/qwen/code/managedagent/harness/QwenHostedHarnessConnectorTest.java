@@ -1333,6 +1333,15 @@ class QwenHostedHarnessConnectorTest {
         assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isFalse();
         verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
 
+        // SQL recovery re-proves the generation even with that cached attachment.
+        connector.recoverForWake("tenant-a", SESSION_ID);
+        connector.recoverForWake("tenant-a", SESSION_ID);
+        verify(client, times(3)).loadSession(loads.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
+                loads.getValue(), "toJson"))
+                .containsEntry("passiveManagedRuntimeRecovery", true)
+                .doesNotContainEntry("driveRuntimeRecovery", true);
+
         // The grant revoked: a fresh node's wake runs the admission and
         // loads nothing.
         QwenHostedHarnessConnector fresh = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
@@ -1340,7 +1349,9 @@ class QwenHostedHarnessConnectorTest {
         doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
         assertThatThrownBy(() -> fresh.activateForWake("tenant-a", SESSION_ID))
                 .hasMessageContaining("Workspace execution authority is unavailable");
-        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
+        assertThatThrownBy(() -> connector.recoverForWake("tenant-a", SESSION_ID))
+                .hasMessageContaining("Workspace execution authority is unavailable");
+        verify(client, times(3)).loadSession(any(LoadHarnessSession.class));
     }
 
     // H4f × H4d-b: a stopped run's message stop must never start the work

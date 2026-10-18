@@ -480,7 +480,8 @@ class ManagedAgentPropertiesTest {
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
-                "runtime-broker.retention.scan-delay");
+                "runtime-broker.retention.scan-delay",
+                "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {
             if (!hasTypedField(key)) {

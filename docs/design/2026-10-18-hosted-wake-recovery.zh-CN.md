@@ -1,0 +1,63 @@
+# Writer 丢失后的 Hosted wake 恢复
+
+[English](2026-10-18-hosted-wake-recovery.md) | [简体中文](2026-10-18-hosted-wake-recovery.zh-CN.md)
+
+状态：为 [#14116](https://github.com/QwenLM/qwen-code/issues/14116) 实现修复，已在 macOS/MySQL 8.4 本地验证。真实 MQ 开启、Linux/Windows 及部署后的 provider 验收仍未验证。
+
+## 问题
+
+已提交的 wake 输入可能比 Harness 存活得更久。替代进程没有加载任何 Session，各来源 relay 的投递结束边界不同，而 writer 租约仍有效时被确认的 MQ 通知，不会在租约到期后再次到达。发现这些持久化工作不应依赖新的用户输入。
+
+## 恢复归属
+
+控制面独立于 EventTransport 扫描 SQL，恢复符合条件的 Session；现有 Harness wake pump 负责输入执行与崩溃后结算。扫描器和消息代理都不判断执行结果，不重新发送来源操作，也不重放工具效果。
+
+支持的来源为 `monitor`（包括后台 Shell）、`channel`、`child_agent`、`workflow`、`automation` 和 `session_message`。相同 turn 标识的 `turn.settled` 表示输入已消费，无论结果是什么。公共前台输入仍由 dispatcher 负责。
+
+## 发现与隔离
+
+追加 V11 迁移扩展现有 Session head，不改变 32 表基线或已发布的迁移资源。日志提交同时维护 `wake_pending` 提示与 `wake_head_revision` 版本戳。生成列 `wake_scan_pending` 同时包含提示有工作的 head 和版本戳未知或过期的 head；索引按持久化 `wake_retry_at` 和有作用域的 head 键排列候选。
+
+新 wake 准入设置提示。其他提交只推进仍然有效的版本戳，不清除提示。扫描器重放已提交日志前缀，证明消费之后，按日志版本比较并清除提示，不会清掉并发准入。旧 head 的版本戳初始为未知，不维护版本戳的旧二进制继续写入时也会使其过期。因此，同一扫描可惰性回填，不会虚构投递或消费状态。
+
+候选必须是 Workspace 匹配、`ACTIVE` 且未退役的公共 Session，其日志为 writer 租约已到期的 `ACTIVE` 或 `SEALED`。租约按数据库时间判断。私有 CSI authority 不参与。Workspace 准入、授权、物理挂载验证和 Harness writer generation 获取仍是最终隔离。关闭中、已关闭、已删除和已退役的 Session 不会在此恢复。已有停止请求的 child run 留给停止 relay，避免恢复启动正在被停止操作取消的消息。
+
+获取 writer 时会锁定并检查公共 Session 的状态，包括未绑定 Workspace 的 Session。因此，在发现候选之后抢先完成的关闭仍会阻止 load；先获取到 writer 的一方仍受已有关闭围栏约束。
+
+认领在同一事务中先锁公共 Session，再锁其 journal head，与普通准入和生命周期的顺序一致。持久化重试时间在日志重放或 Harness HTTP 之前提交，不持有数据库锁执行 load。这避免了包含 Session 子查询的 head 更新导致锁顺序倒置。
+
+扫描器分页读取日志，校验作用域、字节摘要与连续的已提交前缀，根据输入准入和 Turn 结算推导待消费集合。前缀缺失、已压缩或损坏时拒绝并记录日志，绝不解释为没有待处理工作。Harness 在运行之前还会独立验证恢复数据。
+
+有界缓存最多保留 128 个以完整、不可变候选前缀为键的正向证明。加载失败后前缀未变时不再重复读取相同历史。不缓存无待处理输入的结果，也不将其用于清除后续版本。
+
+## 重新附着与策略
+
+恢复强制执行 passive load，不信任 connector 的附着缓存。generation 不匹配时沿用已有的 connector 代际接管，后续扫描使用新 boot 重试。这也覆盖没有保存公共 Turn boot 绑定的 channel Session。Passive takeover 不驱动无关的停放前台 Turn；那仍是 dispatcher 的职责。
+
+不新增按输入年龄取消的策略。尚未尝试的 wake 在长时间故障后仍保留原标识，通过普通准入运行。已经尝试的 wake 沿用各来源现有的崩溃结算：不重放已提交效果，不掩盖未知结果，无法证明可恢复时保持阻塞。生命周期和已提交取消仍按原有优先级处理。
+
+扫描使用独立的单线程调度器、有上限的候选页和持久化重试间隔。失败的 Session 排到其他到期候选之后。对已提交输入的发现没有永久尝试上限。来源 relay 的放弃状态不变：扫描不会重新准入从未提交的输入，也不会把未知的来源回执升级为成功。每次失败都在服务端日志中标明 tenant 和 Session。
+
+首次证明仍会读取完整历史，候选过滤也可能遍历不符合条件的历史 head。页大小限制返回的候选数，并不限制数据库工作量。大规模目录和首次历史读取会延迟单个扫描器；增量重放和可续扫的原始 head 分页留作容量改进。
+
+MQ 继续加速首次发现。其 `wake_covered_sequence` 仅用于通知去重；通知得到 `OWNED`、重复、失败或丢弃，都不会使 SQL 中待处理的工作对扫描不可见。
+
+## 验证与验收
+
+1. 使用真实 Harness、控制面和一次性 MySQL 8.4 复现 writer 丢失，记录已提交输入、租约到期、boot 变化，以及替代进程没有收到 load。之后显式 load 作为正向对照。
+2. 修复后重启且不再发送输入。旧 writer 租约到期且到期扫描成功后，各支持来源的待处理输入应自动加载。夹具模型提供确定性的请求与结算。
+3. 覆盖 EventTransport 关闭和开启，包括通知在租约到期前被消费，以及通知已认领但 load 失败。所有情况下都以日志为事实来源。
+4. 覆盖已结算、多输入、旧或过期提示、回滚、并发准入和认领、tenant/Workspace 隔离、活 writer、生命周期、私有 CSI、已停止 child、过期附着和暂时故障。
+5. 运行受影响的 Java 测试、完整 Maven 验证，以及匹配的 MySQL 和 Hosted 恢复 profile。使用夹具生产来源事件，或未完成的 provider/平台验收，均明确报告。
+
+正常单 Session 恢复延迟为 writer 剩余租期，加上重试间隔及扫描/load 耗时。积压、Harness 不可用、授权被撤销、日志不可读或 Runtime 被阻塞，都可能延长该时间；这些条件仍存在时，不宣称恢复结果成功。
+
+## 已观察的本地验证
+
+完整 Java 单测执行 4,670 项，失败和错误为零，18 项按预设条件跳过。11 个隔离 MySQL 测试覆盖发现、精确结算、版本竞态、持久化认领及先 Session 后 head 的锁顺序。Checkstyle、SpotBugs、最新主干根目录 build/bundle 和 Markdown 格式、引用检查均通过。
+
+真实 Spring/MySQL/Harness 进程探针复现了缺少自动 load 的问题，并验证 monitor、实际 Automation define/fire 和实际 channel 输入无需新输入即可恢复。最终 Automation 构建产物探针在 34,807 毫秒恢复，旧 boot 的 409 后自动获得新 boot 的 200，再观察 35 秒，输入、模型和结算仍各一次。被中断的已尝试 Automation 按 `outcome_unknown` 结算，不重复模型请求。在认领后完成公共关闭，现在会以 `managed_session_not_writable` 拒绝普通 writer 获取，head 和模型计数不推进。
+
+匹配的 Hosted/MySQL 和进程崩溃 profile 均通过，覆盖协调器重启，以及 Harness prepare/start/result、Spring 终止、worker 终止和暂停六处物理故障注入。冷恢复保持 blocked，不重放工具。故障夹具在已有支持的 Linux 和 macOS 上都注册原生存储，身份验证保持启用。
+
+这些 wake 探针中的 monitor 输入生产使用夹具。通用日志测试覆盖六个来源名称，但不证明物理后台 Shell 生产、child/workflow/message 关系验收、外部 channel 投递或真实 MQ 开启行为。它们及部署、跨平台验收仍需独立验证。
