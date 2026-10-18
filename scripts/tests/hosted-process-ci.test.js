@@ -778,8 +778,11 @@ describe('Hosted real-process gates', () => {
       // holds only when every wait goes through the helper that fails on
       // it.
       expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
+      // A class may configure awaitility before chaining failFast — for
+      // example to ignore a deadlock a sibling delivery thread rolled back —
+      // so pin the guard itself, not the exact `await().failFast` prefix.
       expect(read(hostedTestPath(className))).toContain(
-        'await().failFast("The case\'s @Timeout interrupted it"',
+        '.failFast("The case\'s @Timeout interrupted it"',
       );
     },
   );
