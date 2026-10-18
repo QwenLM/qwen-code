@@ -39343,7 +39343,9 @@ describe('Session', () => {
         command: 'git reset --hard',
       });
       expect(
-        request.options.filter((option) => option.kind === 'allow_always'),
+        request.options.filter(
+          (option: { kind: string }) => option.kind === 'allow_always',
+        ),
       ).toEqual([]);
       expect(execute).not.toHaveBeenCalled();
     });
@@ -39399,7 +39401,9 @@ describe('Session', () => {
         const [request] = vi.mocked(mockClient.requestPermission).mock
           .calls[0]!;
         expect(
-          request.options.filter((option) => option.kind === 'allow_always'),
+          request.options.filter(
+            (option: { kind: string }) => option.kind === 'allow_always',
+          ),
         ).toEqual([]);
         expect(generateJson).not.toHaveBeenCalled();
         expect(execute).toHaveBeenCalledTimes(runs);
