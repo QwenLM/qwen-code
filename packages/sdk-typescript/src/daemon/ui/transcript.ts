@@ -1700,6 +1700,16 @@ function appendUnrecognizedDiagnostic(
 }
 
 /**
+ * An inter-teammate message is a discrete event, not latest-state progress:
+ * two messages between the same pair carry different text and these frames are
+ * never persisted, so merging them loses the earlier one for good. Tool frames
+ * stay coalesced, which is what protects the `maxBlocks` budget below.
+ */
+function isTeammateMessageFrame(data: unknown): boolean {
+  return (data as { status?: unknown } | undefined)?.status === 'message';
+}
+
+/**
  * `teammate_activity` arrives once per teammate tool call *and* per tool
  * result and is never persisted, so one block per event spends the `maxBlocks`
  * budget on rows a reload will not contain and `trimTranscriptState` then
@@ -1714,6 +1724,7 @@ function coalesceTeammateActivity(
   }
   const agentName = event.agent?.agentName;
   if (!agentName) return false;
+  if (isTeammateMessageFrame(event.data)) return false;
   for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
     const candidate = state.blocks[i]!;
     // Stop at a segment boundary: a row above it keeps the text the reader saw
@@ -1723,7 +1734,8 @@ function coalesceTeammateActivity(
     if (candidate.source === 'session_branched') return false;
     if (
       candidate.source !== 'teammate_activity' ||
-      candidate.agent?.agentName !== agentName
+      candidate.agent?.agentName !== agentName ||
+      isTeammateMessageFrame(candidate.data)
     ) {
       continue;
     }

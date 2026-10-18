@@ -513,6 +513,42 @@ describe('teammate_activity status events', () => {
     ]);
   });
 
+  it('keeps message rows distinct from each other and from tool rows', () => {
+    // Keying the coalesce on `agent.agentName` alone let a message row and the
+    // recipient's tool row overwrite each other; these frames are never
+    // persisted, so the lost text is unrecoverable.
+    const frame = (text: string, status: string): DaemonUiEvent => ({
+      type: 'status',
+      source: 'teammate_activity',
+      text,
+      data: { status },
+      agent: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
+      clearActiveText: false,
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        frame('checker started read_file', 'call'),
+        frame('writer -> checker: review the auth module', 'message'),
+        frame('writer -> checker: check a different file', 'message'),
+        frame('checker finished read_file', 'result'),
+      ],
+      { now: 1 },
+    );
+
+    const rows = state.blocks.filter(
+      (block) =>
+        block.kind === 'status' && block.source === 'teammate_activity',
+    );
+    // The tool row stays latest-state coalesced; both messages keep their own.
+    expect(rows.map((block) => ('text' in block ? block.text : ''))).toEqual([
+      'checker finished read_file',
+      'writer -> checker: review the auth module',
+      'writer -> checker: check a different file',
+    ]);
+  });
+
   it('appends a separate row when the activity carries no identity', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
