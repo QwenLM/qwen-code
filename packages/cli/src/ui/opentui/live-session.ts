@@ -21,6 +21,7 @@
  */
 
 import { appendFileSync } from 'node:fs';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   AgentResultDisplay,
   Config,
@@ -573,19 +574,26 @@ const initializationPromises = new WeakMap<Config, Promise<void>>();
 export function ensureConfigInitialized(config: Config): Promise<void> {
   const pending = initializationPromises.get(config);
   if (pending) return pending;
-  const started = config.initialize().catch((err) => {
-    // A caller that initialized elsewhere already won: its settled success
-    // reports as core's re-entry error while the chat is ready to send. A
-    // settled failure does not — the real error must surface, and core has
-    // no retry either way, so the rejected promise stays cached for awaiters.
-    if (
-      config.getGeminiClient()?.isInitialized?.() ||
-      (err instanceof Error && err.message === 'Config was already initialized')
-    ) {
-      return;
-    }
-    throw err;
-  });
+  const started = config
+    .initialize()
+    .catch((err) => {
+      // A caller that initialized elsewhere already won: its settled success
+      // reports as core's re-entry error while the chat is ready to send. A
+      // settled failure does not — the real error must surface, and core has
+      // no retry either way, so the rejected promise stays cached for awaiters.
+      if (
+        config.getGeminiClient()?.isInitialized?.() ||
+        (err instanceof Error &&
+          err.message === 'Config was already initialized')
+      ) {
+        return;
+      }
+      getInteractiveModSession(config)?.failStartup(err);
+      throw err;
+    })
+    .then(async () => {
+      await getInteractiveModSession(config)?.initialize();
+    });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
   started.catch(() => {});
