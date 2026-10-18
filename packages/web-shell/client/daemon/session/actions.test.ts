@@ -2472,6 +2472,50 @@ describe('createDaemonSessionActions', () => {
         }
       });
 
+      it('sizes the watchdog from the advertised budget, not the fallback', async () => {
+        // The call sites pass `getConnection().capabilities`; a harness with no
+        // advertised budget cannot tell that argument from `undefined`.
+        vi.useFakeTimers();
+        const initialization = createDeferred<Response>();
+        const transport = new AcpHttpTransport(
+          'http://localhost',
+          '',
+          vi.fn(() => initialization.promise),
+        );
+        try {
+          const client = new DaemonClient({
+            baseUrl: 'http://localhost',
+            token: '',
+            transport,
+          });
+          const { actions } = createWorkspaceCreateHarness(
+            path,
+            client,
+            undefined,
+            advertisingRestoreBudget(90_000),
+          );
+          const rejected = vi.fn();
+          const pending = actions
+            .createSession({ sourceType: 'default' })
+            .catch(rejected);
+          await vi.advanceTimersByTimeAsync(144_999);
+          expect(rejected).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(rejected).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              message: 'Create session timed out after 145000ms',
+            }),
+          );
+          await pending;
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          initialization.reject(new Error('Test cleanup'));
+          await vi.advanceTimersByTimeAsync(0);
+          transport.dispose();
+          vi.useRealTimers();
+        }
+      });
+
       it('detaches a successful result arriving after the create watchdog', async () => {
         vi.useFakeTimers();
         try {
@@ -7036,6 +7080,7 @@ function createWorkspaceCreateHarness(
     typeof createDaemonSessionActions
   >[0]['createDetachedSession'] = (workspaceCwd, overrides) =>
     DaemonSessionClient.createOrAttach(client, { workspaceCwd, ...overrides }),
+  capabilities?: DaemonCapabilities,
 ) {
   const existing = createMockSession('session-a');
   existing.client.createOrAttachSession.mockImplementation((request) =>
@@ -7048,6 +7093,7 @@ function createWorkspaceCreateHarness(
         status: 'connected',
         sessionContext: { kind: 'workspace', cwd: '/workspace' },
         ...(path === 'active' ? { sessionId: 'session-a' } : {}),
+        ...(capabilities ? { capabilities } : {}),
       },
       ...(path === 'active' ? { session: existing } : {}),
       createDetachedSession: vi.fn(createDetachedSession),
