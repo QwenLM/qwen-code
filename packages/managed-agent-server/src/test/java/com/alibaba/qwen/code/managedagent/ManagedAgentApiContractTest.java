@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
+import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
 import com.alibaba.qwen.code.managedagent.api.ApiModels;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -53,12 +54,17 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
+import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
+import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
 import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
+import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -75,11 +81,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
@@ -90,7 +98,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -102,6 +112,9 @@ import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -154,6 +167,14 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
+                    entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
+                    entry(WorkspaceDiscoveryController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryQueryRequest")),
+                    entry(SshWorkspaceController.CreateRequest.class, List.of("WebShellWorkspaceRegisterRequest")),
+                    entry(SshWorkspaceController.OperationRequest.class, List.of("WebShellWorkspaceOperationRequest")),
+                    entry(SshWorkspaceService.NodeSummary.class, List.of("WebShellRuntimeNode")),
+                    entry(SshWorkspaceService.NodePage.class, List.of("WebShellRuntimeNodePage")),
+                    entry(SshWorkspaceService.Directory.class, List.of("WebShellWorkspaceDirectory")),
+                    entry(SshWorkspaceStore.Operation.class, List.of("WebShellWorkspaceCreateOperation")),
                     entry(InputBlock.class, List.of("InputBlock")),
                     entry(CreateSessionRequest.class,
                             List.of("CreateSessionRequest")),
@@ -235,6 +256,11 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellModelContext")),
                     entry(ApiModels.WebShellModelOption.class, List.of("WebShellModelOption")),
                     entry(ApiModels.WebShellModelSelection.class, List.of("WebShellModelSelection")),
+                    entry(ApiModels.WebShellSessionApprovalRequest.class, List.of("WebShellSessionApprovalRequest")),
+                    entry(ApiModels.WebShellSessionApproval.class, List.of("WebShellSessionApproval")),
+                    entry(ApiModels.WebShellChangeApprovalRequest.class, List.of("WebShellChangeApprovalRequest")),
+                    entry(ApiModels.WebShellApprovalChangeResult.class, List.of("WebShellApprovalChangeResult")),
+                    entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
@@ -288,6 +314,15 @@ class ManagedAgentApiContractTest {
 
     @Autowired
     private ManagedTaskEventStore taskEvents;
+
+    @Autowired
+    private SshWorkspaceStore sshWorkspaces;
+
+    // D7-3: present only where the deployment enables the java_durable
+    // admission profile (JavaDurableAdmissionContractTest).
+    @Autowired(required = false)
+    private com.alibaba.qwen.code.managedagent.service.JavaDurableAdmission
+            javaDurableAdmission;
 
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
@@ -528,7 +563,9 @@ class ManagedAgentApiContractTest {
     @Test
     void recordsMatchTheirSchemas() {
         Map<String, String> drift = new TreeMap<>();
-        for (Class<?> type : ApiModels.class.getDeclaredClasses()) {
+        Set<Class<?>> records = new LinkedHashSet<>(Arrays.asList(ApiModels.class.getDeclaredClasses()));
+        records.addAll(RECORD_SCHEMAS.keySet());
+        for (Class<?> type : records) {
             if (!type.isRecord()) {
                 continue;
             }
@@ -815,6 +852,19 @@ class ManagedAgentApiContractTest {
         assertThat(cancelling.get("input_item_id").asText())
                 .isEqualTo("item_" + turnId + "_input");
         settleCancelledTurn(tenant, cancelledId, cancels);
+        // D7-1: the input and its cancel each read back as their own
+        // command operation, settled from the Turn the Harness cancelled.
+        for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
+            JsonNode command = json(exchange(drift, "getSessionCwdOperation",
+                    200, get("/v1/agents/sessions/{id}/operations/{op}",
+                            cancelledId, turnCommandOperation(cancelledId,
+                                    kind)).header(TENANT, tenant), null));
+            assertThat(command.get("type").asText())
+                    .isEqualTo(kind.toLowerCase(Locale.ROOT));
+            assertThat(command.get("status").asText()).isEqualTo("completed");
+            assertThat(command.get("admission_stage").asText())
+                    .isEqualTo("harness_confirmed");
+        }
 
         String webSessionId = json(exchange(drift, "webShellCreateSession",
                 202, post(WEB_SHELL + "/sessions/create")
@@ -919,6 +969,19 @@ class ManagedAgentApiContractTest {
                  "sessionId":"%s","turnId":"%s"}
                 """.formatted(webSessionId, webTurnId));
         settleCancelledTurn(tenant, webSessionId, cancels);
+        for (String kind : List.of("SUBMIT_INPUT", "CANCEL")) {
+            JsonNode command = json(exchange(drift,
+                    "webShellQueryCwdOperation", 200,
+                    post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                    """
+                    {"sessionId":"%s","operationId":"%s"}
+                    """.formatted(webSessionId,
+                            turnCommandOperation(webSessionId, kind))));
+            assertThat(command.get("type").asText())
+                    .isEqualTo(kind.toLowerCase(Locale.ROOT));
+            assertThat(command.get("deliveryState").asText())
+                    .isEqualTo("confirmed");
+        }
         awaitMaterialized(tenant, webSessionId);
         exchange(drift, "webShellGetSession", 200,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
@@ -1161,6 +1224,10 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/create")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"workspace-create\"}");
+        exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1200,6 +1267,18 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(1);
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
+        exchange(drift, "queryWebShellSessionApproval", 200,
+                post(WEB_SHELL + "/session-approval/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionApproval", 401,
+                post(WEB_SHELL + "/session-approval/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "changeWebShellSessionApproval", 409,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
+        exchange(drift, "changeWebShellSessionApproval", 401,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
@@ -1378,12 +1457,128 @@ class ManagedAgentApiContractTest {
         exchangeTurns(drift, tenant, otherTenant);
         exchangeAgents(drift, tenant, otherTenant);
         exchangeChannels(drift, tenant, otherTenant);
+        exchangeWorkspaceRegistration(drift, tenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    private void exchangeWorkspaceRegistration(Map<String, String> drift, String tenant) throws Exception {
+        var owner = actor(tenant);
+        JsonNode nodes = json(exchange(drift, "webShellQueryRuntimeNodes", 200,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant).principal(owner), null));
+        assertThat(nodes.path("supported").asBoolean()).isFalse();
+        assertThat(nodes.path("data")).isEmpty();
+        String directory = "{\"nodeId\":\"mac\",\"path\":\"/work/project\"}";
+        String create = """
+                {"nodeId":"mac","path":"/work/project","displayName":"Project",
+                 "idempotencyKey":"contract-registration","requestId":"registration-trace"}
+                """;
+        for (String code : List.of(
+                exchange(drift, "webShellCheckWorkspaceDirectory", 404,
+                        post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(owner), directory),
+                exchange(drift, "webShellRegisterWorkspace", 404,
+                        post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(owner), create))) {
+            assertThat(json(code).at("/error/code").asText()).isEqualTo("ssh_runtime_disabled");
+        }
+        exchange(drift, "webShellGetWorkspaceOperation", 404,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(owner),
+                "{\"operationId\":\"missing\"}");
+        exchange(drift, "webShellQueryRuntimeNodes", 401,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant), null);
+        exchange(drift, "webShellCheckWorkspaceDirectory", 401,
+                post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant), directory);
+        exchange(drift, "webShellRegisterWorkspace", 401,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
+        exchange(drift, "webShellGetWorkspaceOperation", 401,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+    }
+
+    @Test
+    void localWorkspaceCreationRejectsRemotePayloadsBeforeAdmission() throws Exception {
+        String tenant = "contract-local-remote-boundary-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        for (String extra : List.of(
+                ",\"nodeId\":\"mac\",\"path\":\"/work/project\"",
+                ",\"nodeId\":null,\"path\":\"/work/project\"",
+                ",\"nodeId\":null", ",\"path\":null")) {
+            String body = "{\"displayName\":\"Remote\",\"idempotencyKey\":\"original\"" + extra + "}";
+            assertThat(json(exchange(drift, "webShellCreateWorkspace", 400,
+                    post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)), body))
+                    .at("/error/code").asText()).isEqualTo("invalid_request");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?"
+                + " AND namespace = 'WORKSPACE_CREATE'", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
+    void sshRegistrationOperationsStayActorOwnedWhenNewAdmissionIsDisabled() throws Exception {
+        String tenant = "contract-registration-" + UUID.randomUUID();
+        var operation = sshWorkspaces.begin(tenant, "actor-a", "original", "mac", "/work/project", "Project");
+        var intent = sshWorkspaces.claim(tenant, "actor-a", operation.operationId(), "fixture");
+        // D7-2: only a reserved registration parks recovery_blocked.
+        sshWorkspaces.reserve(intent, "fixture", SurfaceAdmissionAcceptanceTest.reservedRegistration(intent, tenant));
+        sshWorkspaces.fail(intent, "fixture", "ssh_runtime_identity_conflict", false);
+        String body = objectMapper.writeValueAsString(Map.of("operationId", operation.operationId()));
+        Map<String, String> drift = new TreeMap<>();
+        JsonNode saved = json(exchange(drift, "webShellGetWorkspaceOperation", 200,
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant)), body));
+        assertThat(saved.path("operationId").asText()).isEqualTo(operation.operationId());
+        assertThat(saved.path("status").asText()).isEqualTo("recovery_blocked");
+        assertThat(saved.path("replayed").asBoolean()).isTrue();
+        for (var request : List.of(
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant, "actor-b")),
+                post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant + "-other").principal(actor(tenant + "-other")))) {
+            assertThat(json(exchange(drift, "webShellGetWorkspaceOperation", 404, request, body))
+                    .at("/error/code").asText()).isEqualTo("operation_not_found");
+        }
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
+    void sshRegistrationSuccessResponsesMatchTheContractWithoutConnectingToSsh() throws Exception {
+        String tenant = "contract-ssh-proxy";
+        SshWorkspaceService ssh = mock(SshWorkspaceService.class);
+        when(ssh.list(tenant, "actor-a")).thenReturn(new SshWorkspaceService.NodePage(true,
+                List.of(new SshWorkspaceService.NodeSummary("mac", "Build Mac"))));
+        when(ssh.check(tenant, "actor-a", "mac", "/work/project"))
+                .thenReturn(new SshWorkspaceService.Directory("mac", "/work/project", "darwin"));
+        when(ssh.create(tenant, "actor-a", "mac", "/work/project", "Project", "original"))
+                .thenReturn(new SshWorkspaceStore.Operation("registration", "workspace_create", "pending", null, null, false));
+        MockMvc proxy = MockMvcBuilders.standaloneSetup(new SshWorkspaceController(ssh))
+                .setCustomArgumentResolvers(new TenantContextArgumentResolver())
+                .setControllerAdvice(new ApiExceptionHandler())
+                .setMessageConverters(new MappingJackson2HttpMessageConverter(objectMapper))
+                .addFilters(new RequestIdFilter(), new TenantContextFilter(objectMapper)).build();
+        Map<String, String> drift = new TreeMap<>();
+        exchange(proxy, drift, "webShellQueryRuntimeNodes", 200,
+                post(WEB_SHELL + "/runtime-nodes/query").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(proxy, drift, "webShellCheckWorkspaceDirectory", 200,
+                post(WEB_SHELL + "/workspaces/check-directory").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"nodeId\":\"mac\",\"path\":\"/work/project\"}");
+        exchange(proxy, drift, "webShellRegisterWorkspace", 202,
+                post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant).principal(actor(tenant)),
+                """
+                {"nodeId":"mac","path":"/work/project","displayName":"Project",
+                 "idempotencyKey":"original","requestId":"create-registration-trace"}
+                """);
+        for (String status : List.of("pending", "running", "completed", "failed", "cancelled", "recovery_blocked")) {
+            when(ssh.get(tenant, "actor-a", "registration")).thenReturn(new SshWorkspaceStore.Operation(
+                    "registration", "workspace_create", status, "completed".equals(status) ? "workspace" : null,
+                    "recovery_blocked".equals(status) ? "ssh_runtime_identity_conflict" : null, true));
+            exchange(proxy, drift, "webShellGetWorkspaceOperation", 200,
+                    post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant).principal(actor(tenant)),
+                    "{\"operationId\":\"registration\"}");
+        }
+        verify(ssh).check(tenant, "actor-a", "mac", "/work/project");
+        verify(ssh).create(tenant, "actor-a", "mac", "/work/project", "Project", "original");
+        assertThat(drift).isEmpty();
     }
 
     private void exchangeActions(Map<String, String> drift, String tenant) throws Exception {
@@ -1642,6 +1837,28 @@ class ManagedAgentApiContractTest {
                                 rest.at("/data/0/id").asText()));
     }
 
+    /** A committed record body for a synthetic child_run row. */
+    private void childRunResource(String tenant, String sessionId,
+            String resourceId, String json) {
+        String scope = com.alibaba.qwen.code.managedagent.store
+                .ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_resource (resource_key,"
+                + " session_scope_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256,"
+                + " storage_kind, inline_bytes, publish_command_id, state,"
+                + " gmt_create) VALUES (?, ?, ?, 'workspace-contract', ?, ?,"
+                + " 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                + " 'command', 'REFERENCED', "
+                + com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaTime.SQL_NOW + ")",
+                com.alibaba.qwen.code.runtimebroker.managedschema
+                        .ManagedSchemaKeys.key(scope, resourceId),
+                scope, tenant, sessionId, resourceId, body.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
+                body);
+    }
+
     /**
      * H4f: the cancel routes over a monitor task (no cancel action) and a
      * running child-agent task row. Delivery is the coordinator's and is
@@ -1665,12 +1882,26 @@ class ManagedAgentApiContractTest {
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 recordKey, tenant, sessionId, "d".repeat(64));
+        // #13746 F2: the run's committed record names its child Session,
+        // and both task views carry that link inside their schemas.
+        String childSession = UUID.randomUUID().toString();
+        childRunResource(tenant, sessionId, "resource-run-contract",
+                "{\"kind\":\"child_agent\",\"childSessionId\":\""
+                        + childSession + "\"}");
         String childTask = "task_" + recordKey;
         JsonNode view = json(exchange(drift, "getSessionTask", 200,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         childTask).header(TENANT, tenant), null));
         assertThat(view.get("action_capabilities").toString())
                 .isEqualTo("[\"cancel\"]");
+        assertThat(view.get("child_session_id").asText())
+                .isEqualTo(childSession);
+        JsonNode webShellView = json(exchange(drift, "getWebShellTask", 200,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, childTask)));
+        assertThat(webShellView.get("childSessionId").asText())
+                .isEqualTo(childSession);
         String cancelPath = "/v1/agents/sessions/{id}/tasks/{task}/cancel";
         JsonNode admitted = json(exchange(drift, "cancelSessionTask", 202,
                 post(cancelPath, sessionId, childTask).header(TENANT, tenant)
@@ -1775,12 +2006,16 @@ class ManagedAgentApiContractTest {
                 com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 workflowKey, tenant, sessionId, "f".repeat(64));
+        childRunResource(tenant, sessionId, "resource-run-contract-wf",
+                "{\"kind\":\"workflow\",\"childSessionId\":null}");
         String workflowTask = "task_" + workflowKey;
         JsonNode workflowView = json(exchange(drift, "getSessionTask", 200,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         workflowTask).header(TENANT, tenant), null));
         assertThat(workflowView.get("action_capabilities").toString())
                 .isEqualTo("[\"cancel\"]");
+        // Before its child is known, a child task names none.
+        assertThat(workflowView.has("child_session_id")).isFalse();
         // The child_agent cancel above stays open in this fixture, and the
         // one open operation per Session rule spans task kinds.
         assertThat(json(exchange(drift, "cancelSessionTask", 409,
@@ -2367,11 +2602,17 @@ class ManagedAgentApiContractTest {
         for (JsonNode session : List.of(publicSession, publicListed)) {
             assertThat(session.get("id").asText()).isEqualTo(sessionId);
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
-            assertThat(session.get("capabilities")).isEqualTo(json("""
+            // D7-3: durable_operations appears only where the profile is on.
+            JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
                      "session_archive":true,"session_unarchive":true,"session_delete":true}
-                    """));
+                    """);
+            if (javaDurableAdmission != null) {
+                ((com.fasterxml.jackson.databind.node.ObjectNode) capabilities)
+                        .put("durable_operations", true);
+            }
+            assertThat(session.get("capabilities")).isEqualTo(capabilities);
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
                     .isPositive().isEqualTo(snapshotThrough);
@@ -2385,11 +2626,15 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("lastSequence").asLong())
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
-                assertThat(other.get("capabilities"))
-                        .isEqualTo(json("""
+                JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false}
-                                """));
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false}
+                                """);
+                if (javaDurableAdmission != null) {
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)
+                            .put("durableOperations", true);
+                }
+                assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }
         }
 
@@ -2623,6 +2868,10 @@ class ManagedAgentApiContractTest {
     }
 
     private static AuthenticatedTenantActor actor(String tenant) {
+        return actor(tenant, "actor-a");
+    }
+
+    private static AuthenticatedTenantActor actor(String tenant, String actorId) {
         return new AuthenticatedTenantActor() {
             @Override
             public String tenantId() {
@@ -2631,12 +2880,12 @@ class ManagedAgentApiContractTest {
 
             @Override
             public String actorId() {
-                return "actor-a";
+                return actorId;
             }
 
             @Override
             public String getName() {
-                return "actor-a";
+                return actorId;
             }
         };
     }
@@ -2649,7 +2898,207 @@ class ManagedAgentApiContractTest {
                 .getContentAsString(StandardCharsets.UTF_8);
     }
 
+    // D7-3, profile off (the default): asking for java_durable is refused
+    // before anything is admitted, harness_confirmed answers the legacy
+    // body, and no Session advertises durable_operations.
+    @Test
+    void javaDurableAdmissionIsRefusedWhileTheProfileIsOff() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                javaDurableAdmission == null);
+        String tenant = "contract-durable-off-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        String sessionId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-off-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        JsonNode session = json(exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant), null));
+        assertThat(session.path("capabilities").has("durable_operations"))
+                .isFalse();
+        for (String body : List.of("""
+                {"type":"agent.session.input.message","admission_profile":"java_durable",
+                 "input":[{"type":"input_text","text":"refused"}]}
+                """, """
+                {"type":"agent.session.cancel","admission_profile":"java_durable",
+                 "turn_id":"turn_absent"}
+                """)) {
+            assertThat(json(exchange(drift, "postSessionEvent", 400,
+                    post("/v1/agents/sessions/{id}/events", sessionId)
+                            .header(TENANT, tenant)
+                            .header(IDEMPOTENCY_KEY, "durable-off-refused"),
+                    body)).at("/error/code").asText())
+                    .isEqualTo("unsupported_feature");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE"
+                + " tenant_id = ?", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE"
+                + " tenant_id = ? AND operation_kind IN ('SUBMIT_INPUT', 'CANCEL')",
+                Integer.class, tenant)).isZero();
+        JsonNode legacy = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-off-default"),
+                """
+                {"type":"agent.session.input.message","admission_profile":"harness_confirmed",
+                 "input":[{"type":"input_text","text":"default"}]}
+                """));
+        assertThat(legacy.has("operation_id")).isFalse();
+        assertThat(legacy.has("admission_stage")).isFalse();
+        String webSessionId = json(exchange(drift, "webShellCreateSession",
+                202, post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, tenant),
+                """
+                {"requestId":"durable-off","idempotencyKey":"durable-off-web",
+                 "agentId":"qwen-code","title":"web","input":[]}
+                """)).get("sessionId").asText();
+        assertThat(json(exchange(drift, "webShellSubmitTurn", 400,
+                post(WEB_SHELL + "/turns/submit").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"durable-off-web-submit","sessionId":"%s",
+                 "admissionProfile":"java_durable",
+                 "input":[{"type":"input_text","text":"refused"}]}
+                """.formatted(webSessionId))).at("/error/code").asText())
+                .isEqualTo("unsupported_feature");
+        assertThat(json(exchange(drift, "webShellCancelTurn", 400,
+                post(WEB_SHELL + "/turns/cancel").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"durable-off-web-cancel","sessionId":"%s",
+                 "turnId":"turn_absent","admissionProfile":"java_durable"}
+                """.formatted(webSessionId))).at("/error/code").asText())
+                .isEqualTo("unsupported_feature");
+        assertThat(drift).isEmpty();
+    }
+
+    // D7-3, profile on: an admission that asks for java_durable names the
+    // operation it saved, before the dispatcher runs; a retry under the key
+    // answers the same operation; the default stays harness_confirmed.
+    @Test
+    void javaDurableAdmissionNamesTheOperationItsAdmissionSaved()
+            throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                javaDurableAdmission != null);
+        String tenant = "contract-durable-on-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        String sessionId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        assertThat(json(exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant), null))
+                .at("/capabilities/durable_operations").asBoolean()).isTrue();
+        String hold = """
+                {"type":"agent.session.input.message","admission_profile":"java_durable",
+                 "input":[{"type":"input_text","text":"hold"}]}
+                """;
+        JsonNode input = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"), hold));
+        String operationId = input.get("operation_id").asText();
+        assertThat(operationId).startsWith("op_");
+        assertThat(input.get("admission_stage").asText())
+                .isEqualTo("java_durable");
+        assertThat(input.get("delivery_state").asText()).isEqualTo("pending");
+        assertThat(input.get("replayed").asBoolean()).isFalse();
+        String turnId = input.get("turn_id").asText();
+        int cancels = awaitHeldTurn();
+        // A lost response: the retry names the same operation, whatever its
+        // latest stage; without the profile it keeps the legacy body.
+        JsonNode retry = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"), hold));
+        assertThat(retry.get("replayed").asBoolean()).isTrue();
+        assertThat(retry.get("operation_id").asText()).isEqualTo(operationId);
+        assertThat(retry.get("turn_id").asText()).isEqualTo(turnId);
+        JsonNode legacyRetry = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"),
+                """
+                {"type":"agent.session.input.message",
+                 "input":[{"type":"input_text","text":"hold"}]}
+                """));
+        assertThat(legacyRetry.get("replayed").asBoolean()).isTrue();
+        assertThat(legacyRetry.has("operation_id")).isFalse();
+        JsonNode cancel = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-cancel"),
+                """
+                {"type":"agent.session.cancel","admission_profile":"java_durable",
+                 "turn_id":"%s"}
+                """.formatted(turnId)));
+        String cancelId = cancel.get("operation_id").asText();
+        assertThat(cancelId).startsWith("op_").isNotEqualTo(operationId);
+        assertThat(cancel.get("admission_stage").asText())
+                .isEqualTo("java_durable");
+        assertThat(cancel.get("delivery_state").asText()).isEqualTo("pending");
+        settleCancelledTurn(tenant, sessionId, cancels);
+        // Each id resolves through the operation query to its own command.
+        for (var expected : Map.of(operationId, "submit_input", cancelId,
+                "cancel").entrySet()) {
+            JsonNode operation = json(exchange(drift, "getSessionCwdOperation",
+                    200, get("/v1/agents/sessions/{id}/operations/{op}",
+                            sessionId, expected.getKey())
+                            .header(TENANT, tenant), null));
+            assertThat(operation.get("type").asText())
+                    .isEqualTo(expected.getValue());
+            assertThat(operation.get("status").asText()).isEqualTo("completed");
+        }
+        // harness_confirmed stays the default with the profile on. The
+        // fixture Harness serves one Turn per Session, so it gets its own.
+        String plainId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-plain-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        JsonNode plain = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", plainId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-plain"),
+                """
+                {"type":"agent.session.input.message",
+                 "input":[{"type":"input_text","text":"plain"}]}
+                """));
+        assertThat(plain.has("operation_id")).isFalse();
+        assertThat(plain.has("admission_stage")).isFalse();
+        awaitIdle(tenant, plainId);
+        String webSessionId = json(exchange(drift, "webShellCreateSession",
+                202, post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, tenant),
+                """
+                {"requestId":"durable-on","idempotencyKey":"durable-on-web",
+                 "agentId":"qwen-code","title":"web","input":[]}
+                """)).get("sessionId").asText();
+        JsonNode web = json(exchange(drift, "webShellSubmitTurn", 202,
+                post(WEB_SHELL + "/turns/submit").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"durable-on-web-submit","sessionId":"%s",
+                 "admissionProfile":"java_durable",
+                 "input":[{"type":"input_text","text":"web"}]}
+                """.formatted(webSessionId)));
+        assertThat(web.get("operationId").asText()).startsWith("op_");
+        assertThat(web.get("admissionStage").asText()).isEqualTo("java_durable");
+        assertThat(web.get("deliveryState").asText()).isEqualTo("pending");
+        awaitIdle(tenant, webSessionId);
+        assertThat(drift).isEmpty();
+    }
+
     private String exchange(Map<String, String> drift, String operationId,
+            int expectedStatus, MockHttpServletRequestBuilder request,
+            String body) throws Exception {
+        return exchange(mvc, drift, operationId, expectedStatus, request, body);
+    }
+
+    private String exchange(MockMvc target, Map<String, String> drift, String operationId,
             int expectedStatus, MockHttpServletRequestBuilder request,
             String body) throws Exception {
         Operation operation = CONTRACT.operation(operationId);
@@ -2666,7 +3115,7 @@ class ManagedAgentApiContractTest {
                         objectMapper.readTree(body)));
             }
         }
-        MockHttpServletResponse response = mvc.perform(request).andReturn()
+        MockHttpServletResponse response = target.perform(request).andReturn()
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
@@ -2866,6 +3315,12 @@ class ManagedAgentApiContractTest {
                         .andReturn().getResponse()
                         .getContentAsString(StandardCharsets.UTF_8))
                         .get("status").asText()).isEqualTo("completed"));
+    }
+
+    private String turnCommandOperation(String sessionId, String kind) {
+        return jdbc.queryForObject("SELECT operation_id FROM ma_operation"
+                + " WHERE session_id = ? AND operation_kind = ?", String.class,
+                sessionId, kind);
     }
 
     private int awaitHeldTurn() {

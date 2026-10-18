@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -8,12 +9,15 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.ReferenceGuard {
     @Override
     public boolean bindingReferenced(Connection connection, RuntimeBindingRecord binding)
             throws SQLException {
         var request = binding.getRequest();
+        // A shared binding has no isolation key; private-CSI Sessions never place on one.
         return JdbcCsiFilesRetirementGuard.isProfile(request.getScope())
                 || request.getIsolationKey() != null
                         && exists(
@@ -67,11 +71,41 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
     }
 
     private static boolean childRunUnsettled(Connection connection, RuntimeBindingRecord binding) throws SQLException {
+        String tenantId = binding.getRequest().getScope().getTenantId();
+        if (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
+            // Guards run before any deletion, and a settled child run cannot reopen, so owners
+            // whose Runtime Sessions a later visit removes were already settled.
+            List<String> owners = new ArrayList<>();
+            try (var statement =
+                    connection.prepareStatement(
+                            "SELECT DISTINCT harness_session_id FROM ma_runtime_session"
+                                    + " WHERE binding_id = ? AND runtime_generation = ? AND tenant_id = ?")) {
+                statement.setQueryTimeout(10);
+                statement.setBytes(1, identity(binding.getBindingId()));
+                statement.setLong(2, binding.getGeneration());
+                statement.setBytes(3, identity(tenantId));
+                try (var rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        owners.add(rows.getString("harness_session_id"));
+                    }
+                }
+            }
+            for (String owner : owners) {
+                if (childRunUnsettled(connection, tenantId, owner)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         String sessionId = binding.getRequest().getIsolationKey();
         if (sessionId == null) {
             return false;
         }
-        String tenantId = binding.getRequest().getScope().getTenantId();
+        return childRunUnsettled(connection, tenantId, sessionId);
+    }
+
+    private static boolean childRunUnsettled(Connection connection, String tenantId, String sessionId)
+            throws SQLException {
         try (var statement =
                 connection.prepareStatement(
                         "SELECT tenant_id, session_id, parent_session_id, parent_child_run_id FROM"

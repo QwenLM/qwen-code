@@ -85,7 +85,7 @@ public final class PublicationProbeWiring {
         private final ConcurrentHashMap<String, byte[]> objects = new ConcurrentHashMap<>();
 
         @Override
-        public void requireUnversioned() {
+        public void validateConfiguration() {
         }
 
         @Override

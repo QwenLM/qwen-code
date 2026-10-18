@@ -30,6 +30,7 @@
 11634 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
+14543 managed-agent-gate.yml
 15549 main-ci-failure-issue.yml
 1343 mobile-shell.yml
 2277 pnpm-store.yml
@@ -48,7 +49,7 @@
 27648 qwen-triage-finalize.yml
 362377 qwen-triage.yml
 15171 release-chrome-extension.yml
-12872 release-managed-agent-reference.yml
+22974 release-managed-agent-reference.yml
 11950 release-sdk-java.yml
 22345 release-sdk-python.yml
 20008 release-sdk.yml
@@ -58,7 +59,7 @@
 1079 scorecard-monthly.yml
 9751 sdk-java-contract-open-prs.yml
 9555 sdk-java-flyway-open-prs.yml
-74834 sdk-java.yml
+99942 sdk-java.yml
 3886 sdk-python.yml
 5595 security-checks.yml
 6777 serve-ab-publish.yml
