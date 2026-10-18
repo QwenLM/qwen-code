@@ -223,6 +223,10 @@ class HostedMcpRestartFaultGatesIT {
                             .as("a successful status lookup for %s",
                                     configuration)
                             .isNotNull();
+                    JsonNode answer = (JsonNode) found.get("answer");
+                    assertThat(answer.path("result").path("state").asText())
+                            .as("the status answer must be terminal")
+                            .isIn("settled", "outcome_unknown");
                     statusRef.set(found);
                 });
         Map<String, Object> statusEntry = statusRef.get();
@@ -317,7 +321,7 @@ class HostedMcpRestartFaultGatesIT {
                 .path("runtime");
         assertThat(identity.isObject())
                 .as("the baseline must record a Runtime identity").isTrue();
-        kill(workerPid());
+        kill(awaitWorkerPid());
         waitFor(() -> assertThat(fixtureEvents("mcp.exit"))
                 .as("the stdio fixture exits on worker stdin EOF")
                 .hasSize(1));
@@ -348,18 +352,7 @@ class HostedMcpRestartFaultGatesIT {
                 assertThat(wire.stream()
                         .filter(entry -> ((Number) entry.get("seq"))
                                 .intValue() > wireBefore)
-                        .filter(entry -> "POST".equals(entry.get("method")))
-                        .filter(entry -> String.valueOf(entry.get("path"))
-                                .endsWith(":acquire"))
-                        .anyMatch(entry -> {
-                            JsonNode answer = (JsonNode) entry.get("answer");
-                            return Integer.valueOf(409).equals(
-                                    entry.get("status"))
-                                    && answer != null
-                                    && "Runtime generation is no longer live"
-                                            .equals(answer.path("error")
-                                                    .asText());
-                        }))
+                        .anyMatch(this::deadAcquireRefused))
                         .as("the recovery acquire must be refused by the "
                                 + "dead generation")
                         .isTrue();
@@ -374,10 +367,13 @@ class HostedMcpRestartFaultGatesIT {
             assertThat(code).as("a refusal must name the recovery failure")
                     .isIn("hosted_mcp_recovery_required",
                             "hosted_turn_recovery_required");
-            assertThat(deadGenerationRefused(wireBefore))
+            waitFor(() -> assertThat(wire.stream()
+                    .filter(entry -> ((Number) entry.get("seq")).intValue()
+                            > wireBefore)
+                    .anyMatch(this::deadAcquireRefused))
                     .as("a direct refusal must still be backed by the dead "
-                            + "generation's refusal")
-                    .isTrue();
+                            + "generation's acquire refusal")
+                    .isTrue());
         }
         JsonNode after = configuration(session.id());
         assertThat(after.path("run").path("runtime"))
@@ -404,7 +400,7 @@ class HostedMcpRestartFaultGatesIT {
                                 "resource_read", "uri", "ext://hold")),
                         session, 202));
         waitFor(() -> assertThat(fixtureEvents("mcp.hold")).hasSize(1));
-        kill(workerPid());
+        kill(awaitWorkerPid());
         waitFor(() -> assertThat(fixtureEvents("mcp.exit")).hasSize(1));
         waitFor(() -> assertThat(operations(session.id()).getLast()
                 .path("run").path("execution").asText())
@@ -459,6 +455,14 @@ class HostedMcpRestartFaultGatesIT {
             }
         }
         throw new AssertionError("No durable Runtime worker registered");
+    }
+
+    private long awaitWorkerPid() {
+        java.util.concurrent.atomic.AtomicLong pid =
+                new java.util.concurrent.atomic.AtomicLong();
+        await().atMost(Duration.ofSeconds(30)).ignoreExceptions()
+                .untilAsserted(() -> pid.set(workerPid()));
+        return pid.get();
     }
 
     private void kill(long pid) throws Exception {
@@ -610,18 +614,22 @@ class HostedMcpRestartFaultGatesIT {
                 + "/mcp/operations/" + operationId, null, session.clientId());
     }
 
-    private boolean deadGenerationRefused(int wireBefore) {
-        return wire.stream()
-                .filter(entry -> ((Number) entry.get("seq")).intValue()
-                        > wireBefore)
-                .map(entry -> (JsonNode) entry.get("answer"))
-                .filter(answer -> answer != null)
-                .anyMatch(answer -> {
-                    String error = answer.path("error").asText();
-                    return "Runtime generation is no longer live".equals(error)
-                            || "Managed Runtime process is not alive."
-                                    .equals(error);
-                });
+    private boolean deadAcquireRefused(Map<String, Object> entry) {
+        if (!"POST".equals(entry.get("method"))
+                || !String.valueOf(entry.get("path")).endsWith(":acquire")) {
+            return false;
+        }
+        JsonNode answer = (JsonNode) entry.get("answer");
+        if (answer == null) {
+            return false;
+        }
+        int status = ((Number) entry.get("status")).intValue();
+        String error = answer.path("error").asText();
+        return (status == 409
+                && "Runtime generation is no longer live".equals(error))
+                || (status == 503
+                        && "Managed Runtime process is not alive."
+                                .equals(error));
     }
 
     private String uuid() {
