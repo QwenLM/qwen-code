@@ -7,7 +7,10 @@ import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -54,6 +57,10 @@ final class WorkspaceCsiApplicationInventory {
     static final int MAX_BYTES = 32 * 1024 * 1024;
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    private static final ObjectMapper PUBLIC_ARTIFACTS = new ObjectMapper(JsonFactory.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(64).maxStringLength(MAX_BYTES).build()).build())
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     // This companion is outside the persisted application inventory codec.
     private static final Declaration PHYSICAL = declaration("ma_csi_physical", "retirement_id",
@@ -1221,12 +1228,13 @@ final class WorkspaceCsiApplicationInventory {
                 var carriers = declaration.columns().stream().filter(column -> structured(column.name())
                         || column.kind() == Kind.MEDIUMBLOB || column.kind() == Kind.LONGBLOB
                         || "object_key".equals(column.name()) || "capture_object_key".equals(column.name())).map(column -> column.name() + " IS NOT NULL").toList();
-                if (!carriers.isEmpty()) {
-                    var candidates = read.query(declaration, String.join(" OR ", carriers), List.of());
+                if (!carriers.isEmpty() || "ma_snapshot".equals(declaration.name())) {
+                    var candidates = read.query(declaration, carriers.isEmpty() ? "1 = 1" : String.join(" OR ", carriers), List.of());
                     // Manifests establish coverage before independently fetched byte parts are accepted.
                     if ("ma_resource".equals(declaration.name())) {
                         for (Row row : candidates) {
-                            if (!fixed.containsKey(key(row)) && chunkManifest(row.text("kind"))) {
+                            if (!fixed.containsKey(key(row)) && (chunkManifest(row.text("kind"))
+                                    || "managed-snapshot-manifest".equals(row.text("kind")))) {
                                 read.carrier(declaration.name(), row);
                             }
                         }
@@ -1234,7 +1242,7 @@ final class WorkspaceCsiApplicationInventory {
                     for (Row row : candidates) {
                         if (!fixed.containsKey(key(row))) {
                             if (!"ma_resource".equals(declaration.name())
-                                    || !chunkManifest(row.text("kind"))) {
+                                    || !chunkManifest(row.text("kind")) && !"managed-snapshot-manifest".equals(row.text("kind"))) {
                                 read.carrier(declaration.name(), row);
                             }
                         }
@@ -1312,6 +1320,10 @@ final class WorkspaceCsiApplicationInventory {
         private final Map<String, Map<String, Row>> seen = new LinkedHashMap<>();
         private final List<Blocker> blockers = new ArrayList<>();
         private final Set<String> chunkParts = new LinkedHashSet<>();
+        private final Set<String> snapshotRoots = new LinkedHashSet<>();
+        private final Set<String> snapshotPages = new LinkedHashSet<>();
+        private final Set<String> snapshotBodies = new LinkedHashSet<>();
+        private final Set<String> snapshotReferences = new LinkedHashSet<>();
         private final Map<String, com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord> nativeMembers = new LinkedHashMap<>();
         private final FrozenOwnerReader frozenReader;
         private int count;
@@ -1438,7 +1450,15 @@ final class WorkspaceCsiApplicationInventory {
                     block(table, row, "extra_historical_reference");
                     return;
                 }
-                if ("ma_csi_source".equals(table)) {
+                if ("ma_snapshot".equals(table)) {
+                    if (!snapshotRoots.contains(key(row))) {
+                        Row manifest = one("ma_resource", "resource_key = ?",
+                                List.of(new Cell(Kind.CHAR, utf8(row.text("manifest_resource_key")))));
+                        requireEncoded("managed-snapshot-manifest".equals(manifest.text("kind")));
+                        snapshot(manifest);
+                        requireEncoded(snapshotRoots.contains(key(row)));
+                    }
+                } else if ("ma_csi_source".equals(table)) {
                     var configuration = WorkspaceCsiNodeSourceStore.decode(row.text("configuration_json"), WorkspaceCsiNodeSourceStore.Configuration.class);
                     var association = new WorkspaceCsiNodeSourceStore.Association(row.text("binding_id"), row.number("runtime_generation"),
                             row.text("physical_key"), row.text("reservation_id"), row.number("reservation_revision"), configuration,
@@ -1501,16 +1521,23 @@ final class WorkspaceCsiApplicationInventory {
             historyRemaining(started);
         }
 
-        private void nativeResource(Row row) {
-            requireEncoded(ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
-                    .equals(row.text("session_scope_key"))
-                    && ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id")).equals(row.text("resource_key"))
-                    && Objects.equals(row.number("schema_version"), 1L)
-                    && "MYSQL_INLINE".equals(row.text("storage_kind")) && row.text("object_key") == null
-                    && row.text("object_version_id") == null && row.text("encryption_key_id") == null
-                    && Set.of("PUBLISHED", "REFERENCED").contains(row.text("state")));
-            byte[] raw = payload(row, "inline_bytes", "sha256", 8 * 1024 * 1024);
+        private void nativeResource(Row row) throws SQLException {
+            resourceMetadata(row);
             String kind = row.text("kind");
+            if (Set.of("managed-agent-instructions", "managed-agent-skills").contains(kind)) {
+                agentResource(row);
+                return;
+            }
+            if ("managed-snapshot-manifest".equals(kind)) {
+                snapshot(row);
+                return;
+            }
+            if ("managed-snapshot-page".equals(kind)) {
+                requireEncoded(snapshotPages.contains(key(row)));
+                return;
+            }
+            byte[] raw = payload(row, "inline_bytes", "sha256",
+                    "managed-message-parts".equals(kind) ? MAX_BYTES : 8 * 1024 * 1024);
             if (chunkPart(kind)) {
                 requireEncoded(chunkParts.contains(key(row)));
                 return;
@@ -1545,47 +1572,303 @@ final class WorkspaceCsiApplicationInventory {
             }
         }
 
+        private static void resourceMetadata(Row row) {
+            requireEncoded(ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
+                    .equals(row.text("session_scope_key"))
+                    && ManagedSessionStore.resourceKey(row.text("session_scope_key"), row.text("resource_id")).equals(row.text("resource_key"))
+                    && Objects.equals(row.number("schema_version"), 1L)
+                    && "MYSQL_INLINE".equals(row.text("storage_kind")) && row.text("object_key") == null
+                    && row.text("object_version_id") == null && row.text("encryption_key_id") == null
+                    && Set.of("PUBLISHED", "REFERENCED").contains(row.text("state")));
+        }
+
+        private Row one(String table, String predicate, List<Cell> parameters) throws SQLException {
+            var rows = query(CATALOGUE.stream().filter(value -> value.name().equals(table)).findFirst().orElseThrow(), predicate, parameters);
+            requireEncoded(rows.size() == 1);
+            return rows.getFirst();
+        }
+
+        private List<Row> resourceReferences(Row row) throws SQLException {
+            return query(CATALOGUE.stream().filter(value -> value.name().equals("ma_resource_ref")).findFirst().orElseThrow(),
+                    "resource_key = ?", List.of(new Cell(Kind.CHAR, utf8(row.text("resource_key")))));
+        }
+
+        private void foreignArtifact(String table, Row row, JsonNode value) {
+            if (savedOriginalReference(table, row, references)
+                    || value != null && savedJsonReference(value, references, 0, false, row.text("tenant_id"))) {
+                block(table, row, "extra_historical_reference");
+                throw new IllegalArgumentException("Artifact references the original owner");
+            }
+        }
+
+        private static void absent(Row row, String... fields) {
+            for (String field : fields) {
+                requireEncoded(row.cell(field).isNull());
+            }
+        }
+
+        private static void publicResource(Row row) {
+            resourceMetadata(row);
+            requireEncoded("REFERENCED".equals(row.text("state")));
+            absent(row, "workspace_id", "publish_command_id", "scope_key", "publication_id", "slot_key", "capture_state",
+                    "capture_object_key", "operation_id", "quarantine_reason", "deletion_operation_key");
+        }
+
+        private static JsonNode publicJson(byte[] bytes) {
+            try {
+                JsonNode value = PUBLIC_ARTIFACTS.readTree(strictText(bytes));
+                requireEncoded(value != null);
+                return value;
+            } catch (IOException malformed) {
+                throw new IllegalArgumentException("Invalid public artifact JSON", malformed);
+            }
+        }
+
+        private static long integer(JsonNode value, String field) {
+            JsonNode number = value.path(field);
+            requireEncoded(number.isIntegralNumber() && number.canConvertToLong());
+            return number.longValue();
+        }
+
+        private void agentResource(Row row) {
+            boolean instructions = "managed-agent-instructions".equals(row.text("kind"));
+            byte[] raw = row.binary("inline_bytes");
+            requireEncoded(raw != null && raw.length <= (instructions ? ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES
+                    : ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES)
+                    && Objects.equals(row.number("byte_length"), (long) raw.length) && hash(raw).equals(row.text("sha256"))
+                    && ((instructions ? "agent-instructions-" : "agent-skills-") + hash(raw)).equals(row.text("resource_id"))
+                    && row.text("resource_id").equals(row.text("publish_command_id"))
+                    && row.text("workspace_id") != null && !row.text("workspace_id").isEmpty());
+            absent(row, "snapshot_id", "snapshot_page_ordinal", "snapshot_page_first_sequence", "snapshot_page_last_sequence",
+                    "scope_key", "publication_id", "slot_key", "capture_state", "capture_object_key", "operation_id",
+                    "quarantine_reason", "deletion_operation_key");
+            try {
+                strictText(raw);
+                if (!instructions) {
+                    JsonNode skills = publicJson(raw);
+                    requireEncoded(skills.isArray());
+                    AgentDefinitionExtensions.skills(PUBLIC_ARTIFACTS.convertValue(skills, Object.class), true);
+                }
+            } catch (IOException malformed) {
+                throw new IllegalArgumentException("Invalid agent instructions", malformed);
+            }
+        }
+
+        private void snapshot(Row manifestRow) throws SQLException {
+            publicResource(manifestRow);
+            absent(manifestRow, "snapshot_id", "snapshot_page_ordinal", "snapshot_page_first_sequence", "snapshot_page_last_sequence");
+            byte[] raw = payload(manifestRow, "inline_bytes", "sha256", MAX_BYTES);
+            JsonNode value = publicJson(raw);
+            WorkspaceCsiApplicationJson.closed(value, Set.of("version", "snapshot", "sequence", "projection", "items", "pages", "cursorSecret"));
+            requireEncoded(integer(value, "version") == 1 && integer(value, "sequence") >= 0
+                    && integer(value, "projection") > 0 && integer(value, "projection") <= Integer.MAX_VALUE
+                    && integer(value, "items") >= 0 && integer(value, "items") <= MAX_ROWS * 100L
+                    && integer(value, "pages") >= 0 && integer(value, "pages") <= MAX_ROWS
+                    && value.path("snapshot").isTextual() && value.path("cursorSecret").isTextual());
+            ManagedSnapshotStore.Manifest manifest;
+            try {
+                manifest = ManagedSnapshotStore.decodeManifest(PUBLIC_ARTIFACTS, raw);
+            } catch (IOException malformed) {
+                throw new IllegalArgumentException("Invalid snapshot manifest", malformed);
+            }
+            requireEncoded(java.util.UUID.fromString(manifest.snapshot()).toString().equals(manifest.snapshot())
+                    && ("snapshot:" + manifest.snapshot() + ":manifest").equals(manifestRow.text("resource_id")));
+            byte[] secret = Base64.getDecoder().decode(manifest.cursorSecret());
+            requireEncoded(secret.length == 32 && Base64.getEncoder().encodeToString(secret).equals(manifest.cursorSecret()));
+            Row root = one("ma_snapshot", "tenant_id = ? AND session_id = ? AND snapshot_id = ?",
+                    List.of(new Cell(Kind.VARBINARY, utf8(manifestRow.text("tenant_id"))),
+                            new Cell(Kind.VARBINARY, utf8(manifestRow.text("session_id"))), new Cell(Kind.VARBINARY, utf8(manifest.snapshot()))));
+            requireEncoded("PUBLISHED".equals(root.text("state")) && root.number("snapshot_version") > 0
+                    && Objects.equals(root.number("covered_sequence"), manifest.sequence())
+                    && Objects.equals(root.number("projection_version"), (long) manifest.projection())
+                    && Objects.equals(root.number("item_count"), (long) manifest.items())
+                    && manifestRow.text("resource_key").equals(root.text("manifest_resource_key"))
+                    && manifestRow.text("sha256").equals(root.text("manifest_sha256")) && root.number("published_at") != null);
+            foreignArtifact("ma_snapshot", root, null);
+            foreignArtifact("ma_resource", manifestRow, value);
+            if (snapshotRoots.contains(key(root))) {
+                return;
+            }
+            String scope = manifestRow.text("session_scope_key");
+            var resources = new LinkedHashMap<String, Row>();
+            resources.put(manifestRow.text("resource_key"), manifestRow);
+            var bodies = new LinkedHashSet<String>();
+            var pages = query(CATALOGUE.stream().filter(table -> table.name().equals("ma_resource")).findFirst().orElseThrow(),
+                    "session_scope_key = ? AND snapshot_id = ?",
+                    List.of(new Cell(Kind.CHAR, utf8(scope)), new Cell(Kind.VARBINARY, utf8(manifest.snapshot()))));
+            requireEncoded(pages.size() == manifest.pages());
+            pages.sort(java.util.Comparator.comparing(row -> row.number("snapshot_page_ordinal")));
+            var ids = new LinkedHashSet<String>();
+            StoreModels.ItemRecord previous = null;
+            for (int ordinal = 0; ordinal < pages.size(); ordinal++) {
+                historyRemaining(started);
+                Row page = pages.get(ordinal);
+                publicResource(page);
+                requireEncoded("managed-snapshot-page".equals(page.text("kind")) && sameScope(manifestRow, page)
+                        && ("snapshot:" + manifest.snapshot() + ":page:" + ordinal).equals(page.text("resource_id"))
+                        && Objects.equals(page.number("snapshot_page_ordinal"), (long) ordinal));
+                byte[] bytes = payload(page, "inline_bytes", "sha256", MAX_BYTES);
+                JsonNode entries = publicJson(bytes);
+                requireEncoded(entries.isArray() && !entries.isEmpty() && entries.size() <= 100);
+                for (JsonNode entry : entries) {
+                    WorkspaceCsiApplicationJson.closed(entry, Set.of("item", "body"));
+                    validateItem(entry.path("item"), manifestRow, manifest.sequence());
+                    requireEncoded(entry.path("body").isNull() || entry.path("body").isTextual());
+                }
+                List<ManagedSnapshotStore.SnapshotItem> frozen;
+                try {
+                    frozen = ManagedSnapshotStore.decodePage(PUBLIC_ARTIFACTS, bytes);
+                } catch (IOException malformed) {
+                    throw new IllegalArgumentException("Invalid snapshot page", malformed);
+                }
+                requireEncoded(Objects.equals(page.number("snapshot_page_first_sequence"), frozen.getFirst().item().firstSequence())
+                        && Objects.equals(page.number("snapshot_page_last_sequence"), frozen.getLast().item().firstSequence()));
+                for (var entry : frozen) {
+                    var item = entry.item();
+                    requireEncoded(ids.add(item.itemId()) && (previous == null || previous.firstSequence() < item.firstSequence()
+                            || previous.firstSequence() == item.firstSequence()
+                            && Arrays.compareUnsigned(utf8(previous.itemId()), utf8(item.itemId())) < 0));
+                    previous = item;
+                    if (entry.body() != null) {
+                        requireEncoded(item.content().isEmpty() && !references.getOrDefault("resourceKey", Set.of()).contains(entry.body()));
+                        Row body = one("ma_resource", "resource_key = ?", List.of(new Cell(Kind.CHAR, utf8(entry.body()))));
+                        requireEncoded("managed-message-parts".equals(body.text("kind")) && sameScope(manifestRow, body));
+                        JsonNode parts = bodyParts(body, payload(body, "inline_bytes", "sha256", MAX_BYTES));
+                        bodyRevision(body, item.itemId(), item.revision());
+                        partCoverage(parts, item.firstSequence(), item.lastSequence(), item.createdAt(), item.updatedAt());
+                        foreignArtifact("ma_resource", body, parts);
+                        resources.put(body.text("resource_key"), body);
+                        bodies.add(key(body));
+                    }
+                }
+                foreignArtifact("ma_resource", page, entries);
+                resources.put(page.text("resource_key"), page);
+            }
+            requireEncoded(ids.size() == manifest.items());
+            String owner = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scope, manifest.snapshot());
+            var refs = query(CATALOGUE.stream().filter(table -> table.name().equals("ma_resource_ref")).findFirst().orElseThrow(),
+                    "session_scope_key = ? AND owner_kind = 'SNAPSHOT' AND owner_key = ?",
+                    List.of(new Cell(Kind.CHAR, utf8(scope)), new Cell(Kind.CHAR, utf8(owner))));
+            var referenced = new LinkedHashSet<String>();
+            for (Row ref : refs) {
+                Row resource = resources.get(ref.text("resource_key"));
+                requireEncoded(resource != null && referenced.add(ref.text("resource_key"))
+                        && Objects.equals(ref.number("owner_revision"), root.number("snapshot_version")));
+                referenceScope(resource, ref);
+                foreignArtifact("ma_resource_ref", ref, null);
+                if (!bodies.contains(key(resource))) {
+                    var all = resourceReferences(resource);
+                    requireEncoded(all.size() == 1 && Arrays.equals(all.getFirst().bytes(), ref.bytes()));
+                }
+            }
+            requireEncoded(referenced.equals(resources.keySet()));
+            snapshotRoots.add(key(root));
+            pages.forEach(page -> snapshotPages.add(key(page)));
+            snapshotBodies.addAll(bodies);
+            refs.forEach(ref -> snapshotReferences.add(key(ref)));
+        }
+
+        private static boolean sameScope(Row left, Row right) {
+            return Objects.equals(left.text("tenant_id"), right.text("tenant_id"))
+                    && Objects.equals(left.text("session_id"), right.text("session_id"))
+                    && Objects.equals(left.text("session_scope_key"), right.text("session_scope_key"));
+        }
+
+        private static void referenceScope(Row resource, Row ref) {
+            requireEncoded(sameScope(resource, ref) && Objects.equals(resource.text("resource_id"), ref.text("resource_id")));
+            absent(ref, "workspace_id", "journal_revision");
+        }
+
+        private static void validateItem(JsonNode item, Row manifest, long sequence) {
+            WorkspaceCsiApplicationJson.closed(item, Set.of("tenantId", "sessionId", "itemId", "turnId", "type", "role", "status",
+                    "attributes", "firstSequence", "lastSequence", "createdAt", "updatedAt", "revision", "content"));
+            requireEncoded(item.path("tenantId").isTextual() && manifest.text("tenant_id").equals(item.path("tenantId").textValue())
+                    && item.path("sessionId").isTextual() && manifest.text("session_id").equals(item.path("sessionId").textValue())
+                    && item.path("itemId").isTextual() && !item.path("itemId").textValue().isEmpty()
+                    && StandardCharsets.UTF_8.newEncoder().canEncode(item.path("itemId").textValue())
+                    && item.path("type").isTextual() && !item.path("type").textValue().isEmpty()
+                    && (item.path("attributes").isNull() || item.path("attributes").isObject()));
+            for (String field : List.of("turnId", "role", "status")) {
+                requireEncoded(item.path(field).isNull() || item.path(field).isTextual());
+            }
+            long first = integer(item, "firstSequence"), last = integer(item, "lastSequence");
+            long created = integer(item, "createdAt"), updated = integer(item, "updatedAt");
+            requireEncoded(first >= 0 && last >= first && last <= sequence && created >= 0 && updated >= created && integer(item, "revision") > 0);
+            JsonNode parts = item.path("content");
+            validateParts(parts);
+            partCoverage(parts, first, last, created, updated);
+        }
+
+        private static JsonNode bodyParts(Row row, byte[] raw) {
+            publicResource(row);
+            absent(row, "snapshot_id", "snapshot_page_ordinal", "snapshot_page_first_sequence", "snapshot_page_last_sequence");
+            requireEncoded(raw.length > 64 * 1024);
+            JsonNode parts = publicJson(raw);
+            validateParts(parts);
+            return parts;
+        }
+
+        private static void validateParts(JsonNode parts) {
+            requireEncoded(parts.isArray());
+            var ids = new LinkedHashSet<String>();
+            for (JsonNode part : parts) {
+                WorkspaceCsiApplicationJson.closed(part, Set.of("partId", "type", "text", "firstSequence", "lastSequence",
+                        "createdAt", "updatedAt", "revision"));
+                requireEncoded(part.path("partId").isTextual() && !part.path("partId").textValue().isEmpty()
+                        && ids.add(part.path("partId").textValue()) && part.path("type").isTextual()
+                        && !part.path("type").textValue().isEmpty() && part.path("text").isTextual());
+                long first = integer(part, "firstSequence"), last = integer(part, "lastSequence");
+                long created = integer(part, "createdAt"), updated = integer(part, "updatedAt");
+                requireEncoded(first >= 0 && last >= first && created >= 0 && updated >= created && integer(part, "revision") > 0);
+            }
+        }
+
+        private static void partCoverage(JsonNode parts, long first, long last, long created, long updated) {
+            for (JsonNode part : parts) {
+                requireEncoded(integer(part, "firstSequence") >= first && integer(part, "lastSequence") <= last
+                        && integer(part, "createdAt") >= created && integer(part, "updatedAt") <= updated);
+            }
+        }
+
+        private static long bodyRevision(Row body, String item, long revision) {
+            String[] id = body.text("resource_id").split(":", -1);
+            requireEncoded(id.length == 4 && "message".equals(id[0])
+                    && com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(body.text("session_scope_key"), item).equals(id[1])
+                    && id[2].matches("[1-9][0-9]{0,18}") && body.text("sha256").equals(id[3]));
+            long original = Long.parseLong(id[2]);
+            requireEncoded(original > 0 && original <= revision);
+            return original;
+        }
+
         private JsonNode projectedMessageParts(Row row, byte[] raw) {
-            requireEncoded(raw.length > 64 * 1024 && "REFERENCED".equals(row.text("state"))
-                    && row.cell("deletion_operation_key").isNull() && row.cell("publication_id").isNull());
+            JsonNode parts = bodyParts(row, raw);
             try {
                 var messages = query(CATALOGUE.stream().filter(table -> table.name().equals("ma_message")).findFirst().orElseThrow(),
                         "body_resource_key = ?", List.of(new Cell(Kind.CHAR, utf8(row.text("resource_key")))));
-                requireEncoded(messages.size() == 1);
-                Row message = messages.getFirst();
-                requireEncoded(Objects.equals(row.text("tenant_id"), message.text("tenant_id"))
-                        && Objects.equals(row.text("session_id"), message.text("session_id")) && "[]".equals(message.text("parts_json"))
-                        && message.number("revision") != null && message.number("revision") > 0);
-                String owner = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
-                        row.text("session_scope_key"), message.text("item_id"));
-                requireEncoded(("message:" + owner + ":" + message.number("revision") + ":" + hash(raw)).equals(row.text("resource_id")));
-                var refs = query(CATALOGUE.stream().filter(table -> table.name().equals("ma_resource_ref")).findFirst().orElseThrow(),
-                        "resource_key = ?", List.of(new Cell(Kind.CHAR, utf8(row.text("resource_key")))));
-                requireEncoded(refs.size() == 1);
-                Row ref = refs.getFirst();
-                requireEncoded("MESSAGE".equals(ref.text("owner_kind")) && owner.equals(ref.text("owner_key"))
-                        && Objects.equals(message.number("revision"), ref.number("owner_revision"))
-                        && Objects.equals(row.text("tenant_id"), ref.text("tenant_id"))
-                        && Objects.equals(row.text("session_id"), ref.text("session_id"))
-                        && Objects.equals(row.text("session_scope_key"), ref.text("session_scope_key"))
-                        && Objects.equals(row.text("resource_id"), ref.text("resource_id")) && ref.cell("journal_revision").isNull());
-                JsonNode parts = parse(raw);
-                requireEncoded(parts != null && parts.isArray());
-                for (JsonNode part : parts) {
-                    WorkspaceCsiApplicationJson.closed(part, Set.of("partId", "type", "text", "firstSequence", "lastSequence",
-                            "createdAt", "updatedAt", "revision"));
-                    requireEncoded(part.path("partId").isTextual() && !part.path("partId").textValue().isEmpty()
-                            && part.path("type").isTextual() && !part.path("type").textValue().isEmpty() && part.path("text").isTextual());
-                    for (String field : List.of("firstSequence", "lastSequence", "createdAt", "updatedAt", "revision")) {
-                        requireEncoded(part.path(field).isIntegralNumber() && part.path(field).canConvertToLong());
-                    }
-                    long first = part.get("firstSequence").longValue();
-                    long last = part.get("lastSequence").longValue();
-                    long created = part.get("createdAt").longValue();
-                    long updated = part.get("updatedAt").longValue();
-                    requireEncoded(first >= 0 && last >= first && created >= 0 && updated >= created
-                            && part.get("revision").longValue() > 0);
+                requireEncoded(messages.size() <= 1 && (!messages.isEmpty() || snapshotBodies.contains(key(row))));
+                long revision = 0;
+                String owner = null;
+                if (!messages.isEmpty()) {
+                    Row message = messages.getFirst();
+                    requireEncoded(Objects.equals(row.text("tenant_id"), message.text("tenant_id"))
+                            && Objects.equals(row.text("session_id"), message.text("session_id")) && "[]".equals(message.text("parts_json")));
+                    revision = bodyRevision(row, message.text("item_id"), message.number("revision"));
+                    owner = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(row.text("session_scope_key"), message.text("item_id"));
+                    partCoverage(parts, message.number("first_sequence"), message.number("last_sequence"),
+                            message.number("gmt_create"), message.number("gmt_modified"));
                 }
+                int current = 0;
+                for (Row ref : resourceReferences(row)) {
+                    referenceScope(row, ref);
+                    foreignArtifact("ma_resource_ref", ref, null);
+                    if ("MESSAGE".equals(ref.text("owner_kind"))) {
+                        requireEncoded(owner != null && owner.equals(ref.text("owner_key")) && Objects.equals(ref.number("owner_revision"), revision));
+                        current++;
+                    } else {
+                        requireEncoded("SNAPSHOT".equals(ref.text("owner_kind")) && snapshotReferences.contains(key(ref)));
+                    }
+                }
+                requireEncoded(current == messages.size());
                 return parts;
             } catch (SQLException unavailable) {
                 throw new IllegalArgumentException("Message projection ownership unavailable", unavailable);

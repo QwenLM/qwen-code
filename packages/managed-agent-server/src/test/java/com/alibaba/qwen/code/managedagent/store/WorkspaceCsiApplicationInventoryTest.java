@@ -41,16 +41,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class WorkspaceCsiApplicationInventoryTest {
     @TempDir
     Path temp;
-    private DriverManagerDataSource source;
-    private JdbcTemplate jdbc;
+    private javax.sql.DataSource source;
+    JdbcTemplate jdbc;
     private RuntimeBindingRecord binding;
     private WorkspaceCsiReservationStore.Retirement intent;
     private String session;
 
     @BeforeEach
     void setUp() {
-        source = new DriverManagerDataSource("jdbc:h2:mem:application-inventory-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+        initialize(new DriverManagerDataSource("jdbc:h2:mem:application-inventory-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", ""));
+    }
+
+    void initialize(javax.sql.DataSource database) {
+        source = database;
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
@@ -2285,7 +2289,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 state, session, value.toString(), ended == null ? 1L : ended);
     }
 
-    private WorkspaceCsiApplicationInventory.Snapshot readReferences(WorkspaceCsiApplicationInventory.Snapshot expected) throws Exception {
+    WorkspaceCsiApplicationInventory.Snapshot readReferences(WorkspaceCsiApplicationInventory.Snapshot expected) throws Exception {
         return readHistory(expected, new java.util.ArrayList<>(), true);
     }
 
@@ -2439,7 +2443,7 @@ class WorkspaceCsiApplicationInventoryTest {
         return WorkspaceCsiApplicationInventory.expectedImage(tables);
     }
 
-    private WorkspaceCsiApplicationInventory.Snapshot historicalKeys() throws Exception {
+    WorkspaceCsiApplicationInventory.Snapshot historicalKeys() throws Exception {
         var sourceImage = inspect();
         var context = java.util.Set.of("ma_tenant_guard", "ma_workspace");
         var tables = sourceImage.tables().stream().map(table -> new WorkspaceCsiApplicationInventory.Table(
@@ -2460,6 +2464,7 @@ class WorkspaceCsiApplicationInventoryTest {
     private WorkspaceCsiApplicationInventory.Snapshot readHistory(WorkspaceCsiApplicationInventory.Snapshot expected,
             List<String> queries, boolean references) throws Exception {
         try (var target = source.getConnection()) {
+            target.setReadOnly(true);
             target.setAutoCommit(false);
             target.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             var observed = observedRead(target, queries);

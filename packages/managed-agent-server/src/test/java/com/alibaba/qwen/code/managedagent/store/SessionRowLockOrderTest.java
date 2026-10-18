@@ -168,6 +168,8 @@ class SessionRowLockOrderTest {
     // Its physicalKey/1 delegates to the pure local identity hash.
     // The child Workspace row's snapshot/0 (#13753 I3) is a record accessor
     // over its mode: it reaches no JDBC call and takes no lock.
+    // The retained manifest's snapshot/0 accessor collides with Inspection's
+    // in-memory snapshot builder, which also reaches neither side.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
@@ -268,6 +270,7 @@ class SessionRowLockOrderTest {
                                     "HistoricalScan.carrier/2",
                                     "HistoricalScan.query/3",
                                     "Inspection.context/2",
+                                    "Inspection.snapshot/0",
                                     "Kind.accepts/1",
                                     "Kind.binary/0",
                                     "Kind.integral/0",
