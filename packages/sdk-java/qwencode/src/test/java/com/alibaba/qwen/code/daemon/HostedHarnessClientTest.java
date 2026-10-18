@@ -2496,8 +2496,7 @@ class HostedHarnessClientTest {
                     () -> client.closeSession(session));
             Thread.sleep(60);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
@@ -3965,8 +3964,7 @@ class HostedHarnessClientTest {
             assertTrue(failure.getMessage().contains("413"));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced"
                             + " refusal");
         } finally {
@@ -4008,8 +4006,7 @@ class HostedHarnessClientTest {
             assertTrue(failure.getMessage().contains("413"));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced"
                             + " refusal");
         } finally {
@@ -4279,8 +4276,7 @@ class HostedHarnessClientTest {
                     () -> client.detachSession(session));
             Thread.sleep(60);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
@@ -4317,8 +4313,7 @@ class HostedHarnessClientTest {
                     () -> client.closeSession(session));
             Thread.sleep(60);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
@@ -5155,8 +5150,7 @@ class HostedHarnessClientTest {
                     () -> client.detachSession(session));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced 204");
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
@@ -5256,8 +5250,7 @@ class HostedHarnessClientTest {
                     () -> client.closeSession(session));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced 307");
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
@@ -5755,8 +5748,7 @@ class HostedHarnessClientTest {
             // it scheduled keeps beating.
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after the refused close");
             // ...and its admission marker survived: a different identity
             // is still vetoed locally.
