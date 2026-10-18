@@ -118,6 +118,16 @@ const SESSION_WORKTREE_PERSISTENCE_FEATURE: ServeFeature =
 const SESSION_WORKTREE_RESET_FEATURE: ServeFeature =
   'session_worktree_reset_v1';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
+/**
+ * The worker talks to the daemon over HTTP, and the SDK's default request
+ * budget (30s) also caps `POST /session`, which waits for the spawned ACP
+ * child's `initialize` inside the workspace sandbox. A sandboxed start can
+ * outlast 30s on a loaded host, and the daemon's own `--initialize-timeout-ms`
+ * may be raised above that (the channel E2E fixture runs 120s), so the worker
+ * must not undercut it with the generic client deadline. The daemon's budget
+ * still answers first when it is the one waiting.
+ */
+export const CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS = 180_000;
 const WORKER_CHANNEL_DISCONNECT_DRAIN_MS =
   CHANNEL_WORKER_STOP_GRACE_MS - CHANNEL_WORKER_KILL_GRACE_MS;
 const WORKER_STARTUP_ROLLBACK_DRAIN_MS = 1_500;
@@ -209,6 +219,7 @@ interface DaemonSdkLike {
   DaemonClient: new (opts: {
     baseUrl: string;
     token?: string;
+    fetchTimeoutMs?: number;
   }) => DaemonClientLike;
   DaemonSessionClient: DaemonSessionClientStaticLike;
 }
@@ -499,6 +510,7 @@ export async function runChannelDaemonWorker(
   const client = new sdk.DaemonClient({
     baseUrl: opts.daemonUrl,
     ...(opts.daemonToken ? { token: opts.daemonToken } : {}),
+    fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
   });
   const capabilities = await abortableStartup(
     client.capabilities(),
