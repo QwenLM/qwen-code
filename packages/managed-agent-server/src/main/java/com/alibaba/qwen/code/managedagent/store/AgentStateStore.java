@@ -599,7 +599,7 @@ public interface AgentStateStore {
 
     default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
-            boolean supported) {
+            boolean supported, boolean agentDefinitionSupported) {
         throw new UnsupportedOperationException("Approval selection is unavailable");
     }
 

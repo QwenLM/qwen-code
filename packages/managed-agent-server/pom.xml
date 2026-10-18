@@ -396,13 +396,19 @@
                                  (~363 s budgeted at 2×): the healthy sum
                                  becomes 3743 s, so the fork moves to
                                  4353 s and the Verify step to 90
-                                 minutes. The FG13c Hook owner-restart
+                                 minutes. Slice 3 (FG10d, the process
+                                 crash) brings the class to five
+                                 letters measuring 246.1–246.8 s (~494 s
+                                 budgeted at 2×): the healthy sum
+                                 becomes 3874 s and the fork 4484 s,
+                                 which the Verify step's 90 minutes
+                                 still wrap. The FG13c Hook owner-restart
                                  cells (three cases, issue #14449) are
                                  budgeted at 300 s inside the same
                                  envelope: the healthy sum becomes
-                                 4043 s, so the fork moves to 4653 s
+                                 4174 s, so the fork moves to 4784 s
                                  and the Verify step to 95 minutes. -->
-                            <forkedProcessTimeoutInSeconds>4653</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>4784</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -536,7 +542,7 @@
                     <includes><include>**/HostedWorkflow*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Both workflow classes' letters (FG10a's driver
-                         class and the FG10b/FG10f relay class) are
+                         class and the FG10b–f relay class) are
                          independent fixtures sharing one fork: each
                          letter's @Timeout ceiling (600 s) plus the
                          healthy runtime must fit, the per-ceiling
