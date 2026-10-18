@@ -81,8 +81,8 @@ public final class HarnessEventStream implements AutoCloseable {
                 // close (the pre-park guards above).
                 if (closed.get()) {
                     if (idleTimedOut.get()) {
-                        throw new DaemonTransportException(
-                                "Hosted Harness SSE idle timeout");
+                        throw new HostedHarnessStreamIdleException(
+                                client.sseIdleTimeout());
                     }
                     throw new DaemonTransportException(
                             "HarnessEventStream is closed");
@@ -113,8 +113,8 @@ public final class HarnessEventStream implements AutoCloseable {
                     // The watchdog aborted the stream: the parked consumer
                     // gets the idle-timeout signal whether or not the
                     // watchdog's close() has landed yet.
-                    throw new DaemonTransportException(
-                            "Hosted Harness SSE idle timeout", e);
+                    throw new HostedHarnessStreamIdleException(
+                            client.sseIdleTimeout(), e);
                 }
                 if (closed.get()) {
                     // A caller-initiated close() ended the blocked read.
@@ -167,8 +167,8 @@ public final class HarnessEventStream implements AutoCloseable {
 
     private RuntimeException closedFailure() {
         if (idleTimedOut.get()) {
-            return new DaemonTransportException(
-                    "Hosted Harness SSE idle timeout");
+            return new HostedHarnessStreamIdleException(
+                    client.sseIdleTimeout());
         }
         return new IllegalStateException(
                 "HarnessEventStream is closed");
@@ -180,9 +180,18 @@ public final class HarnessEventStream implements AutoCloseable {
             // deadline, so no watchdog is scheduled.
             return;
         }
+        if (!client.advertisesEventKeepalive()) {
+            // A Harness without keepalive comments stays silent through
+            // every quiet phase of a healthy Turn, so a bound would abort
+            // those streams: the read stays unbounded, and only a close
+            // ends it, as before the keepalive.
+            return;
+        }
         long idleMillis = HostedHarnessClient.saturatedMillis(
                 client.sseIdleTimeout());
-        long intervalMillis = Math.max(100L, idleMillis / 2L);
+        // A tenth of the budget keeps the abort within 10% of the bound,
+        // so a supervisor can sit just above it.
+        long intervalMillis = Math.max(100L, idleMillis / 10L);
         long idleNanos = TimeUnit.MILLISECONDS.toNanos(idleMillis);
         try {
             idleWatchdog = client.scheduler().scheduleAtFixedRate(() -> {
