@@ -438,14 +438,22 @@
                                  at 2x): the healthy sum becomes
                                  4888 s, so the fork moves to 5498 s
                                  and the Verify step to 105 minutes.
-                                 The FG12b store-failure class
-                                 (HostedMcpStoreFaultGatesIT, eight
-                                 cases) measures 49.6 s locally on JDK 21
-                                 + MySQL 8.0.46 (~120 s budgeted, a
-                                 conservative 2.4x): the healthy sum
-                                 becomes 5008 s, so the fork moves to
-                                 5618 s. -->
-                            <forkedProcessTimeoutInSeconds>5618</forkedProcessTimeoutInSeconds>
+                                 FG11b slice 2's Harness-side store
+                                 faults, a third method of the class
+                                 (four cases, three cold restarts),
+                                 measure 62.1-72.4 s (~145 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 5033 s, so the fork moves to 5643 s,
+                                 still inside the Verify step's 105
+                                 minutes. The FG12b store-failure
+                                 class (HostedMcpStoreFaultGatesIT,
+                                 eight cases) measures 49.6 s locally
+                                 on JDK 21 + MySQL 8.0.46 (~120 s
+                                 budgeted, a conservative 2.4x): the
+                                 healthy sum becomes 5153 s, so the
+                                 fork moves to 5763 s and the Verify
+                                 step to 107 minutes. -->
+                            <forkedProcessTimeoutInSeconds>5763</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

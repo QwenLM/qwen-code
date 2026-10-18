@@ -602,15 +602,16 @@ describe('Hosted real-process gates', () => {
       // and the Verify step to 100 minutes; the FG13d worker-stop cancel
       // cell adds 150 s, so the fork moves to 5368; FG11b's store faults add
       // ~130 s, so the fork moves to 5498 and the Verify step to 105
-      // minutes; the FG12b store-failure class measures 49.6 s locally on
-      // JDK 21 + MySQL 8.0.46 (~120 s budgeted, a conservative 2.4x), so
-      // the fork moves to 5618 and the Verify step to 107
-      // minutes):
+      // minutes; FG11b slice 2's Harness-side store faults add ~145 s, so
+      // the fork moves to 5643, still inside those 105 minutes; the FG12b
+      // store-failure class measures 49.6 s locally on JDK 21 + MySQL
+      // 8.0.46 (~120 s budgeted, a conservative 2.4x), so the fork moves to
+      // 5763 and the Verify step to 107 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(5618);
+        expect(forkSeconds).toBe(5763);
       }
     },
   );
@@ -653,11 +654,14 @@ describe('Hosted real-process gates', () => {
   // becomes 4758s. FG11b's Spring-side store faults, a second method of the
   // automation class (six cases sharing one minute boundary), measure
   // 30.8-64.5s across three acceptance runs (~130s budgeted at 2x), so it
-  // becomes 4888s; the FG12b store-failure class measures 50.3s locally on
-  // JDK 21 + MariaDB (~120s budgeted at 2x), so it becomes 5008s.
+  // becomes 4888s. FG11b slice 2's Harness-side store faults, a third method
+  // of the class (four cases, three cold restarts), measure 62.1-72.4s across
+  // three acceptance runs (~145s budgeted at 2x), so it becomes 5033s; the
+  // FG12b store-failure class measures 49.6s locally on JDK 21 + MySQL
+  // 8.0.46 (~120s budgeted, a conservative 2.4x), so it becomes 5153s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 5008;
+  const hostedForkHealthySeconds = 5153;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
