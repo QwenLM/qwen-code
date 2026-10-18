@@ -28,6 +28,7 @@ export function acceptedCsiToolInput(
 ): Record<string, unknown> {
   const input = object(structuredClone(call.args));
   for (const value of Object.values(input)) {
+    // Reject lone surrogates before serializing input for the native worker.
     if (typeof value === 'string') encodeURIComponent(value);
   }
   const required =

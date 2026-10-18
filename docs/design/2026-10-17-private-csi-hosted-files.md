@@ -44,9 +44,11 @@ all-rejected batch can continue through the model without fabricated Runtime
 work. The native reader validates the exact rejection reason against the original
 call and full input size, accepts each refusal once, and keeps receipt proof
 mandatory for admitted work. Mutation history references the latest committed
-refusal message while preserving the original batch identity. Normal reservation
-requests follow turn cancellation, while a lost or
-cancelled prepare answer still requires an independent bounded membership read.
+refusal message while preserving the original batch identity. Batch identity
+compares the message ID, content reference and calls; refusal progress does not
+change that identity or prevent the surviving calls from being reserved.
+Normal reservation requests follow turn cancellation, while a lost or cancelled
+prepare answer still requires an independent bounded membership read.
 Check the size of the complete persisted history envelope, including the
 reader-facing snapshot copy, before publishing it. Capacity refusal retains
 uncertain work; it never truncates evidence or replays a mutation.

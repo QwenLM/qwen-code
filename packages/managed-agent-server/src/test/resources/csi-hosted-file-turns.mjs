@@ -19,6 +19,9 @@ export async function runHostedFileTurn({
   const failures = [];
   let requests = 0;
   const functions = [
+    ...(index === 0
+      ? [{ name: 'write_file', args: { file_path: '.', content: 'refused' } }]
+      : []),
     { name: 'read_file', args: { file_path: 'marker.txt' } },
     mutation,
   ];
@@ -51,15 +54,17 @@ export async function runHostedFileTurn({
       );
       assert.deepEqual(
         results.map((message) => message.tool_call_id),
-        Array.from({ length: index + round }, (_, turn) => [
-          `owned-function-${turn}-0`,
-          `owned-function-${turn}-1`,
-        ]).flat(),
+        Array.from({ length: index + round }, (_, turn) =>
+          Array.from(
+            { length: turn === 0 ? 3 : 2 },
+            (_, ordinal) => `owned-function-${turn}-${ordinal}`,
+          ),
+        ).flat(),
       );
       if (round === 1) {
         assert.ok(results.every((message) => message.content.length > 0));
         assert.ok(
-          JSON.stringify(results[index * 2]).includes(
+          JSON.stringify(results[index === 0 ? 1 : 3]).includes(
             index === 0 ? 'alpha' : 'beta',
           ),
         );
@@ -172,7 +177,8 @@ export async function runHostedFileTurn({
     assert.equal(receipts.length, 2);
     for (const [ordinal, intent] of intents.entries()) {
       const id = intent.payload.executionCallId;
-      assert.equal(intent.payload.ordinal, ordinal);
+      const originalOrdinal = ordinal + (index === 0 ? 1 : 0);
+      assert.equal(intent.payload.ordinal, originalOrdinal);
       assert.equal(intent.eventId, `tool-intent:${id}`);
       const receipt = receipts.find(
         (event) => event.payload.executionCallId === id,
@@ -190,7 +196,7 @@ export async function runHostedFileTurn({
       assert.equal(outcome.executionCallId, id);
       assert.equal(
         outcome.history.parts[0].functionResponse.id,
-        `owned-function-${index}-${ordinal}`,
+        `owned-function-${index}-${originalOrdinal}`,
       );
     }
     const projected = await session.sink.project();
@@ -209,12 +215,26 @@ export async function runHostedFileTurn({
       (entry) =>
         entry.type === 'tool_result' && entry.daemonPromptId === promptId,
     );
-    assert.equal(results.length, 2);
+    assert.equal(results.length, functions.length);
     assert.deepEqual(
       results.map((entry) => entry.message.parts[0].functionResponse.name),
       functions.map((call) => call.name),
     );
-    return results.map((entry) => ({
+    if (index === 0) {
+      const refused = results[0];
+      assert.deepEqual(refused.message.parts[0].functionResponse, {
+        id: 'owned-function-0-0',
+        name: 'write_file',
+        response: { error: 'CSI file input is invalid.' },
+      });
+      const refusal = events.find(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload.messageId === refused.uuid,
+      );
+      assert.ok(refusal.sequence < intents[0].sequence);
+    }
+    return results.slice(index === 0 ? 1 : 0).map((entry) => ({
       messageId: entry.uuid,
       parts: entry.message.parts,
     }));

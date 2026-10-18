@@ -254,7 +254,9 @@ final class CsiNativeToolReservation {
         require(original != null && prefix.input() != null && prefix.pendingBatch() != null);
         var batch = prefix.batches().get(prefix.pendingBatch().messageId());
         require(batch != null && batch.promptId().equals(prefix.input().inputId())
-                && batch.batch().equals(prefix.pendingBatch()));
+                && batch.batch().messageId().equals(prefix.pendingBatch().messageId())
+                && batch.batch().contentRef().equals(prefix.pendingBatch().contentRef())
+                && batch.batch().calls().equals(prefix.pendingBatch().calls()));
         qualify(original, batch, execution, inputBytes, definitionBytes);
     }
 
