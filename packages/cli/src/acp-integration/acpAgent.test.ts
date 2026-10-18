@@ -20531,14 +20531,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         revision: 1.5,
         kind: 'permissions',
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('Invalid workspace change');
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
         v: 1,
         revision: 1,
-        kind: 'bogus',
+        kind: 42,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('Invalid workspace change');
 
     mockConnectionState.resolve();
     await agentPromise;
