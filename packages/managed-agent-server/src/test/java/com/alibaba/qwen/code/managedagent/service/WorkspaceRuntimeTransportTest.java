@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -243,6 +244,36 @@ class WorkspaceRuntimeTransportTest {
     private static Map<String, Object> acknowledge(Fixture fixture) {
         return fixture.transport().acknowledgeCsi(fixture.lease(), fixture.session(), fixture.boot(), fixture.pod(),
                 fixture.request(), fixture.capture()).toCompletableFuture().join();
+    }
+
+    @Test
+    void releaseRetiredClearsTheHolderWithAMatchingReceipt() throws Exception {
+        var fixture = sshAcquisitionFixture();
+        var runtime = fixture.runtime();
+        var receipt = new RuntimeDrainReceipt(runtime.getBindingId(), runtime.getGeneration(),
+                runtime.getProvisionSeed().getProvisionRequestId(), runtime.getResourceHandle(), Instant.now());
+        var draining = runtime.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, runtime.getLease(), Instant.now())
+                .withDrainReceipt(receipt);
+        when(fixture.bindings().findById(runtime.getBindingId())).thenReturn(draining);
+
+        assertThat(fixture.transport().releaseRetired(fixture.lease(), fixture.session())
+                .toCompletableFuture().join()).isTrue();
+        verify(fixture.ownership()).release(any(), any());
+    }
+
+    @Test
+    void releaseRetiredRefusesWithoutAPersistedReceipt() throws Exception {
+        var fixture = sshAcquisitionFixture();
+        var runtime = fixture.runtime();
+        var draining = runtime.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, runtime.getLease(), Instant.now());
+        when(fixture.bindings().findById(runtime.getBindingId())).thenReturn(draining);
+        when(fixture.ownership().isHeld(any(), any())).thenReturn(true);
+
+        assertThat(fixture.transport().releaseRetired(fixture.lease(), fixture.session())
+                .toCompletableFuture().join()).isFalse();
+        verify(fixture.ownership(), never()).release(any(), any());
     }
 
     private static void unavailable(Runnable action) {
