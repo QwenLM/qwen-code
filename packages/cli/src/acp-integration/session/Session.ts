@@ -4821,8 +4821,19 @@ export class Session implements SessionContext {
     if (!recording) return;
     for (const item of this.notificationQueue) {
       if (item.kind !== 'peer' || item.persisted) continue;
+      // Envelope the cold copy only. This report was never delivered, so the
+      // model was never asked anything; bare text makes recovery's shape
+      // predicate reject the entry, leaving a `user` tail that classifies a
+      // cleanly-closed session as `interrupted_prompt`. The warm record sites
+      // stay bare on purpose: there the model *was* asked, so a tail with no
+      // assistant record really is an interrupted turn and trimming it would
+      // certify `clean` falsely.
       recording.recordNotification(
-        [{ text: item.modelText }],
+        [
+          {
+            text: `<task-notification>\n${item.modelText}\n</task-notification>`,
+          },
+        ],
         item.displayText,
         {
           taskId: item.taskId,

@@ -54,6 +54,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
@@ -1453,10 +1454,27 @@ describe('Session', () => {
       // the last point where the write is both accepted and then flushed.
       session.flushPendingPeerNotifications();
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
-        [{ text: envelope }],
+        [{ text: `<task-notification>\n${envelope}\n</task-notification>` }],
         '[team] security: found an injection',
         expect.objectContaining({ taskId, kind: 'peer', status: 'message' }),
       );
+
+      // This landed copy is the session's last record, so recovery classifies
+      // against it. The report was never delivered — the model was never asked
+      // anything — so a cleanly-closed session must resume `none`. `1` is the
+      // authoritative trailing-notification count the recorder's provenance
+      // yields for an unstamped cold copy. Read the parts back from the mock
+      // so this asserts what production wrote, not a re-typed literal.
+      const landedParts =
+        vi.mocked(mockChatRecordingService.recordNotification).mock
+          .calls[0]?.[0] ?? [];
+      expect(
+        detectTurnInterruption(
+          [{ role: 'user', parts: landedParts }],
+          undefined,
+          1,
+        ),
+      ).toEqual({ kind: 'none' });
 
       // Landing marks the report durable, so neither a second flush nor the
       // `dispose()` fallback writes the same report twice.
