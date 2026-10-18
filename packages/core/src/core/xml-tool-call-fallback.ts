@@ -192,9 +192,9 @@ function computeExampleRanges(
   parameterRanges: Array<[number, number]>,
   tagPositions: Set<number> | null,
   quotedValueRanges: Array<[number, number]>,
-): Array<[number, number]> | null {
+): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
-  let ambiguous = false;
+  let ambiguousFrom = -1;
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
   let depth = 0;
   let start = 0;
@@ -210,7 +210,14 @@ function computeExampleRanges(
           depth > 0 &&
           /<\/?example(?=[\s/>])/.test(text.slice(span[0], span[1]))
         ) {
-          ambiguous = true;
+          // A value inside a documentation region carries an example tag:
+          // whether the tag is data or structure cannot be resolved. Treat
+          // everything from the open example onward as documentation — the
+          // resolution that widens the mask — rather than declining the turn,
+          // so blocks that end before the ambiguity stay recoverable.
+          if (ambiguousFrom === -1 || start < ambiguousFrom) {
+            ambiguousFrom = start;
+          }
         }
         parameterRanges.push(span);
       }
@@ -241,7 +248,8 @@ function computeExampleRanges(
   }
   maskValuesBefore(text.length);
   if (depth > 0) ranges.push([start, text.length]);
-  return ambiguous ? null : ranges;
+  if (ambiguousFrom !== -1) ranges.push([ambiguousFrom, text.length]);
+  return ranges;
 }
 
 /**
@@ -284,7 +292,10 @@ const PARAMETER_TAG_PATTERN =
  * and differ only in whether a value owns the region.
  *
  * An unmatched opener remains on the stack. Calls behind it have ambiguous
- * ownership and make recovery decline the whole turn.
+ * ownership and make recovery decline the whole turn, unless the scan
+ * already consumed that opener as the start of an accepted value — a value
+ * may document this syntax literally, and what an accepted value owns cannot
+ * dispute what later calls own.
  */
 function parameterOwnership(text: string): {
   closed: Array<[number, number]>;
@@ -332,10 +343,6 @@ function hasBalancedQuotedCalls(value: string): boolean {
  */
 function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   const blocks: ToolCallBlock[] = [];
-  for (const opening of text.matchAll(/<parameter(?=[\s=>])/gi)) {
-    PARAMETER_OPEN_TAG_PATTERN.lastIndex = opening.index;
-    if (!PARAMETER_OPEN_TAG_PATTERN.test(text)) return [];
-  }
   // Parameter spans are a property of the raw text, not of which blocks the
   // guard accepts: they mask parameter data out of the prose handed to the
   // markdown lexer and out of fence tracking. Deriving them from accepted
@@ -390,7 +397,41 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     tagPositions,
     quotedValueRanges,
   );
-  if (exampleRanges === null) return [];
+  // An opener-shaped token the strict grammar cannot validate is ambiguous
+  // where a block's own parameter scan must consume it; anywhere else it is
+  // inert: inside a parameter value (a token strictly interior to a flat
+  // parameter match — one at the match's start is the element the grammar
+  // itself admitted, whose naming quirks stay ambiguous), inside a fence or
+  // an example range, or in prose no call block touches. A differently cased
+  // tag can never enter this dialect's case-sensitive grammar at all.
+  const spansConsumingCalls: Array<[number, number]> = [];
+  TOOL_CALL_PATTERN.lastIndex = 0;
+  let preMatch: RegExpExecArray | null;
+  while ((preMatch = TOOL_CALL_PATTERN.exec(text)) !== null) {
+    spansConsumingCalls.push([
+      preMatch.index,
+      preMatch.index + preMatch[0].length,
+    ]);
+  }
+  for (const opening of text.matchAll(/<parameter(?=[\s=>])/g)) {
+    PARAMETER_OPEN_TAG_PATTERN.lastIndex = opening.index;
+    if (PARAMETER_OPEN_TAG_PATTERN.test(text)) continue;
+    if (
+      parameterRanges.some(
+        ([start, end]) => opening.index > start && opening.index < end,
+      ) ||
+      spansConsumingCalls.every(
+        ([start, end]) => opening.index < start || opening.index >= end,
+      ) ||
+      positionInsideFence(text, opening.index, parameterRanges) ||
+      exampleRanges.some(
+        ([start, end]) => opening.index >= start && opening.index < end,
+      )
+    ) {
+      continue;
+    }
+    return [];
+  }
 
   TOOL_CALL_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -401,7 +442,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     ) {
       continue;
     }
-    if (ownership.unclosed.some((start) => start < matchStart)) return [];
     const toolName = match[1] ?? match[3];
     const closeTag = match[1] !== undefined ? '</invoke>' : '</function>';
     let closeStart = match.index + match[0].length - closeTag.length;
@@ -433,7 +473,19 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // with the other — the name group's delimiters are independent classes —
     // which silently drops every parameter before that offset.
     const paramsStart = lazyCloseStart - (match[2] ?? match[4]).length;
-    if (openTagEnd(match[0]) !== paramsStart - matchStart) return [];
+    const openTagEndOffset = openTagEnd(match[0]);
+    if (openTagEndOffset !== paramsStart - matchStart) {
+      // Only this block's boundary is untrustworthy: a quote run in the name
+      // leaves no unquoted `>` (`-1`), or quote pairs put the flat boundary
+      // inside an attribute. Reject the block and resume past its open tag
+      // rather than costing the whole turn; resuming at or before
+      // `matchStart` would spin the `/g` scan, so fall back to the match end.
+      TOOL_CALL_PATTERN.lastIndex =
+        openTagEndOffset === -1
+          ? match.index + match[0].length
+          : match.index + openTagEndOffset;
+      continue;
+    }
     const paramsBlock = text.slice(paramsStart, closeStart);
     const blockEnd = closeStart + closeTag.length;
     TOOL_CALL_PATTERN.lastIndex = blockEnd;
@@ -538,6 +590,39 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     }
   }
 
+  // An unmatched parameter opener leaves everything behind its ownership
+  // ambiguous, except when the scan above consumed it as the start of an
+  // accepted value: a value may document this syntax literally, and what an
+  // accepted value owns cannot dispute later calls. Consumption only counts
+  // when the flat element the scan took does not bisect a nested call — an
+  // element whose lazy close chops a quoted call in half is the ambiguous
+  // surface itself, owned by no one.
+  for (const unclosedStart of ownership.unclosed) {
+    // A token the strict grammar cannot validate is inert markup, not an
+    // opener — the pre-scan already decided where such a token is ambiguous.
+    PARAMETER_OPEN_TAG_PATTERN.lastIndex = unclosedStart;
+    if (!PARAMETER_OPEN_TAG_PATTERN.test(text)) continue;
+    const consumed = blocks.some((block) =>
+      block.parameterSpans.some(([start]) => start === unclosedStart),
+    );
+    if (!consumed) {
+      if (blocks.some((block) => unclosedStart < block.start)) return [];
+      continue;
+    }
+    const flatRange = parameterRanges.find(
+      ([start]) => start === unclosedStart,
+    );
+    const bisectsCall =
+      flatRange !== undefined &&
+      blocks.some(
+        (block) =>
+          block.start > unclosedStart &&
+          block.start < flatRange[1] &&
+          block.end > flatRange[1],
+      );
+    if (bisectsCall) return [];
+  }
+
   function isEligibleBlock({
     start,
     end,
@@ -550,7 +635,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
         end - 1,
         parameterRanges.concat(parameterSpans),
       ) &&
-      !exampleRanges!.some(
+      !exampleRanges.some(
         ([exampleStart, exampleEnd]) =>
           (start >= exampleStart && start < exampleEnd) ||
           (end - 1 >= exampleStart &&
@@ -619,7 +704,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       exampleTagPositions(text, parameterRanges),
       [],
     );
-    if (exampleRanges === null) return [];
     const refreshedBlocks = blocks.filter(isEligibleBlock);
     if (
       refreshedBlocks.length !== eligibleBlocks.length ||

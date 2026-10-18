@@ -861,6 +861,86 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
   });
 
+  it('recovers a value mention together with a genuine sibling call', () => {
+    // The :840 shape plus one real sibling: the value's opener mention has
+    // exactly one close tag after it, so nothing about later ownership is
+    // ambiguous and both calls must run.
+    const content = `Each argument is wrapped in ${PARAM_OPEN} name="x"> tags.`;
+    const write = invoke(
+      'write_file',
+      param('file_path', 'a.txt') + param('content', content),
+    );
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    expect(extractXmlToolCalls(`${write}\n${read}`)).toEqual([
+      { name: 'write_file', args: { file_path: 'a.txt', content } },
+      { name: 'read_file', args: { file_path: 'real.ts' } },
+    ]);
+  });
+
+  it('treats parameter markup the grammar cannot parse as inert prose', () => {
+    // Differently cased, extra-attribute, self-closing, and bare openers in
+    // prose no block consumes cannot create ownership ambiguity.
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    for (const token of [
+      '<Parameter name="foo" />',
+      `${PARAM_OPEN} foo="bar">`,
+      `${PARAM_OPEN} name="foo" />`,
+      PARAM_OPEN + '>',
+    ]) {
+      expect(extractXmlToolCalls(`${token}\n${read}`)).toEqual([
+        { name: 'read_file', args: { file_path: 'real.ts' } },
+      ]);
+    }
+  });
+
+  it('ignores malformed parameter markup inside fences and examples', () => {
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const expected = [{ name: 'read_file', args: { file_path: 'real.ts' } }];
+    expect(
+      extractXmlToolCalls('```\n' + PARAM_OPEN + ' foo="bar">\n```\n' + read),
+    ).toEqual(expected);
+    expect(
+      extractXmlToolCalls(
+        `<example>\n${PARAM_OPEN} foo="bar">\n</example>\n${read}`,
+      ),
+    ).toEqual(expected);
+  });
+
+  it('recovers a call whose path value quotes non-canonical markup', () => {
+    const call = invoke(
+      'read_file',
+      param('file_path', `${PARAM_OPEN} foo="bar">`),
+    );
+    expect(extractXmlToolCalls(call)).toEqual([
+      { name: 'read_file', args: { file_path: `${PARAM_OPEN} foo="bar">` } },
+    ]);
+  });
+
+  it('rejects an odd-quote function name without cancelling its sibling', () => {
+    // The cross-check declines only the block whose open-tag boundary it
+    // cannot verify; the unrelated well-formed call still runs.
+    const odd = "<function=it's>" + param('command', 'ls') + '</' + 'function>';
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    expect(extractXmlToolCalls(`${odd}\n${read}`)).toEqual([
+      { name: 'read_file', args: { file_path: 'real.ts' } },
+    ]);
+  });
+
+  it('scopes the example-tag ambiguity veto to the ambiguous region', () => {
+    // A call that ends before the ambiguous region is eligible under every
+    // resolution of it; only documentation at or after the region is lost.
+    const first = invoke('first', param('p', 'v'));
+    const documented = invoke('read_file', param('file_path', 'quoted.txt'));
+    const write = invoke(
+      'write_file',
+      param('content', `<example>${documented}</example>`),
+    );
+    const text = `${first}\n\n<example>\n${write}\n</example>`;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'first', args: { p: 'v' } },
+    ]);
+  });
+
   it('does not run the markdown lexer when the text has no example tag', () => {
     const spy = vi.spyOn(Lexer, 'lexInline');
     try {
