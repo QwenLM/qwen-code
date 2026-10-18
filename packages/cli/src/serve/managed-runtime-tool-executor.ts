@@ -186,6 +186,7 @@ export class ManagedToolConflictError extends Error {
       | 'managed_runtime_identity_conflict'
       | 'managed_runtime_provider_operation_failed'
       | 'managed_runtime_owner_hold_pending'
+      | 'managed_runtime_release_timeout'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);
