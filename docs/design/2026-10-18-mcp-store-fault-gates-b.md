@@ -21,7 +21,7 @@ Process crashes are FG12c/d. Stream gaps are FG12e/f; FG12e folds into FG12f, so
 | `store-reject-intent`             | the configuration `intent` commit                                | zero `mcp-configure` controls and zero fixture effects                                                                                                          |
 | `store-reject-configure-dispatch` | the configuration `dispatch_started` commit, after owner acquire | zero controls and zero effects; the owner acquired before the rejection is recorded as retained until the next detach                                           |
 | `store-reject-operation-dispatch` | the raw operation `dispatch_started` commit                      | zero `mcp-invoke` controls and zero effects; the owner is recorded as retained until the next detach                                                            |
-| `store-reject-settled`            | the settled commit after the response resource is published      | the test drives a follow-up turn/close; exactly one lookup; no second read/get; effect count 1; the orphan response resource is recorded as a known side effect |
+| `store-reject-settled`            | the settled commit after the response resource is published      | the failed commit rolls back the staged response/catalog rows; the test disposes/reopens the failed authority from durable state (same operation/runtime pins) before the follow-up turn/close; exactly one lookup; no second read/get; effect count 1 |
 | `store-reject-releasing`          | the `releasing` commit, before the release dispatch              | the next detach performs the first `${configurationId}:release` dispatch under that id; no second configure or invoke                                           |
 | `store-reject-drained`            | the `drained` commit                                             | the Broker owner and storage holder stay; no fabricated drain receipt                                                                                           |
 | `store-reject-released`           | the `released` commit, after the owner release                   | records stay `drained`; the next detach re-sends the owner release; its idempotency is asserted; the cell may be red on main and lands with the fix             |
@@ -31,15 +31,15 @@ Process crashes are FG12c/d. Stream gaps are FG12e/f; FG12e folds into FG12f, so
 
 1. **Inject through a test store wrapper inside the real transaction.** A `@TestConfiguration` wrapper around the Broker's transactional store delegates to the real store and throws for the named phase. A MySQL trigger is rejected: the row cannot identify the phase, and the published blobs sit outside the transaction.
 2. **Fail every retry for the phase.** The HTTP client retries 5xx; the wrapper keeps failing until the test clears the phase, and the case counts the attempts.
-3. **A failed settled commit is driven, not self-healing.** The failure throws out of `install()`/`accept()`, so the test drives a follow-up turn or close; the proxy wire must show one `mcp-status` on the original id and no second invoke.
-4. **Published resources are not rolled back.** The catalog/response/arguments are separate resource writes; a failed settled commit leaves an orphan blob. The gate records that side effect instead of claiming zero effects.
+3. **A failed settled commit is driven, not self-healing.** The failure throws out of `install()`/`accept()`, so the test drives a follow-up turn or close; the proxy wire must show one `mcp-status` on the original id and no second invoke. A persistent 500 exhausts the HTTP commit retries and sets `ManagedSessionAuthority`'s write-failure latch; every later command throws `ManagedSessionWritesStoppedError`. The test must dispose/reopen the authority from the durable session store, keeping the original operation/runtime pins, before the recovery turn or lifecycle reconciliation.
+4. **Staging is not durable publication.** `HttpManagedSessionResourceStore.publish()` stages bytes in memory; `commitResources()` embeds them in the transaction and the server inserts the `ma_resource` rows inside the same commit. A failed settled commit rolls back the new response/catalog rows; only resources committed earlier (arguments at intent) survive.
 5. **Owner and storage retention are read from the owner/storage rows**, not inferred from the 5xx.
 6. **A new `HostedMcpStoreFaultGatesIT` class** isolates the wrapper; the FG12a/c/d classes stay unchanged. The budget accounts and the roster/per-ceiling meta test are re-pinned in the same diff.
 7. **`store-reject-released` may legitimately be red on main.** `markReleased` commits after `broker.release()`; if that commit is rejected, the owner is already released. The cell lands with the fix, as FG12d's R1-1 did, rather than asserting a behavior main does not have.
 
 ## Fixture design
 
-- Reuse the FG12c boot; a test `@TestConfiguration` supplies the faulting store wrapper. The Harness sees a 5xx (a plain wrapper exception is 500 `internal_error`; a contract rejection is 409); JDBC reads the records and the owner/storage rows; the proxy wire counts controls; the fixture log counts effects.
+- Reuse the FG12c boot; a test `@TestConfiguration` supplies the faulting store wrapper. The Harness sees a 5xx (a plain wrapper exception is 500 `internal_error`; a contract rejection is 409); JDBC reads the records and the owner/storage rows; the proxy wire counts controls; the fixture log counts effects. The test reopens the stopped authority from the durable session store after a persistent rejection.
 - The wrapper resets the phase in teardown; a failed reset is best-effort and must not mask the case.
 - Evidence lands in `target/fg12-cases/fg12b/<tenant>/`; the workflow already uploads `target/fg12-cases/`.
 
@@ -58,4 +58,4 @@ The new class re-pins the shared fork accounts in the same diff: the per-case `@
 
 - Does the wrapper belong to the test Spring only, or does the Broker expose a supported fault seam? The wrapper is test-only; no product fault code.
 - The `released` cell's red-on-main behavior and the owner-release retry idempotency must be verified before the case is promised.
-- The orphan catalog/response/arguments blobs after a failed record commit: assert their presence or clean them, and record the choice.
+- The authority reopen from durable state (same operation/runtime pins) must be verified for the settled cell and the later release-retry cells.

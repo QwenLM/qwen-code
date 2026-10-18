@@ -21,7 +21,7 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_config
 | `store-reject-intent`             | 配置的 `intent` 提交                                 | 线上零 `mcp-configure` 控制，fixture 零副作用                                                                |
 | `store-reject-configure-dispatch` | 配置的 `dispatch_started` 提交（owner acquire 之后） | 零控制、零副作用；拒绝前已 acquire 的 owner 记为保留到下一次 detach                                          |
 | `store-reject-operation-dispatch` | 原始操作的 `dispatch_started` 提交                   | 零 `mcp-invoke` 控制、零副作用；owner 记为保留到下一次 detach                                                |
-| `store-reject-settled`            | 响应资源发布之后的 settled 提交                      | 测试驱动一次后续 turn/close；恰好一次查询；没有第二次 read/get；副作用计数 1；孤儿响应资源作为已知副作用记录 |
+| `store-reject-settled`            | 响应资源发布之后的 settled 提交                      | failed commit 回滚暂存的 response/catalog 行；测试先从 durable 状态 dispose/reopen authority（保持原 operation/runtime pins）再驱动后续 turn/close；恰好一次查询；没有第二次 read/get；副作用计数 1 |
 | `store-reject-releasing`          | release 派发之前的 `releasing` 提交                  | 下一次 detach 用同一 id **首次派发** `${configurationId}:release`；没有第二次 configure/invoke               |
 | `store-reject-drained`            | `drained` 提交                                       | Broker owner 与 storage holder 都保留；不伪造 drain 回执                                                     |
 | `store-reject-released`           | owner release 之后的 `released` 提交                 | 记录保持 `drained`；下一次 detach 重发 owner release；断言其幂等；该格在 main 上可能红，随修复一起落地       |
@@ -31,15 +31,15 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_config
 
 1. **用测试 store wrapper 在真实事务内注入。** 在 Broker 事务 store 外包一层 `@TestConfiguration` wrapper，按 phase 抛错。MySQL trigger 被否决：行上无法识别 phase，而且已发布的 blob 在事务之外。
 2. **同一 phase 的所有重试都失败。** HTTP 客户端会重试 5xx；wrapper 保持失败直到测试清除 phase，用例记录尝试次数。
-3. **settled 失败要驱动，不会自愈。** 失败从 `install()`/`accept()` 抛出；测试必须驱动一次后续 turn 或 close；代理 wire 必须只有原 id 上一条 `mcp-status`，没有第二次 invoke。
-4. **已发布资源不回滚。** catalog/response/arguments 是独立资源写；settled 提交失败会留下孤儿 blob。门禁记录该副作用，而不是声称零副作用。
+3. **settled 失败要驱动，不会自愈。** 失败从 `install()`/`accept()` 抛出；测试必须驱动一次后续 turn 或 close；代理 wire 必须只有原 id 上一条 `mcp-status`，没有第二次 invoke。persistent 500 会耗尽 HTTP 提交重试并触发 `ManagedSessionAuthority` 的 write-failure latch；之后的命令都抛 `ManagedSessionWritesStoppedError`。测试必须先按原 operation/runtime pins 从 durable session store dispose/reopen authority，再驱动恢复 turn 或 lifecycle reconciliation。
+4. **内存暂存不等于持久发布。** `HttpManagedSessionResourceStore.publish()` 只在内存暂存字节；`commitResources()` 把字节嵌入事务，服务端在同一事务里插入 `ma_resource` 行。settled 提交失败会回滚新 response/catalog 行；只有更早提交的资源（intent 时的 arguments）保留。
 5. **owner/storage 的保留从对应行读取**，不由 5xx 推断。
 6. **新增 `HostedMcpStoreFaultGatesIT` 类**隔离 wrapper；FG12a/c/d 类不动；预算账目与 roster/per-ceiling 元测试在同一 diff 重钉。
 7. **`store-reject-released` 在 main 上可能合法地红。** `markReleased` 在 `broker.release()` 之后提交；若该提交被拒，owner 已释放。该格随修复一起落地（如 FG12d 的 R1-1），而不是断言 main 尚不具备的行为。
 
 ## 夹具设计
 
-- 复用 FG12c boot；测试 `@TestConfiguration` 提供故障 store wrapper。Harness 看到 5xx（普通 wrapper 异常是 500 `internal_error`；契约拒绝是 409）；JDBC 读记录与 owner/storage 行；代理 wire 计数；fixture 日志计数副作用。
+- 复用 FG12c boot；测试 `@TestConfiguration` 提供故障 store wrapper。Harness 看到 5xx（普通 wrapper 异常是 500 `internal_error`；契约拒绝是 409）；JDBC 读记录与 owner/storage 行；代理 wire 计数；fixture 日志计数副作用。persistent 拒绝后，测试从 durable session store 重新打开被停的 authority。
 - wrapper 在 teardown 清除 phase；清除失败为 best-effort，不得掩盖用例自身失败。
 - 证据落在 `target/fg12-cases/fg12b/<tenant>/`；workflow 已上传 `target/fg12-cases/`。
 
@@ -58,4 +58,4 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_config
 
 - wrapper 只存在于测试 Spring，还是 Broker 需要提供受支持的故障接缝？wrapper 仅测试用，不写产品故障代码。
 - `store-reject-released` 的 main 红行为与 owner-release 重试幂等性，必须在承诺该格前核实。
-- settled 提交失败后的孤儿 catalog/response/arguments blob：断言其存在还是清理，记录选择。
+- settled 格与后续 release-retry 格都必须核实从 durable 状态按原 pins 重新打开 authority。
