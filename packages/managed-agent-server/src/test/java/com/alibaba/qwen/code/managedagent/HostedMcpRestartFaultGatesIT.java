@@ -365,7 +365,7 @@ class HostedMcpRestartFaultGatesIT {
         killHarness();
         releaseControl();
         Map<String, Object> dispatched = awaitWireControl("mcp-release",
-                releaseId, null);
+                releaseId, "running");
         JsonNode dispatchRequest = (JsonNode) dispatched.get("request");
         String runtimeSessionId = dispatchRequest.path("runtimeSessionId")
                 .asText();
@@ -379,6 +379,16 @@ class HostedMcpRestartFaultGatesIT {
                     "settle_resources");
             if (settled.statusCode() == 200) {
                 break;
+            }
+            if (settled.statusCode() == 409) {
+                JsonNode refusal = json.readTree(settled.body());
+                String code = refusal.path("error").asText(
+                        refusal.path("code").asText());
+                if ("hosted_turn_active".equals(code)
+                        || "hosted_lifecycle_operation_conflict".equals(code)) {
+                    Thread.sleep(1_000);
+                    continue;
+                }
             }
             assertThat(settled.statusCode()).as("settle: %s", settled.body())
                     .isEqualTo(503);
@@ -399,11 +409,44 @@ class HostedMcpRestartFaultGatesIT {
                 .hasSize(1);
         assertThat(controls("mcp-configure")).isEmpty();
         assertThat(controls("mcp-invoke")).isEmpty();
-        assertThat(controls("mcp-status")).anyMatch(call ->
-                releaseId.equals(call.operationId()));
+        assertThat(wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-status".equals(request.at(
+                                    "/operation/kind").asText())
+                            && releaseId.equals(request.at(
+                                    "/operation/targetOperationId").asText());
+                })
+                .filter(entry -> Integer.valueOf(200)
+                        .equals(entry.get("status")))
+                .filter(entry -> {
+                    JsonNode answer = (JsonNode) entry.get("answer");
+                    return answer != null && "settled".equals(
+                            answer.path("result").path("state").asText());
+                })
+                .count())
+                .as("a settled status lookup for the original release")
+                .isPositive();
         assertThat(fixtureEvents("mcp.start"))
-                .as("the worker and its stdio server survive the Harness")
+                .as("the release does not start a second server")
                 .hasSize(1);
+        assertThat(fixtureEvents("mcp.exit"))
+                .as("the released stdio server exits once")
+                .hasSize(1);
+        ProcessHandle.of(fixturePid()).ifPresent(handle -> {
+            try {
+                handle.onExit().get(10, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // The fixture records mcp.exit just before it exits.
+            }
+        });
+        assertThat(ProcessHandle.of(fixturePid()).map(
+                ProcessHandle::isAlive).orElse(false))
+                .as("the released stdio server is gone")
+                .isFalse();
         assertThat(controlRequests("mcp-status").stream()
                 .filter(request -> releaseId.equals(request.at(
                         "/operation/operationId").asText()))

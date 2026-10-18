@@ -23,10 +23,10 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的两个域 `m
 ## 决策
 
 1. **扩展现有类，不新增类。** 该格复用 FG12c 的 boot 与夹具，因此“新增一个类”的 fork 预算六处账目不变。证据按 case 分目录：FG12c 留在 `target/fg12-cases/fg12c/`，FG12d 落在 `target/fg12-cases/fg12d/`。
-2. **直接驱动 lifecycle v2。** Java 协调器不是本门禁的主体。测试用 `beginWorkspaceLifecycle(..., protocolVersion = 2)` 准入一个 CLOSE 操作并 claim 它，然后用同一 authority 依次发送三个阶段；在 `effects` 之后，它用与 `WorkspaceLifecycleStore.saveEffects` 相同的 `UPDATE ma_session_head` 代替协调器完成 DRAINING 迁移。
+2. **直接驱动 lifecycle v2。** Java 协调器不是本门禁的主体。测试用 `beginWorkspaceLifecycle(..., protocolVersion = 2)` 准入一个 CLOSE 操作并 claim 它，然后用同一 authority 依次发送三个阶段；在 `effects` 之后，它通过更新 `ma_session_head.phase` 代替协调器完成 DRAINING 迁移；协调器的 effects receipt 与时间戳未覆盖（协调器不在范围内）。
 3. **持住 release 派发，在 `releasing` 之后杀进程。** 代理在转发前停住 `mcp-release`；测试先断言数据库记录为 `releasing` 且派发在飞，再 SIGKILL Harness。放开 hold 后，原派发到达 Runtime 并登记该操作，替换 Harness 的查询才有可结算的对象。
 4. **带原 claim 重载。** load 携带 `lifecycleProtocolVersion: 2` 与原 `{operationId, claimGeneration}`；替换 Harness 在 release 仍为 `running` 时有界重试 `settle_resources`，settled 查询后提交 `drained`/`released`。
-5. **先断言线上序列，再断言状态。** 恰好一次 `${configurationId}:release` 的 `mcp-release`、一次同 id 且 `state: settled` 的 `mcp-status`、基线之后没有 `mcp-configure`/`mcp-invoke`、一次 `mcp.start`、`runtimeSessionId` 不变。只有该序列成立后才断言 `releaseState: released`。若 release 始终不 settle，路由回答 503，记录停在 `releasing`/`drained`；有界重试会失败，而不是接受伪造的 `released`。
+5. **先断言线上序列，再断言状态。** 恰好一次 `${configurationId}:release` 的 `mcp-release`、至少一次同 id 且 settled 的 `mcp-status`（有界重试可能发多次）、基线之后没有 `mcp-configure`/`mcp-invoke`、一次 `mcp.start`、`runtimeSessionId` 不变。只有该序列成立后才断言 `releaseState: released`。若 release 始终不 settle，路由回答 503，记录停在 `releasing`/`drained`；有界重试会失败，而不是接受伪造的 `released`。
 
 ## 夹具设计
 
@@ -39,13 +39,13 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的两个域 `m
 
 不新增类，因此六处 fork 账目不变：类 `@Timeout` 600 s、`hostedForkHealthySeconds` 4438 s、CI fork 5048 s 及其字面钉点、本地 `hosted-mcp-gates` profile（`**/HostedMcp*IT.java`）、workflow 注释、artifact 根 `target/fg12-cases/`。
 
-JDK 21 + MariaDB 10.11 实测：新格 9.05 s；六格整类 50.45 s。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，新增的 +9 s 仍在该余量内；共享 healthy 和 CI fork 均不动。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
+JDK 21 + MariaDB 10.11 实测：新格 6.7–9.1 s；六格整类 33.0–50.5 s（最新 33.0 s）。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，新增的 +9 s 仍在该余量内；共享 healthy 和 CI fork 均不动。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
 
 ## 验收
 
 - `mvn -q -DskipTests test-compile checkstyle:check` 干净。
 - `HostedMcpRestartFaultGatesIT` 在 JDK 21 + MariaDB 上 6/6 绿；新格在杀进程前先自证注入（数据库 `releasing` 与在飞的 `mcp-release`）。
-- `fg12d` 证据显示一次 `mcp-release`、一次同 id 且 settled 的 `mcp-status`、最终 `released`，且没有第二次 configure/invoke。
+- `fg12d` 证据显示一次 `mcp-release`、至少一次同 id 且 settled 的 `mcp-status`、一次 `mcp.start` 与一次 `mcp.exit`、最终 `released`，且没有第二次 configure/invoke。
 - 本切片不跑 TS 变异见证（按 FG12d 任务书）。剩余风险：绿依赖 release 在 60×1 s 重试窗口内 settle；更慢的 Runtime 会让门禁变红，而不是带着未结算记录变绿。
 - 整仓 Spring/Broker 重启在 `WorkspaceStorageGuard` 拒绝被占用 storage 期间继续拆出，不用第二套 rig 伪造。
 

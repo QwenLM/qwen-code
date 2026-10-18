@@ -23,10 +23,10 @@ The whole-Spring/Broker restart cells stay out. A whole-Spring restart replaces 
 ## Decisions
 
 1. **Extend the existing class, not a new one.** The case shares the FG12c boot and fixture, so the fork-budget accounts for a new class do not change. Evidence is per case: FG12c keeps `target/fg12-cases/fg12c/`, FG12d lands in `target/fg12-cases/fg12d/`.
-2. **Drive lifecycle v2 directly.** The Java coordinator is not the subject. The test admits a CLOSE operation with `beginWorkspaceLifecycle(..., protocolVersion = 2)` and claims it, then posts the three phases with the same authority. It stands in for the coordinator's DRAINING transition after `effects` with the same `UPDATE ma_session_head` that `WorkspaceLifecycleStore.saveEffects` performs.
+2. **Drive lifecycle v2 directly.** The Java coordinator is not the subject. The test admits a CLOSE operation with `beginWorkspaceLifecycle(..., protocolVersion = 2)` and claims it, then posts the three phases with the same authority. It stands in for the coordinator's DRAINING transition after `effects` by updating `ma_session_head.phase`; the coordinator's effects receipt and timestamps are not exercised (the coordinator is out of scope).
 3. **Hold the release dispatch, kill after `releasing`.** The proxy parks `mcp-release` before forwarding, the test asserts the database record is `releasing` and the dispatch is in flight, then SIGKILLs the Harness. Releasing the hold lets the original dispatch reach the Runtime and register the operation, so the replacement's lookup has something to settle.
 4. **Reload with the original claim.** The load carries `lifecycleProtocolVersion: 2` and `lifecycleAuthority` = the original `{operationId, claimGeneration}`. The replacement retries `settle_resources` (bounded) while the release is `running`; a settled lookup commits `drained`/`released`.
-5. **The gate asserts the wire, then the state.** One `mcp-release` for `${configurationId}:release`, one `mcp-status` lookup for the same id with `state: settled`, no `mcp-configure`/`mcp-invoke` after the baseline, one `mcp.start`, and `runtimeSessionId` unchanged. `releaseState: released` is asserted only after that sequence. If the release never settles the route answers 503 and the record stays `releasing`/`drained`; the bounded retry fails rather than accepting a fabricated `released`.
+5. **The gate asserts the wire, then the state.** One `mcp-release` for `${configurationId}:release`, a settled `mcp-status` lookup for the same id (the bounded retry may issue more than one), no `mcp-configure`/`mcp-invoke` after the baseline, one `mcp.start`, and `runtimeSessionId` unchanged. `releaseState: released` is asserted only after that sequence. If the release never settles the route answers 503 and the record stays `releasing`/`drained`; the bounded retry fails rather than accepting a fabricated `released`.
 
 ## Fixture design
 
@@ -39,13 +39,13 @@ The whole-Spring/Broker restart cells stay out. A whole-Spring restart replaces 
 
 No new class, so the six fork accounts stay unchanged: the class `@Timeout` 600 s, `hostedForkHealthySeconds` 4438 s, the CI fork 5048 s and its literal pin, the local `hosted-mcp-gates` profile (`**/HostedMcp*IT.java`), the workflow comments, and the artifact root `target/fg12-cases/`.
 
-Measured on JDK 21 + MariaDB 10.11: the new case 9.05 s; the full six-case class 50.45 s. FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the +9 s case stays inside that allowance; the shared healthy sum and the CI fork do not move. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
+Measured on JDK 21 + MariaDB 10.11: the new case 6.7–9.1 s; the six-case class 33.0–50.5 s (latest 33.0 s). FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the +9 s case stays inside that allowance; the shared healthy sum and the CI fork do not move. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
 
 ## Acceptance
 
 - `mvn -q -DskipTests test-compile checkstyle:check` clean.
 - `HostedMcpRestartFaultGatesIT` 6/6 green on JDK 21 + MariaDB; the new case proves its injection (`releasing` in the database and a held `mcp-release`) before the kill.
-- The `fg12d` evidence shows one `mcp-release`, one settled `mcp-status` for the same id, `released`, and no second configure or invoke.
+- The `fg12d` evidence shows one `mcp-release`, at least one settled `mcp-status` for the same id, one `mcp.start` and one `mcp.exit`, `released`, and no second configure or invoke.
 - No TS mutation witness in this slice (per the FG12d brief). Remaining risk: the green depends on the release settling within the 60×1 s retry window; a slower Runtime fails the gate rather than passing it with an unsettled record.
 - The whole-Spring/Broker restart stays out while `WorkspaceStorageGuard` refuses a held storage; it is not faked with a second rig.
 
