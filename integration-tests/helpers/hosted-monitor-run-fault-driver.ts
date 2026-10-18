@@ -1733,7 +1733,11 @@ async function runStoreCase() {
     return {
       case: current.name,
       marker: installed.marker,
-      firedWithMarker: true,
+      firedWithMarker:
+        brokerFives.some((entry) => entry.body.includes(installed.marker)) ||
+        storeFives.some((entry) => entry.body.includes(installed.marker)),
+      brokerFiveCount: brokerFives.length,
+      storeFiveCount: storeFives.length,
       brokerMarkers: brokerFives
         .filter((entry) => entry.body.includes(installed.marker))
         .map((entry) => entry.op),
@@ -1981,22 +1985,29 @@ async function runCancelCase() {
         match: (op) => op === 'cancel',
         label: 'cancel-reply',
       });
-      const first = await brokerDriver(
-        `/executions/${encodeURIComponent(inv.execution_call_id)}:cancel`,
-        {
-          protocolVersion: 1,
-          requestId: randomUUID(),
-          harnessSessionId: current.sessionId,
-          runtimeSessionId,
-        },
+      let firstStatus: number | 'dropped';
+      try {
+        const attempted = await brokerDriver(
+          `/executions/${encodeURIComponent(inv.execution_call_id)}:cancel`,
+          {
+            protocolVersion: 1,
+            requestId: randomUUID(),
+            harnessSessionId: current.sessionId,
+            runtimeSessionId,
+          },
+        );
+        firstStatus = attempted.status;
+      } catch {
+        firstStatus = 'dropped';
+      }
+      assert.equal(
+        firstStatus,
+        'dropped',
+        `the dropped reply must surface as a transport failure (got ${firstStatus})`,
       );
       assert(
         brokerDrops.includes('cancel-reply'),
         'the drop arm must have fired',
-      );
-      assert(
-        first.status === 0,
-        `a destroyed reply can never answer 200 (got ${first.status})`,
       );
       step('cancel reply dropped after commit');
       const second = await brokerDriver(
