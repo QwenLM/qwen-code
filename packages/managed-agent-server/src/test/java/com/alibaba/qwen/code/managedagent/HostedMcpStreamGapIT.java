@@ -77,6 +77,7 @@ class HostedMcpStreamGapIT {
     private int port;
     private int harnessPort;
     private int brokerPort;
+    private String bootId;
     private int boots;
     private HttpServer model;
     private ExecutorService modelExecutor;
@@ -167,6 +168,7 @@ class HostedMcpStreamGapIT {
         Observer resumed = new Observer("public", session, cut.lastSequence());
         List<JsonNode> union = resumed.continueFrom(cut, session);
         assertOneToolResult(union);
+        assertOneEffect();
         assertThat(modelFailure.get()).isNull();
     }
 
@@ -188,6 +190,7 @@ class HostedMcpStreamGapIT {
                 cut.lastSequence());
         List<JsonNode> union = resumed.continueFrom(cut, session);
         assertOneToolResult(union);
+        assertOneEffect();
         assertThat(modelFailure.get()).isNull();
     }
 
@@ -203,31 +206,42 @@ class HostedMcpStreamGapIT {
         holdParked();
         cut.awaitToolCall();
         cut.abort();
-        // The replacement lands while the call is parked: the running
-        // Session stays pinned to revision 1 and the stream it is reading
-        // must not gain, lose or reorder a frame.
-        assertThat(api("POST", "/v1/agents/" + agent, definition(2),
-                "revision-two", 202).path("revision").asText())
-                .isEqualTo("2");
+        // The Harness-private configuration route is what a running Session
+        // replaces its MCP connection through; the public definition route
+        // only appends an immutable revision the Session keeps ignoring.
+        HttpResponse<String> replaced = configureMcp(session,
+                UUID.randomUUID().toString(), 2);
+        assertThat(replaced.statusCode()).as("replacement: %s",
+                replaced.body()).isEqualTo(202);
+        assertThat(HostedGateTestSupport.extensionRecord(jdbc, tenant, session,
+                "mcp_configuration").path("configRevision").asInt())
+                .as("the committed configuration generation advanced")
+                .isEqualTo(2);
         release();
         awaitCompleted(session, turn);
         Observer resumed = new Observer("public", session, cut.lastSequence());
         List<JsonNode> union = resumed.continueFrom(cut, session);
         assertOneToolResult(union);
-        assertThat(jdbc.queryForObject("SELECT agent_revision FROM ma_session"
-                + " WHERE tenant_id = ? AND session_id = ?", String.class,
-                tenant, session))
-                .as("the running Session keeps the revision it started on")
-                .isEqualTo("1");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " ma_agent_definition WHERE tenant_id = ? AND agent_id = ?"
-                + " AND revision = 2", Integer.class, tenant, agent))
-                .as("the replacement is stored once")
-                .isEqualTo(1);
-        assertThat(events("mcp.start"))
-                .as("the held call keeps the server it started on")
-                .hasSize(1);
+        assertOneEffect();
+        assertThat(HostedGateTestSupport.extensionRecord(jdbc, tenant, session,
+                "mcp_configuration").path("configRevision").asInt())
+                .as("the replacement survives the released call")
+                .isEqualTo(2);
         assertThat(modelFailure.get()).isNull();
+    }
+
+    /** All three cases pin the physical side effect, not only the frame. */
+    private void assertOneEffect() throws Exception {
+        List<JsonNode> effects = events("mcp.effect");
+        assertThat(effects).as("the held call appends exactly once")
+                .hasSize(1);
+        assertThat(effects.getFirst().path("value").asText())
+                .isEqualTo("EXT_HOLD");
+        Path proof = workspace.resolve("mcp-proof.jsonl");
+        assertThat(proof).as("the fixture effect file").exists();
+        assertThat(Files.readAllLines(proof))
+                .as("one durable proof row, not one per connection")
+                .hasSize(1);
     }
 
     private void holdParked() throws Exception {
@@ -464,13 +478,42 @@ class HostedMcpStreamGapIT {
         waitFor(() -> {
             assertThat(harness.isAlive()).as("Harness log: %s",
                     temporary.resolve("harness-" + boots + ".log")).isTrue();
-            assertThat(http.send(HttpRequest.newBuilder(URI.create(
-                    "http://127.0.0.1:" + harnessPort + "/capabilities"))
-                    .timeout(Duration.ofSeconds(2)).header("Authorization",
-                            "Bearer " + TOKEN)
-                    .build(), HttpResponse.BodyHandlers.discarding())
-                    .statusCode()).isEqualTo(200);
+            HttpResponse<String> capabilities = http.send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                            + harnessPort + "/capabilities"))
+                            .timeout(Duration.ofSeconds(2))
+                            .header("Authorization", "Bearer " + TOKEN)
+                            .build(), HttpResponse.BodyHandlers.ofString());
+            assertThat(capabilities.statusCode()).isEqualTo(200);
+            bootId = json.readTree(capabilities.body()).at("/hostedHarness/bootId")
+                    .asText();
+            assertThat(bootId).isNotBlank();
         });
+    }
+
+    /**
+     * The Harness-private configuration route, the one the running Session
+     * actually replaces its MCP connection through — not the immutable Agent
+     * definition revision the public API appends.
+     */
+    private HttpResponse<String> configureMcp(String session,
+            String operationId, int revision) throws Exception {
+        Map<String, Object> body = Map.of("operationId", operationId,
+                "expectedRevision", revision - 1, "server", Map.of(
+                        "serverId", "fixture", "serverRevision", revision,
+                        "definitionDigest",
+                        DigestUtils.sha256Hex(mcpDigest + revision)));
+        return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                + harnessPort + "/session/" + session + "/mcp/configurations"))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id", bootId)
+                .header("X-Qwen-Client-Id", session)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(
+                        json.writeValueAsString(body)))
+                .build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private List<JsonNode> events(String kind) throws Exception {
