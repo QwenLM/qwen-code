@@ -312,6 +312,13 @@
             <id>hosted-harness-mysql</id>
             <build>
                 <plugins>
+                    <!-- The H2 unit suite is mysql-integration's; repeating it
+                         in each Hosted job step cost ~11 min apiece. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration><skipTests>true</skipTests></configuration>
+                    </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-failsafe-plugin</artifactId>
@@ -377,8 +384,61 @@
                                  3380 s healthy sum no longer fits
                                  3600 s, so the fork moves to 3990 s and
                                  the Verify step to 80 minutes to keep
-                                 its 600 s wrap plus margin. -->
-                            <forkedProcessTimeoutInSeconds>3990</forkedProcessTimeoutInSeconds>
+                                 its 600 s wrap plus margin. The FG10b
+                                 and FG10f workflow relay letters
+                                 (HostedWorkflowRelayFaultGatesIT,
+                                 81.6–81.7 s healthy locally, ~165 s
+                                 budgeted at 2×) raise the healthy sum to
+                                 3545 s, so the fork moves to 4155 s and
+                                 the Verify step to 85 minutes. Their
+                                 slice 2 (FG10c, FG10e) brings the class
+                                 to four letters measuring 181.2–181.6 s
+                                 (~363 s budgeted at 2×): the healthy sum
+                                 becomes 3743 s, so the fork moves to
+                                 4353 s and the Verify step to 90
+                                 minutes. Slice 3 (FG10d, the process
+                                 crash) brings the class to five
+                                 letters measuring 246.1–246.8 s (~494 s
+                                 budgeted at 2×): the healthy sum
+                                 becomes 3874 s and the fork 4484 s,
+                                 which the Verify step's 90 minutes
+                                 still wrap. The FG12a MCP reply-loss
+                                 letter (HostedMcpReplyLossIT, three
+                                 cases) measures 5.1-7.4 s healthy
+                                 locally on macOS JDK 21 + MariaDB
+                                 10.11 (~15 s budgeted at 2x): the
+                                 healthy sum becomes 3889 s, so the
+                                 fork moves to 4499 s. The FG12c MCP
+                                 restart matrix (HostedMcpRestartFault
+                                 GatesIT, five process-kill cases)
+                                 measures ~49 s healthy locally (~98 s
+                                 budgeted at 2x); the FG13c Hook
+                                 owner-restart cells (three cases,
+                                 issue #14449) are budgeted at 300 s:
+                                 the healthy sum becomes 4238 s, so the
+                                 fork moves to 4848 s. The FG13d
+                                 cancel/timeout cells (two cases, issue
+                                 #14449) add 200 s: the healthy sum
+                                 becomes 4438 s, so the fork moves to
+                                 5048 s. The FG11a automation lost-reply
+                                 letter (HostedAutomationFaultGatesIT,
+                                 eight cases on one minute boundary)
+                                 measures 46.3-85.0 s locally on JDK 21
+                                 + MySQL 8.4.6 (~170 s budgeted at 2x):
+                                 the healthy sum becomes 4608 s, so the
+                                 fork moves to 5218 s and the Verify
+                                 step to 100 minutes. The FG13d
+                                 worker-stop cancel cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 4758 s, so the fork moves to 5368 s.
+                                 FG11b's Spring-side store faults, a
+                                 second method of the automation class
+                                 (six cases on one minute boundary),
+                                 measure 30.8-64.5 s (~130 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 4888 s, so the fork moves to 5498 s
+                                 and the Verify step to 105 minutes. -->
+                            <forkedProcessTimeoutInSeconds>5498</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -395,6 +455,10 @@
         <profile>
             <id>hosted-harness-gates</id>
             <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>
@@ -507,11 +571,49 @@
                 <configuration>
                     <includes><include>**/HostedWorkflow*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's letters are independent fixtures
-                         sharing one fork: each letter's @Timeout ceiling
-                         (600 s) plus the healthy runtime must fit, the
-                         per-ceiling relation the CI profile pins. -->
+                    <!-- Both workflow classes' letters (FG10a's driver
+                         class and the FG10b–f relay class) are
+                         independent fixtures sharing one fork: each
+                         letter's @Timeout ceiling (600 s) plus the
+                         healthy runtime must fit, the per-ceiling
+                         relation the CI profile pins. -->
                     <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-mcp-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedMcp*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Mirrors the hosted-harness-mysql lane's
+                         per-ceiling rule for this class: one @Timeout
+                         ceiling (600 s) plus the healthy runtime must
+                         fit 1200 s. -->
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-automation-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedAutomation*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Mirrors the hosted-harness-mysql lane's
+                         per-ceiling rule for this class: one @Timeout
+                         ceiling (600 s) plus the healthy runtime must
+                         fit 1200 s. -->
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
@@ -519,6 +621,10 @@
         <profile>
             <id>o4-mysql-gates</id>
             <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>

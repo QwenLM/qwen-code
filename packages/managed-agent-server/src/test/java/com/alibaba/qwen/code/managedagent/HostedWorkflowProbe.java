@@ -65,7 +65,8 @@ final class HostedWorkflowProbe implements AutoCloseable {
 
     private Map<String, Object> state(String sessionId) {
         return Map.of(
-                "childRuns", extensionRecords(sessionId, "child_run"),
+                "childRuns", HostedGateTestSupport.extensionRecords(jdbc,
+                        tenant, sessionId, "child_run"),
                 "operations", jdbc.queryForList(
                         "SELECT * FROM ma_operation WHERE tenant_id = ?"
                                 + " AND operation_kind IN"
@@ -78,33 +79,6 @@ final class HostedWorkflowProbe implements AutoCloseable {
                 "turns", jdbc.queryForList(
                         "SELECT session_id, turn_id, status FROM ma_turn"
                                 + " WHERE tenant_id = ?", tenant));
-    }
-
-    private List<JsonNode> extensionRecords(String sessionId,
-            String domain) {
-        try {
-            var rows = jdbc.queryForList(
-                    "SELECT record_id, record_resource_id FROM"
-                            + " ma_session_record WHERE tenant_id = ?"
-                            + " AND session_id = ? AND domain = ? ORDER BY"
-                            + " gmt_create, record_id", tenant, sessionId,
-                    domain);
-            var records = new java.util.ArrayList<JsonNode>();
-            for (var row : rows) {
-                var resources = jdbc.queryForList(
-                        "SELECT CONVERT(inline_bytes USING utf8mb4) AS body"
-                                + " FROM ma_resource WHERE tenant_id = ?"
-                                + " AND session_id = ? AND resource_id = ?",
-                        tenant, sessionId,
-                        row.get("record_resource_id"));
-                assertThat(resources).as(domain + " record body").hasSize(1);
-                records.add(JSON.readTree(
-                        resources.getFirst().get("body").toString()));
-            }
-            return records;
-        } catch (java.io.IOException error) {
-            throw new IllegalStateException(error);
-        }
     }
 
     // The FG10a injection: the envelope's script bytes change while its
@@ -135,8 +109,8 @@ final class HostedWorkflowProbe implements AutoCloseable {
         assertThat(claimed)
                 .as("the relay never read the envelope before the tamper")
                 .isZero();
-        JsonNode record = extensionRecords(sessionId, "child_run")
-                .getFirst();
+        JsonNode record = HostedGateTestSupport.extensionRecords(jdbc,
+                tenant, sessionId, "child_run").getFirst();
         // The record's inputRef carries its own digest of the envelope,
         // left stale here on purpose: the tamper simulates the stored
         // bytes diverging from every pin, and the launch's definition

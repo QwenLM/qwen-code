@@ -296,7 +296,7 @@ const EN: Messages = {
   'managed.approvalOptionsInvalid':
     'The service returned unsupported approval modes.',
   'managed.approvalFixed':
-    'Approval mode is fixed for this task. Start a new task to choose another mode.',
+    'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
     'Choose an existing project directory, or name a new empty workspace.',
   'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
@@ -2431,6 +2431,7 @@ const EN: Messages = {
   'shell.result.cancelled': 'Cancelled',
   'shell.result.waiting': 'Waiting for output…',
   'shell.result.empty': 'No output',
+  'shell.result.unavailable': 'Output is unavailable for this tool call.',
   'shell.result.exited': (v) => `Exited with code ${v?.code}`,
   'turnCalls.open': 'View tool calls',
   'turnCalls.title': 'Tool calls',
@@ -4674,7 +4675,7 @@ const ZH: Messages = {
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
-  'managed.approvalFixed': '当前任务的审批策略已固定；如需更换，请新建任务。',
+  'managed.approvalFixed': '当前会话不支持更改审批策略。',
   'managed.newWorkspaceDescription':
     '选择已有项目目录，或输入名称创建空工作区。',
   'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
@@ -6733,6 +6734,7 @@ const ZH: Messages = {
   'shell.result.cancelled': '已取消',
   'shell.result.waiting': '等待输出…',
   'shell.result.empty': '无输出',
+  'shell.result.unavailable': '无法获取此工具调用的输出。',
   'shell.result.exited': (v) => `退出码 ${v?.code}`,
   'turnCalls.open': '查看工具调用',
   'turnCalls.title': '工具调用',

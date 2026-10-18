@@ -35,11 +35,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 // launch envelope's digest integrity — a tampered script is refused by the
 // child Turn's re-verification before any model spend, and fractional
 // launch args cross the daemon/SDK admission digest byte-identically.
-// FG10d gates process crashes — a SIGKILLed Harness leaves the record
-// unsettled and honestly blocked, never failed or cancelled, and a cold
-// load refuses the unsettled run. Real packaged Harness, real MySQL, JDBC
-// ground truth; no production code changes. This slice lands a and d; the
-// kind-agnostic b/c/e/f letters remain on the issue as a later slice.
+// Real packaged Harness, real MySQL, JDBC ground truth. The other letters,
+// FG10d's process crash among them, assert the record's relay-driven
+// settlement, which this driver-held parent cannot run; they live on the
+// coordinator-owned lead in HostedWorkflowRelayFaultGatesIT.
 class HostedWorkflowFaultGatesIT {
     private final ObjectMapper json = new ObjectMapper();
 
@@ -269,8 +268,8 @@ class HostedWorkflowFaultGatesIT {
         String sessionId = session.get("sessionId").toString();
         String name = session.get("name").toString();
         assertThat(report.path("case").asText()).isEqualTo(name);
-        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
-                "child_run");
+        JsonNode record = HostedGateTestSupport.extensionRecord(jdbc,
+                tenant, sessionId, "child_run");
         // The workflow kind's identity: the record names the kind, and the
         // pin is the launch's own digest — computed over the script the
         // driver authored, never re-resolved from anywhere later.
@@ -346,23 +345,6 @@ class HostedWorkflowFaultGatesIT {
             }
             default -> throw new IllegalArgumentException(name);
         }
-    }
-
-    private JsonNode extensionRecord(JdbcTemplate jdbc, String tenant,
-            String sessionId, String domain) throws Exception {
-        var rows = jdbc.queryForList(
-                "SELECT record_resource_id FROM"
-                        + " ma_session_record WHERE"
-                        + " tenant_id = ? AND session_id = ? AND domain = ?",
-                tenant, sessionId, domain);
-        assertThat(rows).as(domain + " records").hasSize(1);
-        var resources = jdbc.queryForList(
-                "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " ma_resource WHERE tenant_id = ?"
-                        + " AND session_id = ? AND resource_id = ?", tenant,
-                sessionId, rows.getFirst().get("record_resource_id"));
-        assertThat(resources).hasSize(1);
-        return json.readTree(resources.getFirst().get("body").toString());
     }
 
     private static void deleteRecursively(Path root) throws java.io.IOException {
