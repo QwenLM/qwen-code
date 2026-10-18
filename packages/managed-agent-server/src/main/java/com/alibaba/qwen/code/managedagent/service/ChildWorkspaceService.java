@@ -295,8 +295,12 @@ public class ChildWorkspaceService {
         }
         // A discard that replaced the merge since the claim, or a claim
         // that moved on, fails the compare-and-set: the row is read again.
+        // A snapshot never merges (#13753 I3): this store records a merge
+        // asked of one as a discard, but a relay from before snapshots
+        // records the merge itself, so a snapshot's merge runs as a discard.
         String finish = claimed.finishRequest();
-        store.startFinish(claimed, owner, MERGE.equals(finish) ? MERGING : DISCARDING, finish, clock.get());
+        store.startFinish(claimed, owner, MERGE.equals(finish) && !claimed.snapshot() ? MERGING : DISCARDING,
+                finish, clock.get());
     }
 
     private void prepareStep(ChildWorkspaceProvider provider, Row claimed) {

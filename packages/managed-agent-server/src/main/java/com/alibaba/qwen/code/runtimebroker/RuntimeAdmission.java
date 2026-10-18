@@ -45,8 +45,9 @@ final class RuntimeAdmission {
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
                 || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
                         && !SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
-                || !WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
-                || !binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId())
+                || !(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                        || WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
+                                && binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId()))
                 || session.getState() != RuntimeSessionRecord.State.RELEASING
                 || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()
                 || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)

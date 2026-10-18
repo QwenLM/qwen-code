@@ -77,6 +77,19 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
   });
 
+  it('sizes the daemon-e2e budget for the stretched setup on the fast tier', () => {
+    // The fast tier runs this leg on every touched PR push instead of nightly
+    // only, so it meets the ~44 min stretched-setup tail far more often than a
+    // 45 ceiling leaves room for. This budget was originally sized for the
+    // post-job Maven cache save, which #14396 has since suppressed on
+    // self-hosted runners; a killed job concludes cancelled and reddens the
+    // gate of a green suite either way. The full tier keeps the budget the
+    // stretched-setup sizing below justifies.
+    expect(parse(workflow).jobs['daemon-e2e']['timeout-minutes']).toBe(
+      "${{ inputs.tier == 'fast' && 90 || 45 }}",
+    );
+  });
+
   it('serializes latency-sensitive tests on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
@@ -98,12 +111,18 @@ describe('SDK Java self-hosted workflow guards', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
+    expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
       'mvn --batch-mode --no-transfer-progress clean test\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
         '            cd ../../managed-agent-server\n' +
-        `            mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        '            # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
+        '            if [ "${TIER}" = "fast" ]; then\n' +
+        '              mvn --batch-mode --no-transfer-progress clean test\n' +
+        '            else\n' +
+        `              mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        '            fi\n' +
         '          fi',
     );
   });
@@ -122,6 +141,39 @@ describe('SDK Java self-hosted workflow guards', () => {
       block.indexOf('clean test'),
     );
     expect(block).toContain(`'-Dtest=${brokerTestPattern}'`);
+    expect(block).toContain("TIER: '${{ inputs.tier }}'");
+    expect(hosted.run).toContain(
+      'if [ "${TIER}" = "fast" ]; then\n' +
+        '  mvn --batch-mode --no-transfer-progress clean test\n' +
+        'else\n' +
+        `  mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        'fi',
+    );
+  });
+
+  it('builds the JavaScript the full module suite loads before the fast tier runs it', () => {
+    const steps = parse(workflow).jobs.test.steps;
+    const names = steps.map((candidate) => candidate.name);
+    const build = steps.find(
+      (candidate) =>
+        candidate.name ===
+        'Build Managed Agent JavaScript prerequisites (fast tier)',
+    );
+    expect(build.if).toBe("${{ inputs.tier == 'fast' }}");
+    expect(build.run).toBe(
+      parse(workflow).jobs['mysql-integration'].steps.find(
+        (candidate) => candidate.name === 'Build native producer prerequisites',
+      ).run,
+    );
+    for (const later of [
+      'Run Java SDK tests (self-hosted)',
+      'Run Runtime Broker state tests',
+    ]) {
+      expect(names.indexOf(build.name)).toBeLessThan(names.indexOf(later));
+    }
+    expect(names.indexOf('Set up Node.js 22 (hosted)')).toBeLessThan(
+      names.indexOf(build.name),
+    );
   });
 
   it.skipIf(process.platform === 'win32').each([0, 23])(
@@ -199,32 +251,49 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it.each(['test', 'mysql-integration', 'daemon-e2e'])(
-    'keeps setup-java Maven files job-local in the %s job',
-    (name) => {
-      const block = job(name);
+  it.each([
+    'test',
+    'mysql-integration',
+    'daemon-e2e',
+    'event-transport-broker',
+    'event-transport-multi-node',
+  ])('keeps setup-java Maven files job-local in the %s job', (name) => {
+    const block = job(name);
+    expect(block).toContain(
+      "settings-path: '${{ runner.temp }}/setup-java-m2'",
+    );
+    // Two tail-anchored forms, no prefix match: mysql-integration appends
+    // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
+    // (pinned by the 'installs and verifies against one job-local Maven
+    // repository' test), the EventTransport lanes to both of theirs; the
+    // other jobs must carry no suffix at all — an appended -DskipTests
+    // would be word-split live by the mvn launcher.
+    const exact = block.match(
+      /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+    );
+    const jobLocal = block.match(
+      /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
+    );
+    expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
+      {
+        test: 6,
+        'mysql-integration': 2,
+        'daemon-e2e': 1,
+        'event-transport-broker': 2,
+        'event-transport-multi-node': 2,
+      }[name],
+    );
+    if (name.startsWith('event-transport-')) {
+      expect(exact).toBeNull();
       expect(block).toContain(
-        "settings-path: '${{ runner.temp }}/setup-java-m2'",
+        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
       );
-      // Two tail-anchored forms, no prefix match: mysql-integration appends
-      // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
-      // (pinned by the 'installs and verifies against one job-local Maven
-      // repository' test); the other jobs must carry no suffix at all — an
-      // appended -DskipTests would be word-split live by the mvn launcher.
-      const exact = block.match(
-        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
-      );
-      const jobLocal = block.match(
-        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
-      );
-      expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 6, 'mysql-integration': 2, 'daemon-e2e': 1 }[name],
-      );
-      if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
-      expect(block).not.toContain('Drop shared Maven toolchains.xml');
-      expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
-    },
-  );
+    } else if (name !== 'mysql-integration') {
+      expect(jobLocal).toBeNull();
+    }
+    expect(block).not.toContain('Drop shared Maven toolchains.xml');
+    expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
+  });
 
   it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
     // A step copied between jobs and later fixed in only one is the #13506
@@ -238,9 +307,13 @@ describe('SDK Java self-hosted workflow guards', () => {
       ),
     );
     const bodies = [
-      ...['test', 'mysql-integration', 'daemon-e2e'].map(
-        (name) => parsed.jobs[name],
-      ),
+      ...[
+        'test',
+        'mysql-integration',
+        'daemon-e2e',
+        'event-transport-broker',
+        'event-transport-multi-node',
+      ].map((name) => parsed.jobs[name]),
       reference.jobs.build,
     ].map((pooledJob, index) => {
       const s = pooledJob.steps.find(
@@ -252,12 +325,12 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
       return s.run;
     });
-    expect(bodies[1]).toBe(bodies[0]);
-    expect(bodies[2]).toBe(bodies[0]);
-    expect(bodies[3]).toBe(bodies[0]);
+    for (const body of bodies.slice(1)) expect(body).toBe(bodies[0]);
     expect(reference.jobs.build.env).toEqual({
       MAVEN_VERSION: parsed.env.MAVEN_VERSION,
       MAVEN_SHA512: parsed.env.MAVEN_SHA512,
+      MYSQL_CONTAINER:
+        'qwen-code-reference-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
     });
     expect(bodies[0]).toContain('sha512sum --check');
     expect(bodies[0]).toContain('>> "${GITHUB_PATH}"');
@@ -797,6 +870,9 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
         'utf8',
       ),
     ),
+    'managed-agent-gate.yml': parse(
+      readFileSync('.github/workflows/managed-agent-gate.yml', 'utf8'),
+    ),
   };
   const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
   const ciSteps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
@@ -810,10 +886,13 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     ['sdk-java.yml', 'test'],
     ['sdk-java.yml', 'flyway-migrations'],
     ['sdk-java.yml', 'mysql-integration'],
+    ['sdk-java.yml', 'event-transport-broker'],
+    ['sdk-java.yml', 'event-transport-multi-node'],
     ['sdk-java.yml', 'daemon-e2e'],
     ['sdk-java-flyway-open-prs.yml', 'recheck'],
     ['sdk-java-contract-open-prs.yml', 'recheck'],
     ['release-managed-agent-reference.yml', 'build'],
+    ['managed-agent-gate.yml', 'scope'],
   ];
 
   it.each(poolJobs)(
@@ -878,12 +957,18 @@ describe('Java SDK release validation gate', () => {
       required: true,
       type: 'string',
     });
+    // The only lane condition is the fast-tier skip, and the release caller
+    // passes no tier, so the default 'full' runs every lane.
+    expect(checks.on.workflow_call.inputs.tier).toMatchObject({
+      required: false,
+      default: 'full',
+    });
     for (const lane of Object.values(checks.jobs)) {
       const checkout = lane.steps.find((entry) =>
         entry.uses?.startsWith('actions/checkout@'),
       );
       expect(checkout.with.ref).toBe('${{ inputs.ref || github.sha }}');
-      expect(lane.if).toBeUndefined();
+      expect([undefined, "${{ inputs.tier != 'fast' }}"]).toContain(lane.if);
       expect(lane['continue-on-error']).toBeUndefined();
     }
     expect(release.jobs.java_checks).toMatchObject({
@@ -891,6 +976,7 @@ describe('Java SDK release validation gate', () => {
       uses: './.github/workflows/sdk-java.yml',
       with: { ref: '${{ needs.prepare.outputs.release_sha }}' },
     });
+    expect(release.jobs.java_checks.with.tier).toBeUndefined();
     expect(release.jobs.java_checks['continue-on-error']).toBeUndefined();
     expect(release.jobs.release.needs).toEqual(['prepare', 'java_checks']);
     expect(release.jobs.release.if).toBeUndefined();
@@ -951,7 +1037,7 @@ describe('setup-java Maven cache stays on hosted runners', () => {
     String(runsOn ?? '').includes('self-hosted'),
   );
   it('finds every pool-capable setup-java step', () => {
-    expect(poolCapable.length).toBe(4);
+    expect(poolCapable.length).toBe(6);
   });
   it.each(poolCapable)('%s caches Maven only on hosted runners', (_, step) => {
     expect(step.with?.cache).toBe(hostedOnly);
