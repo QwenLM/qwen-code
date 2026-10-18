@@ -41,11 +41,13 @@ type BootstrapRoute =
   | 'serve'
   | 'mcp'
   | 'managed-runtime-worker'
+  | 'session-send-mcp'
   | 'help'
   | 'version'
   | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
+  ['agents <command>', 'Session agents: join a coordinator as a runtime'],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',
@@ -394,6 +396,11 @@ export function resolveBootstrapRoute(
   if (firstArg === 'managed-runtime-worker') {
     return 'managed-runtime-worker';
   }
+  // The daemon spawns `agents session-send-mcp --url <endpoint>` per agent
+  // run; its stdout is an MCP stream, so it skips normal startup entirely.
+  if (firstArg === 'agents' && argv[1] === 'session-send-mcp') {
+    return 'session-send-mcp';
+  }
 
   return 'default';
 }
@@ -519,6 +526,23 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  if (rawArgv.length === 1 && rawArgv[0] === 'managed-runtime-bootstrap') {
+    const { runManagedRuntimeBootstrap } = await import(
+      './serve/managed-runtime-bootstrap.js'
+    );
+    await runManagedRuntimeBootstrap();
+    return;
+  }
+  if (
+    rawArgv.length === 2 &&
+    rawArgv[0] === 'managed-runtime-bootstrap-worker'
+  ) {
+    const { runManagedRuntimeBootstrapWorker } = await import(
+      './serve/managed-runtime-ssh-worker.js'
+    );
+    await runManagedRuntimeBootstrapWorker(rawArgv[1]!);
+    return;
+  }
   // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
   if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
     const { runWorkspaceRecoveryWorker } = await import(
@@ -575,7 +599,9 @@ export async function runCliEntry(
     await runMcpFastPath(argv);
     return;
   } else if (route === 'managed-runtime-worker') {
-    if (argv.length !== 1) {
+    const containerBoot =
+      argv.length === 3 && argv[1] === '--container-boot' ? argv[2] : undefined;
+    if (argv.length !== 1 && !containerBoot) {
       writeStderrLine('Managed Runtime worker arguments are invalid.');
       process.exitCode = 1;
       return;
@@ -583,7 +609,24 @@ export async function runCliEntry(
     const { runManagedRuntimeAttestationWorker } = await import(
       './serve/managed-runtime-attestation-worker.js'
     );
-    await runManagedRuntimeAttestationWorker();
+    await runManagedRuntimeAttestationWorker(containerBoot);
+    return;
+  } else if (route === 'session-send-mcp') {
+    // Nothing on this path may write to stdout (the MCP stream) or read
+    // settings: Codex starts MCP servers with a minimal environment.
+    const { readSessionSendMcpUrl } = await import(
+      './commands/agents/session-send-mcp.js'
+    );
+    const url = readSessionSendMcpUrl(argv.slice(2));
+    if (!url) {
+      writeStderrLine('Usage: qwen agents session-send-mcp --url <endpoint>');
+      process.exitCode = 1;
+      return;
+    }
+    const { runSessionSendMcp } = await import(
+      './commands/agents/session-send-mcp-server.js'
+    );
+    await runSessionSendMcp(url);
     return;
   } else if (route === 'help') {
     await printTopLevelHelp();

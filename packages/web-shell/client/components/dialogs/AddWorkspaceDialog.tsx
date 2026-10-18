@@ -48,6 +48,8 @@ export interface WorkspaceLocationOption {
 interface AddWorkspaceDialogProps {
   browseDirectories?: boolean;
   initialPath?: string;
+  pathHint?: string;
+  pathPlaceholder?: string;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   displayNameEnabled?: boolean;
@@ -80,6 +82,8 @@ function isAbsoluteLike(value: string): boolean {
 export function AddWorkspaceDialog({
   browseDirectories = false,
   initialPath = '',
+  pathHint,
+  pathPlaceholder = '/absolute/path or ssh://user@host/project',
   onClose,
   onAdd,
   displayNameEnabled = false,
@@ -441,7 +445,7 @@ export function AddWorkspaceDialog({
                   ref={inputRef}
                   id="add-workspace-path"
                   type="text"
-                  placeholder="/absolute/path or ssh://user@host/project"
+                  placeholder={pathPlaceholder}
                   value={path}
                   onChange={(e) => {
                     setPath(e.target.value);
@@ -585,7 +589,7 @@ export function AddWorkspaceDialog({
               )}
             </div>
             <FieldDescription id={browseDirectories ? undefined : HINT_ID}>
-              {t('sidebar.addWorkspaceHint')}
+              {pathHint ?? t('sidebar.addWorkspaceHint')}
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>

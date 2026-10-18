@@ -57,6 +57,7 @@ import styles from './SplitView.module.css';
 const MAX_PANES = MAX_SPLIT_PANES;
 
 export interface SplitViewProps {
+  showResponseTokensPerSecond?: boolean;
   /** Sessions to show in the split view. */
   sessionIds?: string[];
   /** Respect the host's session-details action allowlist. */
@@ -154,6 +155,7 @@ export function SplitView({
   voiceWorkspaceRevisions = {},
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: SplitViewProps) {
   const { t } = useI18n();
@@ -723,6 +725,7 @@ export function SplitView({
                       />
                     ) : null}
                     <ChatPane
+                      showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
                       sessionSummary={
                         showSessionDetails

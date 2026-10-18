@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import {
   resetDebugLoggingState,
   setDebugLogSession,
@@ -49,6 +50,7 @@ import type {
   SessionWriterLeaseTestCommandInput,
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
@@ -1319,17 +1321,22 @@ describe('SessionWriterLease', () => {
     await fs.unlink(targetPath);
   });
 
-  itPosix('classifies an unreadable owned lock as unavailable', async () => {
-    const { lease, lockPath } = await leaseFor();
-    await fs.chmod(lockPath, 0o000);
+  // Needs permission bits to bind: root with its DAC capabilities reads the
+  // mode-000 lock anyway, and Windows ignores the mode.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'classifies an unreadable owned lock as unavailable',
+    async () => {
+      const { lease, lockPath } = await leaseFor();
+      await fs.chmod(lockPath, 0o000);
 
-    try {
-      await expectUnavailable(lease.assertOwnedAndUnchanged());
-    } finally {
-      await fs.chmod(lockPath, 0o600);
-      await lease.release();
-    }
-  });
+      try {
+        await expectUnavailable(lease.assertOwnedAndUnchanged());
+      } finally {
+        await fs.chmod(lockPath, 0o600);
+        await lease.release();
+      }
+    },
+  );
 
   it('fails closed on a malformed lock', async () => {
     const fixture = await createFixture();
@@ -2315,6 +2322,21 @@ describe('SessionWriterLease', () => {
       await lease.release().catch(() => undefined);
     });
 
+    it('retries a retryable seal failure instead of memoizing the rejection', async () => {
+      const fixture = await createFixture('retryable-seal-session');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      await lease.appendJsonLine({ record: 'a' });
+      // A transient store fault fails the seal once (review round 14, R14-4).
+      vi.spyOn(lease, 'sealForHandoffOnce' as never).mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+      await expect(lease.sealForHandoff()).rejects.toThrow('disk full');
+      // The retryable failure cleared the memoized promise, so a later seal
+      // retries rather than replaying the rejection.
+      await lease.sealForHandoff();
+      expect(lease.isReleased).toBe(true);
+    });
+
     it('blocks a baseline writer from a sealed managed lock', async () => {
       const fixture = await createFixture('managed-takeover-guard-session');
       const first = await SessionWriterLease.acquire({
@@ -2360,6 +2382,137 @@ describe('SessionWriterLease', () => {
         state: 'active',
         owner_id: replacement.ownerId,
       });
+      await replacement.release();
+    });
+
+    // A sealed Managed record whose commit proof fails validation is not a
+    // seal at all: isLockRecord rejects the whole record, so acquire fails
+    // closed on a malformed lock rather than handing a certified takeover a
+    // corrupt proof. Every case corrupts only the commit proof, leaving the
+    // owner fields, schema version and transcript proof valid, so the clause
+    // under test is the only thing that can reject the record.
+    it.each<[string, string, Record<string, unknown>]>([
+      ['a fractional sequence', 'fractional', { last_commit_sequence: 6.5 }],
+      ['a non-numeric sequence', 'textual', { last_commit_sequence: '7' }],
+      ['a negative sequence', 'negative', { last_commit_sequence: -1 }],
+      ['an absent sequence', 'absent', { last_commit_sequence: undefined }],
+      [
+        'a 63-character hash',
+        'short-hash',
+        { committed_prefix_hash: 'a'.repeat(63) },
+      ],
+      [
+        'an uppercase hash',
+        'uppercase-hash',
+        { committed_prefix_hash: 'A'.repeat(64) },
+      ],
+      [
+        'a non-hex hash',
+        'non-hex-hash',
+        { committed_prefix_hash: 'g'.repeat(64) },
+      ],
+      // Only the typeof guard rejects this one: an array stringifies to the
+      // same 64 hex characters the pattern accepts.
+      [
+        'an array-wrapped hash',
+        'array-hash',
+        { committed_prefix_hash: ['a'.repeat(64)] },
+      ],
+    ])(
+      'fails closed on a sealed managed lock with %s',
+      async (_label, slug, patch) => {
+        const fixture = await createFixture(`managed-corrupt-proof-${slug}`);
+        const lease = await SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: managedSchema,
+        });
+        await lease.appendJsonLine({ record: 'managed' });
+        await lease.sealForHandoff(commitProof);
+        const sealed = await readJson(fixture.lockPath);
+        const corruptRaw = JSON.stringify({ ...sealed, ...patch });
+        await fs.writeFile(fixture.lockPath, corruptRaw);
+
+        await expectUnavailable(acquire(fixture.options));
+        // Failing closed leaves the corrupt seal in place for diagnosis.
+        await expect(fs.readFile(fixture.lockPath, 'utf8')).resolves.toBe(
+          corruptRaw,
+        );
+      },
+    );
+
+    it('keeps a zero commit sequence a genuine seal', async () => {
+      const fixture = await createFixture('managed-zero-sequence-proof');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await lease.appendJsonLine({ record: 'managed' });
+      await lease.sealForHandoff(commitProof);
+      const sealed = await readJson(fixture.lockPath);
+      // The bound is >= 0, not > 0: sequence 0 stays a real seal, so a plain
+      // acquire conflicts and a certified one is handed the proof.
+      await fs.writeFile(
+        fixture.lockPath,
+        JSON.stringify({ ...sealed, last_commit_sequence: 0 }),
+      );
+
+      await expectConflict(acquire(fixture.options));
+      const replacement = await acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: managedSchema,
+      });
+      expect(replacement.takeoverCommitProof).toEqual({
+        ...commitProof,
+        last_commit_sequence: 0,
+      });
+      await replacement.release();
+    });
+
+    it('refuses an unsupported managed lock format version at acquire', async () => {
+      const fixture = await createFixture('managed-format-guard-session');
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: { schemaVersion: 3, formatVersion: 0 },
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      // No wedging: nothing was installed, so a baseline acquire resolves.
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      await lease.release();
+    });
+
+    it('blocks a certified takeover that would downgrade the sealed format', async () => {
+      const fixture = await createFixture('managed-format-takeover-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          takeoverPolicy: 'certified',
+          lockSchema: managedSchema,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        state: 'sealed',
+        format_version: 2,
+      });
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
       await replacement.release();
     });
 
@@ -2428,6 +2581,69 @@ describe('SessionWriterLease', () => {
         lockSchema: managedSchema,
       });
       await managed.release();
+    });
+
+    it('does not reclaim a stale active lock from a newer managed format', async () => {
+      const fixture = await createFixture('managed-stale-format-session');
+      const owner = startLeaseProcess();
+      expect(
+        await requestChild(owner, {
+          type: 'acquire',
+          options: {
+            ...fixture.options,
+            lockSchema: { schemaVersion: 3, formatVersion: 2 },
+          },
+        }),
+      ).toMatchObject({ ok: true });
+      owner.kill('SIGKILL');
+      await waitForClose(owner);
+
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: managedSchema,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+      expect(
+        JSON.parse(await fs.readFile(fixture.lockPath, 'utf8')),
+      ).toMatchObject({
+        state: 'active',
+        format_version: 2,
+      });
+
+      // The barrier only refuses the older binary: a same-format acquirer
+      // reclaims the stale lock as before.
+      const newer = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      await newer.release();
+    });
+
+    it('lets a newer managed format take over an older sealed lock', async () => {
+      const fixture = await createFixture('managed-format-upgrade-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: { schemaVersion: 3, formatVersion: 2 },
+      });
+      expect(replacement.ownerId).not.toBe(first.ownerId);
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      expect(
+        JSON.parse(await fs.readFile(fixture.lockPath, 'utf8')),
+      ).toMatchObject({
+        schema_version: 3,
+        state: 'active',
+        format_version: 2,
+      });
+      await replacement.release();
     });
   });
 
@@ -2987,6 +3203,9 @@ describe('SessionWriterLease', () => {
       getResumedSessionData: () => authoritative,
       getProjectRoot: () => fixture.projectRoot,
       getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getFastModel: () => undefined,
       isInteractive: () => false,
     } as unknown as Config;

@@ -14,7 +14,7 @@ import {
 
 // TypeScript half of the managed-context/1 envelope contract (W0a-2). The
 // shared fixtures in contracts/managed-context-v1.fixtures.json pin it, and a
-// conformance test in packages/sdk-java/runtime-broker pins the same key sets,
+// conformance test in packages/managed-agent-server pins the same key sets,
 // routes and digests. The Runtime worker serves it for boot v2 (W0c-1).
 
 export const MANAGED_CONTEXT_PROTOCOL = 'managed-context/1';
@@ -367,6 +367,7 @@ export class ManagedContextInstallations {
   async install(
     body: unknown,
     verify: (binding: ManagedContextBinding) => Promise<boolean>,
+    canRecord: () => boolean = () => true,
   ): Promise<ManagedContextOutcome<ManagedContextReceipt>> {
     const request = this.#read(body);
     if ('status' in request) {
@@ -376,17 +377,41 @@ export class ManagedContextInstallations {
     if (earlier) {
       return earlier;
     }
+    if (!canRecord()) return CONTEXT_UNAVAILABLE;
     const verified = await verify(request.binding);
     // Another installation may have been recorded during the verification.
     return (
       this.#match(request) ??
-      (verified ? this.#record(request) : CONTEXT_UNAVAILABLE)
+      (verified && canRecord() ? this.#record(request) : CONTEXT_UNAVAILABLE)
     );
   }
 
   /** The binding installed for a Session, if any. */
   installed(sessionId: string): ManagedContextBinding | undefined {
     return this.#sessions.get(sessionId)?.binding;
+  }
+
+  installation(
+    sessionId: string,
+  ): Readonly<Record<string, unknown>> | undefined {
+    const request = this.#sessions.get(sessionId);
+    return request
+      ? Object.freeze({
+          protocolVersion: PROTOCOL_VERSION,
+          managedContext: MANAGED_CONTEXT_PROTOCOL,
+          ...request,
+        })
+      : undefined;
+  }
+
+  /**
+   * Every installed Session's id and binding. The file-tool boundary check
+   * reads it to tell "inside a sibling Session" from "inside the mount".
+   */
+  bindings(): ReadonlyArray<readonly [string, ManagedContextBinding]> {
+    return [...this.#sessions.entries()].map(
+      ([sessionId, request]) => [sessionId, request.binding] as const,
+    );
   }
 
   /** Steps 1 to 3: the shape, the digest and the Workspace part. */

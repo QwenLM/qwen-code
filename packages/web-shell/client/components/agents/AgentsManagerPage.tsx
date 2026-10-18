@@ -27,7 +27,7 @@ import {
 } from './agents-manager-logic';
 import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { AgentCreatePage } from './AgentCreatePage';
-import { LazyThreadsRoute } from '../workspace-agents/LazyThreadsRoute';
+import { LazyAgentsRoute } from '../workspace-agents/lazy-agents-route';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -78,14 +78,13 @@ import type { EmbeddedManagerPage } from '../plugins/manager-page';
 import styles from './AgentsManagerPage.module.css';
 
 interface AgentsManagerPageProps {
-  initialAgentView?: 'agents' | 'tasks' | 'runtime' | 'new-agent';
+  initialAgentView?: 'agents' | 'squads' | 'runtime' | 'new-agent';
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;
   workspaceCwd?: string;
-  /** Opens an agent's own session in the shell's session view. */
-  onOpenAgentSession?: (sessionId: string) => void;
-  onOpenThreadChat?: (threadId: string, workspaceCwd: string) => void;
+  /** Puts `@name ` into the chat composer, from an agent card. */
+  onMentionAgent?: (name: string) => void;
 }
 
 function levelLabel(level: string, t: ReturnType<typeof useI18n>['t']): string {
@@ -138,8 +137,7 @@ export function AgentsManagerPage({
   embedded,
   initialCreateScope,
   workspaceCwd,
-  onOpenAgentSession,
-  onOpenThreadChat,
+  onMentionAgent,
 }: AgentsManagerPageProps) {
   const { t } = useI18n();
   const {
@@ -162,25 +160,20 @@ export function AgentsManagerPage({
     Boolean(initialCreateScope),
   );
   const [editOpen, setEditOpen] = useState(false);
-  // Shared threads are the collaboration surface, and the daemon only mounts
-  // its routes when `experimental.agentCollaboration` is on. Read the capability
-  // rather than rendering the entry and letting every call 404: the tag is
-  // absent precisely when the routes are, so this hides the door instead of
-  // leaving one that opens onto nothing. Definition CRUD below is unaffected —
-  // it is a different, unconditional feature.
-  //
-  // It also needs a chat to open conversations in. The Plugins page embeds
-  // this page without one, and there only the definitions are managed; the
-  // sidebar's Agents entry is where collaboration lives.
+  // The roster and runtimes (agents that answer @-mentions in chat) exist only
+  // when the daemon mounts its routes, i.e. `experimental.agentCollaboration`
+  // is on for this workspace. Read the capability rather than rendering the
+  // entry and letting every call 404. Definition CRUD below is unaffected — it
+  // is a different, unconditional feature.
   const workspace = useWorkspace();
-  const collaborationAvailable =
-    onOpenThreadChat !== undefined &&
-    isAgentCollaborationEnabledForWorkspace(
-      workspace.capabilities,
-      workspaceCwd,
-    );
+  const collaborationAvailable = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    workspaceCwd,
+  );
+  // Embedded (the Plugins page's Agents tab) it opens on the definitions it
+  // manages there; the roster is one click away.
   const [agentsOpen, setAgentsOpen] = useState(
-    () => !initialCreateScope && collaborationAvailable,
+    () => !initialCreateScope && !embedded && collaborationAvailable,
   );
   // The daemon can answer late, or be replaced by one with a different answer.
   useEffect(() => {
@@ -355,11 +348,10 @@ export function AgentsManagerPage({
     return (
       <div className="flex w-full flex-col gap-6 pb-8">
         {navigation}
-        <LazyThreadsRoute
+        <LazyAgentsRoute
           initialView={initialAgentView}
           workspaceCwd={workspaceCwd}
-          onOpenThreadChat={onOpenThreadChat}
-          {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
+          {...(onMentionAgent ? { onMentionAgent } : {})}
           onOpenDefinitions={() => setAgentsOpen(false)}
         />
       </div>
