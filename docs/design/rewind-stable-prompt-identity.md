@@ -25,6 +25,11 @@ its model-facing prompt.
   absorbed does not refuse the turn that still resolves uniquely.
 - Return `-1` when the id is missing or duplicated on either side rather than
   guessing with positional alignment.
+- Treat the turn's prompt entry as its anchor. A tool-loop continuation carries
+  the same id so the turn stays discoverable, but it does not start the turn and
+  is not a second candidate.
+- Offer only turns that carry an identity in the Ink selector, so a row that
+  could never resolve is not picked and refused afterwards.
 - Name the cause of that refusal. An identified turn in the retained region
   that does not resolve reports that it no longer matches the model history,
   not that it was compressed.

@@ -8285,7 +8285,7 @@ describe('AppContainer State Management', () => {
     it('opens rewind selector normally when IDE mode is disabled', () => {
       const mockAddItemDisabled = vi.fn();
       mockedUseHistory.mockReturnValue({
-        history: [{ id: 1, type: 'user', text: 'hello' }],
+        history: [{ id: 1, type: 'user', text: 'hello', promptId: 'prompt-1' }],
         addItem: mockAddItemDisabled,
         updateItem: vi.fn(),
         clearItems: vi.fn(),
@@ -8314,9 +8314,48 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.openRewindSelector();
+      act(() => capturedUIActions.openRewindSelector());
 
       expect(mockAddItemDisabled).not.toHaveBeenCalled();
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+
+    it('does not open the selector when no turn carries a rewind identity', () => {
+      const mockAddItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'hello' }],
+        addItem: mockAddItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(false);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => capturedUIActions.openRewindSelector());
+
+      expect(mockAddItem).not.toHaveBeenCalled();
+      expect(capturedUIState.isRewindSelectorOpen).toBeFalsy();
     });
   });
 

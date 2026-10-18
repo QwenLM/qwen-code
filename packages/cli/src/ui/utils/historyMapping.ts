@@ -47,6 +47,18 @@ export function isRealUserTurn(
 }
 
 /**
+ * Whether the turn carries the identity a conversation rewind resolves to.
+ * A real user row without one (a turn injected by accepted speculation, a
+ * persisted custom slash invocation) can never be associated with model or
+ * recorded history, so the selector must not offer it — every pick would fail
+ * closed.
+ */
+export function isRewindableUserTurn(item: HistoryItem): boolean {
+  if (!isRealUserTurn(item)) return false;
+  return Boolean(item.promptId ?? item.rewindId);
+}
+
+/**
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
  *

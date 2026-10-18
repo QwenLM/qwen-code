@@ -12,7 +12,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { truncateText } from '../utils/sessionPickerUtils.js';
-import { isRealUserTurn } from '../utils/historyMapping.js';
+import { isRewindableUserTurn } from '../utils/historyMapping.js';
 import { t } from '../../i18n/index.js';
 import type { FileHistoryService, DiffStats } from '@qwen-code/qwen-code-core';
 
@@ -29,7 +29,7 @@ export interface RewindSelectorProps {
 const MAX_VISIBLE_ITEMS = 7;
 
 function getUserTurns(history: HistoryItem[]): HistoryItem[] {
-  return history.filter(isRealUserTurn);
+  return history.filter(isRewindableUserTurn);
 }
 
 interface TurnItemViewProps {

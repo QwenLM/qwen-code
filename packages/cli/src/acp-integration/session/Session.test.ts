@@ -9479,6 +9479,40 @@ describe('Session', () => {
       expect(session.getRewindCutPoint('p1')).toBe(0);
     });
 
+    it('resolves a cancelled turn whose tool-lap continuation repeats its mark', () => {
+      // Cancelling between tool-loop laps pushes the continuation into model
+      // history stamped with the turn's own id; the prompt entry must still be
+      // the unique anchor instead of turning the whole turn into a refusal.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          ],
+        },
+      ];
+      markApiHistoryPrompt(history[0]!, 'p1');
+      markApiHistoryPrompt(history[2]!, 'p1');
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindCutPoint('p1')).toBe(0);
+    });
+
     it('does not count a delivered task-notification turn as a rewindable user turn', () => {
       // #9608: a daemon session that ran a background-notification turn
       // carries the turn's `[...systemReminders, ...notificationParts]` user

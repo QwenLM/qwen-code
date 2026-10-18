@@ -1043,3 +1043,42 @@ describe('internal Code Mode tool results', () => {
     );
   });
 });
+
+describe('prompt resolution across tool-loop continuations', () => {
+  const prompt = (text: string): Content => ({
+    role: 'user',
+    parts: [{ text }],
+  });
+  const continuation = (): Content => ({
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output: 'contents' },
+        },
+      },
+    ],
+  });
+
+  it('resolves the prompt entry when its continuation carries the same id', () => {
+    // Cancelling between tool-loop laps pushes the continuation into history
+    // stamped with the turn's own id, so the mark alone matches twice.
+    const userPrompt = prompt('hello');
+    const toolLap = continuation();
+    markApiHistoryPrompt(userPrompt, 'session########1');
+    markApiHistoryPrompt(toolLap, 'session########1');
+    const history = [userPrompt, toolLap];
+
+    expect(findApiHistoryPromptIndex(history, 'session########1')).toBe(0);
+  });
+
+  it('still refuses two prompt entries sharing one id', () => {
+    const history = [prompt('hello'), prompt('hello again')];
+    markApiHistoryPrompt(history[0]!, 'session########1');
+    markApiHistoryPrompt(history[1]!, 'session########1');
+
+    expect(findApiHistoryPromptIndex(history, 'session########1')).toBe(-1);
+  });
+});

@@ -9,6 +9,7 @@ import {
   computeApiTruncationIndex,
   isRetainedUserTurn,
   isRealUserTurn,
+  isRewindableUserTurn,
 } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
@@ -164,6 +165,26 @@ describe('computeApiTruncationIndex', () => {
         secondMatch,
       ]),
     ).toBe(-1);
+  });
+
+  it('resolves a turn whose cancelled continuation repeats its identity', () => {
+    const target = {
+      ...userItem(3, 'target'),
+      promptId: 'session########1',
+    } as HistoryItem;
+    const targetContent = userContent('target');
+    const continuation = functionResponseContent();
+    markApiHistoryPrompt(targetContent, 'session########1');
+    markApiHistoryPrompt(continuation, 'session########1');
+
+    expect(
+      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
+        userContent('first'),
+        modelContent('response'),
+        targetContent,
+        continuation,
+      ]),
+    ).toBe(2);
   });
 
   it('refuses an identity duplicated only in retained UI history', () => {
@@ -409,5 +430,28 @@ describe('isRetainedUserTurn', () => {
 
   it('is false for an unknown target', () => {
     expect(isRetainedUserTurn([userItem(1)], 99)).toBe(false);
+  });
+});
+
+describe('isRewindableUserTurn', () => {
+  it('requires a rewind identity on a real user turn', () => {
+    expect(isRewindableUserTurn(userItem(1, 'hello world'))).toBe(false);
+    expect(
+      isRewindableUserTurn({
+        ...userItem(1, 'hello world'),
+        promptId: 'session########1',
+      } as HistoryItem),
+    ).toBe(true);
+    expect(
+      isRewindableUserTurn({
+        ...userItem(1, 'hello world'),
+        rewindId: 'legacy-record:uuid',
+      } as HistoryItem),
+    ).toBe(true);
+  });
+
+  it('excludes rows a rewind can never resolve', () => {
+    expect(isRewindableUserTurn(userItem(1, '/help'))).toBe(false);
+    expect(isRewindableUserTurn(llmItem(1))).toBe(false);
   });
 });

@@ -162,6 +162,7 @@ import {
   computeApiTruncationIndex,
   isRetainedUserTurn,
   isRealUserTurn,
+  isRewindableUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
 import { sanitizeTerminalLine } from './utils/textUtils.js';
@@ -4273,8 +4274,9 @@ export const AppContainer = (props: AppContainerProps) => {
       );
       return;
     }
-    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
-    if (!hasUserTurns) return;
+    const hasRewindableTurns =
+      historyManager.history.some(isRewindableUserTurn);
+    if (!hasRewindableTurns) return;
     setIsRewindSelectorOpen(true);
   }, [streamingState, config, historyManager]);
   openRewindSelectorRef.current = openRewindSelector;

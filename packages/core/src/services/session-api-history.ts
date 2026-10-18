@@ -46,7 +46,15 @@ export function getRecordRewindId(record: ChatRecord): string | undefined {
     : undefined;
 }
 
-/** Returns the unique matching entry at or after `startIndex`, or -1. */
+/**
+ * A turn starts at its prompt entry; a tool-loop continuation carries the
+ * turn's id but no prompt of its own.
+ */
+function isPromptEntry(content: Content): boolean {
+  return !content.parts?.some((part) => part.functionResponse);
+}
+
+/** Returns the unique matching prompt entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
   history: readonly Content[],
   promptId: string,
@@ -54,7 +62,13 @@ export function findApiHistoryPromptIndex(
 ): number {
   let match = -1;
   for (let index = startIndex; index < history.length; index++) {
-    if (getApiHistoryPromptId(history[index]!) !== promptId) continue;
+    const content = history[index]!;
+    if (getApiHistoryPromptId(content) !== promptId) continue;
+    // A turn cancelled between tool-loop laps pushes its continuation into
+    // history stamped with the turn's own id, so two entries carry the mark.
+    // Only the prompt entry starts the turn; counting the continuation would
+    // turn every such cancellation into a permanent refusal.
+    if (!isPromptEntry(content)) continue;
     if (match !== -1) return -1;
     match = index;
   }
