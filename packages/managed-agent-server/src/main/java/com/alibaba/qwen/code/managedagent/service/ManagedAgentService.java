@@ -145,8 +145,15 @@ public class ManagedAgentService {
     }
 
     private boolean hasActions(SessionRecord session) {
+        // Preserve Action readback when a selected custom Session loses execution support.
         return session.workspace() != null && session.deletedAt() == null
-                && ((WorkspaceToolProfiles.supportsApprovalSelection(session) && harness.supportsApprovalSelection()) || !"yolo".equals(session.approvalMode()));
+                && ((WorkspaceToolProfiles.supportsApprovalSelection(session)
+                && (session.agentDefinitionDigest() != null || supportsApprovalSelection(session))) || !"yolo".equals(session.approvalMode()));
+    }
+
+    private boolean supportsApprovalSelection(SessionRecord session) {
+        return harness.supportsApprovalSelection()
+                && (session.agentDefinitionDigest() == null || harness.supportsAgentDefinitionApprovalSelection());
     }
 
     private BooleanSupplier artifactReadsEnabled = () -> false;
@@ -282,7 +289,7 @@ public class ManagedAgentService {
         validateIdempotencyKey(key);
         String digest = digests.digest(Map.of("sessionId", sessionId, "mode", mode, "expectedRevision", expectedRevision));
         return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
-                expectedRevision, harness.supportsApprovalSelection());
+                expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection());
     }
 
     private static void requireModelActor(String actorId) {
@@ -1133,6 +1140,9 @@ public class ManagedAgentService {
         Map<String, WebShellApprovalSelection> approvalSelections = store.findApprovalSelections(tenantId, approvalIds);
         Set<String> approvalOwners = store.findApprovalOwners(tenantId, actorId, approvalIds);
         boolean approvalSupported = !approvalIds.isEmpty() && harness.supportsApprovalSelection();
+        boolean definitionApprovalSupported = approvalSupported
+                && sessions.stream().anyMatch(session -> session.agentDefinitionDigest() != null)
+                && harness.supportsAgentDefinitionApprovalSelection();
         Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
@@ -1178,7 +1188,9 @@ public class ManagedAgentService {
                         mayChangeCwd(session, grants, executable),
                         modelContexts.get(session.sessionId()),
                         modelSelections.get(session.sessionId()), modelSelectionSupported,
-                        approvalSelections.get(session.sessionId()), approvalSupported && approvalOwners.contains(session.sessionId())))
+                        approvalSelections.get(session.sessionId()), approvalSupported
+                                && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
+                                && approvalOwners.contains(session.sessionId())))
                 .toList();
     }
 
@@ -1208,7 +1220,7 @@ public class ManagedAgentService {
         boolean close = visible && supportsClose(session);
         boolean keep = visible && retention;
         boolean approvalExecutable = approvalSelection == null || approvalSelection.revision() == 0
-                || harness.supportsApprovalSelection();
+                || supportsApprovalSelection(session);
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -1253,7 +1265,7 @@ public class ManagedAgentService {
         }
         return session.deletedAt() == null && store.workspaceFilesEnabled() && store.workspaceShellEnabled()
                 && WorkspaceToolProfiles.supportsApprovalMode(session.approvalMode())
-                && (!"yolo".equals(session.approvalMode()) || harness.supportsApprovalSelection());
+                && (!"yolo".equals(session.approvalMode()) || supportsApprovalSelection(session));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
