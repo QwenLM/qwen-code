@@ -19,6 +19,14 @@ import {
 
 export interface OtherWorkspaceSessionsResult {
   sessions: DaemonSessionSummary[];
+  /**
+   * True until every non-primary workspace list has settled at least once
+   * (or failed, which leaves its page absent). Consumers that compare the
+   * merged list against live state (for example pruning panes) must wait for
+   * this to be false so a still-loading workspace can't look like a vanished
+   * session.
+   */
+  loading: boolean;
   reload: () => Promise<void>;
 }
 
@@ -81,11 +89,18 @@ export function useOtherWorkspaceSessions(
     );
     return merged.length === 0 ? EMPTY : merged;
   }, [snapshots]);
+  const loading = useMemo(
+    () =>
+      snapshots.some(
+        (snapshot) => snapshot.loading || snapshot.page === undefined,
+      ),
+    [snapshots],
+  );
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const reload = useCallback(async () => {
     if (queries.length === 0) return;
     await Promise.allSettled(queries.map((query) => store.refresh(query)));
   }, [queries, store]);
 
-  return { sessions, reload };
+  return { sessions, loading, reload };
 }

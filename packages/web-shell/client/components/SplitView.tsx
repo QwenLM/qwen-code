@@ -15,12 +15,15 @@ import {
 import {
   DaemonSessionProvider,
   useConnection,
+  useWorkspace,
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type {
-  DaemonSessionArtifact,
-  DaemonSessionMonitorTaskStatus,
-  DaemonWorkspaceCapability,
+import {
+  STANDALONE_SESSIONS_CAPABILITY,
+  isStandaloneSessionNotFoundError,
+  type DaemonSessionArtifact,
+  type DaemonSessionMonitorTaskStatus,
+  type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
 import type { WebShellModelManagementOptions } from '../modelManagement';
@@ -159,7 +162,14 @@ export function SplitView({
   const organizationEnabled =
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
-  const { sessions, reload } = useScopedSessions(workspaceCwd, {
+  const workspace = useWorkspace();
+  const {
+    sessions,
+    reload,
+    // Defined only once the active list has loaded at least once — the
+    // readiness signal for pruning panes whose session left the catalog.
+    data: activeSessionPage,
+  } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
@@ -170,12 +180,21 @@ export function SplitView({
   // Live sessions from the daemon's other workspaces, so the picker can offer —
   // and a pane can attach to — sessions that aren't in the primary workspace.
   // Empty (a no-op) on a single-workspace daemon.
-  const { sessions: otherSessions, reload: reloadOther } =
-    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
+  const {
+    sessions: otherSessions,
+    loading: otherSessionsLoading,
+    reload: reloadOther,
+  } = useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
   const allSessions = useMemo(
     () => mergeSessionsById(sessions, otherSessions),
     [sessions, otherSessions],
   );
+  const knownSessionIds = useMemo(
+    () => new Set(allSessions.map((session) => session.sessionId)),
+    [allSessions],
+  );
+  const knownSessionIdsRef = useRef(knownSessionIds);
+  knownSessionIdsRef.current = knownSessionIds;
   const multiWorkspace =
     !workspaceCwd &&
     includeOtherWorkspaces &&
@@ -398,6 +417,66 @@ export function SplitView({
     },
     [onPanesChange, sessionIdsControlled],
   );
+
+  // Reconcile the live pane set with the settled active catalog: a pane whose
+  // session has left it (archived or deleted) has nothing left to load — the
+  // provider parks on a terminal error with an empty transcript, and the
+  // parent re-seeds the stale id from the persisted pane set on every entry
+  // into the split view. Wait for the active list (and, on a multi-workspace
+  // daemon, the other-workspace lists too) to settle at least once, so a
+  // still-loading workspace can't look like a vanished session. Standalone
+  // panes (deep-linked) never appear in a workspace list: probe them first and
+  // keep them on any non-not-found outcome — a transient probe failure must
+  // not close a live pane.
+  useEffect(() => {
+    if (activeSessionPage === undefined || otherSessionsLoading) return;
+    const staleIds = paneIds.filter((id) => !knownSessionIds.has(id));
+    if (staleIds.length === 0) return;
+    let cancelled = false;
+    const standaloneSessionsEnabled =
+      connection.capabilities?.features?.includes(
+        STANDALONE_SESSIONS_CAPABILITY,
+      ) === true;
+    void (async () => {
+      const toPrune: string[] = [];
+      await Promise.all(
+        staleIds.map(async (id) => {
+          if (standaloneSessionsEnabled) {
+            try {
+              await workspace.client.getStandaloneSession(id);
+              return; // a live standalone pane — not part of the workspace list
+            } catch (error) {
+              if (!isStandaloneSessionNotFoundError(error)) return;
+            }
+          }
+          toPrune.push(id);
+        }),
+      );
+      if (cancelled || toPrune.length === 0) return;
+      // The probes may have taken a moment: re-check against the freshest pane
+      // set and catalog before removing, so a re-unarchived session survives
+      // the round trip.
+      const currentPaneIds = paneIdsRef.current;
+      const next = currentPaneIds.filter(
+        (id) => !toPrune.includes(id) || knownSessionIdsRef.current.has(id),
+      );
+      if (next.length === currentPaneIds.length) return;
+      if (sessionIdsControlled) onPanesChange?.(next);
+      else setPaneIds(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSessionPage,
+    otherSessionsLoading,
+    paneIds,
+    knownSessionIds,
+    connection.capabilities,
+    workspace.client,
+    sessionIdsControlled,
+    onPanesChange,
+  ]);
 
   const toggleMaximize = useCallback((sessionId: string) => {
     setActivePaneId(sessionId);
