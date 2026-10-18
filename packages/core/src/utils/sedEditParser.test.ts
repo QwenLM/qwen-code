@@ -220,7 +220,7 @@ describe('sedEditParser', () => {
     );
     // The same even run before | keeps "^" literal (pattern a\\|^b).
     expect(applySed("sed -i 's/a\\\\|^b/X/' f.txt", 'a\\|^b\n')).toBe('X\n');
-    // An anchor outside the alternation is still simulated.
+    // Same-length branches still agree with sed when ^ sits outside them.
     expect(
       applySed("sed -i 's/^foo\\(a\\|b\\)/Z/' f.txt", 'fooa\nfoob\nxfooa\n'),
     ).toBe('Z\nZ\nxfooa\n');
@@ -243,10 +243,46 @@ describe('sedEditParser', () => {
     expect(
       parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\|ab\\)/X/' f.txt"),
     ).toBeNull();
+    // ERE: ^a matches one character and ab matches two, so "ab" diverges.
+    expect(parseSedEditCommand("sed -E -i 's/^a|ab/X/' f.txt")).toBeNull();
   });
 
-  // GNU sed 4.9 leaves "aa" unchanged for s/\(^a\)\{1,2\}/X/ and for \+,
-  // and rewrites s/\(^a\)*/X/ as Xa / X / Xba on "aa", "", and "ba".
+  // Prefix-overlapping branches disagree even when the anchor is outside
+  // the group, and even with no anchor at all. Equal-length branches do not.
+  it('declines overlapping alternation branches', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\(b\\|bc\\)\\)/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^foo\\(b\\|bar\\)\\)/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/^foo\\(a\\|ab\\)/Z/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/foo\\(a\\|ab\\)/Z/' f.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/(^a(b|bc))/X/' f.txt")).toBeNull();
+  });
+
+  it('simulates equal-length alternation branches', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\(b\\|c\\)\\)/X/' f.txt"),
+    ).not.toBeNull();
+    expect(applySed("sed -i 's/\\(^a\\(b\\|c\\)\\)/X/' f.txt", 'abc\n')).toBe(
+      'Xc\n',
+    );
+    expect(
+      parseSedEditCommand("sed -E -i 's/^foo(a|b)/Z/' f.txt"),
+    ).not.toBeNull();
+    expect(
+      applySed("sed -E -i 's/^foo(a|b)/Z/' f.txt", 'fooa\nfoob\nxfooa\n'),
+    ).toBe('Z\nZ\nxfooa\n');
+  });
+
+  // GNU sed 4.9 leaves "aa" unchanged for \{1,2\}, \{1,\}, \{0,2\}, and \+,
+  // and rewrites both * and \{0,\} as Xa on "aa" (XaX with /g). A nested
+  // group keeps the anchor: \(\(^a\)\)\{1,2\} stays "aa", while * rewrites Xa.
   it('declines an anchored group closed by an unsafe quantifier', () => {
     expect(
       parseSedEditCommand("sed -i 's/\\(^#\\)\\{1,2\\} */# /' a.ts"),
@@ -259,6 +295,25 @@ describe('sedEditParser', () => {
     expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", 'aa\n')).toBe('Xa\n');
     expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", '\n')).toBe('X\n');
     expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", 'ba\n')).toBe('Xba\n');
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,\\}/X/' a.ts"),
+    ).not.toBeNull();
+    expect(applySed("sed -i 's/\\(^a\\)\\{0,\\}/X/' a.ts", 'aa\n')).toBe(
+      'Xa\n',
+    );
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{1,\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,2\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\)\\{1,2\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\)*/X/' a.ts"),
+    ).not.toBeNull();
+    expect(applySed("sed -i 's/\\(\\(^a\\)\\)*/X/' a.ts", 'aa\n')).toBe('Xa\n');
   });
 
   // GNU sed 4.9: $ before a raw ) or | is an anchor, so the line is unchanged.
@@ -275,6 +330,10 @@ describe('sedEditParser', () => {
   // every $ before \ as an anchor leaves the line unchanged.
   it('keeps $ literal before a backslash that does not escape ) or |', () => {
     expect(applySed("sed -i 's/a$\\\\b/X/' f.txt", 'a$\\b\n')).toBe('X\n');
+    // `$` before `\\)` or `\\|` is literal: the byte after `\` is `\`, not
+    // `)` or `|`. The `|` here is a literal pipe, not an alternation.
+    expect(applySed("sed -i 's/x$\\\\)y/Z/' f.txt", 'x$\\)y\n')).toBe('Z\n');
+    expect(applySed("sed -i 's/x$\\\\|y/Z/' f.txt", 'x$\\|y\n')).toBe('Z\n');
   });
 
   it('applies non-global substitutions once per line', () => {

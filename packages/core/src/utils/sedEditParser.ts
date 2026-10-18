@@ -196,7 +196,8 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
     }
     return !(
       hasUnsafeQuantifiedGroup(jsPattern) ||
-      hasLiveAnchorInAlternation(jsPattern)
+      hasLiveAnchorInAlternation(jsPattern) ||
+      hasAmbiguousAlternation(jsPattern)
     );
   } catch {
     return false;
@@ -276,10 +277,9 @@ function countCapturingGroups(pattern: string): number {
   return count;
 }
 
-// JavaScript takes the leftmost alternative; POSIX takes the longest. A live
-// ^ or $ on a branch, or nested inside one, makes the simulator rewrite bytes
-// GNU sed would not (`^a|ab` on "ab"). An anchor outside the alternation
-// (`^foo(a|b)`) is still safe to simulate. Declining runs real sed.
+// A live ^ or $ on one alternative, or nested inside one, disagrees with
+// POSIX (`^a|ab` on "ab" is "Xb" in JavaScript and "X" in GNU sed). Anchors
+// that merely sit outside a group are not decided here.
 function hasLiveAnchorInAlternation(pattern: string): boolean {
   const levels: Array<{ hasAnchor: boolean; hasAlternation: boolean }> = [
     { hasAnchor: false, hasAlternation: false },
@@ -323,6 +323,314 @@ function hasLiveAnchorInAlternation(pattern: string): boolean {
   }
 
   return levels.some((level) => level.hasAnchor && level.hasAlternation);
+}
+
+// True when some `|` can match different text in JavaScript (leftmost-first)
+// than in POSIX sed (leftmost-longest). An alternation is safe only when
+// every branch is a non-empty fixed-length run of the same length, or every
+// branch starts with a different literal character that cannot be skipped.
+// An empty branch is always ambiguous. Declining runs real sed.
+function hasAmbiguousAlternation(pattern: string): boolean {
+  return spanHasAmbiguousAlternation(pattern, 0, pattern.length);
+}
+
+function spanHasAmbiguousAlternation(
+  pattern: string,
+  start: number,
+  end: number,
+): boolean {
+  const branches: Array<{ start: number; end: number }> = [];
+  const groups: Array<{ start: number; end: number }> = [];
+  let branchStart = start;
+  let sawPipe = false;
+
+  for (let i = start; i < end; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      const close = skipCharacterClass(pattern, i);
+      if (close >= end || pattern[close] !== ']') {
+        return true;
+      }
+      i = close;
+      continue;
+    }
+    if (char === '(') {
+      const close = findMatchingParen(pattern, i);
+      if (close === null || close >= end) {
+        return true;
+      }
+      const contentStart = indexAfterGroupOpen(pattern, i);
+      if (contentStart > close) {
+        return true;
+      }
+      groups.push({ start: contentStart, end: close });
+      i = close;
+      continue;
+    }
+    if (char === '|') {
+      sawPipe = true;
+      branches.push({ start: branchStart, end: i });
+      branchStart = i + 1;
+    }
+  }
+
+  if (sawPipe) {
+    branches.push({ start: branchStart, end });
+    if (branchesAreAmbiguous(pattern, branches)) {
+      return true;
+    }
+  }
+  return groups.some((group) =>
+    spanHasAmbiguousAlternation(pattern, group.start, group.end),
+  );
+}
+
+function branchesAreAmbiguous(
+  pattern: string,
+  branches: ReadonlyArray<{ start: number; end: number }>,
+): boolean {
+  if (branchesHaveSameFixedLength(pattern, branches)) {
+    return false;
+  }
+  return !branchesHaveDistinctLeadingLiterals(pattern, branches);
+}
+
+function branchesHaveSameFixedLength(
+  pattern: string,
+  branches: ReadonlyArray<{ start: number; end: number }>,
+): boolean {
+  let expected: number | null = null;
+  for (const branch of branches) {
+    const length = fixedBranchLength(pattern, branch.start, branch.end);
+    if (length === null) {
+      return false;
+    }
+    if (expected === null) {
+      expected = length;
+    } else if (length !== expected) {
+      return false;
+    }
+  }
+  return expected !== null;
+}
+
+function branchesHaveDistinctLeadingLiterals(
+  pattern: string,
+  branches: ReadonlyArray<{ start: number; end: number }>,
+): boolean {
+  const seen = new Set<string>();
+  for (const branch of branches) {
+    const literal = leadingPlainLiteral(pattern, branch.start, branch.end);
+    if (literal === null || seen.has(literal)) {
+      return false;
+    }
+    seen.add(literal);
+  }
+  return true;
+}
+
+// Length in characters consumed, or null when the branch is empty, optional,
+// quantified, or contains a group. `^` and `$` add no length.
+function fixedBranchLength(
+  pattern: string,
+  start: number,
+  end: number,
+): number | null {
+  if (start >= end) {
+    return null;
+  }
+  let length = 0;
+  for (let i = start; i < end; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      const esc = pattern[i + 1];
+      if (esc === undefined || i + 1 >= end) {
+        return null;
+      }
+      const kind = classifyEscape(esc);
+      if (kind === 'reject') {
+        return null;
+      }
+      if (kind !== 'zero') {
+        length++;
+      }
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      const close = skipCharacterClass(pattern, i);
+      if (pattern[close] !== ']' || close >= end) {
+        return null;
+      }
+      length++;
+      i = close;
+      continue;
+    }
+    if (char === '^' || char === '$') {
+      continue;
+    }
+    if ('()*+?|'.includes(char)) {
+      return null;
+    }
+    if (char === '{') {
+      const bounds = readBraceQuantifierBounds(pattern, i);
+      if (bounds !== null && bounds.end <= end) {
+        return null;
+      }
+    }
+    length++;
+  }
+  return length > 0 ? length : null;
+}
+
+function leadingPlainLiteral(
+  pattern: string,
+  start: number,
+  end: number,
+): string | null {
+  if (start >= end) {
+    return null;
+  }
+  const char = pattern[start]!;
+  let literal: string;
+  let next: number;
+  if (char === '\\') {
+    const esc = pattern[start + 1];
+    if (
+      esc === undefined ||
+      start + 1 >= end ||
+      classifyEscape(esc) !== 'literal'
+    ) {
+      return null;
+    }
+    literal = escapedLiteralValue(esc);
+    next = start + 2;
+  } else if (isPlainLiteralChar(char)) {
+    literal = char;
+    next = start + 1;
+  } else {
+    return null;
+  }
+  if (followedByZeroQuantifier(pattern, next, end)) {
+    return null;
+  }
+  return literal;
+}
+
+function isPlainLiteralChar(char: string): boolean {
+  return !'^$.*+?()[|\\'.includes(char);
+}
+
+function followedByZeroQuantifier(
+  pattern: string,
+  index: number,
+  end: number,
+): boolean {
+  if (index >= end) {
+    return false;
+  }
+  const char = pattern[index]!;
+  if (char === '*' || char === '?') {
+    return true;
+  }
+  if (char !== '{') {
+    return false;
+  }
+  const bounds = readBraceQuantifierBounds(pattern, index);
+  if (bounds === null || bounds.end > end) {
+    return false;
+  }
+  return bounds.min === 0;
+}
+
+function classifyEscape(esc: string): 'literal' | 'class' | 'zero' | 'reject' {
+  if ('dDwWsS'.includes(esc)) {
+    return 'class';
+  }
+  if (esc === 'b' || esc === 'B') {
+    return 'zero';
+  }
+  if ('xuc'.includes(esc) || (esc >= '0' && esc <= '9')) {
+    return 'reject';
+  }
+  return 'literal';
+}
+
+function escapedLiteralValue(esc: string): string {
+  switch (esc) {
+    case 'n':
+      return '\n';
+    case 'r':
+      return '\r';
+    case 't':
+      return '\t';
+    case 'f':
+      return '\f';
+    case 'v':
+      return '\v';
+    default:
+      return esc;
+  }
+}
+
+// `(?:`, `(?=`, and `(?<name>` are group syntax, not a `?` quantifier. The
+// same `(?` exception countCapturingGroups uses when it does not count them.
+function indexAfterGroupOpen(pattern: string, open: number): number {
+  if (pattern[open + 1] !== '?') {
+    return open + 1;
+  }
+  let i = open + 2;
+  const kind = pattern[i];
+  if (kind === ':' || kind === '=' || kind === '!') {
+    return i + 1;
+  }
+  if (kind === '<') {
+    const next = pattern[i + 1];
+    if (next === '=' || next === '!') {
+      return i + 2;
+    }
+    while (i < pattern.length && pattern[i] !== '>') {
+      i++;
+    }
+    return i < pattern.length ? i + 1 : pattern.length;
+  }
+  while (i < pattern.length && /[a-zA-Z-]/u.test(pattern[i]!)) {
+    i++;
+  }
+  if (pattern[i] === ':') {
+    return i + 1;
+  }
+  return open + 2;
+}
+
+function findMatchingParen(pattern: string, open: number): number | null {
+  let depth = 0;
+  for (let i = open; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      i = skipCharacterClass(pattern, i);
+      continue;
+    }
+    if (char === '(') {
+      depth++;
+      continue;
+    }
+    if (char === ')') {
+      depth--;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return null;
 }
 
 function hasUnsafeQuantifiedGroup(pattern: string): boolean {
@@ -410,11 +718,12 @@ function skipCharacterClass(pattern: string, start: number): number {
   return pattern.length - 1;
 }
 
-// `+` (\+ in BRE) and a brace repeat with lower bound <= 1 and upper bound
-// >= 2 or omitted (`{1,2}`, `{0,}`, `{1,}`) do not backtrack like GNU sed
-// when the group holds a live anchor: sed drops the match, JavaScript keeps
-// a shorter count. `*` is the same shape as `{0,}` but matches sed there, so
-// it stays simulated. Intervals with no anchor are not touched.
+// `+` (\+ in BRE) and `{1,}` repeat an anchored group and do not match GNU
+// sed: sed drops the match, JavaScript keeps a shorter one. `{0,}` is the
+// same shape as `*` and matches sed, so both stay simulated. `{n,}` for
+// n >= 2 cannot repeat an anchored group; sed and JavaScript both leave it
+// unmatched. A finite interval with min <= 1 and max >= 2 (`{0,2}`, `{1,2}`)
+// also diverges. Intervals with no anchor are not touched.
 function isUnsafeAnchoredGroupQuantifier(
   pattern: string,
   start: number,
@@ -426,10 +735,11 @@ function isUnsafeAnchoredGroupQuantifier(
   if (bounds === null) {
     return false;
   }
-  const variable = bounds.max === null || bounds.max !== bounds.min;
-  return (
-    variable && bounds.min <= 1 && (bounds.max === null || bounds.max >= 2)
-  );
+  // `{0,}` is safe. `{1,}` is not. `{2,}` and above stay simulated.
+  if (bounds.max === null) {
+    return bounds.min === 1;
+  }
+  return bounds.min <= 1 && bounds.max >= 2;
 }
 
 function readBraceQuantifierBounds(
