@@ -1922,6 +1922,54 @@ describe('CoreToolScheduler', () => {
     expect(functionResponseOf(third)?.name).toBe(ToolNames.TOOL_CALL);
   });
 
+  it('keeps per-target retry buckets for bridge envelopes rejected before resolution (#13073)', async () => {
+    // Three envelopes aimed at three different visible tools each fail with
+    // "already visible / not deferred". Keyed on the resolved target they stay
+    // in separate buckets, so the third target's FIRST failure must not carry
+    // the directive; the wrapper-name fallback used to share one bucket.
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(
+          new MockTool({ name: ToolNames.TOOL_CALL }),
+          new MockTool({ name: 'visibleToolA' }),
+          new MockTool({ name: 'visibleToolB' }),
+          new MockTool({ name: 'visibleToolC' }),
+        ),
+      });
+
+    const first = await completeBridgeCall(
+      scheduler,
+      onAllToolCallsComplete,
+      'bt-1',
+      'visibleToolA',
+      'p-bt',
+    );
+    const second = await completeBridgeCall(
+      scheduler,
+      onAllToolCallsComplete,
+      'bt-2',
+      'visibleToolB',
+      'p-bt',
+    );
+    const third = await completeBridgeCall(
+      scheduler,
+      onAllToolCallsComplete,
+      'bt-3',
+      'visibleToolC',
+      'p-bt',
+    );
+
+    for (const completed of [first, second, third]) {
+      expectStatus(completed, 'error');
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(completed.response.error?.message).not.toContain(
+        'RETRY LOOP DETECTED',
+      );
+    }
+  });
+
   it('names the target when a bridged call fails its own validation (#12889)', async () => {
     const { completed, deferred } = await runBridgeCall('bridge-invalid-args', {
       params: URL_REQUIRED_PARAMS,
@@ -8534,6 +8582,62 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(messages[2]).toContain('RETRY LOOP DETECTED');
   });
 
+  it('restarts a spent truncation counter when a different cause records (#13073)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(writeFileTool());
+
+    const sendTruncated = async (callId: string, filePath: string) => {
+      await scheduleBatch(scheduler, {
+        ...toolRequest(
+          callId,
+          WriteFileTool.Name,
+          {
+            file_path: filePath,
+            content: 'partial',
+          },
+          `prompt-${callId}`,
+        ),
+        wasOutputTruncated: true,
+      });
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      const call = lastBatch(onAllToolCallsComplete)?.[0];
+      expectStatus(call, 'error');
+      onAllToolCallsComplete.mockClear();
+      return call.response.error?.message ?? '';
+    };
+
+    // Three truncated writes reach the threshold and deliver the directive.
+    expect(await sendTruncated('t1', '/tmp/a.txt')).not.toContain(
+      'RETRY LOOP DETECTED',
+    );
+    expect(await sendTruncated('t2', '/tmp/a.txt')).not.toContain(
+      'RETRY LOOP DETECTED',
+    );
+    expect(await sendTruncated('t3', '/tmp/a.txt')).toContain(
+      'RETRY LOOP DETECTED',
+    );
+
+    // A validation-class failure (different cause) restarts the count: the
+    // next FIRST truncation of unrelated content must not re-fire the spent
+    // directive — the model is doing exactly what the directive asked.
+    await scheduleBatch(
+      scheduler,
+      toolRequest(
+        'v1',
+        WriteFileTool.Name,
+        { file_path: '/tmp/b.txt' },
+        'prompt-v1',
+      ),
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    expectStatus(lastBatch(onAllToolCallsComplete)?.[0], 'error');
+    onAllToolCallsComplete.mockClear();
+
+    expect(await sendTruncated('t4', '/tmp/c.txt')).not.toContain(
+      'RETRY LOOP DETECTED',
+    );
+  });
+
   // The Edit guard rejects before buildInvocation, so schema validation never
   // runs on these calls: at the retry-loop threshold the directive must match
   // the actual cause (repeated incomplete writes), not the validation-failure
@@ -14089,6 +14193,17 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     msg = await send(invalid('c3', true));
     expect(msg).not.toContain(truncationGuidance);
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('accumulates differently-worded validation failures across batches (#13073)', async () => {
+    // The #12970 shape: each failure words the message differently, same root
+    // cause. Per-message keying restarts on every wording change (A, B, A
+    // never reaches 3); cause-class keying accumulates. Keep the second
+    // wording — identical messages would pass on the old keying too.
+    const send = createSchedulerWithTool();
+    expectErrorWithoutDirective(await send(invalid('c1')));
+    expectErrorWithoutDirective(await send(makeRequest('c2', STRICT_TOOL, {})));
+    expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 
   it('should reset retry counter when a different tool is called', async () => {
