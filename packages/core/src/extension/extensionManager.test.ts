@@ -3861,6 +3861,12 @@ describe('extension tests', () => {
       expect(extension.config.mcpServers?.['local'].env).toEqual({
         API_TOKEN: 'stored-key',
       });
+      expect(extension.config.mcpServers?.['remote']).not.toHaveProperty('env');
+      expect(extension.config.mcpServers?.['local']).not.toHaveProperty(
+        'headers',
+      );
+      expect(extension.mcpServers?.['remote']).not.toHaveProperty('env');
+      expect(extension.mcpServers?.['local']).not.toHaveProperty('headers');
       expect(extension.config.description).toBe('shell-key');
       expect(extension.id).toBe(getExtensionId(config));
       expect(process.env['EXTENSION_RUNTIME_KEY']).toBe('shell-key');
@@ -4049,7 +4055,7 @@ describe('extension tests', () => {
         expect(extension.mcpServers).toBeUndefined();
         expect(extension.config.mcpServers).toBeUndefined();
         expect(stderr).toHaveBeenCalledWith(
-          expect.stringContaining('Uninstall and reinstall'),
+          expect.stringContaining('Check credential storage availability'),
         );
         expect(stderr.mock.calls.flat().join('')).not.toContain(
           'stored-unreadable-key',

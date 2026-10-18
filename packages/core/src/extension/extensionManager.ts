@@ -1880,18 +1880,26 @@ export class ExtensionManager {
                 name,
                 {
                   ...server,
-                  headers: resolveEnvVarsInObject(
-                    original.headers,
-                    extensionEnv,
-                  ),
-                  env: resolveEnvVarsInObject(original.env, extensionEnv),
+                  ...(original.headers === undefined
+                    ? {}
+                    : {
+                        headers: resolveEnvVarsInObject(
+                          original.headers,
+                          extensionEnv,
+                        ),
+                      }),
+                  ...(original.env === undefined
+                    ? {}
+                    : {
+                        env: resolveEnvVarsInObject(original.env, extensionEnv),
+                      }),
                 },
               ];
             }),
           ),
         };
       } catch {
-        const warning = `Unable to read settings for extension "${config.name}". Its MCP servers are disabled. Uninstall and reinstall the extension to restore its settings.`;
+        const warning = `Unable to read settings for extension "${config.name}". Its MCP servers are disabled. Check credential storage availability, then restart or reload the extension. If settings are confirmed missing or corrupt, back them up before uninstalling and reinstalling.`;
         process.stderr.write(`[warn] ${warning}\n`);
         debugLogger.warn(warning);
         config = { ...config, mcpServers: undefined };

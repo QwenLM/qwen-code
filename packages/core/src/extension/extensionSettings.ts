@@ -159,7 +159,11 @@ const getKeychainStorageName = (
 ): string => {
   const base = `Qwen Code Extensions ${extensionName} ${extensionId}`;
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return `${base} ${workspaceDir}`;
+    try {
+      return `${base} ${fsSync.realpathSync(workspaceDir)}`;
+    } catch {
+      return `${base} ${workspaceDir}`;
+    }
   }
   return base;
 };
@@ -389,6 +393,14 @@ export async function getScopedEnvContents(
         selector.backend,
       )
     : keychain;
+  const legacyWorkspaceStorage =
+    scope === ExtensionSettingScope.WORKSPACE &&
+    getKeychainStorageName(extensionName, extensionId, scope, workspaceDir) !==
+      `Qwen Code Extensions ${extensionName} ${extensionId} ${workspaceDir}`
+      ? new HybridTokenStorage(
+          `Qwen Code Extensions ${extensionName} ${extensionId} ${workspaceDir}`,
+        )
+      : undefined;
   const envFilePath = getEnvFilePath(extensionName, scope, workspaceDir);
   let customEnv: Record<string, string> = {};
   if (fsSync.existsSync(envFilePath)) {
@@ -417,7 +429,8 @@ export async function getScopedEnvContents(
         override ??
         (selector
           ? bundle?.[setting.envVar]
-          : await settingsStorage.getSecret(setting.envVar));
+          : ((await settingsStorage.getSecret(setting.envVar)) ??
+            (await legacyWorkspaceStorage?.getSecret(setting.envVar))));
       if (secret) {
         customEnv[setting.envVar] = secret;
       }

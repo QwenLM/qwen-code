@@ -104,7 +104,9 @@ describe('extensionSettings', () => {
   const USER_SERVICE = 'Qwen Code Extensions test-ext 12345';
   const userKeychain = () => new KeychainTokenStorage(USER_SERVICE);
   const workspaceKeychain = () =>
-    new KeychainTokenStorage(`${USER_SERVICE} ${tempWorkspaceDir}`);
+    new KeychainTokenStorage(
+      `${USER_SERVICE} ${fs.realpathSync(tempWorkspaceDir)}`,
+    );
   /** Setting `n`: `{ name: 'sN', description: 'dN', envVar: 'VARN' }`, with `extra` keys overriding or added. */
   const setting = (
     n: number,
@@ -615,6 +617,56 @@ describe('extensionSettings', () => {
         VAR1: 'workspace-value1',
         SENSITIVE_VAR: 'workspace-secret',
       });
+    });
+  });
+
+  describe('workspace path aliases', () => {
+    it('reads a setting written from the physical cwd through an alias target', async () => {
+      const alias = path.join(tempHomeDir, 'workspace-alias');
+      fs.symlinkSync(tempWorkspaceDir, alias, 'junction');
+      const config = extConfig([setting(1, { sensitive: true })]);
+      vi.mocked(process.cwd).mockReturnValue(fs.realpathSync(tempWorkspaceDir));
+      await updateSetting(
+        config,
+        ID,
+        'VAR1',
+        async () => 'physical-secret',
+        ExtensionSettingScope.WORKSPACE,
+      );
+      expect(
+        await getScopedEnvContents(
+          config,
+          ID,
+          ExtensionSettingScope.WORKSPACE,
+          alias,
+        ),
+      ).toEqual({ VAR1: 'physical-secret' });
+    });
+
+    it('keeps legacy alias secrets readable without migrating them', async () => {
+      const alias = path.join(tempHomeDir, 'workspace-alias');
+      fs.symlinkSync(tempWorkspaceDir, alias, 'junction');
+      const config = extConfig([setting(1, { sensitive: true })]);
+      const legacy = new KeychainTokenStorage(`${USER_SERVICE} ${alias}`);
+      await legacy.setSecret('VAR1', 'legacy-alias-secret');
+      expect(
+        await getScopedEnvContents(
+          config,
+          ID,
+          ExtensionSettingScope.WORKSPACE,
+          alias,
+        ),
+      ).toEqual({ VAR1: 'legacy-alias-secret' });
+      expect(await legacy.getSecret('VAR1')).toBe('legacy-alias-secret');
+      await workspaceKeychain().setSecret('VAR1', 'canonical-secret');
+      expect(
+        await getScopedEnvContents(
+          config,
+          ID,
+          ExtensionSettingScope.WORKSPACE,
+          alias,
+        ),
+      ).toEqual({ VAR1: 'canonical-secret' });
     });
   });
 
