@@ -276,10 +276,44 @@ class HostedMcpRestartFaultGatesIT {
                 .hasSize(1));
         assertThat(ProcessHandle.of(fixturePid()).map(
                 ProcessHandle::isAlive).orElse(false)).isFalse();
-        // Drive the same Session again: the dead generation must refuse the
-        // recovery instead of being re-minted into a fresh owner.
-        assertThat(promptRaw(session, "FG12C_RECOVER_IDLE").statusCode())
-                .isIn(202, 409, 503);
+        // A 202 only admits the prompt; the MCP refresh/acquire runs later
+        // in the turn's declarations. Require the recovery acquire itself
+        // to be refused by the dead generation before reading the identity,
+        // or a fast assertion would only observe the pre-crash state.
+        assertThat(harnessRequest("GET", "/session/" + session.id()
+                + "/status", null, session.clientId(), 200)
+                .path("recoveryBlocked").asBoolean()).isFalse();
+        int wireBefore = wire.size();
+        HttpResponse<String> recovery = promptRaw(session,
+                "FG12C_RECOVER_IDLE");
+        assertThat(recovery.statusCode()).isIn(202, 409, 503);
+        if (recovery.statusCode() == 202) {
+            assertThat(json.readTree(recovery.body()).path("promptId")
+                    .asText()).isNotBlank();
+            waitFor(() -> {
+                assertThat(wire.stream().skip(wireBefore)
+                        .filter(entry -> "POST".equals(entry.get("method")))
+                        .filter(entry -> String.valueOf(entry.get("path"))
+                                .endsWith(":acquire"))
+                        .anyMatch(entry -> Integer.valueOf(409)
+                                .equals(entry.get("status"))))
+                        .as("the recovery acquire must be refused by the "
+                                + "dead generation")
+                        .isTrue();
+                assertThat(harnessRequest("GET", "/session/" + session.id()
+                        + "/status", null, session.clientId(), 200)
+                        .path("hasActivePrompt").asBoolean()).isFalse();
+            });
+        } else {
+            JsonNode refused = json.readTree(recovery.body());
+            String code = refused.path("error").asText(
+                    refused.path("code").asText());
+            assertThat(code).as("a refusal must name the recovery failure")
+                    .isIn("hosted_mcp_recovery_required",
+                            "hosted_turn_recovery_required",
+                            "managed_mcp_connection_lost",
+                            "hosted_mcp_operation_failed");
+        }
         JsonNode after = configuration(session.id());
         assertThat(after.path("run").path("runtime"))
                 .as("the replacement keeps the original generation")
