@@ -32,7 +32,11 @@ import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
-import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  DISCONTINUED_QWEN_OAUTH_MESSAGE,
+  isDiscontinuedQwenOAuthSelectionKey,
+  publicProviderBaseUrl,
+} from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -1129,22 +1133,10 @@ export function ModelDialog({
         return;
       }
 
-      // Block selection of discontinued qwen-oauth models
-      // (only block non-runtime OAuth; runtime OAuth models from existing
-      //  cached tokens are still allowed to work until the server rejects them)
-      const isQwenOAuthSelection =
-        selected.startsWith(`${AuthType.QWEN_OAUTH}::`) ||
-        (selected.startsWith('$runtime|') &&
-          selected.split('|')[1] === AuthType.QWEN_OAUTH);
-      const isRuntimeOAuthSelection = selected.startsWith(
-        `$runtime|${AuthType.QWEN_OAUTH}|`,
-      );
-      if (isQwenOAuthSelection && !isRuntimeOAuthSelection) {
-        setErrorMessage(
-          t(
-            'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
-          ),
-        );
+      // Block selection of discontinued qwen-oauth models — the rule lives in
+      // one place now, and runtime snapshots stay allowed.
+      if (isDiscontinuedQwenOAuthSelectionKey(selected)) {
+        setErrorMessage(t(DISCONTINUED_QWEN_OAUTH_MESSAGE));
         return;
       }
 

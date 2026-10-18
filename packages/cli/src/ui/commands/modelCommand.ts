@@ -15,7 +15,7 @@ import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
-  AuthType,
+  type AuthType,
   type AvailableModel,
   type Config,
   isImageCapable,
@@ -25,6 +25,8 @@ import {
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   ACP_ROUTE_ID_PREFIX,
+  DISCONTINUED_QWEN_OAUTH_MESSAGE,
+  isDiscontinuedQwenOAuthSelection,
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
   resolveAcpFastModelSelector,
@@ -1136,13 +1138,11 @@ export const modelCommand: SlashCommand = {
       // ids and never `$runtime|…` snapshot ids, so the wrapped form already
       // failed below. Revisit if this lookup is widened to
       // `getAllConfiguredModels()`, which does list the runtime option.
-      if (parsed.authType === AuthType.QWEN_OAUTH) {
+      if (isDiscontinuedQwenOAuthSelection(parsed.authType)) {
         return {
           type: 'message',
           messageType: 'error',
-          content: t(
-            'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
-          ),
+          content: t(DISCONTINUED_QWEN_OAUTH_MESSAGE),
         };
       }
       const targetAuthType = parsed.authType ?? authType;
