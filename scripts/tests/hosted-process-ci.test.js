@@ -624,9 +624,12 @@ describe('Hosted real-process gates', () => {
   // across three acceptance runs (~494s budgeted at 2x, as FG10a, up from
   // slice 2's ~363s); with the fork itself ~14s, 3874s (3545s after slice
   // 1, plus slice 2's ~198s and slice 3's ~131s) covers them; FG12a's
-  // ~15s budgeted at 2x raises it to 3889s, and the FG13c Hook
-  // owner-restart cells (issue #14449, three cases) are budgeted at 300s
-  // until the lane measures them, so the healthy sum becomes 4189s.
+  // ~15s budgeted at 2x raises it to 3889s. On the lane (run 39087108383
+  // at a029896eff, FG10d's head, before FG12a) the nineteen classes then
+  // in the fork ran 3085s from the first class's start to the last
+  // class's end. The FG13c Hook owner-restart cells (issue #14449, three
+  // cases) are budgeted at 300s until the lane measures them, so the
+  // healthy sum becomes 4189s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
   const hostedForkHealthySeconds = 4189;
@@ -639,6 +642,21 @@ describe('Hosted real-process gates', () => {
   const hostedTestPath = (className) =>
     'packages/managed-agent-server/src/test/java/' +
     `com/alibaba/qwen/code/managedagent/${className}.java`;
+  // Every class the fork's **/Hosted*IT.java include picks up, in any
+  // package.
+  const hostedTestClasses = () => {
+    const root = 'packages/managed-agent-server/src/test/java/';
+    return readdirSync(new URL(`../../${root}`, import.meta.url), {
+      recursive: true,
+    })
+      .map(String)
+      .filter((file) => /^Hosted\w*IT\.java$/.test(path.basename(file)))
+      .map((file) => ({
+        name: path.basename(file, '.java'),
+        file: root + file.split(path.sep).join('/'),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  };
   // Java code without its string literals and comments, so neither a
   // commented-out annotation nor a "/*" inside a string skews the counts.
   // One pass, so whichever of a literal or a comment opens first wins.
@@ -655,111 +673,73 @@ describe('Hosted real-process gates', () => {
       Number(m[1]),
     );
 
-  it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
-    const ceilings = ceilingsOf(hostedTestSource('HostedHarnessMySqlIT'));
-    expect(ceilings.length).toBeGreaterThan(0);
+  const casesOf = (source) =>
+    [
+      ...source.matchAll(
+        /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
+      ),
+    ].length;
+  // A regression in these classes stalls every case at once; the summed
+  // rule below holds them.
+  const hostedSummedClasses = [
+    'HostedTeamLeadMySqlIT',
+    'HostedTeamMemberCommandMySqlIT',
+  ];
+
+  it('budgets every Hosted*IT class the shared fork runs', () => {
+    // A new class adds its runtime to hostedForkHealthySeconds in the same
+    // diff; pinning the list puts that on a red here, not on a fork kill
+    // on main (#14148).
+    expect(hostedTestClasses().map(({ name }) => name)).toEqual([
+      'HostedChannelFaultGatesIT',
+      'HostedChannelProcessCrashIT',
+      'HostedCommittedEventLineReplayIT',
+      'HostedConcurrentTurnBurstMySqlIT',
+      'HostedExtensionsIT',
+      'HostedHarnessMySqlIT',
+      'HostedHookFaultGatesIT',
+      'HostedMcpReplyLossIT',
+      'HostedMonitorRunFaultGatesIT',
+      'HostedProcessCrashIT',
+      'HostedPublicWorkspaceIT',
+      'HostedSessionRelayFaultGatesIT',
+      'HostedShellLifecycleRecoveryIT',
+      'HostedTeamLeadMySqlIT',
+      'HostedTeamMemberCommandMySqlIT',
+      'HostedWorkflowFaultGatesIT',
+      'HostedWorkflowRelayFaultGatesIT',
+      'HostedWorkspaceConcurrencyIT',
+      'HostedWorkspaceRecoveryWorkerIT',
+      'HostedWorkspaceStorageGuardMySqlIT',
+      'HostedWorkspaceToolTurnIT',
+    ]);
+  });
+
+  it.each(
+    hostedTestClasses()
+      .filter(({ name }) => !hostedSummedClasses.includes(name))
+      .map(({ name, file }) => [name, file]),
+  )('keeps each %s ceiling inside the shared fork budget', (name, file) => {
+    // A stalled case fails alone and the fork runs on, so each ceiling
+    // must leave the fork its healthy runtime — the shape the FG7–FG10
+    // letters, independent fixtures sharing the fork, were first held
+    // to. A case with no ceiling can stall until failsafe kills the fork.
+    const source = javaCode(read(file));
+    const ceilings = ceilingsOf(source);
+    expect(casesOf(source), name).toBeGreaterThan(0);
+    expect(ceilings, name).toHaveLength(casesOf(source));
     for (const ceiling of ceilings) {
-      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+      expect(ceiling + hostedForkHealthySeconds, name).toBeLessThanOrEqual(
         hostedForkSeconds(),
       );
     }
   });
 
-  it('keeps the HostedMonitorRunFaultGatesIT ceilings inside the shared fork budget', () => {
-    // The FG8 letters are independent fixtures sharing the fork — a stall
-    // in one letter leaves the other running, so the per-ceiling rule (the
-    // same shape the FG7 channel letters are held to) is the honest model.
-    const ceilings = ceilingsOf(
-      hostedTestSource('HostedMonitorRunFaultGatesIT'),
-    );
-    expect(ceilings.length).toBeGreaterThan(0);
-    for (const ceiling of ceilings) {
-      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
-        hostedForkSeconds(),
-      );
-    }
-  });
-
-  it('keeps the HostedHookFaultGatesIT ceilings inside the shared fork budget', () => {
-    // The FG13c owner-restart cells (issue #14449) are independent fixtures
-    // sharing the fork like the FG8 letters: each boots its own Spring,
-    // Harness and durable worker, so the per-ceiling relation is the honest
-    // model. The class is budgeted at 300 s (its ceiling) until the lane
-    // measures it; the healthy sum and the fork move with that budget.
-    const ceilings = ceilingsOf(hostedTestSource('HostedHookFaultGatesIT'));
-    expect(ceilings.length).toBeGreaterThan(0);
-    for (const ceiling of ceilings) {
-      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
-        hostedForkSeconds(),
-      );
-    }
-  });
-
-  it('keeps the HostedSessionRelayFaultGatesIT ceilings inside the shared fork budget', () => {
-    // Like the FG8 monitor/run letters, the FG9 session/relay letters are
-    // independent fixtures sharing the fork — each letter boots its own
-    // Spring application, Harness, and proxies under its own tenant
-    // prefix, so a stall in one letter leaves the others running — and one
-    // letter stalling to its @Timeout must still leave the fork enough
-    // healthy runtime and budget for the sibling letters to finish.
-    const ceilings = ceilingsOf(
-      hostedTestSource('HostedSessionRelayFaultGatesIT'),
-    );
-    expect(ceilings.length).toBeGreaterThan(0);
-    for (const ceiling of ceilings) {
-      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
-        hostedForkSeconds(),
-      );
-    }
-  });
-
-  it('keeps the HostedWorkflowFaultGatesIT ceilings inside the shared fork budget', () => {
-    // The FG10 letters are independent fixtures sharing the fork, the same
-    // per-ceiling shape the FG8 letters are held to.
-    const ceilings = ceilingsOf(hostedTestSource('HostedWorkflowFaultGatesIT'));
-    expect(ceilings.length).toBeGreaterThan(0);
-    for (const ceiling of ceilings) {
-      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
-        hostedForkSeconds(),
-      );
-    }
-  });
-
-  it('keeps the HostedWorkflowRelayFaultGatesIT ceilings inside the shared fork budget', () => {
-    // The FG10b/FG10f letters boot their own Spring, Harness and proxies
-    // per letter, independent fixtures sharing the fork like FG10a's.
-    const ceilings = ceilingsOf(
-      hostedTestSource('HostedWorkflowRelayFaultGatesIT'),
-    );
-    expect(ceilings.length).toBeGreaterThan(0);
-    for (const ceiling of ceilings) {
-      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
-        hostedForkSeconds(),
-      );
-    }
-  });
-
-  it('keeps the HostedMcpReplyLossIT ceilings inside the shared fork budget', () => {
-    // The FG12a MCP reply-loss letter boots its own Spring, Harness and
-    // broker proxy, the same per-ceiling shape the FG8/FG10 letters use.
-    const ceilings = ceilingsOf(hostedTestSource('HostedMcpReplyLossIT'));
-    expect(ceilings.length).toBeGreaterThan(0);
-    for (const ceiling of ceilings) {
-      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
-        hostedForkSeconds(),
-      );
-    }
-  });
-
-  it.each(['HostedTeamLeadMySqlIT', 'HostedTeamMemberCommandMySqlIT'])(
+  it.each(hostedSummedClasses)(
     'keeps every %s ceiling together inside the shared fork budget',
     (className) => {
       const source = hostedTestSource(className);
-      const cases = [
-        ...source.matchAll(
-          /@(?:[\w.]+\.)?(Test|RepeatedTest|ParameterizedTest|TestFactory|TestTemplate)\b/g,
-        ),
-      ].length;
+      const cases = casesOf(source);
       const ceilings = ceilingsOf(source);
       expect(cases).toBeGreaterThan(0);
       expect(ceilings).toHaveLength(cases);
@@ -786,15 +766,9 @@ describe('Hosted real-process gates', () => {
   // claims the work of the classes that run after it. A context inherited
   // from a base class or a meta-annotation is not seen here; none exists.
   it('closes the Spring test context each Hosted IT class declares', () => {
-    const root = 'packages/managed-agent-server/src/test/java/';
-    const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {
-      recursive: true,
-    })
-      .map(String)
-      .filter((file) => /^Hosted\w*IT\.java$/.test(path.basename(file)))
-      .map((file) => {
-        const name = path.basename(file, '.java');
-        const code = javaCode(read(root + file.split(path.sep).join('/')));
+    const contexts = hostedTestClasses()
+      .map(({ name, file }) => {
+        const code = javaCode(read(file));
         const declaration = code.search(new RegExp(`\\bclass\\s+${name}\\b`));
         expect(declaration, name).toBeGreaterThan(0);
         // Only the annotations on the test class itself: the header starts
