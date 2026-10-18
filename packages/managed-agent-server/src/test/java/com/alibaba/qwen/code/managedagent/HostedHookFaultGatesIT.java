@@ -134,14 +134,19 @@ class HostedHookFaultGatesIT {
         HarnessConnector connector = spring.getBean(HarnessConnector.class);
         long[] attachedAt = {0};
         waitFor(() -> {
-            String clientId = attachedClientId(connector, session);
-            if (clientId != null) {
-                var status = hookStatus(session, executionId, clientId);
-                if (status.statusCode() != 404) {
-                    assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            HarnessAttach attach = attachment(connector, session);
+            if (attach != null) {
+                var status = hookStatus(session, executionId, attach);
+                if (status.statusCode() == 200) {
                     assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
                     return;
                 }
+                // A missing Session and a stale process generation both mean
+                // this attachment cannot serve the route; anything else is a
+                // real refusal and should fail with its own body.
+                assertThat(json.readTree(status.body()).path("code").asText())
+                        .as("hook status: %s", status.body())
+                        .isIn("hosted_session_not_found", "hosted_harness_generation_mismatch");
             }
             // A Session the coordinator already attached is resident with a
             // Hook-pending Turn, and a second passive load of it is refused;
@@ -384,23 +389,28 @@ class HostedHookFaultGatesIT {
     }
 
     // The Harness status route identifies the caller by the client id its
-    // attach minted; the connector keeps it on the private attachment ref.
-    private String attachedClientId(HarnessConnector connector, String session) throws Exception {
+    // attach minted and the process generation it attached to; the connector
+    // keeps both on the private attachment ref.
+    private record HarnessAttach(String clientId, String bootId) {}
+
+    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
         Field field = connector.getClass().getDeclaredField("attachments");
         field.setAccessible(true);
         for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
             if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
-                return ref.getHarnessClientId();
+                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
             }
         }
         return null;
     }
 
-    private HttpResponse<String> hookStatus(String session, String executionId, String clientId) throws Exception {
+    private HttpResponse<String> hookStatus(String session, String executionId, HarnessAttach attach) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId))
                 .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", clientId).GET().build();
+                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
