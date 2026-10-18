@@ -364,6 +364,9 @@ class SessionRowLockOrderTest {
                 // session-row FOR UPDATE before its delivery-row work.
                 "beginSessionRename", "completeSessionRename",
                 "abandonSessionRename", "claimRename",
+                // D7-2's parked-title settle locks the session row before
+                // its delivery row, as the late reply it races does.
+                "settleParkedRename",
                 // Main's internal child close (#14069) locks the child's
                 // session row before its operation-row work.
                 "beginChildClose",
@@ -384,6 +387,7 @@ class SessionRowLockOrderTest {
                         "completeSessionMutation", "unarchiveWorkspaceSession",
                         "beginSessionRename", "completeSessionRename",
                         "abandonSessionRename", "claimRename",
+                        "settleParkedRename",
                         "replayChildSessionCommand", "requireCsiRequest");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
@@ -402,12 +406,20 @@ class SessionRowLockOrderTest {
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
                         "findTurnSummary", "hasActiveTurn",
+                        // #14387's lifecycle gate counts live Turns under
+                        // its caller's session-row lock. Its recovery-blocked
+                        // verdict can take the session-row lock through the
+                        // cross-file legacy guard before the Turn update, a
+                        // lock this same-file parse cannot see; both pin here
+                        // as Turn-row accessors, not lockers.
+                        "hasLiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
+                        "markTurnRecoveryBlocked",
                         "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",

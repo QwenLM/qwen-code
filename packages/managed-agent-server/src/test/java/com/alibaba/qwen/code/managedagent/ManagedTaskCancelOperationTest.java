@@ -147,8 +147,6 @@ class ManagedTaskCancelOperationTest {
 
     @Test
     void aNewRequestNeedsTheTasksCancelAction() {
-        refused(() -> begin("key-1", "digest-1", AUTOMATION),
-                HttpStatus.CONFLICT, "task_action_unavailable");
         refused(() -> begin("key-2", "digest-2", SETTLED_CHILD),
                 HttpStatus.CONFLICT, "task_action_unavailable");
         refused(() -> begin("key-3", "digest-3", "task_" + "d".repeat(64)),
@@ -165,6 +163,23 @@ class ManagedTaskCancelOperationTest {
                 + " task_state = 'recovery_blocked' WHERE record_key = ?",
                 "a".repeat(64));
         refused(() -> begin("key-4", "digest-4", RUNNING_CHILD),
+                HttpStatus.CONFLICT, "task_action_unavailable");
+    }
+
+    @Test
+    void anAutomationRunAdmitsCancelAndReplaysAfterSettlement() {
+        OperationRecord admitted = begin("auto-key", "auto-digest", AUTOMATION)
+                .operation();
+        assertThat(admitted.kind()).isEqualTo(OperationKind.TASK_CANCEL);
+        assertThat(admitted.taskId()).isEqualTo(AUTOMATION);
+        refused(() -> begin("auto-key", "other-digest", AUTOMATION),
+                HttpStatus.CONFLICT, "idempotency_conflict");
+        settle(admitted, TaskCancelOutcome.completed());
+        jdbc.update("UPDATE ma_session_record SET task_state = 'cancelled'"
+                + " WHERE record_key = ?", "c".repeat(64));
+        assertThat(begin("auto-key", "auto-digest", AUTOMATION).operation()
+                .operationId()).isEqualTo(admitted.operationId());
+        refused(() -> begin("auto-next", "auto-digest", AUTOMATION),
                 HttpStatus.CONFLICT, "task_action_unavailable");
     }
 
