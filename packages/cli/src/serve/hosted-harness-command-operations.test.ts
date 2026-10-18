@@ -75,6 +75,7 @@ vi.mock(
           resourceStore: resources,
           toolResultResources: resources,
           assertWritable: async () => undefined,
+          stopLocal: async () => undefined,
           close: async () => undefined,
           setLifecycleAuthority: () => undefined,
           authorizeLifecycle: async () => undefined,
