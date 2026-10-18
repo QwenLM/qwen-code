@@ -695,6 +695,12 @@ class HostedMcpRestartFaultGatesIT {
             // to lapse instead of treating the conflict as a failed load.
             assertThat(response.statusCode()).as("load: %s",
                     response.body()).isEqualTo(409);
+            JsonNode refusal = json.readTree(response.body());
+            assertThat(refusal.path("error").asText(
+                    refusal.path("code").asText()))
+                    .as("only the dead writer lease is retryable: %s",
+                            response.body())
+                    .isEqualTo("managed_session_writer_conflict");
             Thread.sleep(1_000);
         }
         assertThat(loaded).as("the replacement Harness must load the Session")
