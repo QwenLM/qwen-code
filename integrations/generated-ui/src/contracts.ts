@@ -14,6 +14,7 @@ export const APP_URI = 'ui://generated-ui/view-v1.html';
 export const META_KEY = 'qwen/generated-ui';
 export const MAX_RESULT_CHARS = 24_000;
 export const MAX_RESULT_BYTES = 24_000;
+const NON_BLANK_TEXT = /[^\s\u200c\u200d]/u;
 
 export const showInputSchema = z
   .object({
@@ -105,7 +106,7 @@ export function createShowResult(input: unknown): CallToolResult {
     title: sweep(parsed.data.title),
     summary: sweep(parsed.data.summary),
   };
-  if (!data.title || !data.summary) {
+  if (!NON_BLANK_TEXT.test(data.title) || !NON_BLANK_TEXT.test(data.summary)) {
     throw new Error('Invalid generated view document.');
   }
   const document: GeneratedDocument = {
@@ -141,6 +142,8 @@ export function parseToolResult(value: unknown): GeneratedDocument {
     summary.documentId !== document.documentId ||
     summary.title !== document.title ||
     summary.summary !== document.summary ||
+    !NON_BLANK_TEXT.test(document.title) ||
+    !NON_BLANK_TEXT.test(document.summary) ||
     sweep(document.title) !== document.title ||
     sweep(document.summary) !== document.summary ||
     result.content[0].text !== summaryText(document)

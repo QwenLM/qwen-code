@@ -370,6 +370,29 @@ describe('generated markup display', () => {
     expect(h.content.getElementById('other')?.textContent).toBe('Original');
   });
 
+  it('projects an unselected dropdown without charging its first option', () => {
+    const h = harness(
+      `<select id="s"><option value="${'y'.repeat(2048)}">Long</option></select>` +
+        Array.from(
+          { length: 7 },
+          (_, i) => `<textarea id="t${i}"></textarea>`,
+        ).join('') +
+        '<output id="out"></output>',
+    );
+    h.surface.apply([{ kind: 'value', id: 's', value: 'missing' }]);
+    const select = h.content.getElementById('s') as HTMLSelectElement;
+    expect(select.selectedIndex).toBe(-1);
+    for (let i = 0; i < 7; i++) {
+      (h.content.getElementById(`t${i}`) as HTMLTextAreaElement).value =
+        'x'.repeat(2000);
+    }
+    expect(h.surface.inputs()['s'].value).toBe('');
+    h.surface.apply([{ kind: 'text', id: 'out', value: 'ok' }]);
+    expect(h.content.getElementById('out')?.textContent).toBe('ok');
+    expect(select.selectedIndex).toBe(-1);
+    expect(h.onError).not.toHaveBeenCalled();
+  });
+
   it('reports an over-limit live snapshot through the error channel', () => {
     const h = harness(
       Array.from(

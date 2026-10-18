@@ -131,35 +131,85 @@ describe('immutable generated view contract', () => {
   });
 
   it.each(['title', 'summary'] as const)(
-    'rejects a %s that becomes empty after display normalization',
+    'rejects a %s containing only whitespace, joiners or removed controls',
     (field) => {
-      expect(() =>
-        createShowResult({ ...input, [field]: '\u202e\u0007' }),
-      ).toThrow('Invalid generated view document.');
+      for (const value of [
+        '\u202e\u0007',
+        ' \t\n',
+        '\u200c',
+        '\u200d\u200c',
+        ' \t\u200d\n\u200c ',
+      ]) {
+        expect(() => createShowResult({ ...input, [field]: value })).toThrow(
+          'Invalid generated view document.',
+        );
+      }
     },
   );
 
-  it('rejects a stored snapshot whose title or summary was not swept', () => {
-    const raw = { ...input, title: 'Rate\u202edeliah' };
-    const document = {
-      schemaVersion: 1 as const,
-      documentId: hashDocument(raw),
-      ...raw,
-    };
-    const forged = {
-      content: [
-        { type: 'text' as const, text: `${raw.title}\n${raw.summary}` },
-      ],
-      structuredContent: {
+  it.each(['title', 'summary'] as const)(
+    'rejects a stored snapshot with an unswept %s and matching readable text',
+    (field) => {
+      const raw = { ...input, [field]: 'Unsafe\u202evalue' };
+      const readable = { ...raw, [field]: 'Unsafevalue' };
+      const document = {
         schemaVersion: 1 as const,
-        documentId: document.documentId,
-        title: raw.title,
-        summary: raw.summary,
-      },
-      _meta: { [META_KEY]: document },
-    };
-    expect(() => parseToolResult(forged)).toThrow('identity');
-  });
+        documentId: hashDocument(raw),
+        ...raw,
+      };
+      const forged = {
+        content: [
+          {
+            type: 'text' as const,
+            text: `${readable.title}\n${readable.summary}`,
+          },
+        ],
+        structuredContent: {
+          schemaVersion: 1 as const,
+          documentId: document.documentId,
+          title: raw.title,
+          summary: raw.summary,
+        },
+        _meta: { [META_KEY]: document },
+      };
+      expect(() => parseToolResult(forged)).toThrow('identity');
+    },
+  );
+
+  it.each(['title', 'summary'] as const)(
+    'rejects a changed public %s independently of the other public fields',
+    (field) => {
+      const result = createShowResult(input);
+      result.structuredContent![field] = 'Other';
+      expect(() => parseToolResult(result)).toThrow('identity');
+    },
+  );
+
+  it.each(['title', 'summary'] as const)(
+    'rejects a matching saved snapshot whose %s has no readable text',
+    (field) => {
+      for (const value of [' ', '\u200c\u200d']) {
+        const result = createShowResult(input);
+        const raw = { ...input, [field]: value };
+        const document = {
+          ...parseToolResult(result),
+          ...raw,
+          documentId: hashDocument(raw),
+        };
+        result._meta![META_KEY] = document;
+        result.structuredContent = {
+          schemaVersion: 1,
+          documentId: document.documentId,
+          title: raw.title,
+          summary: raw.summary,
+        };
+        result.content = [
+          { type: 'text', text: `${raw.title}\n${raw.summary}` },
+        ];
+        expect(() => parseToolResult(result)).toThrow();
+      }
+    },
+  );
 
   it.each(['title', 'summary', 'html', 'css', 'javascript'] as const)(
     'binds %s to the snapshot identity',
@@ -273,10 +323,6 @@ describe('immutable generated view contract', () => {
       { ...result, extra: true },
       { ...result, structuredContent: document },
       { ...result, content: [{ type: 'text', text: 'Another summary' }] },
-      {
-        ...result,
-        structuredContent: { ...result.structuredContent, title: 'Other' },
-      },
       {
         ...result,
         structuredContent: {

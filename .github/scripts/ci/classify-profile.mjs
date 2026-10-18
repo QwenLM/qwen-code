@@ -56,6 +56,8 @@ export const TEST_READ_MARKDOWN = new Set([
   '.qwen/skills/verify-pr/references/android.md',
   'AGENTS.md',
   'CLAUDE.md',
+  'integrations/generated-ui/README.md',
+  'integrations/generated-ui/skills/generated-ui/SKILL.md',
   'integrations/test-failure-explorer/skills/test-failure-explorer/SKILL.md',
   'packages/cua-driver/docs/tool-output-format.md',
   'packages/cua-driver/scripts/README.md',
