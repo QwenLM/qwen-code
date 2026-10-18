@@ -297,19 +297,44 @@ type pluginClient struct {
 	err      error
 	calls    int
 	status   *statusClient
+	nri      *introspection.PluginInfoResponse
+	nriErr   error
+	nriCalls int
+	onNRI    func()
 }
 
 func (c *pluginClient) PluginInfo(ctx context.Context, request *introspection.PluginInfoRequest, options ...grpc.CallOption) (*introspection.PluginInfoResponse, error) {
-	c.calls++
 	deadline, ok := ctx.Deadline()
-	if !ok || time.Until(deadline) > 5*time.Second || c.status != nil && !deadline.Equal(c.status.deadline) || request.Type != "io.containerd.snapshotter.v1" || request.ID != "overlayfs" || request.Options != nil || len(options) != 1 {
+	if !ok || time.Until(deadline) > 5*time.Second || c.status != nil && !deadline.Equal(c.status.deadline) || len(options) != 1 {
 		return nil, errors.New("the exact bounded original plugin query is required")
 	}
 	limit, ok := options[0].(grpc.MaxRecvMsgSizeCallOption)
 	if !ok || limit.MaxRecvMsgSize != 32<<10 {
 		return nil, errors.New("a 32 KiB receive bound is required")
 	}
+	if request.Type == "io.qwen.k2.nri-state.v1" && request.ID == "state" {
+		c.nriCalls++
+		if request.Options == nil || request.Options.TypeUrl != "google.protobuf.Empty" || len(request.Options.Value) != 0 {
+			return nil, errors.New("the exact NRI query options are required")
+		}
+		if c.onNRI != nil {
+			c.onNRI()
+		}
+		return c.nri, c.nriErr
+	}
+	c.calls++
+	if request.Type != "io.containerd.snapshotter.v1" || request.ID != "overlayfs" || request.Options != nil {
+		return nil, errors.New("the exact snapshotter query is required")
+	}
 	return c.response, c.err
+}
+
+// Inert wire reply fixture; real upstream NRI objects are covered separately.
+func disabledNRIReply() *introspection.PluginInfoResponse {
+	return &introspection.PluginInfoResponse{
+		Plugin: &introspection.Plugin{Type: "io.qwen.k2.nri-state.v1", ID: "state"},
+		Extra:  &anypb.Any{TypeUrl: "google.protobuf.BoolValue"},
+	}
 }
 
 func TestOriginalSnapshotterMetadata(t *testing.T) {
@@ -370,7 +395,7 @@ func TestSnapshotterClientFailureIsPermanent(t *testing.T) {
 	for _, failure := range []string{"rpc", "changed-root", "nil-response"} {
 		t.Run(failure, func(t *testing.T) {
 			client := &statusClient{response: status(t, config())}
-			plugins := &pluginClient{response: pluginReply(), status: client}
+			plugins := &pluginClient{response: pluginReply(), status: client, nri: disabledNRIReply()}
 			guard, err := Open(context.Background(), client, plugins, testSnapshotRoot)
 			if err != nil || client.calls != 1 || plugins.calls != 1 {
 				t.Fatal("original bounded queries failed", err)
@@ -394,9 +419,50 @@ func TestSnapshotterClientFailureIsPermanent(t *testing.T) {
 	}
 }
 
+func TestNRIClientFailureIsPermanent(t *testing.T) {
+	for _, failure := range []string{"rpc", "enabled", "missing", "failed-init", "oversized", "canceled"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			client := &statusClient{response: status(t, config())}
+			plugins := &pluginClient{response: pluginReply(), status: client, nri: disabledNRIReply()}
+			guard, err := Open(ctx, client, plugins, testSnapshotRoot)
+			if err != nil || client.calls != 1 || plugins.calls != 1 || plugins.nriCalls != 1 || guard.Verify() != nil {
+				t.Fatal("initial and ongoing NRI observations failed", err)
+			}
+			switch failure {
+			case "rpc":
+				plugins.nriErr = errors.New("original observer unavailable")
+			case "enabled":
+				plugins.nri.Extra.Value = []byte{0x08, 0x01}
+			case "missing":
+				plugins.nri = nil
+			case "failed-init":
+				plugins.nri.Plugin.InitErr = &rpc.Status{}
+			case "oversized":
+				plugins.nri.Plugin.Capabilities = []string{strings.Repeat("x", 32<<10)}
+			case "canceled":
+				plugins.onNRI = cancel
+			}
+			if guard.Verify() == nil || client.calls != 3 || plugins.calls != 3 || plugins.nriCalls != 3 {
+				t.Fatal("failed original NRI observation accepted or skipped")
+			}
+			plugins.nri, plugins.nriErr, plugins.onNRI = disabledNRIReply(), nil, nil
+			if guard.Verify() == nil || client.calls != 3 || plugins.calls != 3 || plugins.nriCalls != 3 {
+				t.Fatal("failed NRI guard reacquired a baseline or queried again")
+			}
+		})
+	}
+	client := &statusClient{response: status(t, config())}
+	plugins := &pluginClient{response: pluginReply(), status: client}
+	if guard, err := Open(context.Background(), client, plugins, testSnapshotRoot); guard != nil || err == nil || plugins.nriCalls != 1 {
+		t.Fatal("missing initial NRI observation accepted")
+	}
+}
+
 func TestInvalidSnapshotterInputsBeforeRPC(t *testing.T) {
 	client := &statusClient{response: status(t, config())}
-	plugins := &pluginClient{response: pluginReply()}
+	plugins := &pluginClient{response: pluginReply(), nri: disabledNRIReply()}
 	for _, root := range []string{"", "/srv/overlay/snapshots", testSnapshotRoot + "/"} {
 		if guard, err := Open(context.Background(), client, plugins, root); guard != nil || err == nil {
 			t.Fatal("unsupported expected root accepted")
@@ -420,7 +486,7 @@ func TestOriginalClientFailureIsPermanent(t *testing.T) {
 	client := &statusClient{response: status(t, config())}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	plugins := &pluginClient{response: pluginReply()}
+	plugins := &pluginClient{response: pluginReply(), nri: disabledNRIReply()}
 	guard, err := Open(ctx, client, plugins, testSnapshotRoot)
 	if err != nil || client.calls != 1 || guard.Verify() != nil || client.calls != 2 {
 		t.Fatalf("initial/ongoing verification failed: calls=%d err=%v", client.calls, err)

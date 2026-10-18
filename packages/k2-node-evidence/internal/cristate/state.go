@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/QwenLM/qwen-code/packages/k2-node-evidence/internal/nriobserver"
 	introspection "github.com/containerd/containerd/api/services/introspection/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
@@ -62,6 +63,10 @@ func (g *Guard) Verify() error {
 	if err != nil || checkSnapshotter(plugin, g.root) != nil || ctx.Err() != nil {
 		g.failed = true
 		return errors.New("original effective snapshotter root differs or was lost")
+	}
+	if err := nriobserver.Observe(ctx, g.plugins); err != nil {
+		g.failed = true
+		return errors.New("original effective NRI state differs or was lost")
 	}
 	return nil
 }

@@ -92,7 +92,9 @@ def render(source, shim, runc, worker_layout, worker_image, sandbox_layout, sand
         "containerdTtrpc": "/run/containerd/containerd.sock.ttrpc",
         "creationContract": base64.b64encode(raw).decode("ascii"),
     }
-    runtime = '''[plugins."io.containerd.cri.v1.runtime"]
+    runtime = '''[plugins."io.containerd.nri.v1.nri"]
+  disable = true
+[plugins."io.containerd.cri.v1.runtime"]
   disable_apparmor = false
   enable_selinux = false
   enable_cdi = false

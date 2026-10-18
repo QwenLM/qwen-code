@@ -53,6 +53,7 @@ class RenderPreExecTest(unittest.TestCase):
         self.assertEqual(shim["shimSha256"], manifest["artifacts"]["shim"]["sha256"])
         self.assertEqual(shim["inputs"]["runcSha256"], manifest["artifacts"]["runc"]["sha256"])
         handler = (self.output / "runtime-handler.toml").read_text()
+        self.assertIn('[plugins."io.containerd.nri.v1.nri"]\n  disable = true\n', handler)
         self.assertIn('runtime_type = "io.containerd.runc.v2"', handler)
         self.assertIn('snapshotter = "overlayfs"', handler)
         self.assertIn('enable_cdi = false', handler)

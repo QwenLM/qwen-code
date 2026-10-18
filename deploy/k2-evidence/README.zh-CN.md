@@ -149,9 +149,21 @@ python3 deploy/k2-evidence/render-pre-exec.py \
 
 `shim.json` 对应拟安装的 `/etc/qwen-k2/shim.json`。`runtime-handler.toml` fragment 保留 `qwen-k2-runc-v1` RuntimeClass/handler 和准确 custom `runtime_path`，改用 `io.containerd.runc.v2` 以产生准确 runc options protobuf。它显式选择 overlayfs、podsandbox、FIFO，保留 AppArmor，关闭 SELinux/CDI/CRIU/restore-via-create，并让网络 namespace 保持在 CRI state 目录之外。安装 fragment 前须审阅这些全局 CRI 设置。source 配置还必须加入生成的 `sandboxImageSha256`；tmpfiles 提供固定私有目录。工具不安装或 apply。详见[options 接线](../../docs/design/2026-10-17-k2-cri-options-wiring.zh-CN.md)。
 
-gateway 通过持续持有的原 containerd 连接读取实际 CRI Status 配置，启动服务前和每次 control 操作两侧核对固定 handler、三个 options、选定安全设置及固定 root/state/socket 路径。观察失败或不可用后永久拒绝。既有 source 调用及已启动 worker 的轮询消费此边界；sandbox-only 间隔没有增加周期检查。这是采样配置校验，不证明 NRI 已关闭、独占 CSI 接线、安装 provenance 或无间断 containment。详见[实际运行时配置](../../docs/design/2026-10-17-k2-effective-runtime-config.zh-CN.md)。
+gateway 通过持续持有的原 containerd 连接读取实际 CRI Status 配置，启动服务前和每次 control 操作两侧核对固定 handler、三个 options、选定安全设置及固定 root/state/socket 路径。观察失败或不可用后永久拒绝。既有 source 调用及已启动 worker 的轮询消费此边界；sandbox-only 间隔没有增加周期检查。仅这项 Status 观察不能证明 NRI 状态、独占 CSI 接线、安装 provenance 或无间断 containment。详见[实际运行时配置](../../docs/design/2026-10-17-k2-effective-runtime-config.zh-CN.md)。
 
 生效配置 guard 还通过原连接，以无 options 的 PluginInfo 读取准确 builtin overlay plugin。唯一 root export 必须与独立校验的 target snapshot 目录匹配，含 proxy address export 时拒绝。这是采样 metadata 校验，不证明文件系统对象或挂载身份。详见[snapshotter 根目录](../../docs/design/2026-10-18-k2-snapshotter-root.zh-CN.md)。
+
+从同一锁定模块构建专用原 daemon，记录两个 Linux 架构。例如在 `packages/k2-node-evidence` 中：
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOTOOLCHAIN=local GOWORK=off \
+  go build -mod=readonly -trimpath -buildvcs=false \
+  -o /absolute/output/containerd-k2 ./cmd/containerd-k2
+```
+
+入口复用上游 containerd 2.3.4 的 command 及正常按 OS/tag 选择的 builtins，加入固定只读 `io.qwen.k2.nri-state.v1.state` observer。不得使用 `no_cri`；`CGO_ENABLED=0` 会排除条件 btrfs 支持。审阅准确选定依赖及 executable 字节，再将该工件作为 runtime executable 固定进受保护 target 及两角色配置。上游版本字符串不能建立这项来源证明。此命令只构建工件，不安装或重启 daemon。
+
+渲染 fragment 现于 `plugins."io.containerd.nri.v1.nri"` 显式设置 `disable=true`，上游默认启用。必须保留 NRI registration，禁用 registration 本身会使强制观察不可用。guard 与 Status/overlay 共用五秒期限，通过原连接，以标准 Empty options 和 BoolValue extra 读取持续持有的真实 NRI 对象。启用、stock、缺失、失败、格式错误、超限或丢失观察都永久拒绝；false 的 typed 空正文合法。这是采样状态，不代表 native daemon 验收、从出生禁用、全部线程隔离或连续排除。详见[有效 NRI 状态](../../docs/design/2026-10-18-k2-effective-nri-state.zh-CN.md)。
 
 安装前必须资格化实际 daemon 的 handler/bootstrap 兼容性、私有 ext4 消费输入挂载、immutable 安装文件及 ancestor、初始 namespaces、完整已加载并 locked 的 AppArmor bundle 和 actor/admission 边界。当前 service units 和历史 profiles 不继承本次改变后候选的资格。运行时目录必须允许正常 PID/log/rootfs/cleanup 写入，不能将整个消费 bundle 设为 immutable。用 exact reviewed source/shim 配置执行 `node-config`，生成 Java 必需的出生期待值；解析成功仍不代表安装资格或物理释放。详见[出生设计](../../docs/design/2026-10-16-k2-pre-exec-birth.zh-CN.md)。
 
