@@ -2016,38 +2016,53 @@ export const ChatEditor = memo(
     // sets this; a blur that lands on another element ends the ownership, one
     // that lands nowhere (the body) does not.
     const modeControlHadFocusRef = useRef(false);
+    // The control's last focused element — the trigger or a popover row. A
+    // changed row set is not itself a loss: a widening, or a narrowing that
+    // kept this element, takes nothing the user had, and handing off there
+    // would steal focus back to the composer from wherever it landed.
+    const modeControlFocusedElementRef = useRef<HTMLElement | null>(null);
     const previousModeItemIdsRef = useRef(modeItemIds);
     useEffect(() => {
       const rowsChanged = previousModeItemIdsRef.current !== modeItemIds;
       previousModeItemIdsRef.current = modeItemIds;
       const gone = modeControlsDisabled || availableModes.length === 0;
-      if (!gone && !rowsChanged) return;
+      const focusedElement = modeControlFocusedElementRef.current;
+      const focusedElementLost =
+        focusedElement !== null && !focusedElement.isConnected;
+      if (!gone && (!rowsChanged || !focusedElementLost)) return;
       // A narrowing keeps the picker open; only an empty or locked control
       // closes it.
       if (gone) setModeDropdownOpen(false);
       const hadFocus = modeControlHadFocusRef.current;
-      modeControlHadFocusRef.current = false;
       const toolbar = toolbarLeadingRef.current;
       const doc = toolbar?.ownerDocument;
       const active = getShadowAwareActiveElement(toolbar);
       if (active !== null && active !== doc?.body && active.isConnected) {
         // Focus that is anywhere but lost is somewhere the user put it. The
         // handoff takes it only from this instance's own mode control — the
-        // dedicated marker and the containment check keep this instance's
-        // other popovers and every other editor instance out of it — and only
-        // once the control is gone: a row that survived a narrowing and an
-        // enabled trigger both keep their focus.
+        // picker's rows are portaled, so toolbar containment can never vouch
+        // for them, but the recorded element can: only focus inside this
+        // control sets it, and another instance's row can never match it —
+        // and only once the control is gone: a row that survived a narrowing
+        // and an enabled trigger both keep their focus.
         if (!(active instanceof HTMLElement)) return;
         const inModeControl = active.closest(
           '[data-web-shell-mode-popover], [data-web-shell-mode-button]',
         );
-        if (!gone || !inModeControl || toolbar?.contains(active) !== true)
+        if (
+          !gone ||
+          !inModeControl ||
+          (active !== modeControlFocusedElementRef.current &&
+            toolbar?.contains(active) !== true)
+        )
           return;
       } else if (!hadFocus) {
-        // Nothing ties a body-level focus to this control without the ref.
+        // Nothing ties a body-level focus to this control without the record.
         return;
       }
       if (!disabled && !isCoarsePointerDevice()) {
+        modeControlHadFocusRef.current = false;
+        modeControlFocusedElementRef.current = null;
         focusComposer();
         return;
       }
@@ -2055,11 +2070,15 @@ export const ChatEditor = memo(
       // nor can a disabled control beside it. With none focusable, the
       // enabled composer is still a better resting place than the body.
       const target = toolbar?.querySelector<HTMLElement>(
-        '[data-web-shell-toolbar-popover-trigger]:not(:disabled), button[data-web-shell-plan-control]:not([data-disabled])',
+        '[data-web-shell-toolbar-popover-trigger]:not(:disabled), [data-web-shell-plan-button]:not(:disabled):not([aria-disabled])',
       );
       if (target) {
+        modeControlHadFocusRef.current = false;
+        modeControlFocusedElementRef.current = null;
         target.focus();
       } else if (!disabled) {
+        modeControlHadFocusRef.current = false;
+        modeControlFocusedElementRef.current = null;
         focusComposer();
       }
     }, [
@@ -3478,8 +3497,11 @@ export const ChatEditor = memo(
                       className={`${styles.dropdownWrapper} ${
                         showModeLabel ? '' : styles.dropdownWrapperCompact
                       }`}
-                      onFocus={() => {
+                      onFocus={(event) => {
                         modeControlHadFocusRef.current = true;
+                        if (event.target instanceof HTMLElement) {
+                          modeControlFocusedElementRef.current = event.target;
+                        }
                       }}
                       onBlur={(event) => {
                         // A blur that lands nowhere is the browser dropping a
@@ -3487,6 +3509,7 @@ export const ChatEditor = memo(
                         // the loss the handoff above exists to catch.
                         if (event.relatedTarget instanceof HTMLElement) {
                           modeControlHadFocusRef.current = false;
+                          modeControlFocusedElementRef.current = null;
                         }
                       }}
                     >

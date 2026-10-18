@@ -75,6 +75,10 @@ export function ApprovalModeDialog({
     const previousIds = highlightedIdsRef.current;
     highlightedIdsRef.current = approvalModes.map((mode) => mode.id);
     setActiveIndex((prev) => {
+      // The follow-current effect may have queued its own update in this
+      // commit, leaving prev in new-list coordinates; until the user has
+      // navigated, the current mode is the anchor and needs no lookup.
+      if (!userNavigatedRef.current) return currentIdx >= 0 ? currentIdx : 0;
       const highlightedId = previousIds[prev];
       if (highlightedId === undefined) return 0;
       const index = approvalModesRef.current.findIndex(
