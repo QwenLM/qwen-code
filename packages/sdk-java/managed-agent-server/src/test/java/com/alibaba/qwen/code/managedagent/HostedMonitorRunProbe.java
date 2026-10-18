@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -127,6 +128,26 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                     }
                     case "state" -> state(sessionId);
                     case "ledger" -> ledger(sessionId);
+                    case "advance-floor" -> advanceFloor(sessionId,
+                            JSON.readTree(exchange.getRequestBody()));
+                    case "trigger-install" -> triggerInstall(sessionId,
+                            JSON.readTree(exchange.getRequestBody()));
+                    case "trigger-drop" -> {
+                        JsonNode request = JSON.readTree(
+                                exchange.getRequestBody());
+                        jdbc.execute("DROP TRIGGER IF EXISTS "
+                                + request.path("name").asText());
+                        yield Map.of();
+                    }
+                    case "trigger-present" -> {
+                        JsonNode request = JSON.readTree(
+                                exchange.getRequestBody());
+                        yield jdbc.queryForObject(
+                                "SELECT COUNT(*) FROM information_schema.TRIGGERS"
+                                        + " WHERE TRIGGER_SCHEMA = DATABASE()"
+                                        + " AND TRIGGER_NAME = ?", Long.class,
+                                request.path("name").asText());
+                    }
                     default -> throw new IllegalArgumentException(route[3]);
                 };
                 byte[] bytes = JSON.writeValueAsBytes(response);
@@ -205,6 +226,11 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                 "SELECT execution_call_id, execution_state, execution_status"
                         + " FROM ma_tool_execution WHERE harness_session_id"
                         + " = ? ORDER BY execution_call_id", sessionId);
+        var replayFloor = jdbc.queryForList(
+                "SELECT replay_floor_sequence, last_sequence, covered_sequence"
+                        + " FROM ma_event_stream WHERE stream_kind = 'SESSION'"
+                        + " AND stream_id = X'' AND tenant_id = ?"
+                        + " AND session_id = ?", tenant, sessionId);
         var relayFailure = failure.get();
         return Map.of("executions", executions,
                 "monitors", extensionRecords(sessionId, "monitor_run"),
@@ -221,7 +247,80 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                         sessionId),
                 "relayAlive", relay != null && !relay.isDone(),
                 "relayFailure", relayFailure == null ? ""
-                        : relayFailure.toString());
+                        : relayFailure.toString(),
+                // FG8d release verbs name the broker-side holder of the
+                // live background run; FG8a/b observation and
+                // cursor-expired cases read their own honesty fields.
+                "runtimeSessions", jdbc.queryForList(
+                        "SELECT DISTINCT runtime_session_id FROM"
+                                + " ma_tool_execution WHERE harness_session_id"
+                                + " = ?", sessionId),
+                "monitorObservations", jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
+                                + " AND session_id = ? AND kind ="
+                                + " 'managed-monitor-observation'",
+                        Integer.class, tenant, sessionId),
+                "replayFloor", replayFloor.isEmpty() ? Map.of()
+                        : replayFloor.getFirst());
+    }
+
+    // FG8e cursor-expired-resync: deterministically expires a resume
+    // cursor by pinning the SESSION stream's replay floor past it — the
+    // serving path's ReplayCursorExpired branch is what the case gates.
+    // The ck constraint (replay_floor_sequence <= last_sequence) is the
+    // fixture's honesty bound.
+    private Map<String, Object> advanceFloor(String sessionId,
+            JsonNode request) {
+        long floor = request.path("floor").asLong();
+        var rows = jdbc.queryForList(
+                "SELECT replay_floor_sequence, last_sequence, covered_sequence"
+                        + " FROM ma_event_stream WHERE stream_kind = 'SESSION'"
+                        + " AND stream_id = X'' AND tenant_id = ?"
+                        + " AND session_id = ?", tenant, sessionId);
+        assertThat(rows).as("SESSION stream row exists").hasSize(1);
+        long lastSequence = ((Number) rows.getFirst().get("last_sequence"))
+                .longValue();
+        assertThat(floor).as("floor within the committed stream")
+                .isBetween(1L, lastSequence);
+        jdbc.update("UPDATE ma_event_stream SET replay_floor_sequence = ?"
+                + " WHERE stream_kind = 'SESSION' AND stream_id = X''"
+                + " AND tenant_id = ? AND session_id = ?", floor, tenant,
+                sessionId);
+        return jdbc.queryForMap(
+                "SELECT replay_floor_sequence, last_sequence, covered_sequence"
+                        + " FROM ma_event_stream WHERE stream_kind = 'SESSION'"
+                        + " AND stream_id = X'' AND tenant_id = ?"
+                        + " AND session_id = ?", tenant, sessionId);
+    }
+
+    // FG8b: one BEFORE INSERT signal per case, scoped to the case's rows
+    // only; the SDL shape copies FG7b's, and teardown/driver drops it.
+    private Map<String, Object> triggerInstall(String sessionId,
+            JsonNode request) {
+        String target = request.path("target").asText();
+        String name = "fg8b_" + UUID.randomUUID().toString()
+                .replace("-", "").substring(0, 8);
+        String marker = "FG8B_" + target;
+        String condition = switch (target) {
+            case "invocation" -> "NEW.harness_session_id = '" + sessionId
+                    + "' AND NEW.execution_call_id NOT LIKE '%:process'";
+            case "process" -> "NEW.harness_session_id = '" + sessionId
+                    + "' AND NEW.execution_call_id LIKE '%:process'";
+            case "manifest" -> "NEW.tenant_id = '" + tenant
+                    + "' AND NEW.session_id = '" + sessionId
+                    + "' AND NEW.kind = 'managed-tool-result-manifest'";
+            case "page" -> "NEW.tenant_id = '" + tenant
+                    + "' AND NEW.session_id = '" + sessionId
+                    + "' AND NEW.kind = 'managed-tool-result-page'";
+            default -> throw new IllegalArgumentException(target);
+        };
+        String table = target.equals("invocation") || target.equals("process")
+                ? "ma_tool_execution" : "ma_resource";
+        jdbc.execute("CREATE TRIGGER " + name + " BEFORE INSERT ON " + table
+                + " FOR EACH ROW BEGIN IF " + condition
+                + " THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '"
+                + marker + "'; END IF; END");
+        return Map.of("name", name, "marker", marker);
     }
 
     private List<JsonNode> extensionRecords(String sessionId, String domain) {
