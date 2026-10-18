@@ -404,7 +404,13 @@ describe('managed session authority channel records', () => {
         TRUSTED,
       );
       expect(last.revision).toBe(4);
-      expect(authority.taskViews()).toEqual([]);
+      // A delivery is a task of its route Session (#13746 F3).
+      expect(authority.taskViews()).toEqual([
+        expect.objectContaining({
+          kind: 'channel_delivery',
+          state: 'completed',
+        }),
+      ]);
       expect(
         authority.extensionRecord('channel_delivery', 'delivery-1'),
       ).toMatchObject({ revision: 4 });
@@ -476,7 +482,12 @@ describe('managed session authority channel records', () => {
         expect(
           authority.extensionRecord('channel_delivery', 'delivery-1'),
         ).toMatchObject({ revision: 1 });
-        expect(authority.taskViews()).toEqual([]);
+        expect(authority.taskViews()).toEqual([
+          expect.objectContaining({
+            kind: 'channel_delivery',
+            state: 'pending',
+          }),
+        ]);
       },
       { create: false },
     );
