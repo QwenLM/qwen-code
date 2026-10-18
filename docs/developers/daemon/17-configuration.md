@@ -162,10 +162,11 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 ## Web Shell workspace creation deadlines
 
 In the common case, workspace creation makes a capability preflight on a cold or
-expired cache, followed by session creation. Each request has its own default
-30-second timeout, including response-body consumption. Web Shell allows 75
-seconds for the combined creation action, covering these two request budgets
-plus 15 seconds of headroom. A 20-second preflight followed by a 15-second create
+expired cache, followed by session creation. The preflight carries the SDK's
+generic 30-second request timeout, including response-body consumption; the
+create request sizes itself from the session budget the daemon advertises — 70
+seconds under the daemon's default budget. Web Shell allows 75 seconds for the
+combined creation action. A 20-second preflight followed by a 15-second create
 therefore succeeds without configuration changes. A concurrent capability refresh
 can supersede the preflight and extend the chain; the action may then time out
 before creation settles even when each request stays within its own deadline.
@@ -178,7 +179,10 @@ SDK standalone creation, other actions, and post-creation callbacks retain their
 existing deadlines.
 
 Increasing `--initialize-timeout-ms` does not raise the SDK request timeout for
-the capability preflight or the create request. Load/resume follows the separate
+the capability preflight, which stays on the generic 30-second deadline. It does
+raise the create and worktree-reset deadline, because the daemon advertises the
+resulting budget as `limits.sessionRestoreTimeoutMs` and the SDK sizes both from
+it. Load/resume follows the separate
 [restore timeout contract](../../design/2026-08-07-safe-session-restore-timeout.md#timeout-contract):
 automatic SDK derivation requires a cached server restore budget; without one it
 falls back to 70 seconds. Explicit request or client timeouts override that
