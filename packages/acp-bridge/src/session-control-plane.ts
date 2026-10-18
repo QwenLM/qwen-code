@@ -16173,7 +16173,12 @@ export function createSessionControlPlane(
         const addSkipped = (response as { skipped?: boolean }).skipped === true;
         if (!addSkipped) {
           const ok = response as AddOk;
-          runtimeMcpServerChannelId = info.id;
+          // Names recorded on a replaced child are gone with it; do not let
+          // a later add on the new child inherit them.
+          if (runtimeMcpServerChannelId !== info.id) {
+            runtimeMcpServerNames.clear();
+            runtimeMcpServerChannelId = info.id;
+          }
           runtimeMcpServerNames.add(ok.name);
           broadcastWorkspaceEvent({
             type: 'mcp_server_added',
