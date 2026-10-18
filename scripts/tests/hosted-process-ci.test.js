@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (125 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (129 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 205, 220],
+    ['hosted-harness-mysql', 209, 222],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -608,14 +608,16 @@ describe('Hosted real-process gates', () => {
       // the FG13d dropped-reply cancel cell adds 150 s, so the fork moves to
       // 6233; the FG12b store-failure class adds ~120 s (49.6 s measured
       // locally on JDK 21 + MySQL 8.0.46), so the fork moves to 6353 and the
-      // Verify step to 116 minutes; the FG11c Harness-crash method (144.8 s
-      // measured, 550 s budgeted) moves it to 6893 and the Verify step to
-      // 125 minutes):
+      // Verify step to 116 minutes; the FG12f stream-gap class adds ~242 s
+      // (121.1 s measured on the merged base), so the fork moves to 6585 and
+      // the Verify step to 120 minutes; the FG11c Harness-crash method
+      // (144.8 s measured, 550 s budgeted) moves the fork to 7135 and the
+      // Verify step to 129 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(6893);
+        expect(forkSeconds).toBe(7135);
       }
     },
   );
@@ -667,11 +669,15 @@ describe('Hosted real-process gates', () => {
   // (~440s budgeted at 2x), so it becomes 5473s; the FG13d dropped-reply
   // cancel cell adds 150s, so it becomes 5623s; the FG12b store-failure
   // class adds ~120s (49.6s measured on JDK 21 + MySQL 8.0.46), so it
-  // becomes 5743s; the FG11c Harness-crash method (144.8s measured, ~550s
-  // budgeted at 2x) becomes 6293s.
-  // A larger ceiling lets failsafe kill the fork mid-run, and the classes
-  // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 6293;
+  // becomes 5743s; the FG12f stream-gap class (HostedMcpStreamGapIT, three
+  // cases, three cold boots) measures 121.1s locally on the merged base
+  // (~242s budgeted), so it becomes 5985s; the FG11c Harness-crash method
+  // (144.8s measured, ~550s budgeted at 2x) becomes 6535s. The largest
+  // ceiling (600s) plus
+  // that healthy sum still fits the fork. A larger ceiling lets failsafe
+  // kill the fork mid-run, and the classes left unrun never report, failing
+  // the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 6535;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -743,6 +749,7 @@ describe('Hosted real-process gates', () => {
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
       'HostedMcpStoreFaultGatesIT',
+      'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',

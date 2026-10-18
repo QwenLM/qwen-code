@@ -451,26 +451,25 @@
                                  keepalive / 45 s bound, 214.4-215.0 s
                                  healthy locally on JDK 21 and 25
                                  across four runs, ~440 s budgeted at
-                                 2x) raise the healthy sum to 5473 s,
-                                 so the fork moves to 6083 s and the
-                                 Verify step to 115 minutes. The FG13d
+                                 2x) raise the healthy sum to 5743 s;
+                                 these sums already include the FG13d
                                  dropped-reply cancel cell (issue
-                                 #14449) adds 150 s: the healthy sum
-                                 becomes 5623 s, so the fork moves to
-                                 6233 s, still inside those 115
-                                 minutes. The FG12b store-failure class
+                                 #14449, 150 s) and the FG12b
+                                 store-failure class
                                  (HostedMcpStoreFaultGatesIT, eight
                                  cases, 49.6 s measured locally on
-                                 JDK 21 + MySQL 8.0.46) adds 120 s: the
-                                 healthy sum becomes 5743 s, so the
-                                 fork moves to 6353 s and the Verify
-                                 step to 116 minutes. The FG11c
-                                 Harness-crash method (three cases,
-                                 144.8 s measured) is budgeted at 550 s:
-                                 the healthy sum becomes 6293 s, so the
-                                 fork moves to 6893 s and the Verify
-                                 step to 125 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6893</forkedProcessTimeoutInSeconds>
+                                 JDK 21 + MySQL 8.0.46, ~120 s
+                                 budgeted). The FG12f stream-gap class
+                                 (HostedMcpStreamGapIT, three cases,
+                                 three cold boots) measures 121.1 s
+                                 locally on the merged base (~242 s
+                                 budgeted): the healthy sum becomes
+                                 5985 s; the FG11c Harness-crash method
+                                 (three cases, 144.8 s measured, 550 s
+                                 budgeted) moves it to 6535 s, so the fork
+                                 moves to 7135 s and the Verify step to 129
+                                 minutes. -->
+                            <forkedProcessTimeoutInSeconds>7135</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -624,7 +623,7 @@
                     <includes><include>**/HostedMcp*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
-                         per-class rule for the three MCP classes: the
+                         per-class rule for the four MCP classes: the
                          largest @Timeout ceiling (600 s) plus the
                          classes' healthy runtime must fit 1200 s. -->
                     <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
