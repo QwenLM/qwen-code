@@ -74,6 +74,14 @@ export class HostedModelRoundLimitError extends Error {
   }
 }
 
+export class HostedImageInputUnsupportedError extends Error {
+  constructor() {
+    super(
+      'The selected model does not support image input. Choose a model with image support or remove the image.',
+    );
+  }
+}
+
 export interface HostedHarnessTextDeltas {
   delta(text: string): Promise<void>;
   /**
@@ -128,6 +136,7 @@ export async function runHostedHarnessTextTurn(input: {
   cwd: string;
   history: readonly ChatRecord[];
   prompt: string;
+  attachmentParts?: readonly Part[];
   promptId: string;
   signal: AbortSignal;
   resumeFromToolResults?: readonly Part[];
@@ -152,7 +161,10 @@ export async function runHostedHarnessTextTurn(input: {
     Partial<
       Pick<
         HostedWorkspaceToolTurn,
-        'resumeHookResults' | 'hookStopReason' | 'setModelRound'
+        | 'resumeHookResults'
+        | 'hookStopReason'
+        | 'setModelRound'
+        | 'planModeInstructions'
       >
     >;
   workspaceContext?: { read(): string | undefined };
@@ -191,6 +203,7 @@ export async function runHostedHarnessTextTurn(input: {
         ? `# Agent instructions\n\n${input.agentInstructions}`
         : undefined,
       input.skills?.instructions(),
+      input.toolTurn?.planModeInstructions?.(),
       context,
     ]
       .filter(Boolean)
@@ -216,7 +229,13 @@ export async function runHostedHarnessTextTurn(input: {
       : [],
   );
   if (!input.resumeFromToolResults && !input.resumeModel)
-    initialMessages.push({ role: 'user', parts: [{ text: input.prompt }] });
+    initialMessages.push({
+      role: 'user',
+      parts: [
+        ...(input.prompt ? [{ text: input.prompt }] : []),
+        ...(input.attachmentParts ?? []),
+      ],
+    });
   const initializationHooks: Array<{
     fields: HookInput;
     signal?: AbortSignal;
@@ -331,6 +350,16 @@ export async function runHostedHarnessTextTurn(input: {
       if (model) throw new HostedModelUnavailableError(cause);
       throw cause;
     }
+    if (
+      [...initialMessages, ...(input.resumeModel?.prepared.history ?? [])].some(
+        (message) =>
+          message.parts?.some((part) =>
+            part.inlineData?.mimeType?.startsWith('image/'),
+          ),
+      ) &&
+      config.getEffectiveInputModalities().image !== true
+    )
+      throw new HostedImageInputUnsupportedError();
     if (input.agentInstructions || input.skills)
       await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
@@ -455,7 +484,10 @@ export async function runHostedHarnessTextTurn(input: {
           config.getModel(),
           input.signal,
         )) ?? [...input.resumeFromToolResults])
-      : [{ text: effectivePrompt }];
+      : [
+          ...(effectivePrompt ? [{ text: effectivePrompt }] : []),
+          ...(input.attachmentParts ?? []),
+        ];
     let pendingToolResults =
       input.resumeFromToolResults !== undefined ||
       (input.resumeModel?.pendingToolResults ?? false);
@@ -496,9 +528,10 @@ export async function runHostedHarnessTextTurn(input: {
           !previousTools ||
           toolNames.size !== previousTools.size ||
           [...toolNames].some((name) => !previousTools.has(name));
-        const contextAvailable = input.workspaceContext?.read();
+        const contextAvailable =
+          contextWithInstructions(input.workspaceContext?.read()) || undefined;
         const contextChanged =
-          contextAvailable !== undefined &&
+          (contextAvailable !== undefined || injectedContext !== undefined) &&
           contextAvailable !== injectedContext;
         if (toolsChanged) {
           config.setPromptToolSnapshot(toolNames);
@@ -507,7 +540,7 @@ export async function runHostedHarnessTextTurn(input: {
           injectedTools = toolNames;
         }
         if (contextChanged) {
-          config.setUserMemory(contextWithInstructions(contextAvailable));
+          config.setUserMemory(contextAvailable ?? '');
           injectedContext = contextAvailable;
         }
         // Config changes alone do not update the chat's cached instruction.

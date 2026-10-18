@@ -24,19 +24,21 @@ once the unit is empty (`hook-command-cgroup.ts:227-248`,
 2. **The fixture gets a TERM-ignoring descendant.** A cancel that only sends
    SIGTERM cannot empty the unit while a descendant ignores it; the fixture
    child installs a `SIGTERM` handler in the `hook-ignore-term` mode.
-3. **Two independent cells, each its own fixture.** Cancellation and timeout
-   boot separate Spring/Harness/worker stacks, so a stall in one cannot mask
-   the other. Each keeps `@Timeout(300)`, and the class is budgeted at 200 s.
+3. **Independent cells, each its own fixture.** Cancellation, timeout and the
+   stopped-worker cancel boot separate Spring/Harness/worker stacks, so a
+   stall in one cannot mask the other. Each keeps `@Timeout(300)`, and the
+   class is budgeted at 350 s.
 4. **The cancel and status probes use the Harness routes.** Both go through
    the authenticated `/session/:id/hooks/operations/:operationId` routes
    with the contract headers, the same entry the FG13c status probe uses.
 
 ## Cases
 
-| Case                   | Inject                                                                                                                    | Expect                                                                                                                                                                                                                                                                                                              |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cancel-held-command`  | A `PreToolUse` command Hook holds with a descendant that ignores SIGTERM; cancel the operation through the Harness route. | The command gets SIGTERM; the descendant survives it, so the unit is only emptied by `cgroup.kill` after the grace. The record settles `cancelled` and only then reports; the unit reaches `populated 0`; exactly one physical call; `failClosed` turns the cancelled outcome into a block and the tool never runs. |
-| `timeout-held-command` | The same held command with a 2 s Hook timeout and a descendant that ignores SIGTERM.                                      | The command times out, its output is not applied, the record settles with `outcome=timeout`, the unit is killed and reaches `populated 0`, and the model sees the block instead of the file body.                                                                                                                   |
+| Case                         | Inject                                                                                                                    | Expect                                                                                                                                                                                                                                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-held-command`        | A `PreToolUse` command Hook holds with a descendant that ignores SIGTERM; cancel the operation through the Harness route. | The command gets SIGTERM; the descendant survives it, so the unit is only emptied by `cgroup.kill` after the grace. The record settles `cancelled` and only then reports; the unit reaches `populated 0`; exactly one physical call; `failClosed` turns the cancelled outcome into a block and the tool never runs. |
+| `timeout-held-command`       | The same held command with a 2 s Hook timeout and a descendant that ignores SIGTERM.                                      | The command times out, its output is not applied, the record settles with `outcome=timeout`, the unit is killed and reaches `populated 0`, and the model sees the block instead of the file body.                                                                                                                   |
+| `cancel-with-stopped-worker` | The same held command; SIGSTOP the durable worker, then cancel through the Harness route.                                 | The cancel is recorded, but the owner cannot answer: the record stays `recovery_blocked` / `outcome_unknown`, the command and its descendant keep the unit populated, and no second call happens.                                                                                                                   |
 
 ## Mutation witnesses
 
@@ -53,14 +55,17 @@ Each witness must turn its cell red before the slice merges.
   `processUnit.terminate` returns, so the record reaches its terminal state
   while the unit is still populated. `awaitTerminalDrained` inspects the
   first terminal observation, so both cells fail on the populated unit.
+- `cancel-with-stopped-worker`: drop the honest unknown commit in `status()`
+  (the branch that records `recovery_blocked` / `outcome_unknown` when the
+  owner cannot answer). The record stays `running`, so the state assertion
+  fails.
 
 ## Non-goals
 
-The rest of FG13d — cancel before dispatch, a dropped `hook-cancel` reply, a
-cancel with the worker stopped, and the DELETE async-drain with
-`SessionEnd`/`SessionDelete` — stays on #14449. Also out: FG13a, FG13b,
-FG13e, FG13f, local non-managed Hooks, Windows/macOS and #13133's design
-items.
+The rest of FG13d — cancel before dispatch, a dropped `hook-cancel` reply,
+and the DELETE async-drain with `SessionEnd`/`SessionDelete` — stays on
+#14449. Also out: FG13a, FG13b, FG13e, FG13f, local non-managed Hooks,
+Windows/macOS and #13133's design items.
 
 ## Validation
 
