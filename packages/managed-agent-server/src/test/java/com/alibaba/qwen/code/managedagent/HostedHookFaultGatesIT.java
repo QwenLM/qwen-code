@@ -91,7 +91,7 @@ class HostedHookFaultGatesIT {
         boot("15000", "default");
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        String firstTurn = submit(session, "FG13_HARNESS_KILL");
+        submit(session, "FG13_HARNESS_KILL");
         waitFor(() -> {
             assertThat(events("hook.call")).hasSize(1);
             assertThat(events("hook.child")).hasSize(1);
@@ -117,16 +117,10 @@ class HostedHookFaultGatesIT {
         waitFor(() -> assertThat(running(child)).isFalse());
         assertThat(worker(session)).isEqualTo(worker);
         assertThat(generation(session)).isEqualTo(generation);
-        // The active Turn refuses prompts and DELETEs; cancel it, then a
-        // fresh prompt's admission runs reconcileUnsettled and settles the
-        // Hook from the original worker's receipt.
-        api("POST", "/v1/agents/sessions/" + session + "/events",
-                Map.of("type", "agent.session.cancel", "turn_id", firstTurn), "cancel", 202);
-        // The cancel waits for the dead Harness's lease renewal; the
-        // coordinator lands it about six seconds after the shared 60 s bound.
-        waitFor(Duration.ofSeconds(120),
-                () -> assertThat(turnStatus(session, firstTurn)).isIn("CANCELLED", "FAILED", "COMPLETED"));
-        submit(session, "FG13_RECONCILE");
+        // The fresh prompt's admission runs reconcileUnsettled before it
+        // admits or refuses the new Turn; the pending Hook settles from the
+        // original receipt without waiting for the stalled Turn.
+        submitAllowingRefusal(session, "FG13_RECONCILE");
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         JsonNode executionAfter = hookExecution(session);
         assertThat(executionAfter.path("resultRef").isNull()).isFalse();
@@ -331,9 +325,9 @@ class HostedHookFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 409);
     }
 
-    private String turnStatus(String session, String turn) {
-        return jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ?"
-                + " AND session_id = ? AND turn_id = ?", String.class, tenant, session, turn);
+    private void submitAllowingRefusal(String session, String prompt) throws Exception {
+        api("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message",
+                "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202, 409);
     }
 
     private JsonNode hookExecution(String session) {
