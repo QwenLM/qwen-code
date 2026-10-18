@@ -22,7 +22,11 @@ import type { Config } from '../config/config.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { IdeContextStore } from '../ide/ideContext.js';
-import type { LspConnectionInterface, LspServerConfig } from './types.js';
+import type {
+  LspConnectionInterface,
+  LspServerConfig,
+  LspServerHandle,
+} from './types.js';
 
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => ({
@@ -141,7 +145,7 @@ async function settle<T>(promise: Promise<T>): Promise<T> {
   return result.value;
 }
 
-async function document(fileName: string) {
+async function document(fileName: string, serverName?: string) {
   const filePath = path.join(directory, fileName);
   fs.writeFileSync(filePath, 'fixture');
   const tool = new LspTool({
@@ -151,7 +155,7 @@ async function document(fileName: string) {
   } as unknown as Config);
   return settle(
     tool
-      .build({ operation: 'diagnostics', filePath })
+      .build({ operation: 'diagnostics', filePath, serverName })
       .execute(new AbortController().signal),
   );
 }
@@ -236,6 +240,73 @@ describe('diagnostic ownership from explicit declarations', () => {
       expect(result.llmContent).toContain('No diagnostics found');
     },
   );
+
+  it.each(['constructor', '__proto__'])(
+    'treats inherited language ID %s as unknown',
+    async (language) => {
+      await start([{ language, connection: connection() }]);
+      const handle = manager.getHandles().get('server-0')!;
+      const extensions = (
+        service as unknown as {
+          getWorkspaceSymbolExtensions(handle: LspServerHandle): string[];
+        }
+      ).getWorkspaceSymbolExtensions(handle);
+      expect(extensions).toEqual([language]);
+      const result = await document('main.unknown');
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('No diagnostics found');
+    },
+  );
+
+  it('keeps scoped attribution independent of an unselected server mapping', async () => {
+    await start([
+      { language: 'remote-lsp', connection: connection() },
+      { language: 'generic', connection: connection() },
+    ]);
+
+    expect((await document('main.custom', 'server-1')).error).toBeUndefined();
+
+    manager.getHandles().get('server-0')!.config.extensionToLanguage = {
+      '.custom': 'custom',
+    };
+    const result = await document('main.custom', 'server-1');
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('No diagnostics found');
+  });
+
+  it('keeps an empty language ID as a veto for an attributable file', async () => {
+    await start([
+      {
+        name: 'empty-language',
+        language: '',
+        connection: connection(),
+        failed: true,
+      },
+      {
+        language: 'remote-lsp',
+        mapping: { '.custom': 'custom' },
+        connection: connection(),
+      },
+    ]);
+    expect((await document('main.custom')).error?.message).toContain(
+      'empty-language',
+    );
+  });
+
+  it('keeps a loader-shaped pyright server as a veto for Python', async () => {
+    await start([
+      {
+        name: 'pyright-langserver',
+        language: 'pyright',
+        connection: connection(),
+        failed: true,
+      },
+      { language: 'python', connection: connection() },
+    ]);
+    const result = await document('main.py');
+    expect(result.error?.message).toContain('pyright-langserver');
+    expect(result.llmContent).not.toContain('No diagnostics found');
+  });
 
   it.each([
     ['typescript', 'main.mts'],
@@ -447,21 +518,25 @@ describe('diagnostic ownership from explicit declarations', () => {
   });
 
   it('does not infer custom ownership from an unrecognized language ID', async () => {
+    const explicitOwner = connection();
+    explicitOwner.request.mockRejectedValue(
+      new LspJsonRpcError('Method not found', -32601),
+    );
     await start([
       { name: 'custom', language: 'custom', connection: connection() },
       {
         language: 'remote-lsp',
         mapping: { '.custom': 'custom' },
-        connection: connection(),
+        connection: explicitOwner,
       },
     ]);
-    // The explicit mapping makes this extension attributable, but the selected
-    // server's language ID alone is not evidence that it owns the file.
+    // The explicit mapping makes this extension attributable, but the other
+    // server's matching language ID alone is not evidence that it owns the file.
     const filePath = path.join(directory, 'main.custom');
     fs.writeFileSync(filePath, 'fixture');
     await expect(
-      settle(service.diagnostics(pathToFileURL(filePath).toString(), 'custom')),
-    ).rejects.toThrow('could not be attributed');
+      settle(service.diagnostics(pathToFileURL(filePath).toString())),
+    ).rejects.toThrow('server-1: does not support pull diagnostics');
   });
 
   it.each([

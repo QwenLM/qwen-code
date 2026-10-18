@@ -802,7 +802,10 @@ export class NativeLspService {
     );
     const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
     const skipped = configured
-      .filter(([, handle]) => !this.serverDeclaredIrrelevant(handle, extension))
+      .filter(
+        ([, handle]) =>
+          !this.serverDeclaredIrrelevant(handle, extension, serverName),
+      )
       .map(([name, handle]) => describeLspServerState(name, handle));
     if (skipped.length > 0) {
       throw new Error(
@@ -837,7 +840,7 @@ export class NativeLspService {
     return this.getReadyHandles(serverName).filter(
       ([name, handle]) =>
         !asked.some(([askedName]) => askedName === name) &&
-        !this.serverDeclaredIrrelevant(handle, extension),
+        !this.serverDeclaredIrrelevant(handle, extension, serverName),
     );
   }
 
@@ -910,8 +913,12 @@ export class NativeLspService {
         }
         continue;
       }
-      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
-        LANGUAGE_ID_TO_EXTENSIONS[id] ??
+      const mappedExtensions = Object.hasOwn(DIAGNOSTIC_LANGUAGE_ALIASES, id)
+        ? DIAGNOSTIC_LANGUAGE_ALIASES[id]
+        : Object.hasOwn(LANGUAGE_ID_TO_EXTENSIONS, id)
+          ? LANGUAGE_ID_TO_EXTENSIONS[id]
+          : undefined;
+      for (const ext of mappedExtensions ??
         (id.length > 0 &&
         !/\s/u.test(id) &&
         (ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(id) ||
@@ -924,10 +931,14 @@ export class NativeLspService {
     return owned;
   }
 
-  private isAttributableDiagnosticExtension(extension: string): boolean {
+  private isAttributableDiagnosticExtension(
+    extension: string,
+    serverName?: string,
+  ): boolean {
     return (
       ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension) ||
-      Array.from(this.serverManager.getHandles().values()).some((handle) => {
+      Array.from(this.serverManager.getHandles()).some(([name, handle]) => {
+        if (serverName && name !== serverName) return false;
         const mapping = handle.config.extensionToLanguage;
         return (
           mapping !== undefined &&
@@ -953,17 +964,21 @@ export class NativeLspService {
   private serverDeclaredIrrelevant(
     handle: LspServerHandle,
     extension: string | undefined,
+    serverName?: string,
   ): boolean {
     if (
       extension === undefined ||
-      !this.isAttributableDiagnosticExtension(extension)
+      !this.isAttributableDiagnosticExtension(extension, serverName)
     ) {
       return false;
     }
     const owned = this.declaredDiagnosticExtensions(handle);
     // Only explicit mappings and recognized languages contribute ownership;
     // an unrecognized server-name key still proves nothing about this file.
-    return owned.size > 0 && !owned.has(extension);
+    const hasAttributableOwnership = [...owned].some((ownedExtension) =>
+      this.isAttributableDiagnosticExtension(ownedExtension, serverName),
+    );
+    return hasAttributableOwnership && !owned.has(extension);
   }
 
   /**
@@ -994,7 +1009,7 @@ export class NativeLspService {
         ([name, handle]) =>
           (!serverName || name === serverName) &&
           !queried.some(([queriedName]) => queriedName === name) &&
-          !this.serverDeclaredIrrelevant(handle, extension),
+          !this.serverDeclaredIrrelevant(handle, extension, serverName),
       )
       .map(([name, handle]) =>
         handle.status === 'READY' && handle.connection !== undefined
@@ -1350,7 +1365,9 @@ export class NativeLspService {
     // Fall back to deriving extensions from language identifiers
     if (extensions.size === 0) {
       for (const language of handle.config.languages) {
-        const mapped = LANGUAGE_ID_TO_EXTENSIONS[language];
+        const mapped = Object.hasOwn(LANGUAGE_ID_TO_EXTENSIONS, language)
+          ? LANGUAGE_ID_TO_EXTENSIONS[language]
+          : undefined;
         if (mapped) {
           for (const ext of mapped) {
             extensions.add(ext);
@@ -2299,7 +2316,9 @@ export class NativeLspService {
               });
             } else {
               answeredAny++;
-              if (!this.serverDeclaredIrrelevant(handle, extension)) {
+              if (
+                !this.serverDeclaredIrrelevant(handle, extension, serverName)
+              ) {
                 answeredRelevant++;
                 if (
                   extension !== undefined &&
@@ -2356,14 +2375,15 @@ export class NativeLspService {
       // the existing pass-through documented in the diagnostic design.
       const attributable =
         extension !== undefined &&
-        this.isAttributableDiagnosticExtension(extension);
+        this.isAttributableDiagnosticExtension(extension, serverName);
       // A server the queried file provably excludes cannot veto the answer —
       // its failure says nothing about this file — and neither can a server
       // that answered `-32601`, which never implemented the pull in the first
       // place (and so is already out of `failures`). A failure or unusable
       // answer from a server that could own the file must still veto.
       const relevantFailures = failures.filter(
-        ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
+        ({ handle }) =>
+          !this.serverDeclaredIrrelevant(handle, extension, serverName),
       );
       const unreachable = this.unreachableDiagnosticServers(
         queried,
