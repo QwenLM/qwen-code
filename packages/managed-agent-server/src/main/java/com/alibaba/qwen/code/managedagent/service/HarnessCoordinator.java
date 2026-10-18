@@ -103,6 +103,7 @@ public class HarnessCoordinator {
     private final Duration batchInterval;
     private final int batchMaxEvents;
     private final int batchMaxBytes;
+    private final boolean sessionCreateWarm;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final Set<String> cancellations = ConcurrentHashMap.newKeySet();
@@ -129,6 +130,7 @@ public class HarnessCoordinator {
         this.runtimeWarmer = runtimeWarmer;
         this.executor = executor;
         this.clock = clock;
+        this.sessionCreateWarm = properties.getRuntimeBroker().isSessionCreateWarm();
         this.leaseDuration = properties.getDispatch().getLeaseDuration();
         this.renewInterval = properties.getDispatch()
                 .getLeaseRenewInterval();
@@ -205,6 +207,31 @@ public class HarnessCoordinator {
         dispatch(tenantId, sessionId, turnId);
         executor.execute(() -> cancelAdmittedTurn(tenantId, sessionId,
                 turnId, false));
+    }
+
+    public void warmSession(String tenantId, String sessionId) {
+        if (!sessionCreateWarm || !runtimeWarmer.isEnabled()
+                || !harness.isWorkspaceFilesAvailable()) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                runtimeWarmer.warm(sessionId).whenComplete(
+                        (ignored, error) -> {
+                            if (error != null) {
+                                sessionWarmFailed(tenantId, sessionId, error);
+                            }
+                        });
+            } catch (RuntimeException error) {
+                sessionWarmFailed(tenantId, sessionId, error);
+            }
+        });
+    }
+
+    private static void sessionWarmFailed(String tenantId, String sessionId,
+            Throwable error) {
+        LOG.warn("Managed Runtime create warm failed tenant={} session={}",
+                tenantId, sessionId, error);
     }
 
     @Scheduled(fixedDelayString =
