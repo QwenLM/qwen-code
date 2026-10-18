@@ -15,6 +15,10 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsModelSelection() { return false; }
 
+    default boolean supportsPlanMode() { return false; }
+
+    default boolean supportsInputAttachments() { return false; }
+
     default boolean isWorkspaceFilesAvailable() {
         return false;
     }
