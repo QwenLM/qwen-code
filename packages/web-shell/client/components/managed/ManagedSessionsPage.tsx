@@ -24,7 +24,7 @@ import {
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
-import { managedEventsToMessages } from './managed-session-messages';
+import { createManagedMessageProjector } from './managed-session-messages';
 import {
   getManagedClientId,
   managedRequestId,
@@ -228,9 +228,15 @@ function ManagedSessionsContent({
   const listBusy = useRef(false);
   const selection = useRef(sessionId);
   selection.current = sessionId;
+  const messageProjector = useMemo(
+    () => createManagedMessageProjector(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- provider and sessionId are projector cache reset keys
+    [provider, sessionId],
+  );
+  const truncatedLabel = t('managed.truncated');
   const messages = useMemo(
-    () => managedEventsToMessages(detail.events, t('managed.truncated')),
-    [detail.events, t],
+    () => messageProjector(detail.events, truncatedLabel),
+    [messageProjector, detail.events, truncatedLabel],
   );
   // The caveat sits beside the card rather than inside the panel, so the panel
   // is told about it: without this the dialog describes only the tool name and
