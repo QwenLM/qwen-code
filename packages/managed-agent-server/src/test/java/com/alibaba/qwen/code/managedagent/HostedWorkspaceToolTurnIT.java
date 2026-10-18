@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
@@ -597,8 +598,10 @@ class HostedWorkspaceToolTurnIT {
                     .isEqualTo(target.path("lastSequence").asLong()).isEqualTo(receipt.path("committedSequence").asLong());
         }
         for (JsonNode resource : target.path("resources")) {
-            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
-                    tenant, sessionId, resource.path("resourceId").asText());
+            // Led by the indexed session scope key, as in HostedGateTestSupport:
+            // the raw tenant+session form scans the lane's accumulated ma_resource rows.
+            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
             if (!applied) {
                 if (resource.has("bytesBase64")) {
                     assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -680,8 +683,8 @@ class HostedWorkspaceToolTurnIT {
         assertThat(head.get("last_commit_digest")).isEqualTo(digest);
         assertThat(head.get("latest_checkpoint_resource_id")).isEqualTo(checkpointId);
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
-                tenant, sessionId, checkpointId);
+                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
         if (fault.startsWith("result-")) {
             assertThat(phase).isEqualTo("await_runtime");
