@@ -674,6 +674,60 @@ describe('SkillTool', () => {
       expect(result).toMatch(/Skill "code-review" not found/);
     });
 
+    it('does not resolve a bare name whose only match is hidden from model invocation (#13683)', async () => {
+      const hidden: SkillConfig = {
+        ...mockSkills[0],
+        name: 'portable:secret',
+        authoredName: 'secret',
+        extensionName: 'portable',
+        level: 'extension',
+        disableModelInvocation: true,
+      };
+      lists([hidden]);
+      caches([hidden]);
+      const tool = await newTool();
+      // Not resolved (the bare spelling never grants a hidden skill), and the
+      // error stays the generic not-found — not a load path.
+      expect(validate('secret', tool)).toMatch(/Skill "secret" not found/);
+    });
+
+    it('surfaces the path-activation hint for a bare name matching a gated skill (#13683)', async () => {
+      const gated: SkillConfig = {
+        ...mockSkills[0],
+        name: 'portable:gated',
+        authoredName: 'gated',
+        extensionName: 'portable',
+        level: 'extension',
+        paths: ['**/*.tsx'],
+      };
+      lists([gated]);
+      caches([gated]);
+      gateOnPaths();
+      const tool = await newTool();
+      expect(validate('gated', tool)).toMatch(/gated by path-based activation/);
+    });
+
+    it('dedups a bare-then-qualified invocation in one session (#13683)', async () => {
+      const skill: SkillConfig = {
+        ...mockSkills[0],
+        name: 'portable:code-review',
+        authoredName: 'code-review',
+        extensionName: 'portable',
+        level: 'extension',
+      };
+      setSkills([skill]);
+      loads(skill);
+      await skillTool.refreshSkills();
+
+      const first = await execText('code-review');
+      expect(first).toContain(skill.body);
+
+      // Bookkeeping keys on the resolved identity: the qualified spelling
+      // must see the skill as already loaded rather than re-injecting it.
+      const second = await execText('portable:code-review');
+      expect(second).toContain('already loaded');
+    });
+
     it('does not allow a pending conditional skill to be invoked via the model-invocable command path', async () => {
       // Regression for /review finding: SkillCommandLoader exposes every
       // user/project skill as a model-invocable command (so it surfaces

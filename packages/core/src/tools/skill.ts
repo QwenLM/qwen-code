@@ -291,6 +291,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     // model-invocable commands take precedence above).
     const authoredResolution = this.resolveAuthoredName(params.skill);
     if (authoredResolution && 'name' in authoredResolution) return null;
+    if (authoredResolution && 'gated' in authoredResolution) {
+      return `Skill "${params.skill}" is gated by path-based activation (paths: frontmatter) and is not yet available. Access a file matching its paths patterns first to activate it.`;
+    }
 
     // Disabled-by-user branch — placed AFTER commandExists so a same-named
     // MCP prompt or file command can still pass validation. With the
@@ -343,17 +346,32 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   private resolveAuthoredName(
     requested: string,
-  ): { name: string } | { candidates: string[] } | null {
+  ): { name: string } | { candidates: string[] } | { gated: string } | null {
     const cached = this.skillManager.getCachedSkills() ?? [];
-    const matches = cached.filter(
+    const authored = cached.filter(
       (skill) =>
         skill.name !== requested &&
-        (skill.authoredName ?? '').trim() === requested &&
-        this.config.isSkillEnabled(skill),
+        (skill.authoredName ?? '').trim() === requested,
     );
-    if (matches.length === 1) return { name: matches[0]!.name };
-    if (matches.length > 1)
-      return { candidates: matches.map((skill) => skill.name) };
+    // The model-invocation contract this file enforces everywhere else:
+    // enabled, not disable-model-invocation, and paths:-active.
+    const allowed = authored.filter(
+      (skill) =>
+        skillModelInvocationBlock(this.config, this.skillManager, skill) ===
+        undefined,
+    );
+    if (allowed.length === 1) return { name: allowed[0]!.name };
+    if (allowed.length > 1)
+      return { candidates: allowed.map((skill) => skill.name) };
+    // A unique bare match that is merely paths-gated surfaces the gating
+    // hint; a hidden/disabled one stays a plain not-found.
+    const inactive = authored.filter(
+      (skill) =>
+        skillModelInvocationBlock(this.config, this.skillManager, skill) ===
+        'inactive',
+    );
+    if (authored.length === 1 && inactive.length === 1)
+      return { gated: inactive[0]!.name };
     return null;
   }
 
@@ -748,17 +766,32 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   // return the candidates so callers surface them.
   private resolveAuthoredName(
     requested: string,
-  ): { name: string } | { candidates: string[] } | null {
+  ): { name: string } | { candidates: string[] } | { gated: string } | null {
     const cached = this.skillManager.getCachedSkills() ?? [];
-    const matches = cached.filter(
+    const authored = cached.filter(
       (skill) =>
         skill.name !== requested &&
-        (skill.authoredName ?? '').trim() === requested &&
-        this.config.isSkillEnabled(skill),
+        (skill.authoredName ?? '').trim() === requested,
     );
-    if (matches.length === 1) return { name: matches[0]!.name };
-    if (matches.length > 1)
-      return { candidates: matches.map((skill) => skill.name) };
+    // The model-invocation contract this file enforces everywhere else:
+    // enabled, not disable-model-invocation, and paths:-active.
+    const allowed = authored.filter(
+      (skill) =>
+        skillModelInvocationBlock(this.config, this.skillManager, skill) ===
+        undefined,
+    );
+    if (allowed.length === 1) return { name: allowed[0]!.name };
+    if (allowed.length > 1)
+      return { candidates: allowed.map((skill) => skill.name) };
+    // A unique bare match that is merely paths-gated surfaces the gating
+    // hint; a hidden/disabled one stays a plain not-found.
+    const inactive = authored.filter(
+      (skill) =>
+        skillModelInvocationBlock(this.config, this.skillManager, skill) ===
+        'inactive',
+    );
+    if (authored.length === 1 && inactive.length === 1)
+      return { gated: inactive[0]!.name };
     return null;
   }
 
@@ -887,9 +920,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
     try {
       // Load the skill with runtime config (includes additional files)
-      const skill = await this.skillManager.loadSkillForRuntime(
-        effectiveSkill,
-      );
+      const skill = await this.skillManager.loadSkillForRuntime(effectiveSkill);
       if (skill && !this.config.isSkillEnabled(skill)) {
         return this.executeDisabledSkill();
       }
@@ -983,7 +1014,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       } catch (error) {
         if (
           !(error instanceof ReviewWorkflowActivationError) ||
-          !this.isSkillLoaded(this.params.skill)
+          !this.isSkillLoaded(effectiveSkill)
         ) {
           throw error;
         }
@@ -996,8 +1027,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // short confirmation so the model knows the skill is active
       // without wasting context tokens. Check BEFORE calling
       // onSkillLoaded, which adds the name to the loaded set.
-      if (this.isSkillLoaded(this.params.skill)) {
-        this.onSkillLoaded(this.params.skill);
+      if (this.isSkillLoaded(effectiveSkill)) {
+        this.onSkillLoaded(effectiveSkill);
         void this.recordAutoSkillUsageBestEffort(skill);
         const msg = `Skill "${this.params.skill}" is already loaded in context.${activationWarning}`;
         return {
@@ -1008,7 +1039,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
-      this.onSkillLoaded(this.params.skill, llmContent, skill);
+      this.onSkillLoaded(effectiveSkill, llmContent, skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
