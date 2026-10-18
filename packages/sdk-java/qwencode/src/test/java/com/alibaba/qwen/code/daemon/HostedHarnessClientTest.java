@@ -2784,6 +2784,7 @@ class HostedHarnessClientTest {
         // R1-43: a peer that stops writing without closing must not park
         // the consumer forever; the idle watchdog closes the stream and
         // next() reports the idle timeout.
+        advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch headersSent = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -2820,17 +2821,21 @@ class HostedHarnessClientTest {
                 DaemonEvent first = assertTimeoutPreemptively(
                         Duration.ofSeconds(5), stream::next);
                 assertEquals("turn_complete", first.getType());
-                DaemonTransportException failure = assertThrows(
-                        DaemonTransportException.class,
+                // The typed outcome tells a coordinator a silent peer from
+                // a reset socket or a server that ended the stream.
+                HostedHarnessStreamIdleException failure = assertThrows(
+                        HostedHarnessStreamIdleException.class,
                         () -> assertTimeoutPreemptively(
                                 Duration.ofSeconds(10), stream::next));
                 assertTrue(failure.getMessage().contains("idle timeout"),
                         failure.getMessage());
+                assertEquals(Duration.ofMillis(500),
+                        failure.getIdleTimeout());
                 // A caller arriving after the out-of-band abort gets the
                 // same DaemonException-family signal from the closed
                 // guard, not the caller-initiated IllegalStateException.
-                DaemonTransportException late = assertThrows(
-                        DaemonTransportException.class, stream::next);
+                HostedHarnessStreamIdleException late = assertThrows(
+                        HostedHarnessStreamIdleException.class, stream::next);
                 assertTrue(late.getMessage().contains("idle timeout"),
                         late.getMessage());
             }
@@ -2873,6 +2878,7 @@ class HostedHarnessClientTest {
         // empty when the consumer parks again: the answer delay sits
         // between one watchdog tick and the budget, a window only the
         // entry stamp in next() survives.
+        advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch stopKeepalives = new CountDownLatch(1);
         CountDownLatch stallOver = new CountDownLatch(1);
@@ -2896,7 +2902,7 @@ class HostedHarnessClientTest {
                             }
                         }
                         stallOver.await(15, TimeUnit.SECONDS);
-                        // Strictly between one watchdog tick (200 ms) and
+                        // Strictly between one watchdog tick (100 ms) and
                         // the idle budget (400 ms): with the entry stamp
                         // the first tick after the consumer parks again
                         // measures ~250 ms and the stream survives;
@@ -2951,6 +2957,7 @@ class HostedHarnessClientTest {
         // A peer that stays alive through keepalive comments must not trip
         // the watchdog: the hosted events route emits these during
         // legitimately silent phases (long tool calls, approval waits).
+        advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch stopKeepalives = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
@@ -3026,6 +3033,8 @@ class HostedHarnessClientTest {
         // Builder.sseIdleTimeout(Duration.ZERO) hands the deadline to the
         // caller: a consumer parked in next() against a silent peer must
         // keep waiting instead of aborting at the first watchdog tick.
+        // The Harness advertises keepalives, so only ZERO disables it.
+        advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
@@ -3085,6 +3094,66 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void aHarnessWithoutKeepalivesKeepsTheReadUnbounded() throws Exception {
+        // #14135: a Harness that does not advertise event-keepalive/1 is
+        // silent through every quiet phase of a healthy Turn, so a bound
+        // would abort those streams during a rolling upgrade. The client
+        // arms no watchdog against it, whatever sseIdleTimeout says.
+        createSessionRoute();
+        CountDownLatch release = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/events",
+                exchange -> {
+                    sendSseHeaders(exchange);
+                    exchange.getResponseBody().flush();
+                    try {
+                        release.await(15, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    exchange.getResponseBody().write(terminalEvent(1,
+                            PROMPT_ID).getBytes(StandardCharsets.UTF_8));
+                    exchange.getResponseBody().flush();
+                    exchange.close();
+                });
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                .sseIdleTimeout(Duration.ofMillis(200))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            try (HarnessEventStream stream = client.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .eventEpoch(EVENT_EPOCH)
+                            .build())) {
+                assertEquals(0, client.scheduler().getQueue().size());
+                ExecutorService consumer =
+                        Executors.newSingleThreadExecutor();
+                try {
+                    // Parked against a peer silent for five budgets: with
+                    // no watchdog the event written afterwards arrives.
+                    Future<DaemonEvent> parked = consumer.submit(
+                            stream::next);
+                    Thread.sleep(1000);
+                    release.countDown();
+                    DaemonEvent event = parked.get(10, TimeUnit.SECONDS);
+                    assertEquals("turn_complete", event.getType());
+                } finally {
+                    consumer.shutdownNow();
+                }
+                assertNull(stream.next());
+            }
+        } finally {
+            release.countDown();
+            client.close();
+        }
+    }
+
+    @Test
     void aWatchdogSchedulingFailureUnregistersTheStream()
             throws Exception {
         // client.close() racing a stream open has already shut the
@@ -3092,6 +3161,7 @@ class HostedHarnessClientTest {
         // rejection as a DaemonTransportException (the mapping send()
         // uses), and must not strand the just-registered stream in the
         // client's set.
+        advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
@@ -7110,12 +7180,17 @@ class HostedHarnessClientTest {
     @Test
     void anIdleAbortLandsInsideThePublishedWindow() throws Exception {
         // R4-4: the published abort window — between the budget and the
-        // budget plus max(100 ms, half the budget) — is what an
+        // budget plus max(100 ms, a tenth of the budget) — is what an
         // integrator sizes an outer supervisor deadline against, so the
-        // watchdog interval formula is pinned here: with a 400 ms budget
-        // the abort must land before 400 + 200 ms (plus scheduling
-        // slack); an interval of the full budget would double the
-        // worst-case latency past that bound.
+        // watchdog interval formula is pinned here: with a 2000 ms budget
+        // the abort must land before 2000 + 200 ms (plus scheduling
+        // slack). The ticks run from the stream's creation, so a park
+        // right after it sits on a tick of a half-budget 1000 ms interval
+        // too, and a tick a few ms late aborts that one at ~2000 ms.
+        // Parking 300 ms in puts the park mid-interval for both: the
+        // shipped 200 ms tick aborts at 2100 ms, a 1000 ms tick not
+        // before 2700 ms.
+        advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
@@ -7135,7 +7210,7 @@ class HostedHarnessClientTest {
                 .bearerToken("harness-token")
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ZERO)
-                .sseIdleTimeout(Duration.ofMillis(400))
+                .sseIdleTimeout(Duration.ofMillis(2000))
                 .build();
         try {
             HarnessSessionRef session = createSession(client);
@@ -7144,6 +7219,7 @@ class HostedHarnessClientTest {
                             .session(session)
                             .eventEpoch(EVENT_EPOCH)
                             .build())) {
+                Thread.sleep(300);
                 long parkedAt = System.nanoTime();
                 DaemonTransportException failure = assertThrows(
                         DaemonTransportException.class,
@@ -7153,9 +7229,9 @@ class HostedHarnessClientTest {
                         (System.nanoTime() - parkedAt) / 1_000_000;
                 assertTrue(failure.getMessage().contains("idle timeout"),
                         failure.getMessage());
-                assertTrue(elapsedMillis >= 350,
+                assertTrue(elapsedMillis >= 1950,
                         "aborted before the budget: " + elapsedMillis);
-                assertTrue(elapsedMillis < 700,
+                assertTrue(elapsedMillis < 2400,
                         "aborted outside the published window: "
                                 + elapsedMillis);
             }
@@ -8995,6 +9071,16 @@ class HostedHarnessClientTest {
                 .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
                         List.of(block)))
                 .build();
+    }
+
+    // The keepalive feature arms the idle watchdog (#14135); fixtures for
+    // the watchdog advertise it the way the current Harness does.
+    private void advertiseEventKeepalive() {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace(
+                "\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\""
+                        + HostedHarnessClient.EVENT_KEEPALIVE_FEATURE
+                        + "\"],"));
     }
 
     private static String capabilitiesJson(String digest, String bootId) {

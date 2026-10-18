@@ -445,22 +445,24 @@
                                  at 2x): the healthy sum becomes
                                  5033 s, so the fork moves to 5643 s,
                                  still inside the Verify step's 105
-                                 minutes. The FG12b store-failure
+                                 minutes. The event-stream liveness
+                                 gates add ~440 s, so the healthy sum
+                                 becomes 5473 s and the Verify step moves
+                                 to 115 minutes. The FG12b store-failure
                                  class (HostedMcpStoreFaultGatesIT,
                                  eight cases) measures 49.6 s locally
                                  on JDK 21 + MySQL 8.0.46 (~120 s
                                  budgeted, a conservative 2.4x): the
-                                 healthy sum becomes 5153 s, so the
-                                 fork moves to 5763 s and the Verify
-                                 step to 107 minutes. The FG12f
+                                 healthy sum becomes 5593 s and the
+                                 fork moves to 6203 s. The FG12f
                                  stream-gap class (HostedMcpStreamGap
                                  IT, three cases, three cold boots)
                                  measures 104.6 s locally on JDK 21 +
-                                 MySQL 8.0.46 (~210 s budgeted at 2x):
-                                 the healthy sum becomes 5363 s, so
-                                 the fork moves to 5963 s and the
-                                 Verify step to 110 minutes. -->
-                            <forkedProcessTimeoutInSeconds>5963</forkedProcessTimeoutInSeconds>
+                                 MySQL 8.0.46 (~210 s budgeted): the
+                                 healthy sum becomes 5803 s, so the
+                                 fork moves to 6403 s and the Verify
+                                 step to 117 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6403</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
