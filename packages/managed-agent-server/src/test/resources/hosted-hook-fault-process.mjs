@@ -1,8 +1,7 @@
 // FG13c (issue #14449): the managed command-Hook fixture. A Hook is a
 // decision gate with a process behind it, so the fault cells need a command
-// that can hold while a descendant keeps its cgroup unit populated, one that
-// ignores SIGTERM (so the post-grace cgroup.kill branch is reachable), and
-// one that dies on SIGKILL while it runs.
+// that can hold while a descendant keeps its cgroup unit populated, and one
+// that dies on SIGKILL while it runs.
 import { spawn } from 'node:child_process';
 import {
   closeSync,
