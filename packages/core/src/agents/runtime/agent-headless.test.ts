@@ -54,6 +54,7 @@ import {
   AgentEventEmitter,
   AgentEventType,
   type AgentEventMap,
+  type AgentRoundTextEvent,
 } from './agent-events.js';
 import type {
   ModelConfig,
@@ -988,6 +989,46 @@ describe('subagent.ts', () => {
           contextWith({ task_prompt: 'Follow-up task' }),
         );
         expect(scope.getFinalText()).toBe('');
+      });
+
+      it('releases an unstarted response stream when a round listener throws', async () => {
+        const { config } = await createMockConfig();
+        const responseStream = (async function* () {
+          yield {
+            type: 'chunk' as const,
+            value: {
+              candidates: [
+                {
+                  finishReason: 'STOP',
+                  content: { parts: [{ text: 'unused' }] },
+                },
+              ],
+            },
+          };
+        })();
+        const returnSpy = vi
+          .spyOn(responseStream, 'return')
+          .mockRejectedValueOnce(new Error('stream teardown failed'));
+        mockSendMessageStream.mockResolvedValue(responseStream);
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.ROUND_START, () => {
+          throw new Error('round listener failed');
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+          eventEmitter,
+        );
+
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'round listener failed',
+        );
+        expect(returnSpy).toHaveBeenCalledOnce();
       });
 
       it('should append userMemory to the system prompt when available', async () => {
@@ -3089,6 +3130,124 @@ describe('subagent.ts', () => {
         },
       );
 
+      it('preserves the recovered prefix across continuation retries', async () => {
+        const { config } = await createMockConfig();
+        const usageMetadata = {
+          promptTokenCount: 100,
+          candidatesTokenCount: 10,
+          totalTokenCount: 110,
+        };
+        mockSendMessageStream.mockResolvedValue(
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [{ content: { parts: [{ text: 'prefix ' }] } }],
+                usageMetadata,
+              },
+            };
+            yield { type: 'retry', isContinuation: true };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'suffix' }] },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const eventEmitter = new AgentEventEmitter();
+        const roundEvents: AgentRoundTextEvent[] = [];
+        eventEmitter.on(AgentEventType.ROUND_TEXT, (event) => {
+          roundEvents.push(event);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          EXECUTE_PROMPT,
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getFinalText()).toBe('prefix suffix');
+        expect(roundEvents).toEqual([
+          expect.objectContaining({
+            text: 'prefix suffix',
+            usageMetadata,
+          }),
+        ]);
+      });
+
+      it('discards partial output when the model falls back', async () => {
+        const alwaysOnSpy = vi
+          .spyOn(LoopDetectionService.prototype, 'checkAlwaysOnSafeties')
+          .mockReturnValue(false);
+        const heuristicSpy = vi
+          .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+          .mockReturnValue(false);
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockResolvedValue(
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [{ content: { parts: [{ text: 'discarded' }] } }],
+              },
+            };
+            yield {
+              type: 'model_fallback',
+              info: {
+                fromModel: 'primary',
+                toModel: 'fallback',
+                fallbackIndex: 1,
+              },
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'replacement' }] },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          EXECUTE_PROMPT,
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getFinalText()).toBe('replacement');
+        const fallbackEvent = expect.objectContaining({
+          type: LlmEventType.ModelFallback,
+          fromModel: 'primary',
+          toModel: 'fallback',
+          fallbackIndex: 1,
+        });
+        expect(alwaysOnSpy).toHaveBeenCalledWith(fallbackEvent);
+        expect(heuristicSpy).toHaveBeenCalledWith(fallbackEvent);
+      });
+
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const { config, toolConfig } = await setupWriteFile();
         mockSendMessageStream
@@ -3114,6 +3273,9 @@ describe('subagent.ts', () => {
         expect(
           mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
         ).toBe(65_536);
+        expect(mockSendMessageStream.mock.calls[1][4]).toEqual({
+          maxOutputTokensFromRecovery: true,
+        });
       });
     });
   });

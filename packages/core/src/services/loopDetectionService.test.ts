@@ -1467,6 +1467,12 @@ describe('LoopDetectionService', () => {
       service = new LoopDetectionService(capConfig);
     });
 
+    const modelFallbackEvent = {
+      type: LlmEventType.ModelFallback,
+      fromModel: 'primary',
+      toModel: 'fallback',
+      fallbackIndex: 1,
+    } as ServerLlmStreamEvent;
     const finishedEvent = {
       type: LlmEventType.Finished,
       value: { reason: 'STOP' },
@@ -1605,7 +1611,7 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
-    it('rolls back a failed attempt on retry so its calls do not count', () => {
+    it('rolls back a failed attempt on retry', () => {
       service.reset('');
       // Attempt makes 6 calls, then the API retries (no round-trip committed
       // yet, so the rollback floor is 0).
@@ -1617,6 +1623,18 @@ describe('LoopDetectionService', () => {
       diverse(HARD_CAP, 't', 'j');
       expect(guardTool('t', { last: true })).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves committed repetition evidence on model fallback', () => {
+      service.reset('');
+      const sameCall = toolCall('t', { same: true });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(sameCall)).toBe(false);
+        expect(service.checkAlwaysOnSafeties(finishedEvent)).toBe(false);
+      }
+
+      expect(service.checkAlwaysOnSafeties(modelFallbackEvent)).toBe(false);
+      expect(service.checkAlwaysOnSafeties(sameCall)).toBe(true);
     });
 
     it('rolls back the stuck-repetition signal on retry', () => {

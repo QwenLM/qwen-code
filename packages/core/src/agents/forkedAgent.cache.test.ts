@@ -287,6 +287,169 @@ describe('runForkedAgent (cache path)', () => {
     vi.mocked(createRuntimeContentGeneratorView).mockReset();
   });
 
+  it('discards fresh-retry output and retains continuation output', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+    vi.mocked(LlmChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: vi.fn(async () =>
+            (async function* () {
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'discarded' }] } }],
+                },
+              };
+              yield { type: StreamEventType.RETRY };
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'kept' }] } }],
+                  usageMetadata: {
+                    promptTokenCount: 10,
+                    candidatesTokenCount: 2,
+                    totalTokenCount: 12,
+                  },
+                },
+              };
+              yield { type: StreamEventType.RETRY, isContinuation: true };
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: ' suffix' }] } }],
+                },
+              };
+            })(),
+          ),
+        }) as unknown as LlmChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'test',
+      cacheSafeParams: getCacheSafeParams()!,
+    });
+
+    expect(result.text).toBe('kept suffix');
+    expect(result.usage.outputTokens).toBe(2);
+  });
+
+  it('reports the fallback model that produced the result', async () => {
+    saveCacheSafeParams({}, [], 'primary-model');
+    vi.mocked(LlmChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: vi.fn(async () =>
+            (async function* () {
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'stale' }] } }],
+                },
+              };
+              yield {
+                type: StreamEventType.MODEL_FALLBACK,
+                info: {
+                  fromModel: 'primary-model',
+                  toModel: 'fallback-model',
+                  fallbackIndex: 1,
+                },
+              };
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'replacement' }] } },
+                  ],
+                },
+              };
+            })(),
+          ),
+        }) as unknown as LlmChat,
+    );
+
+    const result = await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'test',
+      cacheSafeParams: getCacheSafeParams()!,
+    });
+
+    expect(result.text).toBe('replacement');
+    expect(result.model).toBe('fallback-model');
+  });
+
+  describe('structured result across discarded attempts', () => {
+    const schema = {
+      type: 'object',
+      properties: { suggestion: { type: 'string' } },
+    };
+    const schemaChunk = (suggestion: string) => ({
+      type: StreamEventType.CHUNK,
+      value: modelChunk([fnCall('respond_in_schema', { suggestion })]),
+    });
+
+    const runWithEvents = (events: unknown[]) => {
+      vi.mocked(LlmChat).mockImplementation(
+        () =>
+          ({
+            sendMessageStream: vi.fn(async () => streamOf(...events)),
+          }) as unknown as LlmChat,
+      );
+      return runFork({ userMessage: 'suggest', jsonSchema: schema });
+    };
+
+    beforeEach(() => {
+      saveCacheSafeParams({}, [], 'primary-model');
+    });
+
+    it('drops the discarded attempt payload on a fresh retry', async () => {
+      const result = await runWithEvents([
+        schemaChunk('discarded'),
+        { type: StreamEventType.RETRY },
+        schemaChunk('kept'),
+      ]);
+
+      expect(result.jsonResult).toEqual({ suggestion: 'kept' });
+    });
+
+    it('drops the discarded attempt payload on model fallback', async () => {
+      const result = await runWithEvents([
+        schemaChunk('stale'),
+        {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          },
+        },
+        schemaChunk('replacement'),
+      ]);
+
+      expect(result.jsonResult).toEqual({ suggestion: 'replacement' });
+      expect(result.model).toBe('fallback-model');
+    });
+
+    it('replaces a payload revoked by a continuation retry', async () => {
+      const result = await runWithEvents([
+        schemaChunk('first'),
+        { type: StreamEventType.RETRY, isContinuation: true },
+        schemaChunk('second'),
+      ]);
+
+      expect(result.jsonResult).toEqual({ suggestion: 'second' });
+    });
+
+    it('returns no payload when a continuation retry revokes the only one', async () => {
+      const result = await runWithEvents([
+        schemaChunk('revoked'),
+        { type: StreamEventType.RETRY, isContinuation: true },
+      ]);
+
+      expect(result.jsonResult).toBeUndefined();
+    });
+  });
+
   it.each(['https://second.example/v1', ''])(
     'resolves an endpoint-qualified selector without passing its suffix as the model ID: %s',
     async (endpoint) => {
