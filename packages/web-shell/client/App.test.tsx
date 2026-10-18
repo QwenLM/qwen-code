@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
+import { DAEMON_APPROVAL_MODES } from './test/sidebarHarness';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
 const approvalModesProbe = vi.hoisted(() => ({
   cwd: undefined as string | undefined,
@@ -1173,7 +1174,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     },
   };
   return {
-    DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+    DAEMON_APPROVAL_MODES,
     // This harness only models the parent session connection.
     DaemonSessionProvider: ({
       children,
