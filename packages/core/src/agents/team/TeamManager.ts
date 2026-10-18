@@ -1767,6 +1767,15 @@ export class TeamManager {
     this.taskUpdateUnsubscribe?.();
     this.taskUpdateUnsubscribe = undefined;
 
+    // A teammate that never reported a terminal status still holds a bridge
+    // entry. `backend.cleanup()` terminates it later, when the STATUS_CHANGE
+    // bridge is detached and this emitter has no listeners, so the sole
+    // TEAMMATE_EXITED site cannot fire for it. Publish those exits here, while
+    // listeners are still attached: a client that reconstructs roster
+    // membership from joins and exits would otherwise keep a deleted team's
+    // teammates for the rest of the session.
+    const survivingAgentIds = [...this.eventBridgeCleanups.keys()];
+
     for (const cleanup of this.eventBridgeCleanups.values()) {
       cleanup();
     }
@@ -1774,6 +1783,17 @@ export class TeamManager {
 
     while (this.pendingAsyncWork.size > 0) {
       await Promise.allSettled([...this.pendingAsyncWork]);
+    }
+
+    for (const agentId of survivingAgentIds) {
+      this.teamEventEmitter.emit(TeamEventType.TEAMMATE_EXITED, {
+        agentId,
+        name: this.agentIdentities.get(agentId)?.agentName ?? agentId,
+        // The team is being torn down; `backend.cleanup()` below is what ends
+        // them, so the terminal status is a cancellation, not a completion.
+        status: AgentStatus.CANCELLED,
+        timestamp: Date.now(),
+      });
     }
 
     this.pendingMessages.clear();

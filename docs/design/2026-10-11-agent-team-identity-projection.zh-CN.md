@@ -33,6 +33,7 @@ interface AgentIdentity {
 ### 队友链路
 
 - **报告与花名册变更**以 `kind: 'peer'` 后台通知入队，带 `agent`（生产者）与 `label`（发送方名字，渲染在 turn marker 上）。持久化保存在 `backgroundTask.agent` 内；重放提升到帧级 `_meta.agent`，live 与 reload 帧同形，SDK reducer 的 `block.agent` 路径两边一致。
+- **删除团队会为仍在花名册上的每个队友发出退出事件。** 从未上报终态的队友没有自己的 `TEAMMATE_EXITED`，而拆除流程是在事件桥解绑之后才终止它 —— 因此删除动作本身在监听者仍在时把剩余成员以 `cancelled` 收尾。靠加入/退出重建成员表的客户端最终拿到空名单，而不是陈旧名单。
 - **活动与 agent 间消息**是独立的 display-only 投射（本 PR 新增）：
   - `TeamManager` 事件桥早已观察每个队友的工具调用/结果 —— 之前只当活跃度心跳用完即弃。新 `TEAMMATE_ACTIVITY` 事件转发 `{name, toolName, phase, description, success}`。
   - team sink 订阅发给队友的 `MESSAGE_SENT`（`{from, to, message}`），使用花名册里解析后的名字。发给 leader 的报告只走邮箱投射。
@@ -51,7 +52,7 @@ interface AgentIdentity {
 3. **Ephemeral 是文档化的，不是隐藏的** —— reload 后报告/花名册行保持归因；活动行消失。follow-up 清单记录了「按队友持久化活动摘要」为候选改进。
 4. **同一 manager 实例的重复通知是 no-op**：`Config.setTeamManager` 对同一对象也触发变更回调，重复注册五个监听器会导致审批翻倍且 detach 泄漏（review 发现，已修并加回归测试）。
 
-队员审批继承会话的权限持久化策略：standalone 会话不提供项目级持久化选项，选择未提供选项的响应会被取消。每次请求有独立 UUID。队员审批请求携带内部 `_meta.permissionScope: 'session'`：ACP 会话和 bridge 都不把它归到 leader 的前台或后台轮次。leader 轮次结束不会取消该审批；会话取消或销毁仍会清理它。切换或解绑 TeamManager 时，立即取消该绑定的待审批请求；迟到的 host 响应不能允许旧团队工具执行。每个绑定带有子进程内单调递增的内部 `teammateBindingId`；`qwen/notify/session/teammate-binding-ended` 回收其 bridge/mediator 请求并发出 `permission_resolved`。按 session entry 隔离的高水位拒绝已解绑团队的迟到请求，不取消 leader 或新团队的审批。同一 manager 的重复通知不会取消待审批请求。
+队员审批继承会话的权限持久化策略：standalone 会话不提供项目级持久化选项，选择未提供选项的响应会被取消。每次请求有独立 UUID。队员审批请求携带内部 `_meta.permissionScope: 'session'`：ACP 会话和 bridge 都不把它归到 leader 的前台或后台轮次。leader 轮次结束不会取消该审批；会话取消或销毁仍会清理它。切换或解绑 TeamManager 时，立即取消该绑定的待审批请求；迟到的 host 响应不能允许旧团队工具执行。每个绑定带有子进程内单调递增的内部 `teammateBindingId`；`qwen/notify/session/teammate-binding-ended` 回收其 bridge/mediator 请求并发出 `permission_resolved`。按 session entry 隔离的高水位拒绝已解绑团队的迟到请求，不取消 leader 或新团队的审批。同一 manager 的重复通知不会取消待审批请求。单个队友退出不会回收整个绑定，因此它的退出另经内部 `qwen/notify/session/teammate-exited` 上报：host 回收该队友的待审批请求，使会话不会在团队其余成员继续运行时，一直宣传一个没人能回答的「需要输入」交互。
 
 ## 已知缺口（follow-up，不属本 PR）
 

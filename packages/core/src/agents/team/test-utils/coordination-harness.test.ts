@@ -1649,6 +1649,57 @@ describe('TeamCoordinationHarness', () => {
     });
   });
 
+  // ─── Team deletion: roster exits ────────────────────────────
+
+  describe('team deletion', () => {
+    it('publishes an exit for every teammate still on the roster', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('worker');
+      await h.spawnTeammate('reviewer');
+      const exited: Array<{ name: string; status: string }> = [];
+      h.teamManager
+        .getEventEmitter()
+        .on(TeamEventType.TEAMMATE_EXITED, (event) => {
+          exited.push({ name: event.name, status: event.status });
+        });
+
+      await h.teamManager.cleanup();
+
+      // A client that reconstructs membership from joins and exits must not
+      // keep a deleted team's teammates: `backend.cleanup()` terminates them
+      // after the emitter has no listeners, so the exit has to be published by
+      // the teardown itself.
+      expect(exited.sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+        { name: 'reviewer', status: AgentStatus.CANCELLED },
+        { name: 'worker', status: AgentStatus.CANCELLED },
+      ]);
+    });
+
+    it('does not republish an exit for a teammate that already exited', async () => {
+      const h = await createHarness();
+      const worker = await h.spawnTeammate('worker');
+      const exited: string[] = [];
+      h.teamManager
+        .getEventEmitter()
+        .on(TeamEventType.TEAMMATE_EXITED, (event) => {
+          exited.push(event.name);
+        });
+      worker.getEventEmitter().emit(AgentEventType.STATUS_CHANGE, {
+        agentId: worker.agentId,
+        previousStatus: AgentStatus.RUNNING,
+        newStatus: AgentStatus.COMPLETED,
+        timestamp: Date.now(),
+      });
+      expect(exited).toEqual(['worker']);
+
+      await h.teamManager.cleanup();
+
+      // Its bridge was detached when it exited, so the teardown has nothing
+      // left to retire for it.
+      expect(exited).toEqual(['worker']);
+    });
+  });
+
   // ─── Leader inbox: race + envelope hardening ────────────────
 
   describe('leader inbox', () => {
