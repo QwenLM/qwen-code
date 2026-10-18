@@ -357,16 +357,24 @@ vi.mock('./hosted-workflow-turn.js', async (importOriginal) => ({
 
 const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
+const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 
 // Every turn-settling wait in this file polls the daemon until the pipeline
 // reports a terminal state. On a loaded runner that pipeline outlasts a 10 s
 // budget long before anything is wrong with it, which is how the same file
 // came to fail on different assertions on different days (#14406, #14023).
-// Use the slow-host policy the file already applies elsewhere instead of a
-// fresh number, and stay below the 60 s per-test ceiling so a genuine hang
-// still fails inside the test rather than at the runner's timeout.
-const SETTLE_TIMEOUT_MS = isSlowTestHost() ? 45_000 : 10_000;
-const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
+// Use the slow-host policy the file already applies elsewhere (evaluated once
+// at module load, so the budget is stable across the whole file run) instead
+// of a fresh number, and clamp to the per-test ceiling the runner actually
+// sets (60 s on the ecs-qwen pool, 15 s elsewhere — packages/cli/vitest.config.ts)
+// so a genuine hang still fails on the assertion inside the test rather than
+// as a bare runner timeout.
+const SETTLE_TIMEOUT_MS = isSlowTestHost()
+  ? Math.min(
+      45_000,
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ? 60_000 : 15_000,
+    )
+  : 10_000;
 
 async function enforceInlineResourceLimit() {
   const actual = await vi.importActual<
