@@ -223,9 +223,9 @@ export class InteractiveModToolScheduler {
                   }
                 },
               });
-              void scheduler
-                .schedule(nativeRequest, attemptSignal, runtimeView)
-                .catch(reject);
+              void runWithHookExecutionOwner(owner, () =>
+                scheduler.schedule(nativeRequest, attemptSignal, runtimeView),
+              ).catch(reject);
             });
           try {
             active.throwIfAborted();

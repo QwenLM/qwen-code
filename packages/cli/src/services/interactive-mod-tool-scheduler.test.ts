@@ -3,6 +3,11 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import { AsyncResource } from 'node:async_hooks';
+import {
+  runWithHookExecutionOwner,
+  getHookExecutionOwner,
+} from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockTool } from '@qwen-code/qwen-code-core';
 import type {
@@ -62,6 +67,7 @@ function setup(middleware?: ModToolCall, ready = Promise.resolve()) {
   });
   const config = {
     getHookSystem: () => undefined,
+    getSessionId: () => 'session',
     getToolRegistry: () => ({
       getTool: () => ({}),
       getAllToolNames: () => ['read_file'],
@@ -122,7 +128,16 @@ function setup(middleware?: ModToolCall, ready = Promise.resolve()) {
   mocks.schedule.mockImplementation(async (options, native) =>
     finish(options, native),
   );
-  return { scheduler, complete, update, observe, request, generation, finish };
+  return {
+    config,
+    scheduler,
+    complete,
+    update,
+    observe,
+    request,
+    generation,
+    finish,
+  };
 }
 const signal = () => new AbortController().signal;
 const check: Parameters<Parameters<ModToolCall>[1]>[2] = async (
@@ -263,6 +278,35 @@ describe('interactive Mod logical scheduler', () => {
     expect(test.complete).not.toHaveBeenCalled();
     expect(test.observe).not.toHaveBeenCalled();
   });
+  it('re-enters the captured hook owner at the native boundary after a worker-context hop', async () => {
+    const hostOperation = new AsyncResource('Mod worker host operation');
+    const owner = Object.freeze({
+      runtimeId: 'runtime',
+      sessionId: 'session',
+      agentId: null,
+    });
+    const test = setup((input, next, active) =>
+      hostOperation.runInAsyncScope(() => next(input, active, check)),
+    );
+    vi.spyOn(test.config, 'getHookSystem').mockReturnValue({
+      runtimeId: 'runtime',
+    } as ReturnType<Config['getHookSystem']>);
+    const seen: unknown[] = [];
+    mocks.schedule.mockImplementation(async (options, request) => {
+      seen.push(getHookExecutionOwner());
+      await test.finish(options, request);
+    });
+    try {
+      await runWithHookExecutionOwner(owner, () =>
+        test.scheduler.schedule(test.request, signal()),
+      );
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBe(owner);
+    } finally {
+      hostOperation.emitDestroy();
+    }
+  });
+
   it('retains real execution facts if a physical observer fails', async () => {
     const test = setup(async (input, next, active) =>
       next(input, active, check),
