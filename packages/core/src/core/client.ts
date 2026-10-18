@@ -3994,6 +3994,8 @@ export class LlmClient {
       managedMemoryType = interactionStartType;
     }
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
+    /** Hook context appended to this turn's request, if any. */
+    let appendedHookContext: string | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
     let userPromptSubmitFailureMessage = 'UserPromptSubmit hook failed';
@@ -4101,29 +4103,33 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
-        // `promptText` is declared above this block so assignment here cannot
-        // hit a TDZ if the surrounding Goal try/catch is later reshuffled.
         // An unchanged payload is already in history from an earlier turn, so
         // re-appending it would duplicate it once per turn for the rest of the
         // session; the earlier copy still carries the same text. History is
         // scanned newest-first over the raw entries, so the check stays off
         // the deep-cloning accessor on this per-turn path.
         const additionalContext = verdict.additionalContext;
-        if (
-          additionalContext &&
-          !this.getChat().findLastHistoryEntry((entry) =>
-            hasUserPromptSubmitContext(entry, additionalContext),
-          )
-        ) {
-          const requestArray = Array.isArray(request) ? request : [request];
-          request = [
-            ...requestArray,
-            createUserPromptSubmitContextPart(additionalContext),
-          ];
+        if (additionalContext) {
+          const alreadyDelivered = Boolean(
+            this.getChat().findLastHistoryEntry((entry) =>
+              hasUserPromptSubmitContext(entry, additionalContext),
+            ),
+          );
+          if (!alreadyDelivered) {
+            const requestArray = Array.isArray(request) ? request : [request];
+            request = [
+              ...requestArray,
+              createUserPromptSubmitContextPart(additionalContext),
+            ];
+            appendedHookContext = additionalContext;
+          }
           if (messageType === SendMessageType.UserQuery) {
+            // A suppressed turn appends nothing, so it records no
+            // hookContext, but the user-authored projection still belongs in
+            // the transcript.
             userPromptRecordPayload = {
               displayText: submittedPrompt ?? verdict.prompt,
-              hookContext: additionalContext,
+              hookContext: alreadyDelivered ? '' : additionalContext,
             };
           }
         }
@@ -4683,6 +4689,14 @@ export class LlmClient {
       let requestToSend = await flatMapTextParts(request, async (text) => [
         text,
       ]);
+      if (appendedHookContext) {
+        // flatMapTextParts rebuilds text parts as bare strings, dropping the
+        // injector receipt. Re-stamp the block it just appended so live
+        // history carries the same provenance resume restores from the
+        // recorded payload.
+        requestToSend[requestToSend.length - 1] =
+          createUserPromptSubmitContextPart(appendedHookContext);
+      }
       if (ideContextText) {
         requestToSend = prependToFirstTextPart(requestToSend, ideContextText);
       }

@@ -123,7 +123,10 @@ import {
   getInitialChatHistory,
   wrapSystemReminder,
 } from './environmentContext.js';
-import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -12337,7 +12340,8 @@ Other open files:
         await run([{ text: 'my prompt' }], 'prompt-hook-context-dedup');
 
         // The identical block from the earlier turn is not appended again, so
-        // no provenance is recorded for this turn either.
+        // this turn records no hook provenance — but the user-authored
+        // projection still reaches the transcript.
         const requestText = getLastTurnRequestText();
         expect(requestText).toContain('my prompt');
         expect(requestText).not.toContain('extra hook context');
@@ -12345,7 +12349,10 @@ Other open files:
         expect(recordUserMessage).toHaveBeenCalledWith(
           [{ text: 'my prompt' }],
           undefined,
-          undefined,
+          {
+            displayText: 'my prompt',
+            hookContext: '',
+          },
           'prompt-hook-context-dedup',
         );
       });
@@ -12376,6 +12383,14 @@ Other open files:
         const requestText = getLastTurnRequestText();
         expect(requestText).toContain('my prompt');
         expect(requestText).toContain('extra hook context');
+        // The part handed to the model call must stay injector-owned after
+        // text flattening, or live history cannot prove it on the next turn.
+        expect(
+          hasUserPromptSubmitContext(
+            { role: 'user', parts: mockTurnRunFn.mock.calls.at(-1)?.[1] },
+            'extra hook context',
+          ),
+        ).toBe(true);
         const [recordedParts, goalContext, payload, promptId] =
           recordUserMessage.mock.calls[0]!;
         expect(

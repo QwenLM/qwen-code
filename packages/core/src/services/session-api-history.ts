@@ -12,6 +12,7 @@ import type {
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
   TurnResultRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
 import { restoreUserPromptSubmitContextReceipt } from '../hooks/user-prompt-submit-context.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
@@ -213,9 +214,7 @@ function appendApiHistoryRecord(
   const message = copyContentForApiHistory(record.message);
   if (record.type === 'user' && !record.subtype) {
     markApiHistoryPrompt(message, record.promptId);
-    const payload = record.systemPayload as
-      | { hookContext?: unknown }
-      | undefined;
+    const payload = record.systemPayload as UserPromptRecordPayload | undefined;
     // Only the injector records per-turn hookContext provenance, so a
     // trailing tagged part matching it is injector-owned: restore the
     // receipt the JSON transcript could not carry.
