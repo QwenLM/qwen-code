@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { renderFailureComment } from '../../.github/scripts/ci/main-failure-signature.mjs';
 
 describe('main CI failure issue workflow', () => {
   const workflow = readFileSync(
@@ -61,7 +62,10 @@ describe('main CI failure issue workflow', () => {
     }
     expect(workflow).toContain("types: ['completed']");
     // Approval runs use the PR branch, including when they finish after merge.
-    expect(yml.on.workflow_run.branches).toBeUndefined();
+    expect(Object.keys(yml.on.workflow_run).sort()).toEqual([
+      'types',
+      'workflows',
+    ]);
     expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
     expect(workflow).toContain(
       "github.event.workflow_run.conclusion == 'failure'",
@@ -138,7 +142,11 @@ describe('main CI failure issue workflow', () => {
         writeFileSync(join(tmp, 'pulls.json'), JSON.stringify(prs));
         writeFileSync(
           join(tmp, 'gh'),
-          ghScript ?? '#!/usr/bin/env bash\ncat "${RUNNER_TEMP}/pulls.json"\n',
+          ghScript ??
+            `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
+cat "\${RUNNER_TEMP}/pulls.json"
+`,
         );
         chmodSync(join(tmp, 'gh'), 0o755);
         const output = join(tmp, 'output');
@@ -168,6 +176,9 @@ describe('main CI failure issue workflow', () => {
         return {
           output: existsSync(output) ? readFileSync(output, 'utf8') : '',
           stdout: result.stdout,
+          args: existsSync(join(tmp, 'lookup-args'))
+            ? readFileSync(join(tmp, 'lookup-args'), 'utf8')
+            : '',
         };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
@@ -185,6 +196,8 @@ describe('main CI failure issue workflow', () => {
       const resolved = resolve([pr()]);
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
       expect(resolved.stdout).not.toContain('::warning::');
+      expect(resolved.args).toContain('state=all');
+      expect(resolved.args).toContain('--paginate');
     });
     it('resolves a fork approval run, which records the base repository as its head repository', () => {
       // On a pull_request_review run head_repository is the BASE repository
@@ -259,6 +272,7 @@ describe('main CI failure issue workflow', () => {
         HEAD_BRANCH: 'main',
       });
       expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+      expect(resolved.args).toBe('');
       expect(resolved.stdout).not.toContain('::warning::');
     });
     it('warns and reports nothing when the run resolves to no destination', () => {
@@ -358,7 +372,7 @@ describe('main CI failure issue workflow', () => {
     const download = oneLine(
       steps.find((step) => step.name === 'Download failed job logs').run,
     );
-    const plan = oneLine(steps.find((step) => step.id === 'plan').run);
+    const summary = oneLine(steps.find((step) => step.id === 'summary').run);
 
     // `gh api` writes a non-2xx body to stdout before exiting non-zero, so the
     // fetch has to stay non-fatal AND say so — with the warning inside the
@@ -392,10 +406,10 @@ describe('main CI failure issue workflow', () => {
     );
     // `--jobs` has to ride the `analyze` invocation: `plan` never reads
     // `options.jobs`, so moving the flag there drops the section silently. The
-    // span ends at the first `> "${analysis}"`, so no later helper call in the
+    // span ends at the first analysis redirect, so no later helper call in the
     // step can satisfy it.
-    const analyzeInvocation = plan.match(
-      /node "\$\{helper\}" analyze .*?> "\$\{analysis\}"/,
+    const analyzeInvocation = summary.match(
+      /node "\$\{helper\}" analyze .*?> "\$\{RUNNER_TEMP\}\/analysis\.json"/,
     )?.[0];
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
@@ -666,21 +680,104 @@ describe('main CI failure issue workflow', () => {
       const condition = String(jobs.file_issue.if);
       expect(condition).toContain('always()');
       expect(condition).toContain("needs.analyze.result == 'success'");
+      expect(condition).toContain("needs.analyze.outputs.file_issue == 'true'");
       expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
       // A rerun that could not be dispatched must not swallow the report:
       // the issue is then the only record of a red main.
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
     });
 
-    it('skips the PR comment for infrastructure-only failures', () => {
-      // The issue path deliberately stays silent for an infra-only death and
-      // reruns once; the comment would be a false alarm with no correction
-      // path — its marker is keyed on the run, and only a failure re-enters
-      // this workflow, so a green retry never updates it.
-      const condition = String(jobs.report_pr.if);
-      expect(condition).toContain("needs.analyze.result == 'success'");
-      expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
-    });
+    it.each([
+      ['false', 'skipped', 'success', 'body', true],
+      ['true', 'success', 'success', 'body', false],
+      ['true', 'failure', 'success', 'body', true],
+      ['true', 'skipped', 'success', 'body', true],
+      ['false', 'skipped', 'failure', 'body', true],
+      ['false', 'skipped', 'failure', '', false],
+    ])(
+      'reports infra=%s rerun=%s analyze=%s body=%s: %s',
+      (infra, rerun, result, body, expected) => {
+        const evaluate = new Function(
+          'needs',
+          'always',
+          `return (${jobs.report_pr.if.slice(3, -2)});`,
+        );
+        expect(
+          evaluate(
+            {
+              analyze: {
+                result,
+                outputs: {
+                  infra_only: infra,
+                  comment_body: body,
+                  pr_number: '14472',
+                },
+              },
+              rerun_infra: { result: rerun },
+            },
+            () => true,
+          ),
+        ).toBe(expected);
+      },
+    );
+  });
+
+  it('prepares the PR summary before a failed issue lookup and exports it to the writer', () => {
+    const summary = jobs.analyze.steps.find((step) => step.id === 'summary');
+    const plan = jobs.analyze.steps.find((step) => step.id === 'plan');
+    expect(jobs.analyze.steps.indexOf(summary)).toBeLessThan(
+      jobs.analyze.steps.indexOf(plan),
+    );
+    expect(jobs.analyze.outputs.comment_body).toBe(
+      '${{ steps.summary.outputs.body }}',
+    );
+    expect(jobs.report_pr.steps[0].env.COMMENT_BODY).toBe(
+      '${{ needs.analyze.outputs.comment_body }}',
+    );
+    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-summary-'));
+    try {
+      writeFileSync(join(tmp, 'gh'), '#!/bin/sh\nexit 1\n');
+      chmodSync(join(tmp, 'gh'), 0o755);
+      writeFileSync(
+        join(tmp, 'failed-jobs.tsv'),
+        'Hosted processes\tRun tests\n',
+      );
+      writeFileSync(join(tmp, 'run-jobs.json'), JSON.stringify({ jobs: [] }));
+      const output = join(tmp, 'output');
+      const env = {
+        ...process.env,
+        PATH: `${tmp}:${process.env.PATH}`,
+        RUNNER_TEMP: tmp,
+        GITHUB_OUTPUT: output,
+        REPO: 'QwenLM/qwen-code',
+        INFRA_ONLY: 'true',
+        WORKFLOW_NAME: 'Managed Agent gate',
+        WORKFLOW_RUN_ID: '39045740099',
+        WORKFLOW_RUN_URL:
+          'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
+        WORKFLOW_RUN_AT: '2026-10-18T00:00:00Z',
+        HEAD_SHA: 'abc123456789',
+      };
+      const prepared = spawnSync(
+        'bash',
+        ['-eo', 'pipefail', '-c', summary.run],
+        { env, encoding: 'utf8' },
+      );
+      expect(prepared.status, prepared.stderr).toBe(0);
+      const body = readFileSync(output, 'utf8');
+      const delimiter = body.split('\n')[0].slice('body<<'.length);
+      expect(body.endsWith(`${delimiter}\n`)).toBe(true);
+      expect(body).toContain('### `Managed Agent gate` failed');
+      expect(body).toContain('GitHub runner infrastructure failed');
+      const planned = spawnSync('bash', ['-eo', 'pipefail', '-c', plan.run], {
+        env,
+        encoding: 'utf8',
+      });
+      expect(planned.status).toBe(1);
+      expect(readFileSync(output, 'utf8')).toBe(body);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   describe('file or update the autofix issue', () => {
@@ -767,48 +864,89 @@ describe('main CI failure issue workflow', () => {
   );
 
   it.each([
-    ['github-actions[bot]', 'PATCH', 'issues/comments/123'],
-    ['contributor', 'POST', 'issues/14472/comments'],
-  ])('uses a %s marker comment to select %s', (login, method, endpoint) => {
-    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-comment-'));
-    try {
-      const step = jobs.report_pr.steps[0];
-      const marker = '<!-- qwen-managed-agent-ci-failure:39045740099 -->';
-      writeFileSync(
-        join(tmp, 'comments.json'),
-        JSON.stringify([{ id: 123, user: { login }, body: marker }]),
-      );
-      writeFileSync(
-        join(tmp, 'gh'),
-        '#!/bin/bash\nif [[ "$*" == *--paginate* ]]; then cat "${RUNNER_TEMP}/comments.json"; else printf \'%s\\n\' "$@" > "${RUNNER_TEMP}/published-args"; fi\n',
-      );
-      chmodSync(join(tmp, 'gh'), 0o755);
-      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${tmp}:${process.env.PATH}`,
-          RUNNER_TEMP: tmp,
-          REPO: 'QwenLM/qwen-code',
-          PR_NUMBER: '14472',
-          WORKFLOW_RUN_ID: '39045740099',
-          COMMENT_BODY: `${marker}\nJava CI failed`,
-          ISSUE_URL: 'https://github.com/QwenLM/qwen-code/issues/14500',
-        },
-      });
-      expect(result.status, result.stderr).toBe(0);
-      expect(readFileSync(join(tmp, 'published-args'), 'utf8')).toContain(
-        `${method}\nrepos/QwenLM/qwen-code/${endpoint}\n`,
-      );
-      expect(readFileSync(join(tmp, 'pr-comment.md'), 'utf8')).toContain(
-        '[Tracking issue](https://github.com/QwenLM/qwen-code/issues/14500)',
-      );
-      expect(JSON.stringify(jobs.report_pr)).not.toContain('actions/checkout');
-      expect(JSON.stringify(jobs.report_pr)).not.toContain('CI_DEV_BOT_PAT');
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
+    [
+      'github-actions[bot]',
+      'PATCH',
+      'issues/comments/456',
+      'https://github.com/QwenLM/qwen-code/issues/14500',
+      0,
+    ],
+    ['contributor', 'POST', 'issues/14472/comments', '', 0],
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1],
+    ['github-actions[bot]', null, null, '', 3],
+  ])(
+    'upserts a %s comment via %s with %s and issue=%s after %s lookup errors',
+    (login, method, endpoint, issueUrl, failures) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-comment-'));
+      try {
+        const step = jobs.report_pr.steps[0];
+        const comment = renderFailureComment({
+          analysis: { workflow: 'Managed Agent gate', tests: [] },
+          occurrence: {
+            sha: 'abc123456789',
+            runId: '39045740099',
+            runUrl:
+              'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
+          },
+        });
+        writeFileSync(
+          join(tmp, 'comments.json'),
+          JSON.stringify(
+            [123, 456].map((id) => ({ id, user: { login }, body: comment })),
+          ),
+        );
+        writeFileSync(
+          join(tmp, 'gh'),
+          `#!/usr/bin/env bash
+if [[ "$*" == *--paginate* ]]; then
+  count=$(cat "\${RUNNER_TEMP}/lookups" 2>/dev/null || echo 0)
+  count=$((count + 1))
+  echo "$count" > "\${RUNNER_TEMP}/lookups"
+  if [[ "$count" -le "\${LOOKUP_FAILURES}" ]]; then exit 1; fi
+  cat "\${RUNNER_TEMP}/comments.json"
+else
+  printf '%s\n' "$@" > "\${RUNNER_TEMP}/published-args"
+fi
+`,
+        );
+        writeFileSync(join(tmp, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(join(tmp, 'gh'), 0o755);
+        chmodSync(join(tmp, 'sleep'), 0o755);
+        const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${tmp}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            REPO: 'QwenLM/qwen-code',
+            PR_NUMBER: '14472',
+            WORKFLOW_RUN_ID: '39045740099',
+            COMMENT_BODY: comment,
+            ISSUE_URL: issueUrl,
+            LOOKUP_FAILURES: String(failures),
+          },
+        });
+        expect(result.status, result.stderr).toBe(method ? 0 : 1);
+        const published = join(tmp, 'published-args');
+        if (method)
+          expect(readFileSync(published, 'utf8')).toContain(
+            `${method}\nrepos/QwenLM/qwen-code/${endpoint}\n`,
+          );
+        else expect(existsSync(published)).toBe(false);
+        expect(
+          readFileSync(join(tmp, 'pr-comment.md'), 'utf8').includes(
+            '[Tracking issue]',
+          ),
+        ).toBe(Boolean(issueUrl));
+        expect(JSON.stringify(jobs.report_pr)).not.toContain(
+          'actions/checkout',
+        );
+        expect(JSON.stringify(jobs.report_pr)).not.toContain('CI_DEV_BOT_PAT');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps the bot PAT in a job that runs no repository code', () => {
     // The job that can write as the bot must not check out or execute anything

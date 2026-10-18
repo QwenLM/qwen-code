@@ -226,6 +226,34 @@ jobs:
           echo "infra_only=${infra_only}"
           echo "infra_only=${infra_only}" >> "${GITHUB_OUTPUT}"
 
+      - name: 'Build the PR failure summary'
+        id: 'summary'
+        if: "${{ steps.destination.outputs.pr_number != '' || steps.destination.outputs.file_issue == 'true' }}"
+        env:
+          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          INFRA_ONLY: '${{ steps.infra.outputs.infra_only }}'
+        run: |-
+          helper='.github/scripts/ci/main-failure-signature.mjs'
+          shopt -s nullglob
+          logs=("${RUNNER_TEMP}/failed-logs/"*.log)
+          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" \
+            --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" > "${RUNNER_TEMP}/analysis.json"
+          node "${helper}" comment --analysis "${RUNNER_TEMP}/analysis.json" \
+            --jobs-json "${RUNNER_TEMP}/run-jobs.json" --sha "${HEAD_SHA}" \
+            --run-id "${WORKFLOW_RUN_ID}" --run-url "${WORKFLOW_RUN_URL}" > "${RUNNER_TEMP}/pr-comment.md"
+          delim="QWEN_CI_COMMENT_$(openssl rand -hex 16)"
+          {
+            echo "body<<${delim}"
+            cat "${RUNNER_TEMP}/pr-comment.md"
+            if [[ "${INFRA_ONLY}" == 'true' ]]; then
+              echo 'GitHub runner infrastructure failed; this result does not identify a Java test regression.'
+            fi
+            echo "${delim}"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: 'Plan the issue'
         id: 'plan'
         if: "${{ steps.destination.outputs.file_issue == 'true' }}"
@@ -240,14 +268,8 @@ jobs:
           WORKFLOW_RUN_AT: '${{ github.event.workflow_run.updated_at }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
         run: |-
-          shopt -s nullglob
-          logs=("${RUNNER_TEMP}/failed-logs/"*.log)
-
           helper='.github/scripts/ci/main-failure-signature.mjs'
           analysis="${RUNNER_TEMP}/analysis.json"
-          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" \
-            --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" \
-            > "${analysis}"
           echo "Failing tests identified: $(jq '.tests | length' "${analysis}")"
           jq -r '.tests[].id' "${analysis}"
 
@@ -303,30 +325,6 @@ jobs:
             echo "${delim}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: 'Build the PR failure summary'
-        id: 'summary'
-        if: "${{ steps.destination.outputs.pr_number != '' }}"
-        env:
-          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
-          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
-          WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
-          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
-        run: |-
-          helper='.github/scripts/ci/main-failure-signature.mjs'
-          shopt -s nullglob
-          logs=("${RUNNER_TEMP}/failed-logs/"*.log)
-          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" \
-            --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" > "${RUNNER_TEMP}/pr-analysis.json"
-          node "${helper}" comment --analysis "${RUNNER_TEMP}/pr-analysis.json" \
-            --jobs-json "${RUNNER_TEMP}/run-jobs.json" --sha "${HEAD_SHA}" \
-            --run-id "${WORKFLOW_RUN_ID}" --run-url "${WORKFLOW_RUN_URL}" > "${RUNNER_TEMP}/pr-comment.md"
-          delim="QWEN_CI_COMMENT_$(openssl rand -hex 16)"
-          {
-            echo "body<<${delim}"
-            cat "${RUNNER_TEMP}/pr-comment.md"
-            echo "${delim}"
-          } >> "${GITHUB_OUTPUT}"
-
   # An all-infrastructure failure has no code signal to file: the runner died,
   # not the code, and the run's green legs already exonerate the tree. Rerun
   # its failed jobs once (analyze gates this to attempt 1) and file nothing;
@@ -335,8 +333,8 @@ jobs:
   # The rerun holds actions: write while infra_only is classified from
   # check-run annotation text — text a fork's own steps print — so it runs
   # only for destinations that file (main runs and merged PRs). An open PR's
-  # infra death is left for its author to retrigger, and the classifier's
-  # output never reaches the write token on an untrusted run.
+  # infra death is reported on the PR without dispatching a rerun, and the
+  # classifier never grants an untrusted run actions: write.
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
@@ -424,11 +422,10 @@ jobs:
 
   report_pr:
     name: 'Report Java CI failure on the PR'
-    needs: ['analyze', 'file_issue']
-    # Same infra gate as file_issue: an infrastructure-only death is rerun
-    # once, not reported; the comment would have no correction path anyway
-    # (the marker is keyed on the run, and only failures re-enter).
-    if: "${{ always() && needs.analyze.result == 'success' && needs.analyze.outputs.pr_number != '' && needs.analyze.outputs.infra_only != 'true' }}"
+    needs: ['analyze', 'file_issue', 'rerun_infra']
+    # A prepared summary survives issue planning errors. Only a successfully
+    # dispatched infrastructure rerun suppresses the comment.
+    if: "${{ always() && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -450,13 +447,23 @@ jobs:
             printf '\n[Tracking issue](%s)\n' "${ISSUE_URL}" >> "${body_file}"
           fi
           marker="<!-- qwen-managed-agent-ci-failure:${WORKFLOW_RUN_ID} -->"
-          comment_id="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
-            | jq -sr --arg marker "${marker}" 'add | map(select(.user.login == "github-actions[bot]" and (.body | contains($marker)))) | .[0].id // empty')"
-          if [[ -n "${comment_id}" ]]; then
-            endpoint="repos/${REPO}/issues/comments/${comment_id}"
-            method=PATCH
-          else
-            endpoint="repos/${REPO}/issues/${PR_NUMBER}/comments"
-            method=POST
-          fi
-          gh api --method "${method}" "${endpoint}" -F "body=@${body_file}"
+          # Keep the lookup/publish retry contract of upsert-bot-comment.sh
+          # without checking out repository code in this write-only job.
+          for attempt in 1 2 3; do
+            if comment_id="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+              | jq -sr --arg marker "${marker}" 'add | map(select(.user.login == "github-actions[bot]" and ((.body // "") | contains($marker)))) | last | .id // empty')"; then
+              if [[ -n "${comment_id}" ]]; then
+                endpoint="repos/${REPO}/issues/comments/${comment_id}"
+                method=PATCH
+              else
+                endpoint="repos/${REPO}/issues/${PR_NUMBER}/comments"
+                method=POST
+              fi
+              if gh api --method "${method}" "${endpoint}" -F "body=@${body_file}"; then
+                exit 0
+              fi
+            fi
+            sleep "${attempt}"
+          done
+          echo '::error::Could not publish the CI failure summary after three attempts.'
+          exit 1

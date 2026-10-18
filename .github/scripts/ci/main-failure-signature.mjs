@@ -405,7 +405,7 @@ export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
   const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
-    '### Java CI failed',
+    `### ${code(analysis.workflow)} failed`,
     '',
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
@@ -413,7 +413,7 @@ export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
       .filter((job) => job.conclusion === 'failure')
       .map((job) => {
         const steps = (job.steps ?? [])
-          .filter((step) => step.conclusion === 'failure')
+          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
           .map((step) => code(step.name));
         return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
       }),
@@ -425,9 +425,12 @@ export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
           ...analysis.tests
             .slice(0, MAX_BODY_TESTS)
             .map((test) => `- ${code(test.id)}`),
+          ...(analysis.tests.length > MAX_BODY_TESTS
+            ? [`- …and ${analysis.tests.length - MAX_BODY_TESTS} more`]
+            : []),
         ]
       : [
-          'No test identifier was available; the failed jobs above link directly to the logs.',
+          'No test identifier was available; follow the run link for job logs and annotations.',
         ]),
     '',
   ].join('\n');

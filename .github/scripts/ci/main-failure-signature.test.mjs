@@ -35,7 +35,10 @@ const ESC = '\u001B';
 
 test('reports failed jobs, steps and tests directly on a PR', () => {
   const comment = renderFailureComment({
-    analysis: { tests: [{ id: 'com.example.HostedExtensionsIT.closes' }] },
+    analysis: {
+      workflow: 'Managed Agent gate',
+      tests: [{ id: 'com.example.HostedExtensionsIT.closes' }],
+    },
     occurrence: {
       sha: 'abc123456789abcdef',
       runId: '39042781121',
@@ -53,10 +56,53 @@ test('reports failed jobs, steps and tests directly on a PR', () => {
     ],
   });
   assert.match(comment, /qwen-managed-agent-ci-failure:39042781121/);
+  assert.match(comment, /### `Managed Agent gate` failed/);
   assert.match(comment, /Hosted processes.*\/job\/123/);
   assert.match(comment, /Verify Hosted processes/);
   assert.match(comment, /com\.example\.HostedExtensionsIT\.closes/);
   assert.doesNotMatch(comment, /Windows/);
+});
+
+test('keeps contributor text on one line and reports cancelled steps and test overflow', () => {
+  const hostile = 'name`\r\n[link](https://example.com)';
+  const comment = renderFailureComment({
+    analysis: {
+      workflow: 'Managed Agent gate',
+      tests: Array.from({ length: MAX_BODY_TESTS + 1 }, () => ({
+        id: hostile,
+      })),
+    },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '1',
+      runUrl: 'https://example.com/run',
+    },
+    jobs: [
+      {
+        name: hostile,
+        conclusion: 'failure',
+        html_url: 'https://example.com/job',
+        steps: [
+          { name: hostile, conclusion: 'cancelled' },
+          { name: 'Checkout', conclusion: 'success' },
+        ],
+      },
+    ],
+  });
+  assert.ok(
+    comment.includes(
+      '- [`name   [link](https://example.com)`](https://example.com/job): `name   [link](https://example.com)`',
+    ),
+  );
+  assert.equal(
+    comment
+      .split('\n')
+      .filter((line) => line === '- `name   [link](https://example.com)`')
+      .length,
+    MAX_BODY_TESTS,
+  );
+  assert.match(comment, /…and 1 more/);
+  assert.doesNotMatch(comment, /\r|Checkout/);
 });
 
 test('runCli comment tolerates a missing or empty jobs listing', () => {
