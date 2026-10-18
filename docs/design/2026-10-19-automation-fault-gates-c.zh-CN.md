@@ -76,20 +76,28 @@ generation changed`。因此用例只断言该 occurrence 至少被 fire 过一�
   与 `settled-crash` 各记录一条 `automation reconcile failed ... Hosted
 Harness generation changed` WARN；下一个到期 slot 会重新驱动修复，run 最终
   结算。这正是 issue 点名的 #14116 形态，不是丢 slot。
-- **`settled-crash` 从不需要 reconcile 路由的修复。** 它的 input 在 revision 3
-  之前已被消费，所以 `firstPendingWakeInput` 为 undefined，路由答复
-  `repaired: false`；真正提交 revision 3 的是 open 路径的 `reconcileRuns`。
+- **`settled-crash` 的 input 无需 reconcile 路由「修复」，但路由仍会 reconcile run。**
+  它的 input 在 revision 3 之前已被消费，所以 `firstPendingWakeInput` 为
+  undefined，路由答复 `repaired: false`；同一次 load 仍会调用
+  `reconcileRuns()`，因此 revision 3 由路由与 open 路径任一方都能提交。
 
 ## 变异见证
 
-每个见证都将在合入前单独对各自的用例运行，并逐字节恢复；下表记录
-预期变红处。
+每个见证都已单独对各自的用例运行，并逐字节恢复；下表记录预期变红处。
 
 | 见证 | 变异                                                       | 预期变红处                                                                          |
 | ---- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | c1   | `intent` run 的 replay 直接答复已提交的 run，不再 dispatch | `claim-crash`：revision 停在 `:1`，run 永不完成                                     |
 | c2   | `wakeHasPriorAttempt` 恒答复 false                         | `turn-crash`：pump 重跑 turn 而不是结算它，run 不是 `failed`，并出现第二次模型 Turn |
-| c3   | open 路径跳过 `reconcileRuns`                              | `settled-crash`：revision 3 永不提交，run 停在 `running`                            |
+| c3   | `HostedAutomationSession.reconcileRuns()` 直接返回空       | `settled-crash`：revision 3 永不提交，run 停在 `running`                            |
+
+**c3 只能打在方法上，不能只打在 open 路径。** 只让 open 路径跳过
+`reconcileRuns` 时 `settled-crash` 仍绿（39.6 秒）：崩溃后的 Harness 由后续
+slot 驱动 `reconcile_run`，路由同样走到 `reconcileRuns()` 并提交 revision 3，
+所以那条单点变异被路由覆盖，不咬人。把方法整体短路后 `settled-crash` 变红：
+`ConditionTimeoutException: expected "completed"`，落在 `settledCrash` 的终态
+断言上，耗时 216.5 秒。本用例门控的是「被崩掉的 run 会不会被 reconcile」这一
+性质，不是某一个调用点。
 
 ## 预算
 

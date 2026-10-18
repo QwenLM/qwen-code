@@ -90,21 +90,31 @@ changed`. The case therefore asserts that the occurrence was fired at
 failed ... Hosted Harness generation changed` WARN in the measured
   runs; the next due slot re-drives the repair and the run settles. That
   is the #14116 shape the issue names, not a lost slot.
-- **`settled-crash` never needs the reconcile route's repair.** Its input
-  was consumed before revision 3, so `firstPendingWakeInput` is
-  undefined and the route answers `repaired: false`; the open path's
-  `reconcileRuns` is what commits revision 3.
+- **`settled-crash` needs no repair from the reconcile route, but the
+  route still reconciles runs.** Its input was consumed before revision 3,
+  so `firstPendingWakeInput` is undefined and the route answers
+  `repaired: false`; the same load still calls `reconcileRuns()`, so
+  either the route or the open path commits revision 3.
 
 ## Mutation witnesses
 
-Each witness is to be run against its own case alone and restored byte
-for byte before merge; the table records the expected red.
+Each witness has been run against its own case alone and restored byte
+for byte; the table records the expected red.
 
 | Witness | Mutation                                                                  | Expected red at                                                                                                            |
 | ------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | c1      | A replay of an `intent` run answers the committed run without dispatching | `claim-crash`: revisions stay `:1`; the run never completes                                                                |
 | c2      | `wakeHasPriorAttempt` always answers false                                | `turn-crash`: the pump re-runs the turn instead of settling it, so the run is not `failed` and a second model Turn appears |
-| c3      | The open path skips `reconcileRuns`                                       | `settled-crash`: revision 3 never commits and the run stays `running`                                                      |
+| c3      | `HostedAutomationSession.reconcileRuns()` returns early                   | `settled-crash`: revision 3 never commits and the run stays `running`                                                      |
+
+**c3 must target the method, not the open path.** Skipping only the open
+path's `reconcileRuns` left `settled-crash` green (39.6 s): the crashed
+Harness is re-driven by the next slot's `reconcile_run`, and that route
+reaches `reconcileRuns()` too, so the single-site mutation is covered.
+Short-circuiting the method turns `settled-crash` red with
+`ConditionTimeoutException: expected "completed"` at the case's terminal
+state assertion, after 216.5 s. The case gates whether a crashed run gets
+reconciled at all, not one particular call site.
 
 ## Budget
 
