@@ -597,7 +597,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     var receipt = renewal.current.get().getDrainReceipt();
                     return receipt == null ? stopAcknowledgedRuntime(draining)
                             : CompletableFuture.completedFuture(receipt);
-                }).thenCompose(receipt -> releaseRetiredHolders(draining)
+                }).thenCompose(receipt -> releaseRetiredHolders(draining, renewal)
                         .thenApply(ignored -> receipt)).thenAccept(receipt -> {
                     if (authority != null) {
                         bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
@@ -652,11 +652,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
      * still hold the storage. Runs before the binding is marked RELEASED, so a
      * crash retries it; the exact-match clear cannot touch a newer holder.
      */
-    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding) {
-        if (!binding.getRequest().isManagedContext() || binding.getLease() == null) {
+    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, BindingRenewal renewal) {
+        var current = renewal.current.get();
+        // Only a persisted receipt can prove the worker stopped. On the plain
+        // close path every holder was cleared by the acknowledged release, so
+        // there is nothing to scan and nothing to clear.
+        if (!binding.getRequest().isManagedContext() || binding.getLease() == null
+                || current == null || current.getDrainReceipt() == null) {
             return CompletableFuture.completedFuture(null);
         }
-        return releaseRetiredHolders(binding, null);
+        return releaseRetiredHolders(binding, (String) null);
     }
 
     private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, String cursor) {
