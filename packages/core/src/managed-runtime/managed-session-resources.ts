@@ -5,8 +5,10 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
+import { openNoFollow } from '../utils/no-follow-open.js';
 import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import {
@@ -89,6 +91,7 @@ export class LocalManagedSessionResourceStore
     const pending = path.join(directory, `.${resourceId}.pending`);
 
     const target = path.join(directory, resourceId);
+    await ensurePrivateDirectory(path.dirname(this.root));
     await ensurePrivateDirectory(this.root);
     await ensurePrivateDirectory(directory);
 
@@ -158,15 +161,32 @@ export class LocalManagedSessionResourceStore
         `resource ${ref.resourceId} is ${size} bytes where ${ref.byteLength} was recorded.`,
       );
     }
+    let handle: FileHandle;
     try {
-      bytes = await readFile(target);
+      handle = await openNoFollow(target);
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new ManagedSessionRecordError(
           `resource ${ref.resourceId} is not present for session ${this.sessionKey.sessionId}.`,
         );
       }
+      if ((cause as NodeJS.ErrnoException).code === 'ELOOP') {
+        throw new ManagedSessionRecordError(
+          `resource ${ref.resourceId} is not a regular file.`,
+        );
+      }
       throw cause;
+    }
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size !== size) {
+        throw new ManagedSessionRecordError(
+          `resource ${ref.resourceId} changed while it was being read.`,
+        );
+      }
+      bytes = await handle.readFile();
+    } finally {
+      await handle.close();
     }
     if (bytes.byteLength !== ref.byteLength) {
       throw new ManagedSessionRecordError(
@@ -273,6 +293,10 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
       'session resource directory is not private.',
     );
   }
+  // `publish` promises a ref that is safe to reference from a transaction
+  // once it resolves, so the directory entry has to be durable in its parent
+  // before bytes land under it.
+  await syncDirectory(path.dirname(directory));
 }
 
 async function syncDirectory(directory: string): Promise<void> {

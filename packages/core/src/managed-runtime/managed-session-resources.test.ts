@@ -211,6 +211,17 @@ describe('managed session resource store', () => {
     ).rejects.toThrow(/resource directory is not private/);
   });
 
+  it('refuses to publish through a symlinked resources directory', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    await fs.symlink(outside, path.dirname(store.sessionRoot));
+
+    await expect(
+      store.publish('managed-input', Buffer.from('x', 'utf8')),
+    ).rejects.toThrow(/resource directory is not private/);
+  });
+
   it('refuses to publish through a symlinked kind directory', async () => {
     const { store, runtimeBaseDir } = await createStore();
     const outside = path.join(runtimeBaseDir, 'outside');
