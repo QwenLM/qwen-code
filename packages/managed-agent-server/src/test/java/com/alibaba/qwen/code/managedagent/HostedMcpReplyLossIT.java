@@ -197,6 +197,35 @@ class HostedMcpReplyLossIT {
                 "mcp_operation");
     }
 
+    // macOS (and any host without /proc) still writes durable-worker
+    // registrations into the broker state directory; kill the recorded
+    // pids instead of relying on the Linux-only identity probe.
+    private void stopRegisteredWorkers(Path broker) throws IOException {
+        if (!Files.isDirectory(broker)) {
+            return;
+        }
+        try (var registrations = Files.list(broker)) {
+            for (Path file : registrations
+                    .filter(path -> path.getFileName().toString()
+                            .endsWith(".json"))
+                    .toList()) {
+                JsonNode saved = json.readTree(Files.readString(file));
+                long pid = saved.path("pid").asLong();
+                if (pid <= 0) {
+                    continue;
+                }
+                ProcessHandle.of(pid).ifPresent(handle -> {
+                    handle.destroyForcibly();
+                    try {
+                        handle.onExit().get(10, TimeUnit.SECONDS);
+                    } catch (Exception ignored) {
+                        // Best-effort teardown.
+                    }
+                });
+            }
+        }
+    }
+
     private List<JsonNode> fixtureEvents(String kind) {
         if (evidence == null || !Files.exists(evidence)) {
             return List.of();
@@ -704,18 +733,19 @@ class HostedMcpReplyLossIT {
                 if ("Linux".equals(System.getProperty("os.name"))) {
                     HostedDurableWorkers.stop(
                             temporary.resolve("broker"), json);
-                    for (JsonNode event : fixtureEvents("mcp.start")) {
-                        ProcessHandle.of(event.path("pid").asLong())
-                                .ifPresent(handle -> {
-                                    handle.destroyForcibly();
-                                    try {
-                                        handle.onExit().get(10,
-                                                TimeUnit.SECONDS);
-                                    } catch (Exception ignored) {
-                                        // Best-effort teardown.
-                                    }
-                                });
-                    }
+                } else {
+                    stopRegisteredWorkers(temporary.resolve("broker"));
+                }
+                for (JsonNode event : fixtureEvents("mcp.start")) {
+                    ProcessHandle.of(event.path("pid").asLong())
+                            .ifPresent(handle -> {
+                                handle.destroyForcibly();
+                                try {
+                                    handle.onExit().get(10, TimeUnit.SECONDS);
+                                } catch (Exception ignored) {
+                                    // Best-effort teardown.
+                                }
+                            });
                 }
             } catch (Exception ignored) {
                 // Best-effort teardown: a worker that refuses to stop must
