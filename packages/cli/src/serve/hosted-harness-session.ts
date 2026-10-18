@@ -10,6 +10,7 @@ import {
   hostedTurnApproval,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
+import { parseHostedInput, readHostedInput } from './hosted-input.js';
 import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
@@ -137,6 +138,7 @@ import {
 } from './hosted-agent-definition.js';
 import {
   HostedModelRoundLimitError,
+  HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
 } from './hosted-harness-model.js';
 import { hostedToolProgress } from './hosted-tool-progress.js';
@@ -2788,6 +2790,8 @@ async function eventEnvelope(
     const storeUnavailable =
       event.payload['stopReason'] === 'managed_session_store_unavailable';
     const roundLimit = event.payload['stopReason'] === 'model_round_limit';
+    const imageUnsupported =
+      event.payload['stopReason'] === 'image_input_unsupported';
     return {
       v: 1,
       id: event.sequence,
@@ -2802,14 +2806,18 @@ async function eventEnvelope(
             ? 'model_unavailable'
             : storeUnavailable
               ? 'managed_session_store_unavailable'
-              : roundLimit
-                ? 'hosted_turn_limit_exceeded'
-                : 'hosted_turn_failed',
+              : imageUnsupported
+                ? 'image_input_unsupported'
+                : roundLimit
+                  ? 'hosted_turn_limit_exceeded'
+                  : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
-          : roundLimit
-            ? 'The Hosted Harness Turn reached its configured model round limit.'
-            : 'Hosted Harness turn failed.',
+          : imageUnsupported
+            ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
+            : roundLimit
+              ? 'The Hosted Harness Turn reached its configured model round limit.'
+              : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -2941,6 +2949,9 @@ async function executeHostedTurn(
   workflowLaunch?: HostedWorkflowLaunch,
 ): Promise<ChatRecord> {
   const authority = session.managed.authority;
+  const promptInput = workflowLaunch
+    ? { text, parts: [{ text }], attachments: [] }
+    : await readHostedInput(session.managed, promptId, text);
   const harness = createManagedHarnessHandle(session.managed);
   if (resumeModel) {
     await harness.adoptPreparedContinuation(promptId, true);
@@ -3139,7 +3150,7 @@ async function executeHostedTurn(
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
           const user = record(session, sessionId, 'user', parentUuid, {
             daemonPromptId: promptId,
-            message: { role: 'user', parts: [{ text }] },
+            message: { role: 'user', parts: promptInput.parts },
           });
           await session.managed.sink.write(user);
           parentUuid = user.uuid;
@@ -3222,6 +3233,13 @@ async function executeHostedTurn(
                   teams: session.teams,
                   commands: session.commands,
                   memberPlanMode: await ensureMemberPlanMode(session),
+                  publicPlanMode:
+                    (
+                      await readHostedTurnApprovalSelection(
+                        session.managed,
+                        promptId,
+                      )
+                    )?.planMode === true,
                 },
               )
             : undefined;
@@ -3274,6 +3292,7 @@ async function executeHostedTurn(
                   cwd,
                   history,
                   prompt: text,
+                  attachmentParts: promptInput.attachments,
                   promptId,
                   signal: abort.signal,
                   modelScope,
@@ -3335,6 +3354,11 @@ async function executeHostedTurn(
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
+          if (
+            stopReason === 'error' &&
+            cause instanceof HostedImageInputUnsupportedError
+          )
+            stopReason = 'image_input_unsupported';
           // A deadline expiry must keep naming the deadline: only a generic
           // error outcome may be reclassified as a model-route failure.
           if (
@@ -6284,18 +6308,37 @@ export function registerHostedHarnessSessionRoutes(
       );
       if (
         approvalSelection &&
-        (session.agentDefinition ||
-          !session.approval ||
-          ![
-            'hosted-workspace-files/1',
-            'hosted-workspace-shell/1',
-            'hosted-workspace-files/2',
-            'hosted-workspace-shell/2',
-          ].includes(session.toolProfile ?? '') ||
+        (!session.approval ||
+          !(
+            session.agentDefinition
+              ? [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-shell/2',
+                ]
+              : [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-files/2',
+                  'hosted-workspace-shell/2',
+                ]
+          ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
             approvalSelection.mode !== session.approval.mode))
       )
         throw new Error('Approval selection is unavailable for this Session.');
+      if (
+        approvalSelection?.planMode &&
+        (![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/2',
+        ].includes(session.toolProfile ?? '') ||
+          (session.childDepth ?? 0) !== 0 ||
+          session.mcp ||
+          session.hooks)
+      )
+        throw new Error('Public Plan mode is unavailable for this Session.');
     } catch {
       return error(res, 400, 'invalid_hosted_approval_selection');
     }
@@ -6330,21 +6373,17 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 400, 'invalid_hosted_prompt');
       }
     }
+    let promptInput: ReturnType<typeof parseHostedInput> | undefined;
+    try {
+      if (workflowLaunch === undefined) promptInput = parseHostedInput(prompt);
+    } catch {
+      return error(res, 400, 'invalid_hosted_prompt');
+    }
     if (
       typeof promptId !== 'string' ||
       !HOSTED_UUID.test(promptId) ||
       !Array.isArray(prompt) ||
       prompt.length === 0 ||
-      (workflowLaunch === undefined &&
-        !prompt.every((block) => {
-          const item = object(block);
-          return (
-            item?.['type'] === 'text' &&
-            typeof item['text'] === 'string' &&
-            item['text'].length > 0 &&
-            Object.keys(item).length === 2
-          );
-        })) ||
       typeof digest !== 'string' ||
       !DIGEST.test(digest) ||
       (deadlineMs !== undefined &&
@@ -6361,12 +6400,12 @@ export function registerHostedHarnessSessionRoutes(
     // keeps the one-line summary while the full payload rides the input.
     const text = workflowLaunch
       ? workflowLaunchSummaryText(workflowLaunch)
-      : prompt.map((block) => (block as { text: string }).text).join('\n');
+      : promptInput!.text;
     const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
       daemonPromptId: promptId,
-      message: { role: 'user', parts: [{ text }] },
+      message: { role: 'user', parts: promptInput?.parts ?? [{ text }] },
     });
     if (
       Buffer.byteLength(JSON.stringify(prompt)) > maxBytes ||
@@ -8540,6 +8579,9 @@ export function registerHostedHarnessSessionRoutes(
             teams: session.teams,
             commands: session.commands,
             memberPlanMode: await ensureMemberPlanMode(session),
+            publicPlanMode:
+              (await readHostedTurnApprovalSelection(session.managed, promptId))
+                ?.planMode === true,
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -8775,6 +8817,11 @@ export function registerHostedHarnessSessionRoutes(
         } catch (cause) {
           if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
           state = abort.signal.aborted ? 'cancelled' : 'error';
+          if (
+            state === 'error' &&
+            cause instanceof HostedImageInputUnsupportedError
+          )
+            failureReason = 'image_input_unsupported';
           if (state === 'error' && cause instanceof HostedModelUnavailableError)
             failureReason = 'model_unavailable';
           if (state === 'error') {

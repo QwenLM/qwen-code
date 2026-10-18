@@ -39,6 +39,12 @@ import {
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
+import {
+  HOSTED_PUBLIC_PLAN_TOOL,
+  HOSTED_PUBLIC_PLAN_READS,
+  HOSTED_PUBLIC_PLAN_REFUSAL,
+  hostedPublicPlanActive,
+} from './hosted-plan-mode.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
@@ -1565,9 +1571,12 @@ interface HostedPreparedRequest {
   message: boolean;
   command: boolean;
   skill: boolean;
+  planExit?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
+  private readonly publicPlanMode: boolean;
+  private planning: boolean;
   private logicalRound = 0;
   private nativeBatch?: {
     messageId: string;
@@ -1689,6 +1698,7 @@ export class HostedWorkspaceToolTurn {
        * `plan-mode="required"` preamble; its calls admit reads only.
        */
       memberPlanMode?: boolean;
+      publicPlanMode?: boolean;
     },
   ) {
     this.foregroundOnly = extras?.foregroundOnly === true;
@@ -1715,6 +1725,21 @@ export class HostedWorkspaceToolTurn {
     this.commands = this.foregroundOnly ? undefined : extras?.commands;
     this.skills = extras?.skills;
     this.memberPlanMode = extras?.memberPlanMode === true;
+    this.publicPlanMode = extras?.publicPlanMode === true;
+    this.planning = this.publicPlanMode;
+    if (
+      this.publicPlanMode &&
+      (this.hooks ||
+        this.mcp ||
+        this.memberPlanMode ||
+        this.childDepth !== 0 ||
+        ![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/2',
+        ].includes(this.profile ?? ''))
+    )
+      throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -1766,6 +1791,9 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    this.planning =
+      this.publicPlanMode &&
+      (await hostedPublicPlanActive(this.session, this.promptId));
     // #13753 I3: a snapshot child's read profile declares its two read
     // tools and nothing else, whatever lanes, orchestration or MCP the
     // Session has; the refusal of every other call rests on this alone.
@@ -1902,7 +1930,18 @@ export class HostedWorkspaceToolTurn {
           : tool,
       );
     }
-    return this.advertised;
+    if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+    return this.planning
+      ? this.advertised.filter(
+          (tool) =>
+            tool.name === 'exit_plan_mode' ||
+            HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
+        )
+      : this.advertised;
+  }
+
+  planModeInstructions(): string {
+    return this.planning ? HOSTED_PUBLIC_PLAN_REFUSAL : '';
   }
 
   /** Which side of its lineage this Session's send_message addresses. */
@@ -2871,6 +2910,7 @@ export class HostedWorkspaceToolTurn {
           message: false,
           command: false,
           skill: item.call.name === 'skill' && this.skills !== undefined,
+          planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
         });
       }
       this.logicalRound = plan.round;
@@ -2893,17 +2933,24 @@ export class HostedWorkspaceToolTurn {
   ): Promise<ManagedSessionDurableRef | undefined> {
     const batch = this.nativeBatch;
     const runtime = this.broker.runtime;
+    const singlePlanExit =
+      this.publicPlanMode &&
+      batch?.requests.length === 1 &&
+      batch.requests[0].planExit === true;
     if (
       !batch ||
       batch.uncaptured ||
       !runtime ||
-      isHostedWorkspaceShellProfile(this.profile) ||
+      (isHostedWorkspaceShellProfile(this.profile) && !singlePlanExit) ||
       this.hooks ||
       this.mcp ||
       batch.requests.some(
         (request) =>
-          !['read_file', 'write_file', 'edit', 'glob'].includes(
-            request.call.name,
+          !(
+            singlePlanExit ||
+            ['read_file', 'write_file', 'edit', 'glob'].includes(
+              request.call.name,
+            )
           ) ||
           // A call refused at the canonical-digest ceiling (#13803 D1) has
           // no argument digest a restore could re-verify, and one refused
@@ -3105,10 +3152,31 @@ export class HostedWorkspaceToolTurn {
           (HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
             (call.name === 'team_plan_approval' &&
               teamPlanAdmissionsEnabled()));
+        const planExit = this.publicPlanMode && call.name === 'exit_plan_mode';
         // H4e-b3 decision 9: a run whose first input carried an unescaped
         // plan-mode preamble admits reads only; every other call is
         // refused before it runs, ahead of any per-tool arm below.
         if (
+          this.planning &&
+          !planExit &&
+          !HOSTED_PUBLIC_PLAN_READS.has(call.name)
+        ) {
+          validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
+          input = { ...call.args };
+        } else if (planExit) {
+          input = { ...call.args };
+          if (!this.planning)
+            validationError = 'Plan mode already ended for this Turn.';
+          else if (
+            source.length !== 1 ||
+            Object.keys(input).length !== 1 ||
+            typeof input['plan'] !== 'string' ||
+            !input['plan'].trim() ||
+            input['plan'].length > 24000
+          )
+            validationError =
+              'Hosted exit_plan_mode requires a nonempty Markdown plan of at most 24000 characters and must be the only call in its batch.';
+        } else if (
           this.memberPlanMode &&
           !HOSTED_PLAN_MODE_READS.has(call.name) &&
           !(
@@ -3702,6 +3770,7 @@ export class HostedWorkspaceToolTurn {
           team,
           command,
           skill,
+          planExit,
         };
       });
     };
@@ -4163,6 +4232,7 @@ export class HostedWorkspaceToolTurn {
           request.message ||
           request.team ||
           request.command ||
+          request.planExit ||
           request.skill ||
           request.workflow
         )
@@ -4600,6 +4670,29 @@ export class HostedWorkspaceToolTurn {
               commandRuns,
             )),
           );
+          continue;
+        }
+        if (request.planExit) {
+          if (await hostedPublicPlanActive(this.session, this.promptId))
+            throw new HostedToolRecoveryRequiredError(
+              'The public plan has no durable approval.',
+            );
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [
+              {
+                text: 'The user approved the plan. Plan mode is now off for this Turn. Continue under the original execution permission; ordinary tool approvals still apply.',
+              },
+            ],
+          );
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Plan result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          this.planning = false;
+          responses.push(...converted);
           continue;
         }
         if (request.skill) {
@@ -7412,8 +7505,17 @@ export class HostedWorkspaceToolTurn {
       if (
         refusals[index] ||
         (request.call.name === 'skill' && this.skills !== undefined) ||
-        this.hookPermission.get(request.call.callId) === 'allow' ||
-        !hostedApprovalAsks(approval.settings, request.call.name, globProfile)
+        (!(
+          this.publicPlanMode &&
+          this.planning &&
+          request.call.name === 'exit_plan_mode'
+        ) &&
+          (this.hookPermission.get(request.call.callId) === 'allow' ||
+            !hostedApprovalAsks(
+              approval.settings,
+              request.call.name,
+              globProfile,
+            )))
       )
         continue;
       asked = true;
