@@ -1364,6 +1364,11 @@ public class ManagedExtensionRecordStore {
         String deliveryState = delivery.isNull() ? null
                 : delivery.get("state").textValue();
         long revision = previous == null ? 1 : previous.revision() + 1;
+        // A row's task kind is fixed at its insert: a row written before
+        // its domain projected tasks (a channel delivery planned before
+        // #13746 F3) stays a non-task on every later revision.
+        String taskKind = previous == null ? body.taskKindOf().apply(record)
+                : previous.taskKind();
         if (previous == null) {
             try {
                 jdbc.update("INSERT INTO ma_session_record"
@@ -1379,8 +1384,8 @@ public class ManagedExtensionRecordStore {
                                 + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         scopeKey, recordKey, tenantId, workspaceId, sessionId,
                         domain, recordId, operationHash, revision, resourceId,
-                        body.taskKindOf().apply(record),
-                        body.taskKindOf().apply(record) == null ? null : projection.state(), projection.runtimeState(),
+                        taskKind, taskKind == null ? null : projection.state(),
+                        projection.runtimeState(),
                         projection.definitionRevision(), deliveryTarget,
                         deliveryState, projection.createdAt(),
                         projection.startedAt(), projection.settledAt(), sequence,
@@ -1403,7 +1408,7 @@ public class ManagedExtensionRecordStore {
                         + " = ?, runtime_state = ?, definition_revision = ?, delivery_target = ?,"
                         + " delivery_state = ?, started_at = ?, settled_at = ? WHERE record_kind ="
                         + " 'DOMAIN' AND session_scope_key = ? AND record_key = ?",
-                    revision, resourceId, body.taskKindOf().apply(record) == null ? null : projection.state(),
+                    revision, resourceId, taskKind == null ? null : projection.state(),
                     projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.startedAt(),
@@ -1418,7 +1423,7 @@ public class ManagedExtensionRecordStore {
         jdbc.update(
                 "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scopeKey, recordKey, revision, ManagedSchemaKeys.key(scopeKey, resourceId), tenantId, workspaceId, sessionId, resourceId);
-        if (body.taskKindOf().apply(record) != null && (previous == null
+        if (taskKind != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
             if (isBeingDeleted(tenantId, sessionId)) {
@@ -1461,7 +1466,8 @@ public class ManagedExtensionRecordStore {
             throws SQLException {
         return new StoredRow(result.getString("domain"),
                 result.getString("record_id"), result.getLong("revision"),
-                result.getString("record_resource_id"), projection(result));
+                result.getString("record_resource_id"),
+                result.getString("task_kind"), projection(result));
     }
 
     private static TaskProjection projection(ResultSet result)
@@ -1911,7 +1917,7 @@ public class ManagedExtensionRecordStore {
     }
 
     private record StoredRow(String domain, String recordId, long revision,
-            String resourceId, TaskProjection projection) {
+            String resourceId, String taskKind, TaskProjection projection) {
     }
 
     /** Whether the event id sits in the domain's own reserved {@code <domain>:<n>} namespace. */
