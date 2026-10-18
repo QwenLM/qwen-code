@@ -19,6 +19,7 @@ import {
   requestedDaemonParam,
   requestedFanoutParams,
 } from './web-shell-static.js';
+import { bearerAuth } from './auth.js';
 
 const stderr = vi.hoisted(() => ({ writeStderrLine: vi.fn() }));
 vi.mock('../utils/stdioHelpers.js', () => stderr);
@@ -29,6 +30,9 @@ describe('Web Shell sandbox framing', () => {
     expect(csp).toContain('frame-src http: https: blob:;');
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("connect-src 'self'");
+    expect(
+      csp.split('; ').find((directive) => directive.startsWith('img-src ')),
+    ).toBe("img-src 'self' data: blob: https://avatars.githubusercontent.com");
     expect(csp).toContain("media-src 'self' data:");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain(
@@ -294,13 +298,25 @@ describe('public PWA HTTP routes', () => {
       const shell = express();
       mountWebShellAssets(shell, directory, [], enabled);
       mountWebShellSpaFallback(shell, directory, [], enabled);
-      for (const route of ['/', '/session/test', '/unknown-page']) {
+      for (const route of [
+        '/',
+        '/session/test',
+        '/code-review',
+        '/unknown-page',
+      ]) {
         const response = await request(shell)
           .get(route)
           .set('Accept', 'text/html')
           .expect(200);
         const directives =
           response.headers['content-security-policy'].split('; ');
+        expect(
+          directives.find((directive: string) =>
+            directive.startsWith('img-src '),
+          ),
+        ).toBe(
+          "img-src 'self' data: blob: https://avatars.githubusercontent.com",
+        );
         expect(
           directives.find((directive: string) =>
             directive.startsWith('connect-src '),
@@ -313,6 +329,38 @@ describe('public PWA HTTP routes', () => {
       }
     },
   );
+
+  it('serves code review deep links before bearer auth without exposing API reads', async () => {
+    const shell = express();
+    mountWebShellAssets(shell, directory);
+    shell.use(bearerAuth('test-token'));
+    mountWebShellSpaFallback(shell, directory);
+    for (const route of [
+      '/settings',
+      '/code-review',
+      '/CODE-REVIEW/?pr=https%3A%2F%2Fgithub.com%2Ffixture%2Frepo%2Fpull%2F7',
+    ]) {
+      const response = await request(shell)
+        .get(route)
+        .set('Accept', 'text/html')
+        .expect(200);
+      expect(response.headers['content-type']).toContain('text/html');
+      expect(response.text).toContain('<title>Shell</title>');
+      await request(shell).head(route).set('Accept', 'text/html').expect(200);
+    }
+    await request(shell)
+      .get('/code-review')
+      .set('Accept', 'application/json')
+      .expect(401);
+    await request(shell)
+      .get('/github/prs/inbox')
+      .set('Accept', 'text/html')
+      .expect(401);
+    await request(shell)
+      .post('/code-review')
+      .set('Accept', 'text/html')
+      .expect(401);
+  });
 
   it.each(['/manifest.webmanifest', '/MANIFEST.WEBMANIFEST/'])(
     'serves %s without a token and permits revalidation',

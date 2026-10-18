@@ -54,6 +54,58 @@ afterEach(() => {
 });
 
 describe('navigation protocol', () => {
+  it('round trips the account PR URL without workspace scope or leaking into chat', () => {
+    const route = {
+      page: 'code-review' as const,
+      prRef: 'https://github.com/org/repo/pull/12',
+    };
+    const url = buildNavigationUrl(
+      new URL('https://host/agentic-code?instanceId=kept&workspace=unknown'),
+      route,
+      '/agentic-code',
+    );
+    expect(readNavigationUrl(url, '/agentic-code')).toEqual(route);
+    expect(
+      buildNavigationUrl(url, { page: 'chat' }, '/agentic-code').search,
+    ).toBe('?instanceId=kept');
+  });
+  it('navigates between repositories while preserving the chat return target', () => {
+    window.history.replaceState(
+      {},
+      '',
+      '/agentic-code/session/old?workspace=one',
+    );
+    render();
+    act(() =>
+      controller?.openCodeReview('https://github.com/one/repo/pull/12'),
+    );
+    expect(controller?.route).toEqual({
+      page: 'code-review',
+      prRef: 'https://github.com/one/repo/pull/12',
+    });
+    act(() =>
+      controller?.openCodeReview('https://github.com/two/repo/pull/12'),
+    );
+    expect(new URLSearchParams(window.location.search).get('pr')).toBe(
+      'https://github.com/two/repo/pull/12',
+    );
+    expect(new URLSearchParams(window.location.search).has('workspace')).toBe(
+      false,
+    );
+    act(() => controller?.returnToChat());
+    expect(controller?.route).toMatchObject({
+      page: 'chat',
+      sessionId: 'old',
+      workspaceId: 'one',
+    });
+  });
+  it('ignores obsolete workspace parameters in code review links', () => {
+    expect(
+      readNavigationUrl(
+        new URL('https://host/code-review?workspace=unknown&pr=42'),
+      ),
+    ).toEqual({ page: 'code-review', prRef: '42' });
+  });
   it.each(WEB_SHELL_PAGES)(
     'round trips %s without session scope and preserves host query/hash',
     (page) => {

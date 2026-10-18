@@ -46,6 +46,7 @@ export const WEB_SHELL_PAGE_PATHS = [
   '/live',
   '/scheduled-tasks',
   '/goals',
+  '/code-review',
   '/settings',
 ] as const;
 

@@ -55,6 +55,7 @@ describe('page deep links', () => {
     '/live',
     '/scheduled-tasks',
     '/goals',
+    '/code-review',
     '/settings',
   ])('only exempts document GET/HEAD on exact %s', (path) => {
     for (const method of ['GET', 'HEAD']) {

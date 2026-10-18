@@ -9,6 +9,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createServer as createHttpServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { createServer, preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
@@ -46,6 +48,12 @@ it('serves the settings page without claiming the settings source module', async
     });
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
+    expect(
+      response.headers
+        .get('Content-Security-Policy')
+        ?.split('; ')
+        .find((directive) => directive.startsWith('img-src ')),
+    ).toBe("img-src 'self' data: blob: https://avatars.githubusercontent.com");
     expect(await response.text()).toContain('/main.tsx');
   }
   const source = await fetch(`${baseUrl}settings.ts`);
@@ -90,6 +98,14 @@ it.each([
       const response = await fetch(`${baseUrl}${query}`);
       expect(response.status).toBe(200);
       expect(await response.text()).toContain('<title>Preview</title>');
+      expect(
+        response.headers
+          .get('Content-Security-Policy')
+          ?.split('; ')
+          .find((directive) => directive.startsWith('img-src ')),
+      ).toBe(
+        "img-src 'self' data: blob: https://avatars.githubusercontent.com",
+      );
       expect(
         response.headers.get('Content-Security-Policy')?.split('; '),
       ).toContain(expected + (enabled ? ' http://127.0.0.1:47821' : ''));
@@ -223,6 +239,78 @@ describe('Web Shell client source proxy bypass', () => {
 });
 
 describe('Web Shell daemon API proxy coverage', () => {
+  it('forwards code review reads and settings writes through the dev server', async () => {
+    const daemon = createHttpServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk: string) => (body += chunk));
+      request.on('end', () => {
+        response.setHeader('Content-Type', 'application/json');
+        response.end(
+          JSON.stringify({ method: request.method, url: request.url, body }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      daemon.listen(0, '127.0.0.1', resolve),
+    );
+    onTestFinished(
+      () =>
+        new Promise<void>((resolve, reject) =>
+          daemon.close((error) => (error ? reject(error) : resolve())),
+        ),
+    );
+    const target = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
+    const config = loadConfig();
+    const server = await createServer({
+      ...config,
+      configFile: false,
+      server: {
+        ...config.server,
+        host: '127.0.0.1',
+        port: 0,
+        open: false,
+        proxy: Object.fromEntries(
+          Object.entries(config.server?.proxy ?? {}).map(([key, options]) => [
+            key,
+            typeof options === 'string' ? target : { ...options, target },
+          ]),
+        ),
+      },
+    });
+    onTestFinished(() => server.close());
+    await server.listen();
+    const baseUrl = server.resolvedUrls!.local[0];
+    for (const [method, path, body] of [
+      ['GET', 'github/prs/settings', undefined],
+      ['POST', 'github/prs/settings', JSON.stringify({ enabled: true })],
+      ['GET', 'github/prs/inbox?page=2', undefined],
+      [
+        'GET',
+        'github/prs/detail?url=https%3A%2F%2Fgithub.com%2Ffixture%2Frepo%2Fpull%2F7',
+        undefined,
+      ],
+    ] as const) {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method,
+        body,
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain(
+        'application/json',
+      );
+      expect(await response.json()).toEqual({
+        method,
+        url: `/${path}`,
+        body: body ?? '',
+      });
+    }
+  });
+
   it.each(['/standalone', '/live'])('proxies %s API routes', (prefix) => {
     const proxy = loadConfig().server?.proxy?.[prefix];
     expect(proxy).not.toBeTypeOf('string');

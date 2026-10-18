@@ -297,6 +297,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // and its auth is reported per-request through the
   // `github_cli_unavailable` / `github_prs_failed` error codes.
   workspace_github_prs: { since: 'v1' },
+  // Account-scoped read-only PR workbench and user-level feature settings.
+  github_code_review: { since: 'v1' },
   // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
   // workspace's repository, `GET .../git/worktrees/status?path=` reads one
   // listed worktree's working-tree counters, and

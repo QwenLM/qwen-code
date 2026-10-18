@@ -99,7 +99,7 @@ function developmentCsp(requestUrl: string): string {
     "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self' data:",
-    "img-src 'self' data: blob:",
+    "img-src 'self' data: blob: https://avatars.githubusercontent.com",
     "media-src 'self' data:",
     `connect-src 'self' ${connectOrigins.join(' ')}`.trim(),
     "worker-src 'self' blob:",
@@ -224,6 +224,7 @@ export default defineConfig(({ command }) => ({
       [MANAGED_AGENT_PUBLIC_ROUTE_PROXY]: managedAgentJavaProxy,
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      '/github/prs': daemonProxy,
       // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
       // index.html in dev; the client swallows the parse failure and silently
       // keeps the built-in name and logo, so a locally configured `ui.brand`

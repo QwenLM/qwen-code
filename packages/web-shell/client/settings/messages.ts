@@ -16,6 +16,9 @@ type SettingsMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
+  'settings.label.experimental.codeReview': 'Code Review Workbench',
+  'settings.description.experimental.codeReview':
+    'Enable the account-wide GitHub pull request workbench on the connected machine.',
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -109,6 +112,9 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
+  'settings.label.experimental.codeReview': '代码审查工作台',
+  'settings.description.experimental.codeReview':
+    '在连接的机器上启用账户级 GitHub Pull Request 工作台。',
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',

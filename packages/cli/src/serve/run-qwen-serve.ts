@@ -8414,6 +8414,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      githubAccountEnv: getEnvironmentBeforeLoad() ?? daemonRuntimeBaseEnv,
       modelSelectionBaseEnv: getEnvironmentBeforeLoad() ?? daemonRuntimeBaseEnv,
       runtimePlatform: deps.runtimePlatform,
       daemonLog,

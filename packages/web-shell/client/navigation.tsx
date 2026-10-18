@@ -47,6 +47,7 @@ interface NavigationController {
   revision: number;
   historyRevision?: number;
   openPage: (page: WebShellPage) => void;
+  openCodeReview: (prRef?: string) => void;
   returnToChat: () => void;
   reconcilePage: (page: WebShellPage | undefined) => void;
   beginSessionNavigation: (
@@ -308,6 +309,19 @@ export function WebShellNavigationBoundary({
               userSessionNavigation.current = false;
               if (current.current.route.page === page) return;
               commit({ page }, current.current.target, 'push');
+            },
+            openCodeReview: (prRef) => {
+              restoringHistory.current = false;
+              userSessionNavigation.current = false;
+              const route = {
+                page: 'code-review' as const,
+                prRef,
+              };
+              if (
+                JSON.stringify(current.current.route) === JSON.stringify(route)
+              )
+                return;
+              commit(route, current.current.target, 'push');
             },
             returnToChat: () => {
               restoringHistory.current = false;

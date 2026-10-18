@@ -300,6 +300,8 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import { CodeReviewWorkbench } from './components/CodeReviewWorkbench';
+import { useCodeReviewSettings } from './hooks/useCodeReviewSettings';
 import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { buildGoalControlRequest } from './utils/goalControlRequest';
@@ -1859,6 +1861,7 @@ type MainView =
   | 'scheduledTasks'
   | 'workflows'
   | 'goals'
+  | 'codeReview'
   | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -9004,6 +9007,16 @@ export function App({
   ]);
   const connected = connection.status === 'connected';
   const workspaceEventSignals = useWorkspaceEventSignals();
+  const [codeReviewLocalRef, setCodeReviewLocalRef] = useState<string>();
+  const codeReviewRoute =
+    navigation?.route.page === 'code-review' ? navigation.route : undefined;
+  const codeReviewSupported =
+    workspace.capabilities?.features?.includes('github_code_review') === true;
+  const codeReviewSettings = useCodeReviewSettings(
+    workspace.client,
+    codeReviewSupported,
+    workspaceEventSignals?.settingsVersion,
+  );
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
   const skillsCatalogActive =
@@ -9460,6 +9473,22 @@ export function App({
     if (cockpitViewRequested()) updateCockpitLocation(false);
     setMainView('chat');
   }, []);
+  useEffect(() => {
+    if (
+      !navigation &&
+      mainView === 'codeReview' &&
+      workspaceCapabilitiesReady &&
+      !codeReviewSupported
+    ) {
+      showChat();
+    }
+  }, [
+    navigation,
+    mainView,
+    workspaceCapabilitiesReady,
+    codeReviewSupported,
+    showChat,
+  ]);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
   // The floating drawer mounts already-open. Only a genuine closed->open may
@@ -10000,6 +10029,13 @@ export function App({
     setMainView('goals');
     navigationRef.current?.openPage('goals');
   }, [showChat]);
+  const openCodeReview = useCallback(() => {
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    if (!navigationRef.current) showChat();
+    setMainView('codeReview');
+    navigationRef.current?.openCodeReview(codeReviewLocalRef);
+  }, [codeReviewLocalRef, showChat]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -10014,6 +10050,7 @@ export function App({
       sidebarOptions.primaryNav?.items?.some((item) => {
         if (item === 'newTask') return false;
         if (item === 'managed') return externalManagedAgentAvailable;
+        if (item === 'codeReview') return codeReviewSupported;
         if (!projectFeaturesAvailable) return false;
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
@@ -10210,7 +10247,9 @@ export function App({
         ? 'scheduled-tasks'
         : mainView === 'goals'
           ? 'goals'
-          : undefined;
+          : mainView === 'codeReview'
+            ? 'code-review'
+            : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -10219,10 +10258,17 @@ export function App({
       navigationSettledRef.current = true;
       return;
     }
-    const primaryItem = page === 'scheduled-tasks' ? 'scheduledTasks' : page;
+    const primaryItem =
+      page === 'scheduled-tasks'
+        ? 'scheduledTasks'
+        : page === 'code-review'
+          ? 'codeReview'
+          : page;
     const allowed =
       page === 'chat' ||
-      (projectFeaturesAvailable &&
+      ((page === 'code-review'
+        ? codeReviewSupported
+        : projectFeaturesAvailable) &&
         (page !== 'live' || liveSidebarEnabled) &&
         (page === 'settings'
           ? hostSidebar?.footer !== false &&
@@ -10249,7 +10295,9 @@ export function App({
         ? 'scheduledTasks'
         : nextPage === 'goals'
           ? 'goals'
-          : 'chat',
+          : nextPage === 'code-review'
+            ? 'codeReview'
+            : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -10260,6 +10308,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     workspaceCapabilitiesReady,
+    codeReviewSupported,
   ]);
   useEffect(() => {
     if (
@@ -10761,7 +10810,8 @@ export function App({
       mainView === 'cockpit' ||
       mainView === 'scheduledTasks' ||
       mainView === 'workflows' ||
-      mainView === 'goals'
+      mainView === 'goals' ||
+      mainView === 'codeReview'
     ) {
       setMainView('chat');
     }
@@ -21529,6 +21579,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  onOpenCodeReview={
+                    codeReviewSupported
+                      ? () => {
+                          closeMobileDrawer();
+                          openCodeReview();
+                        }
+                      : undefined
+                  }
                   onOpenSessions={() => {
                     closeMobileDrawer();
                     openPanel('sessions');
@@ -22330,6 +22388,27 @@ export function App({
                     </ShadowDomBoundary>
                   </div>
                 </section>
+              )}
+              {codeReviewSupported && mainView === 'codeReview' && (
+                <div
+                  className={styles.fullPage}
+                  data-testid="code-review-workbench"
+                >
+                  <CodeReviewWorkbench
+                    client={workspace.client}
+                    settings={codeReviewSettings}
+                    initialPrRef={
+                      codeReviewRoute
+                        ? codeReviewRoute.prRef
+                        : codeReviewLocalRef
+                    }
+                    onSelectPullRequest={(ref) => {
+                      setCodeReviewLocalRef(ref);
+                      navigationRef.current?.openCodeReview(ref);
+                    }}
+                    onClose={!navigationRailVisible ? returnToChat : undefined}
+                  />
+                </div>
               )}
               {projectFeaturesAvailable && mainView === 'scheduledTasks' && (
                 <div

@@ -681,6 +681,142 @@ export interface DaemonGitHubPullRequestList {
   pullRequests: DaemonGitHubPullRequest[];
 }
 
+export interface DaemonGitHubRepository {
+  host: string;
+  nameWithOwner: string;
+  url: string;
+}
+
+export interface DaemonGitHubAccount {
+  host: string;
+  login: string;
+}
+
+export interface DaemonGitHubPullRequestSettings {
+  v: 1;
+  enabled: boolean;
+  userEnabled: boolean | null;
+  locked: boolean;
+}
+
+export interface DaemonGitHubAccountPullRequest {
+  repository: DaemonGitHubRepository;
+  number: number;
+  title: string;
+  url: string;
+  author: string;
+  authorAvatarUrl?: string;
+  state: 'open' | 'draft';
+  /** Unix timestamp in seconds. */
+  updatedAt: number;
+}
+
+export interface DaemonGitHubSearchInfo {
+  totalCount: number;
+  incompleteResults: boolean;
+  searchLimitReached: boolean;
+}
+
+/** One page per search source, across the authenticated account's repositories. */
+export interface DaemonGitHubPullRequestInbox {
+  v: 1;
+  scope: 'account';
+  account: DaemonGitHubAccount;
+  authored: DaemonGitHubAccountPullRequest[];
+  /** This page's review-requested and assigned PRs, deduplicated by URL. */
+  needsMyReview: DaemonGitHubAccountPullRequest[];
+  page: number;
+  limit: 50;
+  hasMore: { authored: boolean; needsMyReview: boolean };
+  search: {
+    authored: DaemonGitHubSearchInfo;
+    reviewRequested: DaemonGitHubSearchInfo;
+    assigned: DaemonGitHubSearchInfo;
+  };
+}
+
+export interface DaemonGitHubPullRequestDetail
+  extends Omit<DaemonGitHubPullRequest, 'state'> {
+  state: 'open' | 'draft' | 'merged' | 'closed';
+  authorAvatarUrl?: string;
+  body: string;
+  baseRefName: string;
+  baseRefOid: string;
+  headRefOid: string;
+  /** Unix timestamp in seconds. */
+  createdAt: number;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  mergeable: string;
+  files: Array<{
+    path: string;
+    status: string;
+    additions: number;
+    deletions: number;
+    patch: string | null;
+    patchTruncated: boolean;
+  }>;
+  checksDetails: Array<{
+    id?: string;
+    name: string;
+    workflowName?: string;
+    event?: string;
+    status: string;
+    conclusion: string | null;
+    url: string | null;
+  }>;
+  reviews: Array<{
+    id: string;
+    author: string;
+    authorAvatarUrl?: string;
+    body: string;
+    state: string;
+    createdAt: number;
+    url: string;
+  }>;
+  comments: Array<{
+    id: string;
+    author: string;
+    authorAvatarUrl?: string;
+    body: string;
+    createdAt: number;
+    url: string;
+    path: string | null;
+    line: number | null;
+  }>;
+  requestedReviewers: Array<{
+    kind: 'user' | 'team';
+    login: string;
+    url: string | null;
+    avatarUrl?: string;
+  }>;
+  reviewers?: Array<{
+    kind: 'user' | 'team';
+    login: string;
+    url: string | null;
+    avatarUrl?: string;
+    state: string;
+    commentCount: number;
+  }>;
+  truncated: {
+    files: boolean;
+    checks: boolean;
+    reviews: boolean;
+    comments: boolean;
+    requestedReviewers: boolean;
+    reviewers?: boolean;
+  };
+}
+
+export interface DaemonGitHubPullRequestDetailResponse {
+  v: 1;
+  scope: 'account';
+  account: DaemonGitHubAccount;
+  repository: DaemonGitHubRepository;
+  pullRequest: DaemonGitHubPullRequestDetail;
+}
+
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
 export interface DaemonGitHubPullRequestCreateResult {
   url: string;

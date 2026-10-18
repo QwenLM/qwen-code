@@ -53,6 +53,7 @@ import {
   FolderClosedIcon,
   FolderInputIcon,
   GitBranchIcon,
+  GitPullRequestIcon,
   GitForkIcon,
   PencilIcon,
   PinIcon,
@@ -283,6 +284,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'scheduledTasks'
   | 'workflows'
   | 'goals'
+  | 'codeReview'
   | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
@@ -331,6 +333,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'scheduledTasks',
     'workflows',
     'goals',
+    'codeReview',
     'managed',
   ];
 
@@ -447,6 +450,7 @@ interface WebShellSidebarProps {
   onOpenScheduledTasks: () => void;
   onOpenWorkflows: () => void;
   onOpenGoals: () => void;
+  onOpenCodeReview?: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. The table handles
@@ -1046,6 +1050,7 @@ export function WebShellSidebar({
   onOpenScheduledTasks,
   onOpenWorkflows,
   onOpenGoals,
+  onOpenCodeReview,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenWorkspacesOverview,
@@ -1187,6 +1192,7 @@ export function WebShellSidebar({
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
+    (primaryNavItems.has('codeReview') && Boolean(onOpenCodeReview)) ||
     (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
@@ -5747,6 +5753,21 @@ export function WebShellSidebar({
             {!collapsed && !railLayout && <span>{t('sidebar.workflows')}</span>}
           </button>
         )}
+      {primaryNavItems.has('codeReview') && onOpenCodeReview && (
+        <button
+          className={styles.pluginButton}
+          type="button"
+          title={railLayout ? undefined : t('sidebar.codeReview')}
+          aria-label={t('sidebar.codeReview')}
+          aria-current={activePage === 'codeReview' ? 'page' : undefined}
+          onClick={() => openNavigation(onOpenCodeReview)}
+        >
+          <span className={styles.navIcon}>
+            <GitPullRequestIcon size={16} strokeWidth={1.2} />
+          </span>
+          {!collapsed && !railLayout && <span>{t('sidebar.codeReview')}</span>}
+        </button>
+      )}
       {projectFeaturesEnabled && primaryNavItems.has('goals') && (
         <button
           className={styles.pluginButton}

@@ -10,6 +10,7 @@ export const WEB_SHELL_PAGES = [
   'live',
   'scheduled-tasks',
   'goals',
+  'code-review',
   'settings',
 ] as const;
 export type WebShellPage = (typeof WEB_SHELL_PAGES)[number];
@@ -19,7 +20,8 @@ export interface SessionUrlTarget {
   context?: 'standalone' | 'live';
 }
 export type WebShellRoute =
-  | { page: WebShellPage }
+  | { page: Exclude<WebShellPage, 'code-review'> }
+  | { page: 'code-review'; prRef?: string }
   | ({ page: 'chat' } & SessionUrlTarget);
 
 export function normalizeNavigationBasePath(basePath = ''): string {
@@ -52,6 +54,14 @@ export function readNavigationUrl(
         ? { workspaceId }
         : {};
   if (!path) return { page: 'chat', ...scope };
+  if (path === '/code-review') {
+    return {
+      page: 'code-review',
+      ...(url.searchParams.get('pr')
+        ? { prRef: url.searchParams.get('pr')! }
+        : {}),
+    };
+  }
   if (isWebShellPage(path.slice(1))) {
     return { page: path.slice(1) as WebShellPage };
   }
@@ -81,6 +91,10 @@ export function buildNavigationUrl(
         : base || '/';
   url.searchParams.delete('workspace');
   url.searchParams.delete('context');
+  url.searchParams.delete('pr');
+  if (route.page === 'code-review') {
+    if (route.prRef) url.searchParams.set('pr', route.prRef);
+  }
   if (route.page === 'chat' && route.sessionId) {
     if (route.context) url.searchParams.set('context', route.context);
     else if (route.workspaceId) {

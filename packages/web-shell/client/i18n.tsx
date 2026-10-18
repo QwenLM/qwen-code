@@ -26,6 +26,10 @@ import {
 import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
+  CODE_REVIEW_MESSAGES_EN,
+  CODE_REVIEW_MESSAGES_ZH,
+} from './components/code-review/messages.js';
+import {
   MCP_APP_MESSAGES_EN,
   MCP_APP_MESSAGES_ZH,
 } from './mcp-app/messages.js';
@@ -66,6 +70,7 @@ function plural(count: string | number | undefined, noun: string): string {
 }
 
 const EN: Messages = {
+  'sidebar.codeReview': 'Code review',
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
   'capacityChoice.title': 'Choose a workspace to stop',
@@ -4470,6 +4475,7 @@ const EN: Messages = {
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
+  ...CODE_REVIEW_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
@@ -4479,6 +4485,7 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'sidebar.codeReview': '代码审查',
   'capacityChoice.persistenceUnconfirmed':
     '无法确认最后一轮被中断内容是否已保存。',
   'capacityChoice.title': '选择要停止的工作区',
@@ -8611,6 +8618,7 @@ const ZH: Messages = {
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
+  ...CODE_REVIEW_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,

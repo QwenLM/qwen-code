@@ -2158,6 +2158,48 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('reads account Code Review, encodes pages and complete PR URLs, and writes only the user toggle', async () => {
+      const payload = { v: 1, scope: 'account' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.githubPullRequestSettings()).resolves.toEqual(
+        payload,
+      );
+      await expect(
+        client.updateGitHubPullRequestSettings(true),
+      ).resolves.toEqual(payload);
+      await expect(client.githubPullRequestInbox({ page: 2 })).resolves.toEqual(
+        payload,
+      );
+      const url = 'https://github.example/o/r/pull/42/files?x=1#diff';
+      await expect(client.githubPullRequestDetail(url)).resolves.toEqual(
+        payload,
+      );
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/github/prs/settings'],
+        ['POST', 'http://daemon/github/prs/settings'],
+        ['GET', 'http://daemon/github/prs/inbox?page=2'],
+        [
+          'GET',
+          `http://daemon/github/prs/detail?url=${encodeURIComponent(url)}`,
+        ],
+      ]);
+      expect(calls[1]?.body).toBe(JSON.stringify({ enabled: true }));
+    });
+
+    it('preserves the Code Review feature gate error', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          code: 'feature_disabled',
+          error: 'Code Review is disabled.',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.githubPullRequestInbox()).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+
     it('routes the git mutation and GitHub create methods over REST', async () => {
       const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));

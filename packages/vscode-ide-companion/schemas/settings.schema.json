@@ -4470,6 +4470,11 @@
           "type": "boolean",
           "default": false
         },
+        "codeReview": {
+          "description": "Enable the read-only GitHub pull request workbench for the daemon GitHub account. Controlled from the workbench and User or System settings; workspace settings are ignored.",
+          "type": "boolean",
+          "default": false
+        },
         "liveVoice": {
           "description": "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
           "type": "object",

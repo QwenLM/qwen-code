@@ -131,6 +131,9 @@ import type {
   DaemonGitRemotesResult,
   DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestList,
+  DaemonGitHubPullRequestInbox,
+  DaemonGitHubPullRequestSettings,
+  DaemonGitHubPullRequestDetailResponse,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpConfigStatus,
@@ -1260,6 +1263,52 @@ export class DaemonClient {
 
   workspaceByCwd(workspaceCwd: string): WorkspaceDaemonClient {
     return new WorkspaceDaemonClient(this, urlEncode(workspaceCwd));
+  }
+
+  githubPullRequestSettings(): Promise<DaemonGitHubPullRequestSettings> {
+    return this.jsonRequest(
+      '/github/prs/settings',
+      'GET /github/prs/settings',
+      { mode: 'rest' },
+    );
+  }
+
+  updateGitHubPullRequestSettings(
+    enabled: boolean,
+  ): Promise<DaemonGitHubPullRequestSettings> {
+    return this.jsonRequest(
+      '/github/prs/settings',
+      'POST /github/prs/settings',
+      {
+        method: 'POST',
+        body: { enabled },
+        mode: 'rest',
+      },
+    );
+  }
+
+  githubPullRequestInbox(
+    options: { page?: number } = {},
+  ): Promise<DaemonGitHubPullRequestInbox> {
+    const query =
+      options.page === undefined
+        ? ''
+        : `?page=${urlEncode(String(options.page))}`;
+    return this.jsonRequest(
+      `/github/prs/inbox${query}`,
+      'GET /github/prs/inbox',
+      { mode: 'rest' },
+    );
+  }
+
+  githubPullRequestDetail(
+    url: string,
+  ): Promise<DaemonGitHubPullRequestDetailResponse> {
+    return this.jsonRequest(
+      `/github/prs/detail?url=${urlEncode(url)}`,
+      'GET /github/prs/detail',
+      { mode: 'rest' },
+    );
   }
 
   // -- Lifecycle / discovery ---------------------------------------------

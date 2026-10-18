@@ -330,6 +330,7 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import { registerGitHubCodeReviewRoutes } from './routes/github-code-review.js';
 import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -751,6 +752,8 @@ export interface ServeAppDeps {
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  /** Operator environment captured before loading any workspace values. */
+  githubAccountEnv?: Readonly<NodeJS.ProcessEnv>;
   modelSelectionBaseEnv?: Readonly<NodeJS.ProcessEnv>;
   runtimePlatform?: NodeJS.Platform;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
@@ -2956,6 +2959,11 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerGitHubCodeReviewRoutes(app, {
+    accountEnv: deps.githubAccountEnv,
     sendBridgeError,
     mutate,
   });

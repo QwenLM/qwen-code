@@ -4301,6 +4301,16 @@ const SETTINGS_SCHEMA = {
           'Run the experimental JavaScript and TypeScript Mod command subset from enabled extensions in trusted headless sessions.',
         showInDialog: false,
       },
+      codeReview: {
+        type: 'boolean',
+        label: 'Code Review Workbench',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable the read-only GitHub pull request workbench for the daemon GitHub account. Controlled from the workbench and User or System settings; workspace settings are ignored.',
+        showInDialog: false,
+      },
       liveVoice: {
         type: 'object',
         label: 'Live Voice',
