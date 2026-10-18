@@ -604,6 +604,23 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // opener — the pre-scan already decided where such a token is ambiguous.
     PARAMETER_OPEN_TAG_PATTERN.lastIndex = unclosedStart;
     if (!PARAMETER_OPEN_TAG_PATTERN.test(text)) continue;
+    // So is an opener no later call can be bound to: documentation inside a
+    // fence or an example range, or data inside a value an accepted block
+    // already consumed. Vetoing on those cancelled the intact calls outside
+    // the ambiguous region.
+    if (
+      blocks.some((block) =>
+        block.parameterSpans.some(
+          ([start, end]) => unclosedStart > start && unclosedStart < end,
+        ),
+      ) ||
+      positionInsideFence(text, unclosedStart, parameterRanges) ||
+      exampleRanges.some(
+        ([start, end]) => unclosedStart >= start && unclosedStart < end,
+      )
+    ) {
+      continue;
+    }
     const consumed = blocks.some((block) =>
       block.parameterSpans.some(([start]) => start === unclosedStart),
     );

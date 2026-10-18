@@ -1115,6 +1115,23 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     expect(result.remainingText).toBe('');
   });
 
+  it('recovers a live call beside a fenced doc holding an unclosed opener', () => {
+    // The documented opener never closes, so it stays unmatched — but it sits
+    // in a fence, owned by no block, and vetoing on it cost the live sibling
+    // the whole turn. See #13492.
+    const text =
+      invoke('read_file', param('file_path', 'a.ts')) +
+      '\n```\n' +
+      PARAM_OPEN +
+      ' name="content">\n' +
+      invoke('x', param('q', '1')) +
+      '\n```\n';
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
+    expect(tryRecoverXmlToolCalls(text).recovered).toBe(true);
+  });
+
   it('does not excise a quoted value the block never consumed', () => {
     // The flat scan binds the unclosed `command` value to the nested
     // documentation element's closer, so the dispatched argument absorbs that
