@@ -684,15 +684,16 @@ jobs:
     # 5048 s, the FG11a automation lost-reply letter to 5218 s, which moved
     # Verify to 100 minutes, the FG13d worker-stop cell to 5368 s and the
     # FG11b store faults to 5498 s, which moved Verify to 105 minutes,
-    # FG11b slice 2 to 5643 s, still inside them, the event-stream liveness
-    # gates to 6083 s, which moved Verify to 115 minutes, the FG12b
-    # store-failure class to 6203 s, and the FG12f stream-gap class to
-    # 6403 s, which moves Verify to 117 minutes so it wraps its fork +
-    # 600 s plus margin; the Broker fault gates keep 10, and admission plus
-    # O4 keep per-fork ceilings) plus 13 minutes for the uncapped setup
-    # steps (Checkout.. cgroup delegation, the report checks):
-    # 197 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 210
+    # FG11b slice 2 to 5643 s, still inside them, and the event-stream
+    # liveness gates to 6083 s; the FG13d dropped-reply cancel cell adds
+    # 150 s and the FG12b store-failure class adds 120 s, so the fork moves
+    # to 6353 s; the FG12f stream-gap class adds 210 s, so the fork moves to
+    # 6553 s and Verify to 120 minutes, which wraps its fork + 600 s plus
+    # margin; the Broker fault gates keep 10, and admission plus O4 keep
+    # per-fork ceilings) plus ~13 minutes for the uncapped setup steps
+    # (Checkout.. cgroup delegation, the report checks): 200 + 13. The
+    # failover arms run in hosted-failover-e2e.
+    timeout-minutes: 213
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -781,8 +782,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 6403 s, so the step wraps to fork + 600 s plus margin.
-        timeout-minutes: 117
+        # 6553 s, so the step wraps to fork + 600 s plus margin.
+        timeout-minutes: 120
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

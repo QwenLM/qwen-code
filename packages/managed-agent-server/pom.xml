@@ -444,25 +444,29 @@
                                  measure 62.1-72.4 s (~145 s budgeted
                                  at 2x): the healthy sum becomes
                                  5033 s, so the fork moves to 5643 s,
-                                 still inside the Verify step's 105
-                                 minutes. The event-stream liveness
-                                 gates add ~440 s, so the healthy sum
-                                 becomes 5473 s and the Verify step moves
-                                 to 115 minutes. The FG12b store-failure
-                                 class (HostedMcpStoreFaultGatesIT,
-                                 eight cases) measures 49.6 s locally
-                                 on JDK 21 + MySQL 8.0.46 (~120 s
-                                 budgeted, a conservative 2.4x): the
-                                 healthy sum becomes 5593 s and the
-                                 fork moves to 6203 s. The FG12f
-                                 stream-gap class (HostedMcpStreamGap
-                                 IT, three cases, three cold boots)
-                                 measures 104.6 s locally on JDK 21 +
-                                 MySQL 8.0.46 (~210 s budgeted): the
-                                 healthy sum becomes 5803 s, so the
-                                 fork moves to 6403 s and the Verify
-                                 step to 117 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6403</forkedProcessTimeoutInSeconds>
+                                 which the Verify step's 105 minutes
+                                 still wrap. The event-stream liveness
+                                 gates (HostedEventStreamLivenessIT,
+                                 four cases on the shipped 15 s
+                                 keepalive / 45 s bound, 214.4-215.0 s
+                                 healthy locally on JDK 21 and 25
+                                 across four runs, ~440 s budgeted at
+                                 2x) raise the healthy sum to 5743 s;
+                                 these sums already include the FG13d
+                                 dropped-reply cancel cell (issue
+                                 #14449, 150 s) and the FG12b
+                                 store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases, 49.6 s measured locally on
+                                 JDK 21 + MySQL 8.0.46, ~120 s
+                                 budgeted). The FG12f stream-gap class
+                                 (HostedMcpStreamGapIT, three cases,
+                                 three cold boots) measures 104.6 s
+                                 locally on the same stack (~210 s
+                                 budgeted): the healthy sum becomes
+                                 5953 s, so the fork moves to 6553 s
+                                 and the Verify step to 120 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6553</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
