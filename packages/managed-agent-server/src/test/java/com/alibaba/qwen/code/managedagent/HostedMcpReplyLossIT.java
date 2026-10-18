@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -107,8 +108,14 @@ class HostedMcpReplyLossIT {
                 .as("configure control %s expected drop id %s", configureCall,
                         configuration)
                 .isTrue();
+        assertThat(configureCall.status())
+                .as("the dropped control keeps its upstream status")
+                .isEqualTo(200);
         assertThat(controls("mcp-status")).isNotEmpty();
+        assertLookupFollows("mcp-configure", configuration);
         dropControls = false;
+        assertThat(configuration(session.id()).path("configRevision").asInt())
+                .isEqualTo(2);
         assertThat(configuration(session.id()).at("/run/state").asText())
                 .isEqualTo("settled");
 
@@ -126,9 +133,14 @@ class HostedMcpReplyLossIT {
         assertThat(effects("resource_read")).containsExactly("ext://proof");
         assertThat(operations(session.id()).getLast().at("/run/state").asText())
                 .isEqualTo("settled");
+        assertLookupFollows("mcp-invoke", read);
         dropControls = false;
         assertThat(operations(session.id()).getLast().path("resultRef").isNull())
                 .isFalse();
+        JsonNode resourceResult = published(session.id(),
+                operations(session.id()).getLast().path("resultRef"));
+        assertThat(resourceResult.path("response").path("contents").get(0)
+                .path("text").asText()).isEqualTo("EXT_RESOURCE_2");
 
         String prompt = uuid();
         dropControls = true;
@@ -141,10 +153,16 @@ class HostedMcpReplyLossIT {
         assertThat(controls("mcp-invoke")).hasSize(2);
         assertThat(controls("mcp-invoke").getLast().dropped()).isTrue();
         dropControls = false;
+        assertLookupFollows("mcp-invoke", prompt);
         assertThat(effects("prompt_get")).containsExactly("proof");
         assertThat(operations(session.id())).hasSize(2);
         assertThat(operations(session.id()).getLast().at("/run/state").asText())
                 .isEqualTo("settled");
+        JsonNode promptResult = published(session.id(),
+                operations(session.id()).getLast().path("resultRef"));
+        assertThat(promptResult.path("response").path("messages").get(0)
+                .path("content").path("text").asText())
+                .isEqualTo("EXT_PROMPT_2");
     }
 
     private Map<String, Object> mcpPin(int revision) {
@@ -177,6 +195,72 @@ class HostedMcpReplyLossIT {
     private List<JsonNode> operations(String session) {
         return HostedGateTestSupport.extensionRecords(jdbc, tenant, session,
                 "mcp_operation");
+    }
+
+    private List<JsonNode> fixtureEvents(String kind) {
+        if (evidence == null || !Files.exists(evidence)) {
+            return List.of();
+        }
+        try {
+            return Files.readAllLines(evidence).stream().map(line -> {
+                try {
+                    return json.readTree(line);
+                } catch (IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }).filter(event -> kind.equals(event.path("event").asText()))
+                    .toList();
+        } catch (IOException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private JsonNode published(String session, JsonNode ref) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        String body = jdbc.queryForObject(
+                "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
+                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " AND tenant_id = ? AND session_id = ?",
+                String.class, scope, ref.path("resourceId").asText(), tenant,
+                session);
+        assertThat(body).as("published response body").isNotBlank();
+        try {
+            return json.readTree(body);
+        } catch (IOException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private void assertLookupFollows(String kind, String operationId) {
+        int control = -1;
+        for (int index = 0; index < wire.size(); index++) {
+            JsonNode operation = (JsonNode) wire.get(index).get("request");
+            if (operation == null) {
+                continue;
+            }
+            operation = operation.path("operation");
+            if (kind.equals(operation.path("kind").asText())
+                    && operationId.equals(
+                            operation.path("operationId").asText())) {
+                control = index;
+            }
+        }
+        assertThat(control).as("%s control for %s", kind, operationId)
+                .isGreaterThanOrEqualTo(0);
+        for (int index = control + 1; index < wire.size(); index++) {
+            JsonNode operation = (JsonNode) wire.get(index).get("request");
+            if (operation == null) {
+                continue;
+            }
+            operation = operation.path("operation");
+            if ("mcp-status".equals(operation.path("kind").asText())
+                    && operationId.equals(
+                            operation.path("targetOperationId").asText())) {
+                return;
+            }
+        }
+        throw new AssertionError("No status lookup follows the " + kind
+                + " for " + operationId);
     }
 
     private List<String> effects(String kind) {
@@ -505,7 +589,7 @@ class HostedMcpReplyLossIT {
                 // The upstream answered and the effect happened; the reply
                 // never reaches the Harness — a connection-level loss, not
                 // an HTTP refusal it could mistake for a rejection.
-                proxyCalls.set(index, call.markDropped());
+                proxyCalls.set(index, call.markDropped(response.statusCode()));
                 exchange.close();
                 return;
             }
@@ -620,6 +704,18 @@ class HostedMcpReplyLossIT {
                 if ("Linux".equals(System.getProperty("os.name"))) {
                     HostedDurableWorkers.stop(
                             temporary.resolve("broker"), json);
+                    for (JsonNode event : fixtureEvents("mcp.start")) {
+                        ProcessHandle.of(event.path("pid").asLong())
+                                .ifPresent(handle -> {
+                                    handle.destroyForcibly();
+                                    try {
+                                        handle.onExit().get(10,
+                                                TimeUnit.SECONDS);
+                                    } catch (Exception ignored) {
+                                        // Best-effort teardown.
+                                    }
+                                });
+                    }
                 }
             } catch (Exception ignored) {
                 // Best-effort teardown: a worker that refuses to stop must
@@ -632,7 +728,7 @@ class HostedMcpReplyLossIT {
     private void saveEvidence() {
         try {
             Path destination = Files.createDirectories(Path.of(
-                    "target/fg12a", tenant));
+                    "target/fg12-cases/fg12a", tenant));
             System.out
                     .println("FG12A_EVIDENCE " + destination.toAbsolutePath());
             json.writeValue(destination.resolve("proxy.json").toFile(),
@@ -656,8 +752,8 @@ class HostedMcpReplyLossIT {
                     operationId);
         }
 
-        ProxyCall markDropped() {
-            return new ProxyCall(method, path, kind, status, true,
+        ProxyCall markDropped(int value) {
+            return new ProxyCall(method, path, kind, value, true,
                     operationId);
         }
     }

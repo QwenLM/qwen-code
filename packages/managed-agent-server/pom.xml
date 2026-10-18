@@ -553,7 +553,7 @@
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>
                 <configuration>
-                    <includes><include>**/HostedMcpReplyLossIT.java</include></includes>
+                    <includes><include>**/HostedMcp*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
                          per-ceiling rule for this class: one @Timeout

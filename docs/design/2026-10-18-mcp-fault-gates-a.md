@@ -82,7 +82,7 @@ configuration. The fixture serves `tools`, `resources` and `prompts` so
 both raw operation kinds are discoverable, and records every physical
 effect to a JSONL evidence file.
 
-Evidence lands in `target/fg12a/<tenant>/`; the CI upload carries it.
+Evidence lands in `target/fg12-cases/fg12a/<tenant>/`; the CI upload carries it.
 
 ## Acceptance
 
@@ -90,7 +90,7 @@ Evidence lands in `target/fg12a/<tenant>/`; the CI upload carries it.
 - The class green locally on JDK 21 + MariaDB 10.11 (measured 5.1-7.4 s), and
   the mutation witness red before merge.
 - `scripts/tests/hosted-process-ci.test.js` green with the fork budget
-  moved from 4353 s to 4363 s and the healthy sum from 3743 s to 3753 s.
+  moved from 4353 s to 4368 s and the healthy sum from 3743 s to 3758 s.
 - This design ships in both languages with matching structure.
 
 ## Open questions

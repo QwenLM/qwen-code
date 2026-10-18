@@ -70,7 +70,7 @@ managed-session store 描述符在 Harness 上 `POST /session`。一个基线 tu
 完成首次 MCP 配置。fixture 同时提供 `tools`、`resources` 与 `prompts`，两
 种原始操作都可被发现，并把每次物理副作用写入 JSONL 证据文件。
 
-证据落在 `target/fg12a/<tenant>/`，由 CI 上传。
+证据落在 `target/fg12-cases/fg12a/<tenant>/`，由 CI 上传。
 
 ## 验收
 
@@ -78,7 +78,7 @@ managed-session store 描述符在 Harness 上 `POST /session`。一个基线 tu
 - 该类在本机 JDK 21 + MariaDB 10.11 上绿（实测 5.1-7.4 s），且变异见证在合入
   前跑红。
 - `scripts/tests/hosted-process-ci.test.js` 绿：fork 预算由 4353 s 移到
-  4363 s，healthy 和由 3743 s 移到 3753 s。
+  4368 s，healthy 和由 3743 s 移到 3758 s。
 - 本设计双语言同构交付。
 
 ## 待决问题

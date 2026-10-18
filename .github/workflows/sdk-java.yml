@@ -813,7 +813,7 @@ jobs:
             packages/managed-agent-server/target/fg8-cases/
             packages/managed-agent-server/target/fg9-cases/
             packages/managed-agent-server/target/fg10-cases/
-            packages/managed-agent-server/target/fg12a/
+            packages/managed-agent-server/target/fg12-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
 

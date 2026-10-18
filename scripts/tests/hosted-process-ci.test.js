@@ -360,9 +360,9 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg10-cases/',
     );
-    // FG12a's MCP reply-loss evidence lives in target/fg12a/.
+    // FG12a's MCP reply-loss evidence lives in target/fg12-cases/.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg12a/',
+      'packages/managed-agent-server/target/fg12-cases/',
     );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag. The arms
