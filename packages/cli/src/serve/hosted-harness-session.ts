@@ -345,6 +345,18 @@ const HOSTED_TURN_DEADLINE = new Error(
 const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
 
 /**
+ * How long a route that settles a crashed wake input outside the pump (a
+ * `reconcile_run` repair, a message stop) waits for a pump pass in
+ * flight. The load's pass over a crashed input is its reads, its
+ * transcript projection and the aftermath's Broker and Store calls. A
+ * pass still running after this (a live turn, or a slow Store or Broker)
+ * keeps the pump, and the route answers without settling. Well inside the
+ * control plane's 30 s request timeout, which the settle itself still has
+ * to fit in.
+ */
+const HOSTED_WAKE_PASS_WAIT_MS = 10_000;
+
+/**
  * The terminal classification of a turn whose runner threw. A deadline
  * expiry is an attributable failure, never a cancellation.
  */
@@ -7739,13 +7751,32 @@ export function registerHostedHarnessSessionRoutes(
     }
     // What is left owed is a message turn that crashed in an earlier
     // process: its aftermath, which the pump no longer picks for a stopped
-    // Session, settles it.
+    // Session, settles it. A pass that picked it before the stop runs that
+    // same aftermath, holding no turn slot while it reads and classifies,
+    // so this one waits for the pass (#14538).
     const authority = session.managed.authority;
-    for (const input of pendingSessionInputs(
-      authority.eventsInSequenceRange(1, authority.committedSequence),
-    ))
-      if (input.source === SESSION_MESSAGE_INPUT_SOURCE)
-        await session.wakeAftermath?.(input.turnId);
+    const owed = () =>
+      pendingSessionInputs(
+        authority.eventsInSequenceRange(1, authority.committedSequence),
+      ).filter((input) => input.source === SESSION_MESSAGE_INPUT_SOURCE);
+    if (owed().length === 0) return;
+    await session.monitorWake?.exclusive(async () => {
+      // Re-read after the wait. A pass that left the Session blocked owns
+      // the crash: its blocked cycle retries the aftermath and lifts the
+      // block, which this consume would leave in place. A prompt or a
+      // lifecycle claim admitted meanwhile keeps the Session to itself.
+      // The relay repeats the stop either way.
+      if (
+        session.blocked ||
+        session.active !== undefined ||
+        session.mcpBusy ||
+        session.hooksBusy ||
+        session.mcpRecovering ||
+        session.mcpClosing
+      )
+        return;
+      for (const input of owed()) await session.wakeAftermath?.(input.turnId);
+    }, HOSTED_WAKE_PASS_WAIT_MS);
   };
 
   // One message verb onto the Session's journal, for the route below.
@@ -10383,18 +10414,23 @@ export function registerHostedHarnessSessionRoutes(
           // pump slot instead, and the answer reports rather than
           // touches it.
           let repaired = false;
-          if (
+          const repairable = () =>
             session.wakeAftermath !== undefined &&
             session.active === undefined &&
             !session.mcpBusy &&
             !session.mcpRecovering &&
             !session.hooksBusy &&
-            !session.mcpClosing
-          ) {
+            !session.mcpClosing &&
+            firstPendingWakeInput(session) !== undefined;
+          const repair = async () => {
+            // Re-read after any wait: the pass may have settled the crash
+            // itself, and a prompt or a close may have claimed the Session
+            // meanwhile.
+            const aftermathOf = session.wakeAftermath;
+            if (aftermathOf === undefined || !repairable()) return;
             // Claim the turn slot for the repair, exactly like a turn
-            // start: the pump reads it as busy instead of beginning the
-            // pending input mid-aftermath, which is the one way this
-            // route could settle a run out from under a live turn.
+            // start: a prompt or a lifecycle close reads it as busy
+            // instead of starting mid-aftermath.
             session.active = {
               promptId: `wake-reconcile:${operationId}`,
               digest: '',
@@ -10403,7 +10439,7 @@ export function registerHostedHarnessSessionRoutes(
             try {
               const first = firstPendingWakeInput(session);
               if (first !== undefined) {
-                const aftermath = await session.wakeAftermath(first.turnId);
+                const aftermath = await aftermathOf(first.turnId);
                 if (aftermath === 'settled') {
                   liftRecoveryBlock(session);
                   repaired = true;
@@ -10412,7 +10448,18 @@ export function registerHostedHarnessSessionRoutes(
             } finally {
               session.active = undefined;
             }
-          }
+          };
+          // A wake pump pass holds no turn slot while it reads, projects
+          // and classifies the crashed input, so the repair runs with the
+          // pump held: it waits for the load's pass to settle the crash
+          // first (the run then answers failed, and the occurrence
+          // resolves), and repairs only what that pass left blocked
+          // (#14538).
+          if (repairable())
+            await session.monitorWake?.exclusive(
+              repair,
+              HOSTED_WAKE_PASS_WAIT_MS,
+            );
           const reconciled = automations.run(
             automationRunId(scheduleId, occurrenceKey as string),
           );
