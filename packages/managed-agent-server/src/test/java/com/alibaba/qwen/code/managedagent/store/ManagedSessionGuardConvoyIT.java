@@ -544,19 +544,15 @@ class ManagedSessionGuardConvoyIT {
     }
 
     /**
-     * Writer acquisition must hold the Session root exclusively before any
-     * shared lock on it. Since #13800 ordinary writers lock that root
-     * without a tenant guard, and on MariaDB a shared root lock upgraded
-     * behind one of their queued exclusive requests is an InnoDB 1213
-     * deadlock. The acquisition pauses right after ensureSessionRoot's
-     * INSERT IGNORE while an ordinary blockRecovery of the same Session
-     * queues on the root; both must then complete. (MySQL 8.4 lets the
-     * shared holder upgrade ahead of the queue, so only MariaDB fails
-     * without the exclusive-first order.)
+     * Writer acquisition must hold the Session root exclusively before an
+     * ordinary writer can queue on it. The acquisition pauses after
+     * the acquisition's first root UPSERT, then an ordinary blockRecovery of the
+     * same Session queues on the root; releasing the pause must let both
+     * complete without an InnoDB deadlock.
      */
     @Test
     void writerAcquisitionHoldsTheSessionRootExclusivelyAgainstOrdinaryWriters() throws Exception {
-        assertNoDeadlockAgainstOrdinaryWriter("INSERT IGNORE INTO ma_session (",
+        assertNoDeadlockAgainstOrdinaryWriter("INSERT INTO ma_session (",
                 (store, grant) -> store.acquireWriter(TENANT, "victim", TOKEN,
                         new AcquireWriterRequest(WORKSPACE, "writer-victim", 60_000L)));
     }
