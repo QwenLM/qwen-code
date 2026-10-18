@@ -10,6 +10,7 @@ import {
   hostedTurnApproval,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
+import { parseHostedInput, readHostedInput } from './hosted-input.js';
 import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
@@ -137,6 +138,7 @@ import {
 } from './hosted-agent-definition.js';
 import {
   HostedModelRoundLimitError,
+  HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
 } from './hosted-harness-model.js';
 import { hostedToolProgress } from './hosted-tool-progress.js';
@@ -341,6 +343,18 @@ const HOSTED_TURN_DEADLINE = new Error(
  * pending record while the route waits.
  */
 const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
+
+/**
+ * How long a route that settles a crashed wake input outside the pump (a
+ * `reconcile_run` repair, a message stop) waits for a pump pass in
+ * flight. The load's pass over a crashed input is its reads, its
+ * transcript projection and the aftermath's Broker and Store calls. A
+ * pass still running after this (a live turn, or a slow Store or Broker)
+ * keeps the pump, and the route answers without settling. Well inside the
+ * control plane's 30 s request timeout, which the settle itself still has
+ * to fit in.
+ */
+const HOSTED_WAKE_PASS_WAIT_MS = 10_000;
 
 /**
  * The terminal classification of a turn whose runner threw. A deadline
@@ -2788,6 +2802,8 @@ async function eventEnvelope(
     const storeUnavailable =
       event.payload['stopReason'] === 'managed_session_store_unavailable';
     const roundLimit = event.payload['stopReason'] === 'model_round_limit';
+    const imageUnsupported =
+      event.payload['stopReason'] === 'image_input_unsupported';
     return {
       v: 1,
       id: event.sequence,
@@ -2802,14 +2818,18 @@ async function eventEnvelope(
             ? 'model_unavailable'
             : storeUnavailable
               ? 'managed_session_store_unavailable'
-              : roundLimit
-                ? 'hosted_turn_limit_exceeded'
-                : 'hosted_turn_failed',
+              : imageUnsupported
+                ? 'image_input_unsupported'
+                : roundLimit
+                  ? 'hosted_turn_limit_exceeded'
+                  : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
-          : roundLimit
-            ? 'The Hosted Harness Turn reached its configured model round limit.'
-            : 'Hosted Harness turn failed.',
+          : imageUnsupported
+            ? 'The selected model does not support image input. Choose a model with image support or remove the image.'
+            : roundLimit
+              ? 'The Hosted Harness Turn reached its configured model round limit.'
+              : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -2941,6 +2961,9 @@ async function executeHostedTurn(
   workflowLaunch?: HostedWorkflowLaunch,
 ): Promise<ChatRecord> {
   const authority = session.managed.authority;
+  const promptInput = workflowLaunch
+    ? { text, parts: [{ text }], attachments: [] }
+    : await readHostedInput(session.managed, promptId, text);
   const harness = createManagedHarnessHandle(session.managed);
   if (resumeModel) {
     await harness.adoptPreparedContinuation(promptId, true);
@@ -3139,7 +3162,7 @@ async function executeHostedTurn(
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
           const user = record(session, sessionId, 'user', parentUuid, {
             daemonPromptId: promptId,
-            message: { role: 'user', parts: [{ text }] },
+            message: { role: 'user', parts: promptInput.parts },
           });
           await session.managed.sink.write(user);
           parentUuid = user.uuid;
@@ -3222,6 +3245,13 @@ async function executeHostedTurn(
                   teams: session.teams,
                   commands: session.commands,
                   memberPlanMode: await ensureMemberPlanMode(session),
+                  publicPlanMode:
+                    (
+                      await readHostedTurnApprovalSelection(
+                        session.managed,
+                        promptId,
+                      )
+                    )?.planMode === true,
                 },
               )
             : undefined;
@@ -3274,6 +3304,7 @@ async function executeHostedTurn(
                   cwd,
                   history,
                   prompt: text,
+                  attachmentParts: promptInput.attachments,
                   promptId,
                   signal: abort.signal,
                   modelScope,
@@ -3335,6 +3366,11 @@ async function executeHostedTurn(
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
+          if (
+            stopReason === 'error' &&
+            cause instanceof HostedImageInputUnsupportedError
+          )
+            stopReason = 'image_input_unsupported';
           // A deadline expiry must keep naming the deadline: only a generic
           // error outcome may be reclassified as a model-route failure.
           if (
@@ -6284,18 +6320,37 @@ export function registerHostedHarnessSessionRoutes(
       );
       if (
         approvalSelection &&
-        (session.agentDefinition ||
-          !session.approval ||
-          ![
-            'hosted-workspace-files/1',
-            'hosted-workspace-shell/1',
-            'hosted-workspace-files/2',
-            'hosted-workspace-shell/2',
-          ].includes(session.toolProfile ?? '') ||
+        (!session.approval ||
+          !(
+            session.agentDefinition
+              ? [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-shell/2',
+                ]
+              : [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-files/2',
+                  'hosted-workspace-shell/2',
+                ]
+          ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
             approvalSelection.mode !== session.approval.mode))
       )
         throw new Error('Approval selection is unavailable for this Session.');
+      if (
+        approvalSelection?.planMode &&
+        (![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/2',
+        ].includes(session.toolProfile ?? '') ||
+          (session.childDepth ?? 0) !== 0 ||
+          session.mcp ||
+          session.hooks)
+      )
+        throw new Error('Public Plan mode is unavailable for this Session.');
     } catch {
       return error(res, 400, 'invalid_hosted_approval_selection');
     }
@@ -6330,21 +6385,17 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 400, 'invalid_hosted_prompt');
       }
     }
+    let promptInput: ReturnType<typeof parseHostedInput> | undefined;
+    try {
+      if (workflowLaunch === undefined) promptInput = parseHostedInput(prompt);
+    } catch {
+      return error(res, 400, 'invalid_hosted_prompt');
+    }
     if (
       typeof promptId !== 'string' ||
       !HOSTED_UUID.test(promptId) ||
       !Array.isArray(prompt) ||
       prompt.length === 0 ||
-      (workflowLaunch === undefined &&
-        !prompt.every((block) => {
-          const item = object(block);
-          return (
-            item?.['type'] === 'text' &&
-            typeof item['text'] === 'string' &&
-            item['text'].length > 0 &&
-            Object.keys(item).length === 2
-          );
-        })) ||
       typeof digest !== 'string' ||
       !DIGEST.test(digest) ||
       (deadlineMs !== undefined &&
@@ -6361,12 +6412,12 @@ export function registerHostedHarnessSessionRoutes(
     // keeps the one-line summary while the full payload rides the input.
     const text = workflowLaunch
       ? workflowLaunchSummaryText(workflowLaunch)
-      : prompt.map((block) => (block as { text: string }).text).join('\n');
+      : promptInput!.text;
     const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
       daemonPromptId: promptId,
-      message: { role: 'user', parts: [{ text }] },
+      message: { role: 'user', parts: promptInput?.parts ?? [{ text }] },
     });
     if (
       Buffer.byteLength(JSON.stringify(prompt)) > maxBytes ||
@@ -7700,13 +7751,32 @@ export function registerHostedHarnessSessionRoutes(
     }
     // What is left owed is a message turn that crashed in an earlier
     // process: its aftermath, which the pump no longer picks for a stopped
-    // Session, settles it.
+    // Session, settles it. A pass that picked it before the stop runs that
+    // same aftermath, holding no turn slot while it reads and classifies,
+    // so this one waits for the pass (#14538).
     const authority = session.managed.authority;
-    for (const input of pendingSessionInputs(
-      authority.eventsInSequenceRange(1, authority.committedSequence),
-    ))
-      if (input.source === SESSION_MESSAGE_INPUT_SOURCE)
-        await session.wakeAftermath?.(input.turnId);
+    const owed = () =>
+      pendingSessionInputs(
+        authority.eventsInSequenceRange(1, authority.committedSequence),
+      ).filter((input) => input.source === SESSION_MESSAGE_INPUT_SOURCE);
+    if (owed().length === 0) return;
+    await session.monitorWake?.exclusive(async () => {
+      // Re-read after the wait. A pass that left the Session blocked owns
+      // the crash: its blocked cycle retries the aftermath and lifts the
+      // block, which this consume would leave in place. A prompt or a
+      // lifecycle claim admitted meanwhile keeps the Session to itself.
+      // The relay repeats the stop either way.
+      if (
+        session.blocked ||
+        session.active !== undefined ||
+        session.mcpBusy ||
+        session.hooksBusy ||
+        session.mcpRecovering ||
+        session.mcpClosing
+      )
+        return;
+      for (const input of owed()) await session.wakeAftermath?.(input.turnId);
+    }, HOSTED_WAKE_PASS_WAIT_MS);
   };
 
   // One message verb onto the Session's journal, for the route below.
@@ -8540,6 +8610,9 @@ export function registerHostedHarnessSessionRoutes(
             teams: session.teams,
             commands: session.commands,
             memberPlanMode: await ensureMemberPlanMode(session),
+            publicPlanMode:
+              (await readHostedTurnApprovalSelection(session.managed, promptId))
+                ?.planMode === true,
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -8775,6 +8848,11 @@ export function registerHostedHarnessSessionRoutes(
         } catch (cause) {
           if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
           state = abort.signal.aborted ? 'cancelled' : 'error';
+          if (
+            state === 'error' &&
+            cause instanceof HostedImageInputUnsupportedError
+          )
+            failureReason = 'image_input_unsupported';
           if (state === 'error' && cause instanceof HostedModelUnavailableError)
             failureReason = 'model_unavailable';
           if (state === 'error') {
@@ -10336,18 +10414,23 @@ export function registerHostedHarnessSessionRoutes(
           // pump slot instead, and the answer reports rather than
           // touches it.
           let repaired = false;
-          if (
+          const repairable = () =>
             session.wakeAftermath !== undefined &&
             session.active === undefined &&
             !session.mcpBusy &&
             !session.mcpRecovering &&
             !session.hooksBusy &&
-            !session.mcpClosing
-          ) {
+            !session.mcpClosing &&
+            firstPendingWakeInput(session) !== undefined;
+          const repair = async () => {
+            // Re-read after any wait: the pass may have settled the crash
+            // itself, and a prompt or a close may have claimed the Session
+            // meanwhile.
+            const aftermathOf = session.wakeAftermath;
+            if (aftermathOf === undefined || !repairable()) return;
             // Claim the turn slot for the repair, exactly like a turn
-            // start: the pump reads it as busy instead of beginning the
-            // pending input mid-aftermath, which is the one way this
-            // route could settle a run out from under a live turn.
+            // start: a prompt or a lifecycle close reads it as busy
+            // instead of starting mid-aftermath.
             session.active = {
               promptId: `wake-reconcile:${operationId}`,
               digest: '',
@@ -10356,7 +10439,7 @@ export function registerHostedHarnessSessionRoutes(
             try {
               const first = firstPendingWakeInput(session);
               if (first !== undefined) {
-                const aftermath = await session.wakeAftermath(first.turnId);
+                const aftermath = await aftermathOf(first.turnId);
                 if (aftermath === 'settled') {
                   liftRecoveryBlock(session);
                   repaired = true;
@@ -10365,7 +10448,18 @@ export function registerHostedHarnessSessionRoutes(
             } finally {
               session.active = undefined;
             }
-          }
+          };
+          // A wake pump pass holds no turn slot while it reads, projects
+          // and classifies the crashed input, so the repair runs with the
+          // pump held: it waits for the load's pass to settle the crash
+          // first (the run then answers failed, and the occurrence
+          // resolves), and repairs only what that pass left blocked
+          // (#14538).
+          if (repairable())
+            await session.monitorWake?.exclusive(
+              repair,
+              HOSTED_WAKE_PASS_WAIT_MS,
+            );
           const reconciled = automations.run(
             automationRunId(scheduleId, occurrenceKey as string),
           );
