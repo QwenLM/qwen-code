@@ -125,15 +125,33 @@ class HostedHookFaultGatesIT {
         assertThat(worker(session)).isEqualTo(worker);
         assertThat(generation(session)).isEqualTo(generation);
         // The replacement Harness holds no receipt, but the record's
-        // runtimeSessionId still names the worker that does. Re-attach the
-        // Session and read the operation through the Harness status route:
-        // it asks that original owner and settles the record from the
-        // receipt still in the worker's memory.
+        // runtimeSessionId still names the worker that does. Read the
+        // operation through the Harness status route: it asks that original
+        // owner and settles the record from the receipt still in the
+        // worker's memory. The status route is also the attachment probe —
+        // a 404 means this Harness does not serve the Session yet, and only
+        // then is a passive re-attach worth asking for.
         HarnessConnector connector = spring.getBean(HarnessConnector.class);
-        connector.createOrLoad(tenant, session, true, true);
-        String clientId = harnessClientId(connector, session);
-        waitFor(() -> assertThat(harnessHookStatus(session, executionId, clientId).path("state").asText())
-                .isEqualTo("settled"));
+        long[] attachedAt = {0};
+        waitFor(() -> {
+            String clientId = attachedClientId(connector, session);
+            if (clientId != null) {
+                var status = hookStatus(session, executionId, clientId);
+                if (status.statusCode() != 404) {
+                    assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+                    assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+                    return;
+                }
+            }
+            // A Session the coordinator already attached is resident with a
+            // Hook-pending Turn, and a second passive load of it is refused;
+            // retry at most once a second so that attachment can win.
+            if (System.nanoTime() - attachedAt[0] > 1_000_000_000L) {
+                attachedAt[0] = System.nanoTime();
+                connector.createOrLoad(tenant, session, true, true);
+            }
+            throw new AssertionError("no attachment is serving the Hook status route yet");
+        });
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         assertThat(worker(session)).isEqualTo(worker);
         assertThat(generation(session)).isEqualTo(generation);
@@ -361,7 +379,7 @@ class HostedHookFaultGatesIT {
 
     // The Harness status route identifies the caller by the client id its
     // attach minted; the connector keeps it on the private attachment ref.
-    private String harnessClientId(HarnessConnector connector, String session) throws Exception {
+    private String attachedClientId(HarnessConnector connector, String session) throws Exception {
         Field field = connector.getClass().getDeclaredField("attachments");
         field.setAccessible(true);
         for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
@@ -369,17 +387,15 @@ class HostedHookFaultGatesIT {
                 return ref.getHarnessClientId();
             }
         }
-        throw new AssertionError("No Harness attachment for " + session);
+        return null;
     }
 
-    private JsonNode harnessHookStatus(String session, String executionId, String clientId) throws Exception {
+    private HttpResponse<String> hookStatus(String session, String executionId, String clientId) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId))
                 .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
                 .header("X-Qwen-Client-Id", clientId).GET().build();
-        var response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        assertThat(response.statusCode()).as("hook status: %s", response.body()).isEqualTo(200);
-        return json.readTree(response.body());
+        return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     private int generation(String session) {
