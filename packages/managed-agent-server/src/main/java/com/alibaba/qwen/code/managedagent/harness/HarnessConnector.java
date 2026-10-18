@@ -11,7 +11,13 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsApprovalSelection() { return false; }
 
+    default boolean supportsAgentDefinitionApprovalSelection() { return false; }
+
     default boolean supportsModelSelection() { return false; }
+
+    default boolean supportsPlanMode() { return false; }
+
+    default boolean supportsInputAttachments() { return false; }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;
@@ -111,8 +117,9 @@ public interface HarnessConnector extends AutoCloseable {
     /**
      * H6b/H6c: one automation operation onto the Session's journal, from the
      * control plane's automation service and scanner (define_schedule,
-     * retire_schedule, fire_run). The Hosted side settles it before
-     * answering, and the answer carries the operation's result.
+     * retire_schedule, fire_run, reconcile_run, cancel_run). The answer
+     * carries the committed operation result; a cancel_run may still be
+     * awaiting its Turn's physical settlement.
      */
     default Map<String, Object> runAutomationOperation(String tenantId,
             String sessionId, Map<String, Object> body) {

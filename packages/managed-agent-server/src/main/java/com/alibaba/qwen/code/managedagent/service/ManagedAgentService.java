@@ -145,8 +145,15 @@ public class ManagedAgentService {
     }
 
     private boolean hasActions(SessionRecord session) {
+        // Preserve Action readback when a selected custom Session loses execution support.
         return session.workspace() != null && session.deletedAt() == null
-                && ((WorkspaceToolProfiles.supportsApprovalSelection(session) && harness.supportsApprovalSelection()) || !"yolo".equals(session.approvalMode()));
+                && ((WorkspaceToolProfiles.supportsApprovalSelection(session)
+                && (session.agentDefinitionDigest() != null || supportsApprovalSelection(session))) || !"yolo".equals(session.approvalMode()));
+    }
+
+    private boolean supportsApprovalSelection(SessionRecord session) {
+        return harness.supportsApprovalSelection()
+                && (session.agentDefinitionDigest() == null || harness.supportsAgentDefinitionApprovalSelection());
     }
 
     private BooleanSupplier artifactReadsEnabled = () -> false;
@@ -236,9 +243,13 @@ public class ManagedAgentService {
         requireModelActor(actorId);
         var options = store.workspaceSessionOptions(tenantId, agentId);
         if ("qwen-code".equals(agentId) && store.workspaceShellEnabled() && harness.supportsApprovalSelection()) {
-            return new WebShellSessionOptions(options.approvalMode(), List.of("default", "auto-edit", "yolo"));
+            return new WebShellSessionOptions(options.approvalMode(), List.of("default", "auto-edit", "yolo"),
+                    harness.supportsPlanMode(), harness.supportsInputAttachments());
         }
-        return options;
+        return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
+                harness.supportsPlanMode() && harness.supportsAgentDefinitionApprovalSelection()
+                        && options.planModeSupported(),
+                harness.supportsInputAttachments());
     }
 
     public WebShellSessionModels queryWebShellSessionModels(String tenantId, String actorId,
@@ -273,16 +284,28 @@ public class ManagedAgentService {
         return new WebShellSessionApproval(summary.approvalMode(),
                 summary.approvalRevision() == null ? 0 : summary.approvalRevision(),
                 supported ? List.of("default", "auto-edit", "yolo")
-                        : summary.approvalMode() == null ? List.of() : List.of(summary.approvalMode()), supported);
+                        : summary.approvalMode() == null ? List.of() : List.of(summary.approvalMode()), supported,
+                summary.planMode(), summary.planModeSupported());
     }
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String mode, long expectedRevision) {
+        return changeWebShellSessionApproval(tenantId, actorId, sessionId, key, mode, expectedRevision, null);
+    }
+
+    public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String mode, long expectedRevision, Boolean planMode) {
         requireModelActor(actorId);
         validateIdempotencyKey(key);
-        String digest = digests.digest(Map.of("sessionId", sessionId, "mode", mode, "expectedRevision", expectedRevision));
+        Map<String, Object> semantic = new LinkedHashMap<>(Map.of("sessionId", sessionId,
+                "mode", mode, "expectedRevision", expectedRevision));
+        if (planMode != null) {
+            semantic.put("planMode", planMode);
+        }
+        String digest = digests.digest(semantic);
         return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
-                expectedRevision, harness.supportsApprovalSelection());
+                expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
+                planMode, harness.supportsPlanMode());
     }
 
     private static void requireModelActor(String actorId) {
@@ -295,6 +318,14 @@ public class ManagedAgentService {
             String actorId, String idempotencyKey, String agentId,
             String agentRevision, String title, Map<String, Object> metadata,
             List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision,
+                title, metadata, blocks, selection, approvalMode, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode) {
         validateIdempotencyKey(idempotencyKey);
         if (actorId == null || actorId.isEmpty()) {
             throw new ApiException(HttpStatus.UNAUTHORIZED,
@@ -316,6 +347,9 @@ public class ManagedAgentService {
         if (approvalMode != null) {
             semantic.put("approvalMode", approvalMode);
         }
+        if (planMode != null) {
+            semantic.put("planMode", planMode);
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -334,14 +368,16 @@ public class ManagedAgentService {
         }
         Admission admission;
         try {
-            admission = approvalMode == null
+            admission = approvalMode == null && planMode == null
                     ? store.insertWorkspaceSessionCommand(tenantId,
                             actorId, idempotencyKey, requestDigest, agentId,
                             agentRevision, effectiveTitle, input, payloadDigest, selection)
                     : store.insertWorkspaceSessionCommand(tenantId,
                             actorId, idempotencyKey, requestDigest, agentId,
                             agentRevision, effectiveTitle, input, payloadDigest,
-                            selection, approvalMode, harness.supportsApprovalSelection());
+                            selection, approvalMode, harness.supportsApprovalSelection()
+                                    && ("qwen-code".equals(agentId) || harness.supportsAgentDefinitionApprovalSelection()),
+                            planMode, harness.supportsPlanMode());
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
@@ -1133,6 +1169,9 @@ public class ManagedAgentService {
         Map<String, WebShellApprovalSelection> approvalSelections = store.findApprovalSelections(tenantId, approvalIds);
         Set<String> approvalOwners = store.findApprovalOwners(tenantId, actorId, approvalIds);
         boolean approvalSupported = !approvalIds.isEmpty() && harness.supportsApprovalSelection();
+        boolean definitionApprovalSupported = approvalSupported
+                && sessions.stream().anyMatch(session -> session.agentDefinitionDigest() != null)
+                && harness.supportsAgentDefinitionApprovalSelection();
         Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
@@ -1178,7 +1217,9 @@ public class ManagedAgentService {
                         mayChangeCwd(session, grants, executable),
                         modelContexts.get(session.sessionId()),
                         modelSelections.get(session.sessionId()), modelSelectionSupported,
-                        approvalSelections.get(session.sessionId()), approvalSupported && approvalOwners.contains(session.sessionId())))
+                        approvalSelections.get(session.sessionId()), approvalSupported
+                                && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
+                                && approvalOwners.contains(session.sessionId())))
                 .toList();
     }
 
@@ -1208,7 +1249,9 @@ public class ManagedAgentService {
         boolean close = visible && supportsClose(session);
         boolean keep = visible && retention;
         boolean approvalExecutable = approvalSelection == null || approvalSelection.revision() == 0
-                || harness.supportsApprovalSelection();
+                || supportsApprovalSelection(session);
+        approvalExecutable = approvalExecutable && (approvalSelection == null
+                || !approvalSelection.planMode() || harness.supportsPlanMode());
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -1231,11 +1274,14 @@ public class ManagedAgentService {
                         mayChangeCwd && approvalExecutable, foregroundShell(session),
                         visible && modelSelectionSupported && mayChangeCwd,
                         visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session)),
-                        javaDurableAdmission == null ? null : visible),
+                        javaDurableAdmission == null ? null : visible,
+                        visible && maySubmit && harness.supportsInputAttachments()),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),
-                session.workspace() != null || session.agentDefinitionDigest() != null ? session.approvalMode() : null);
+                session.workspace() != null || session.agentDefinitionDigest() != null ? session.approvalMode() : null,
+                approvalSelection != null && approvalSelection.planMode(), visible && approvalSupported
+                        && mayChangeCwd && harness.supportsPlanMode() && store.supportsPlanMode(session));
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -1253,7 +1299,7 @@ public class ManagedAgentService {
         }
         return session.deletedAt() == null && store.workspaceFilesEnabled() && store.workspaceShellEnabled()
                 && WorkspaceToolProfiles.supportsApprovalMode(session.approvalMode())
-                && (!"yolo".equals(session.approvalMode()) || harness.supportsApprovalSelection());
+                && (!"yolo".equals(session.approvalMode()) || supportsApprovalSelection(session));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -1760,7 +1806,7 @@ public class ManagedAgentService {
         }
     }
 
-    private static List<Map<String, Object>> input(List<InputBlock> blocks,
+    private List<Map<String, Object>> input(List<InputBlock> blocks,
             boolean required) {
         if (blocks == null || blocks.isEmpty()) {
             if (required) {
@@ -1772,11 +1818,15 @@ public class ManagedAgentService {
         List<Map<String, Object>> result = new ArrayList<>();
         long totalChars = 0;
         for (InputBlock block : blocks) {
-            if (block == null || !INPUT_TYPES.contains(block.type())
-                    || block.text() == null || block.text().isEmpty()) {
+            if (block != null && !INPUT_TYPES.contains(block.type())) {
+                result.add(ManagedInputAttachments.normalize(block));
+                continue;
+            }
+            if (block == null || block.text() == null || block.text().isEmpty()
+                    || block.mimeType() != null || block.name() != null || block.data() != null) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         "unsupported_input",
-                        "Phase 1 accepts non-empty text input only.");
+                        "Expected non-empty text, a text file or an image.");
             }
             // Code points, matching the published schema's maxLength; a
             // String.length() count would disagree on astral-plane text.
@@ -1798,7 +1848,13 @@ public class ManagedAgentService {
             result.add(Map.of("type", "text", "text",
                     replaceLoneSurrogates(block.text())));
         }
-        return List.copyOf(result);
+        var normalized = normalizeInput(result);
+        if (normalized.stream().anyMatch(block -> !"text".equals(block.get("type")))
+                && digests.byteLength(normalized) > ManagedInputAttachments.MAX_INPUT_BYTES) {
+            throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE, "input_too_large",
+                    "An input containing attachments must fit within 48 KiB of encoded JSON.");
+        }
+        return normalized;
     }
 
     /** The input the digest and the column both describe: an unpaired

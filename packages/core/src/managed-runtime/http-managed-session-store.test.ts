@@ -1856,6 +1856,7 @@ describe('HTTP Managed Session store', () => {
           error: {
             code: 'managed_session_writer_conflict',
             message: 'The Managed Session has another writer.',
+            request_id: 'request-2',
           },
         },
         409,
@@ -1877,7 +1878,77 @@ describe('HTTP Managed Session store', () => {
       remoteCode: 'managed_session_writer_conflict',
       message: 'The Managed Session has another writer.',
     });
+    expect((error as ManagedSessionStoreHttpError).details).toEqual({
+      request_id: 'request-2',
+    });
     expect(String(error)).not.toContain(TOKEN_A);
+  });
+
+  it('carries the scalar fields of a publication refusal envelope', async () => {
+    const server = new FakeManagedSessionStore();
+    let grants = 0;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!new URL(requestUrl(input)).pathname.endsWith('/grants'))
+          return server.fetch(input, init);
+        if (++grants === 1)
+          return jsonResponse(
+            { error: { code: 'invalid_request', message: 'invalid' } },
+            400,
+          );
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_tool_publication_capacity_exhausted',
+              message:
+                'Tool publication reservation refused at the active_captures limit',
+              request_id: 'request-1',
+              limit: 'active_captures',
+              admits: 2,
+              retryable: false,
+              nested: { admits: 9 },
+              list: [9],
+              missing: null,
+            },
+          },
+          429,
+        );
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      // An envelope with nothing beyond its code and message has no details.
+      const invalid = await stores.publication
+        .request('/grants', { operation: 'reserve' })
+        .catch((cause: unknown) => cause);
+      expect(invalid).toMatchObject({
+        status: 400,
+        remoteCode: 'invalid_request',
+      });
+      expect((invalid as ManagedSessionStoreHttpError).details).toBeUndefined();
+      const error = await stores.publication
+        .request('/grants', { operation: 'reserve' })
+        .catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(ManagedSessionStoreHttpError);
+      expect(error).toMatchObject<Partial<ManagedSessionStoreHttpError>>({
+        status: 429,
+        remoteCode: 'managed_tool_publication_capacity_exhausted',
+        message:
+          'Tool publication reservation refused at the active_captures limit',
+      });
+      expect((error as ManagedSessionStoreHttpError).details).toEqual({
+        request_id: 'request-1',
+        limit: 'active_captures',
+        admits: 2,
+        retryable: false,
+      });
+    } finally {
+      await stores.close();
+    }
   });
 
   it('persists a fenced recovery block through the active writer', async () => {
@@ -2597,6 +2668,57 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('stops locally by joining renewal without sealing or losing staged resources', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    let finishRenewal!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (requestUrl(input).endsWith('/writers:renew')) await gate;
+      return response;
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      leaseDurationMs: 1000,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const bytes = Buffer.from('{"retained":true}');
+      const ref = await stores.resourceStore.publish('managed-input', bytes);
+      await vi.advanceTimersByTimeAsync(500);
+      let joined = false;
+      const stopped = stores.stopLocal().then(() => {
+        joined = true;
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(joined).toBe(false);
+      finishRenewal();
+      await stopped;
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(stores.assertWritable()).rejects.toThrow('locally stopped');
+      await expect(stores.close()).rejects.toThrow('locally stopped');
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toHaveLength(1);
+      expect(server.sealCount).toBe(0);
+      expect(await stores.resourceStore.read(ref)).toEqual(bytes);
+    } finally {
+      finishRenewal();
+      await stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not restart renewal while an in-flight renewal races sealing', async () => {
     vi.useFakeTimers();
     const server = new FakeManagedSessionStore();
@@ -2839,7 +2961,7 @@ describe('HTTP Managed Session store', () => {
     const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
       if (requestUrl(input).includes('/restore?'))
         return jsonResponse(
-          { error: { code: 'boom', message: 'stored' } },
+          { error: { code: 'boom', message: 'stored', request_id: 'r-3' } },
           503,
         );
       return server.fetch(input, init);
@@ -2860,6 +2982,7 @@ describe('HTTP Managed Session store', () => {
       await expect(handle.read()).rejects.toMatchObject({
         status: 503,
         remoteCode: 'boom',
+        details: { request_id: 'r-3' },
       });
       await expect(handle.read()).rejects.toThrow(
         /GET \/restore\?[^ ]* failed after 3 attempts/,
@@ -4009,6 +4132,177 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('still inspects a snapshot whose manifest names an unstaged page (#13930 R1-43)', async () => {
+    // A manifest committed before the closure edge shipped names page
+    // envelopes the store never uploaded. The read-side walk drops the
+    // dangling page ref instead of ruling the whole snapshot corrupt —
+    // remove the tolerance and the construction below throws.
+    const server = new FakeManagedSessionStore();
+    const { session } = await bootStoresAndSession(server);
+    try {
+      const pageRef = await session.resources.publish(
+        MANAGED_TOOL_RESULT_KINDS.page,
+        Buffer.from('abc', 'utf8'),
+      );
+      const manifest = Buffer.from(
+        JSON.stringify({
+          toolResult: 'managed-tool-result/1',
+          type: 'manifest',
+          tenantId: 'tenant',
+          sessionId: 'session',
+          turnId: 'turn',
+          executionCallId: 'execution',
+          callId: 'call',
+          invocationDigest: `sha256:${'a'.repeat(64)}`,
+          bindingGeneration: '1',
+          captureId: 'capture',
+          revision: 1,
+          executionStatus: 'success',
+          exitCode: 0,
+          signal: null,
+          captureScope: 'process_pipes',
+          capturePolicy: 'complete_required',
+          captureStatus: 'complete',
+          captureReason: null,
+          upstreamTruncated: false,
+          contents: [
+            {
+              streamId: 'stdout',
+              role: 'stdout',
+              mimeType: 'application/octet-stream',
+              state: 'sealed',
+              byteLength: 3,
+              digest: 'b'.repeat(64),
+              missingRanges: [],
+              body: {
+                pages: [{ ref: pageRef, segmentCount: 1, byteLength: 3 }],
+              },
+            },
+            {
+              streamId: 'stderr',
+              role: 'stderr',
+              mimeType: 'application/octet-stream',
+              state: 'sealed',
+              byteLength: 0,
+              digest: 'c'.repeat(64),
+              missingRanges: [],
+              body: { pages: [] },
+            },
+          ],
+        }),
+        'utf8',
+      );
+      const manifestRef = await session.resources.publish(
+        MANAGED_TOOL_RESULT_KINDS.manifest,
+        manifest,
+      );
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-paged',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:paged',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-paged',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [manifestRef],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      // Build the snapshot rows exactly the way the writer shipped them,
+      // then drop the page body — the pre-closure-edge shape.
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const resources = [] as Array<{
+        ref: ManagedSessionDurableRef;
+        bytesBase64: string;
+        referencedRevisions: number[];
+      }>;
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const ref = {
+            resourceId: raw.resourceId,
+            kind: raw.kind,
+            schemaVersion: raw.schemaVersion,
+            byteLength: raw.byteLength,
+            digest: raw.digest,
+          };
+          resources.push({
+            ref,
+            bytesBase64: (await session.resources.read(ref)).toString('base64'),
+            referencedRevisions: [index + 1],
+          });
+        }
+      }
+      const snapshotInput = {
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources,
+      };
+      const snapshot = readOnlyManagedSessionSnapshot({
+        ...snapshotInput,
+        resources: snapshotInput.resources.filter(
+          ({ ref }) => ref.resourceId !== pageRef.resourceId,
+        ),
+      });
+      expect(await snapshot.resources.read(manifestRef)).toEqual(
+        await session.resources.read(manifestRef),
+      );
+      // Reading the absent page honestly reports its absence; the load
+      // just no longer condemns the entire snapshot for it.
+      await expect(snapshot.resources.read(pageRef)).rejects.toThrow(
+        'snapshot resource is missing.',
+      );
+      // The tolerance is page-scoped: the manifest itself is a direct
+      // reference of the receipt event, so dropping it is condemned by the
+      // direct-reference guard before the walk ever runs.
+      expect(() =>
+        readOnlyManagedSessionSnapshot({
+          ...snapshotInput,
+          resources: snapshotInput.resources.filter(
+            ({ ref }) => ref.resourceId !== manifestRef.resourceId,
+          ),
+        }),
+      ).toThrow('snapshot direct resource reference is missing.');
+    } finally {
+      await session.close();
+    }
+  });
+
   it("rejects a restore head regressed below the writer's committed position", async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
@@ -4315,7 +4609,13 @@ describe('HTTP Managed Session store', () => {
         if (body['operation'] === 'message.commit') {
           attempts++;
           return jsonResponse(
-            { error: { code: 'tenant_guard_contended', message: 'held' } },
+            {
+              error: {
+                code: 'tenant_guard_contended',
+                message: 'held',
+                request_id: 'r-4',
+              },
+            },
             503,
           );
         }
@@ -4327,9 +4627,16 @@ describe('HTTP Managed Session store', () => {
       MESSAGE_BODY,
     );
     const started = Date.now();
-    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+    const error = await appendMessage(session, 1, messageRef).catch(
+      (cause: unknown) => cause,
+    );
+    expect(error).toBeInstanceOf(ManagedSessionStoreHttpError);
+    expect((error as Error).message).toMatch(
       /POST \/transactions:commit failed after \d+ attempts: held/,
     );
+    expect((error as ManagedSessionStoreHttpError).details).toEqual({
+      request_id: 'r-4',
+    });
     // Each of the commit's three attempts restarting its own 1 200 ms of
     // guard retries would take ~3.6 s and ~15 fetches.
     expect(Date.now() - started).toBeLessThan(1_200 + 1_000);

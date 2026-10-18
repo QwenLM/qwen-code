@@ -589,7 +589,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 // The sessions release — and their sweep of provably ended
                 // background exits — run BEFORE the unsettled gate: a row the
                 // sweep can prove never blocks the close on a stale active.
-                drainSessions(draining, renewal, authority, null)).thenCompose(ignored -> {
+                releaseDrainedSessions(draining, renewal, authority)).thenCompose(ignored -> {
                     if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
                             || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
                         throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
@@ -597,7 +597,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     var receipt = renewal.current.get().getDrainReceipt();
                     return receipt == null ? stopAcknowledgedRuntime(draining)
                             : CompletableFuture.completedFuture(receipt);
-                }).thenAccept(receipt -> {
+                }).thenCompose(receipt -> releaseRetiredHolders(draining, renewal)
+                        .thenApply(ignored -> receipt)).thenAccept(receipt -> {
                     if (authority != null) {
                         bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
                     }
@@ -619,6 +620,69 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }).exceptionally(error -> {
                     throw mapStepTimeout(error);
                 });
+    }
+
+    /**
+     * Releases the drained Sessions, and escalates a worker that refuses to
+     * release to the durable stop this drain arm already owns. Only the close
+     * cascade reaches this path: a routine release never stops a worker.
+     */
+    private CompletionStage<Void> releaseDrainedSessions(RuntimeBindingRecord binding,
+            BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
+        return drainSessions(binding, renewal, authority, null).exceptionallyCompose(error -> {
+            if (!workerRefusedRelease(error) || !provisioner.supportsDrainedStop(binding)) {
+                return CompletableFuture.<Void>failedFuture(error);
+            }
+            return safeStage(() -> provisioner.stopDrained(binding))
+                    .thenAccept(receipt -> renewal.persistDrainReceipt(receipt, authority))
+                    .thenCompose(ignored -> drainSessions(binding, renewal, authority, null));
+        });
+    }
+
+    private static boolean workerRefusedRelease(Throwable error) {
+        Throwable cause = unwrap(error);
+        return cause instanceof RuntimeBrokerException failure
+                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
+                        || "managed_runtime_release_timeout".equals(failure.getCode()));
+    }
+
+    /**
+     * Clears durable Workspace ownership for Sessions this drain has retired.
+     * Their worker is stopped and their rows are released, so no writer can
+     * still hold the storage. Runs before the binding is marked RELEASED, so a
+     * crash retries it; the exact-match clear cannot touch a newer holder.
+     */
+    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, BindingRenewal renewal) {
+        var current = renewal.current.get();
+        // Only a persisted receipt can prove the worker stopped. On the plain
+        // close path every holder was cleared by the acknowledged release, so
+        // there is nothing to scan and nothing to clear.
+        if (!binding.getRequest().isManagedContext() || binding.getLease() == null
+                || current == null || current.getDrainReceipt() == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return releaseRetiredHolders(binding, (String) null);
+    }
+
+    private CompletionStage<Void> releaseRetiredHolders(RuntimeBindingRecord binding, String cursor) {
+        var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
+        CompletionStage<Void> work = CompletableFuture.completedFuture(null);
+        for (var record : batch) {
+            if (record.isActive()) {
+                continue;
+            }
+            work = work.thenCompose(ignored -> safeStage(() ->
+                    transport.releaseRetired(binding.getLease(), record.getSession())))
+                    .thenAccept(retired -> {
+                        if (!Boolean.TRUE.equals(retired)) {
+                            throw unavailable("runtime_session_release_failed",
+                                    "Retired Session still owns Workspace storage");
+                        }
+                    });
+        }
+        return work.thenCompose(ignored -> batch.size() < 100
+                ? CompletableFuture.completedFuture(null)
+                : releaseRetiredHolders(binding, batch.getLast().getRuntimeSessionId()));
     }
 
     private CompletionStage<Void> drainSessions(RuntimeBindingRecord binding, BindingRenewal renewal,
@@ -1397,11 +1461,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                 return current == null ? record : current;
                                             }
                                             // The detached family holds its Runtime
-                                            // through its own ledger row: the Shell
-                                            // process for `is_background`, the watch
-                                            // for `is_monitor`.
+                                            // through its own ledger row: a monitor
+                                            // turn for `monitor`, the Shell process
+                                            // for `is_background`. The family keys on
+                                            // the validated toolName, never on the
+                                            // optional caller marker (#13930 R1-23):
+                                            // a marker-less monitor payload must
+                                            // still admit its hold row.
                                             Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
-                                            ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
+                                            ManagedHoldFamily family = "monitor".equals(toolName)
                                                     ? ManagedHoldFamily.MONITOR
                                                     : Boolean.TRUE.equals(toolInput.get("is_background"))
                                                             ? ManagedHoldFamily.SHELL
