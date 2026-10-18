@@ -80,6 +80,7 @@ import type {
 } from './voice/voice-workspace-target';
 import type {
   ChatHeaderRenderInfo,
+  WebShellCustomization,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
 import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
@@ -900,6 +901,7 @@ const {
       queuedPromptStreamingState: 'idle',
       queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
+      latestChatCustomization: null as WebShellCustomization | null,
       latestChatEditorProps: null as ChatEditorTestProps | null,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
@@ -1417,6 +1419,7 @@ vi.mock('./components/ChatEditor', async () => {
         testState.latestChatEditorProps = props;
         const { onAttachmentsChange } = props;
         const customization = useWebShellCustomization();
+        testState.latestChatCustomization = customization;
         React.useEffect(() => {
           onAttachmentsChange?.(
             Boolean(
@@ -12352,6 +12355,7 @@ beforeEach(() => {
   testState.queuedPromptStreamingState = 'idle';
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
+  testState.latestChatCustomization = null;
   testState.latestChatEditorProps = null;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
@@ -12585,6 +12589,72 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('App loading phrase settings', () => {
+  function setting(key: string, value: unknown): DaemonSettingDescriptor {
+    return {
+      key,
+      type: key === 'ui.customWittyPhrases' ? 'array' : 'boolean',
+      label: key,
+      category: 'UI',
+      requiresRestart: false,
+      default: undefined,
+      values: { effective: value },
+    };
+  }
+
+  it.each([
+    [false, 'false'],
+    [true, 'true'],
+    [undefined, 'true'],
+  ] as const)(
+    'forwards enabled=%s to the mounted indicator',
+    async (enabled, expected) => {
+      testState.settings =
+        enabled === undefined
+          ? []
+          : [setting('ui.accessibility.enableLoadingPhrases', enabled)];
+      testState.sessionHasActivePrompt = true;
+      const { container } = renderApp();
+      await flush();
+      const indicator = container.querySelector(
+        '[data-testid="streaming-status"]',
+      );
+      expect(indicator).not.toBeNull();
+      expect(indicator?.getAttribute('data-show-phrase')).toBe(expected);
+    },
+  );
+
+  it('filters custom phrases and keeps the context stable across equal settings reloads', async () => {
+    testState.settings = [setting('ui.customWittyPhrases', ['ok', ' ', 42])];
+    const { rerender } = renderApp();
+    await flush();
+    const customization = testState.latestChatCustomization;
+    expect(customization?.loadingPhrases?.('en')).toEqual(['ok']);
+
+    testState.settings = [setting('ui.customWittyPhrases', ['ok', ' ', 42])];
+    rerender();
+    await flush();
+    expect(testState.latestChatCustomization).toBe(customization);
+  });
+
+  it('falls back to built-in phrases when every custom entry is invalid', async () => {
+    testState.settings = [setting('ui.customWittyPhrases', [' ', 42])];
+    renderApp();
+    await flush();
+    expect(testState.latestChatCustomization?.loadingPhrases).toBeUndefined();
+  });
+
+  it('keeps host phrase customization ahead of workspace settings', async () => {
+    testState.settings = [setting('ui.customWittyPhrases', ['workspace'])];
+    const loadingPhrases = () => ['host'];
+    renderApp({ loadingPhrases });
+    await flush();
+    expect(testState.latestChatCustomization?.loadingPhrases).toBe(
+      loadingPhrases,
+    );
+  });
 });
 
 describe('App live transcript boundary', () => {

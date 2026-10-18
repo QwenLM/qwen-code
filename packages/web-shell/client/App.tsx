@@ -13404,19 +13404,18 @@ export function App({
       : undefined;
   }, [workspaceSettings]);
 
+  const stableCustomWittyPhrases = useShallowMemo(configuredCustomWittyPhrases);
+
   const effectiveChatCustomization = useMemo(() => {
     if (mainChatCustomization.loadingPhrases) return mainChatCustomization;
-    if (
-      configuredCustomWittyPhrases &&
-      configuredCustomWittyPhrases.length > 0
-    ) {
+    if (stableCustomWittyPhrases && stableCustomWittyPhrases.length > 0) {
       return {
         ...mainChatCustomization,
-        loadingPhrases: () => configuredCustomWittyPhrases,
+        loadingPhrases: () => stableCustomWittyPhrases,
       };
     }
     return mainChatCustomization;
-  }, [mainChatCustomization, configuredCustomWittyPhrases]);
+  }, [mainChatCustomization, stableCustomWittyPhrases]);
 
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
