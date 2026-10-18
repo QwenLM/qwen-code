@@ -69,6 +69,17 @@ change configuration, dependencies, model messages, or tool execution.
   forces a cut. Count table height per rendered line. Wrap bounded table text only until overflow is known,
   not the invisible tail. Reserve margins and cues separately; tiny clamps show
   and charge only the cue rather than an isolated border.
+  When code or math blocks interrupt an open table, retain its headers and rows
+  and replace its previously charged layout cost with the merged layout cost;
+  do not truncate merely because a pipe row resumes. Charge completed layout
+  only once a non-table line actually closes the table.
+  A clipped pending slice also reports a closed table's source boundary when it
+  lies within the kept prefix. If no blank boundary exists, the stream can commit
+  that whole table to scrollback without a trailing blank, while open tables and
+  incomplete frontier rows remain pending. A final delimiter prefix that can
+  still become a code/math fence or table separator is not a commit boundary.
+  Render-side height limits still use keptLines, and completed-layout accounting
+  remains in place.
 - Do not mark complete results as streaming to obtain clipping. Callers without
   a budget retain full rendering. Only the plain-text tool preview registers
   expandable overflow; plan and assistant table cues are pure text. Keep the
@@ -84,7 +95,10 @@ formatting in the bounded preview, but retain visible tail content and the
 existing rendered-row hidden count. Other non-pending enforceHeightBudget callers
 (e.g. plan confirmation) still use a head preview: an oversized first block can
 leave only a cue, whose count is source lines, not rendered rows. No generic
-Markdown tail slicer or layout cache is introduced.
+Markdown tail slicer or layout cache is introduced. A very short viewport can
+still clip before a table interrupted by code/math reaches its closing line;
+that legacy streaming case can remain pending until the character cap or
+finalization. The closed-table boundary fix does not scan beyond the height walk.
 
 ## Validation and acceptance
 
@@ -100,7 +114,13 @@ Markdown tail slicer or layout cache is introduced.
   plain blank runs must not reject fitting Markdown; a pending-to-completed
   transition must preserve formatting and retain the completed trailing spacer.
   Huge pending/completed tool tables must fall back without a layout crash and
-  keep their visible tail and overflow indicator.
+  keep their visible tail and overflow indicator. A fitting table resumed after
+  code or math must retain its resumed rows and following text without a false
+  viewport cue. At the regression viewport, a closed wide table followed
+  immediately by prose, code, or math must commit before the character cap,
+  preserve all source text, and leave a bounded pending tail; an open table must
+  not commit a headerless fragment. Compare smaller viewports with the baseline
+  rather than treating preexisting interrupted-table stalls as new regressions.
 - Preserve shell caps, explicit plain text, and raw-file detail through regression
   tests. Run related tool, Markdown, table, estimator, MaxSizedBox, and streaming
   tests, plus build, bundle, typecheck, lint, and formatting checks.

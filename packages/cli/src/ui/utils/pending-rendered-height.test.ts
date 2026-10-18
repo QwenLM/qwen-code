@@ -371,6 +371,7 @@ describe('fitPendingSlice', () => {
       expect(fitPendingSlice(lines, 20, 1, CLAMP, isPending)).toEqual({
         keptLines: 3,
         clipped: true,
+        ...(isPending ? { completedTableBoundary: 3 } : {}),
       });
     },
   );
@@ -453,11 +454,69 @@ describe('fitPendingSlice', () => {
     expect(fitPendingSlice(lines, 80, 28, 26)).toEqual({
       keptLines: 9,
       clipped: true,
+      completedTableBoundary: 9,
     });
     expect(fitPendingSlice(lines, 80, 100, CLAMP)).toEqual({
       keptLines: 10,
       clipped: false,
     });
+  });
+
+  it.each([false, true])(
+    'charges the merged table across code blocks instead of always cutting with pending=%s',
+    (isPending) => {
+      const lines = [
+        '| A | B |',
+        '| --- | --- |',
+        '| x | y |',
+        '```text',
+        'x',
+        '```',
+        '| z | w |',
+        'TAIL',
+      ];
+      expect(fitPendingSlice(lines, 80, 100, CLAMP, isPending).clipped).toBe(
+        false,
+      );
+      const tall = [
+        ...lines.slice(0, 6),
+        ...Array<string>(30).fill('| z | w |'),
+        'TAIL',
+      ];
+      expect(fitPendingSlice(tall, 80, 15, CLAMP, isPending).clipped).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each([
+    { suffix: [] },
+    { suffix: ['| unfinished'] },
+    { suffix: ['`'] },
+    { suffix: ['``'] },
+    { suffix: ['~'] },
+    { suffix: ['~~'] },
+    { suffix: ['$'] },
+    { suffix: ['-'] },
+    { suffix: [':--'] },
+    { suffix: ['```text', 'still inside code'] },
+    { suffix: ['$$', 'still inside math'] },
+  ])(
+    'does not offer an open table as a commit boundary with suffix $suffix',
+    ({ suffix }) => {
+      const lines = ['| A | B |', '| --- | --- |', '| x | y |', ...suffix];
+      expect(
+        fitPendingSlice(lines, 80, 3, CLAMP).completedTableBoundary,
+      ).toBeUndefined();
+    },
+  );
+
+  it('does not offer raw table-like text as a table commit boundary', () => {
+    const lines = ['| A | B |', '| --- | --- |', '| x | y |', 'after'];
+    expect(
+      fitPendingSlice(lines, 80, 3, CLAMP, true, { renderVisualBlocks: false })
+        .completedTableBoundary,
+    ).toBeUndefined();
   });
 
   it('lets a tool fit probe reject an oversized first pending table', () => {

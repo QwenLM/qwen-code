@@ -12474,6 +12474,126 @@ describe('useLlmStream', () => {
       });
     });
 
+    it.each(['prose', 'code', 'math'])(
+      'commits a closed wide table followed by %s without a trailing blank before the character cap',
+      async (following) => {
+        vi.useFakeTimers();
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          (s: string, cap?: number) =>
+            cap === undefined ? s.length : Math.min(cap, s.length),
+        );
+        const table = [
+          '| A | B | C | D | E |',
+          '| - | - | - | - | - |',
+          ...Array.from(
+            { length: 6 },
+            (_, i) => `| a | b | c | d | ${i === 5 ? 'z'.repeat(240) : 'e'} |`,
+          ),
+        ].join('\n');
+        const content = [
+          'intro',
+          '',
+          table,
+          ...(following === 'code'
+            ? ['```text', 'x', '```']
+            : following === 'math'
+              ? ['$$', 'x', '$$']
+              : []),
+          'after',
+          ...Array.from({ length: 40 }, (_, i) => `paragraph ${i}\n`),
+        ].join('\n');
+        expect(content.length).toBeLessThan(16_384);
+        const { result } = renderTestHook([], undefined, { current: 33 });
+        const releaseStream = await streamContent(result, content);
+        const committed = llmContentItems();
+        expect(committed.some((item) => item.text.includes(table))).toBe(true);
+        const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+        expect(pendingText).not.toContain('| A | B |');
+        expect(pendingText.split('\n').length).toBeLessThanOrEqual(28);
+        expect(committed.map((item) => item.text).join('') + pendingText).toBe(
+          content,
+        );
+        act(() => result.current.cancelOngoingRequest());
+        await act(async () => {
+          releaseStream();
+        });
+      },
+    );
+
+    it.each([
+      ['`', '``text\nx\n```'],
+      ['$', '$\nx\n$$'],
+      ['-', ' | - | - | - | - |'],
+    ])(
+      'waits for the partial table delimiter %s before committing',
+      async (prefix, completion) => {
+        vi.useFakeTimers();
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          (s: string, cap?: number) =>
+            cap === undefined ? s.length : Math.min(cap, s.length),
+        );
+        const table = [
+          '| A | B | C | D | E |',
+          '| - | - | - | - | - |',
+          ...Array.from(
+            { length: 6 },
+            (_, i) => `| a | b | c | d | ${i === 5 ? 'z'.repeat(240) : 'e'} |`,
+          ),
+        ].join('\n');
+        const resumed = '| RESUMED | b | c | d | e |';
+        const first = table + '\n' + prefix;
+        const rest =
+          completion +
+          '\n' +
+          resumed +
+          '\nafter\n' +
+          Array.from({ length: 40 }, (_, i) => `paragraph ${i}\n`).join('\n');
+        let nextChunk!: () => void;
+        const holdChunk = new Promise<void>((resolve) => {
+          nextChunk = resolve;
+        });
+        let releaseStream!: () => void;
+        const holdStream = new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: first };
+            await holdChunk;
+            yield { type: ServerLlmEventType.Content, value: rest };
+            await holdStream;
+          })(),
+        );
+        const { result } = renderTestHook([], undefined, { current: 33 });
+        act(() => {
+          void result.current.submitQuery('test query');
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60);
+        });
+        expect(llmContentItems()).toHaveLength(0);
+        await act(async () => {
+          nextChunk();
+          await vi.advanceTimersByTimeAsync(60);
+        });
+        const committed = llmContentItems();
+        expect(
+          committed.some(
+            (item) => item.text.includes(table) && item.text.includes(resumed),
+          ),
+        ).toBe(true);
+        const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+        expect(committed.map((item) => item.text).join('') + pendingText).toBe(
+          first + rest,
+        );
+        act(() => result.current.cancelOngoingRequest());
+        await act(async () => {
+          releaseStream();
+        });
+      },
+    );
+
     it('commits a code block taller than the viewport incrementally (no stall-then-dump)', async () => {
       vi.useFakeTimers();
       vi.mocked(findLastSafeSplitPoint).mockImplementation(

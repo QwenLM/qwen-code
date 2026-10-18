@@ -193,6 +193,32 @@ describe('<MarkdownDisplay />', () => {
     expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(17);
   });
 
+  it.each(['```text\nx\n```', '$$\nx\n$$'])(
+    'keeps resumed table rows and following text with room after %s',
+    (block) => {
+      const { lastFrame } = renderWithProviders(
+        <Box width={80} flexDirection="column">
+          <MarkdownDisplay
+            {...baseProps}
+            text={[
+              '| A | B |',
+              '| --- | --- |',
+              '| x | y |',
+              block,
+              '| z | w |',
+              'TAIL',
+            ].join('\n')}
+            availableTerminalHeight={100}
+            enforceHeightBudget
+          />
+        </Box>,
+      );
+      expect(stripAnsi(lastFrame() ?? '')).toContain('│ z');
+      expect(lastFrame()).toContain('TAIL');
+      expect(lastFrame()).not.toContain('more lines not shown');
+    },
+  );
+
   it('keeps a following step when a tiny table collapses to one cue row', () => {
     const { lastFrame } = renderWithProviders(
       <Box width={80} flexDirection="column">

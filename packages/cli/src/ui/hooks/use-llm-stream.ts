@@ -1958,11 +1958,10 @@ export const useLlmStream = (
       //
       //  - `while`, not `if`: a single throttled update can append many lines, so
       //    keep committing until the remainder fits.
-      //  - Commit ONLY at a blank-line block boundary so a table / list / code
-      //    block is never cut into a headerless continuation (which would render
-      //    as raw "| ... |" text). A table that is still streaming (no trailing
-      //    blank line yet) stays pending — bounded in view by MarkdownDisplay's
-      //    clamp — until it is complete, then commits whole.
+      //  - Commit at a blank-line boundary or the end of a closed table, never
+      //    into a headerless continuation (which would render as raw "| ... |"
+      //    text). An open table stays pending, bounded by MarkdownDisplay's clamp,
+      //    until it is complete, then commits whole.
       //  - `findLastSafeSplitPoint`: also never cut inside a fenced code block.
       //  - Conservative fallback when the content-area height is not yet known
       //    (ref is 0 before the first render populates it): derive from
@@ -1984,7 +1983,7 @@ export const useLlmStream = (
       const tableClampRows = Math.max(2, viewportRows - 3);
       while (true) {
         const bufferLines = newLlmMessageBuffer.split('\n');
-        const { keptLines, clipped } = fitPendingSlice(
+        const { keptLines, clipped, completedTableBoundary } = fitPendingSlice(
           bufferLines,
           commitWidth,
           commitRowBudget,
@@ -2015,7 +2014,12 @@ export const useLlmStream = (
           }
         }
         let target: number;
-        if (boundaryLine < 0) {
+        if (boundaryLine < 0 && completedTableBoundary !== undefined) {
+          target = charIndexAfterLine(
+            newLlmMessageBuffer,
+            completedTableBoundary,
+          );
+        } else if (boundaryLine < 0) {
           // No blank-line boundary at/before the kept prefix. A fenced code
           // block taller than the viewport never provides one mid-block, so the
           // whole block would stay pending — frozen on its head — and only land

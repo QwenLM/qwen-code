@@ -140,6 +140,8 @@ export interface PendingSliceResult {
   keptLines: number;
   /** True when some trailing source lines were dropped to fit the budget. */
   clipped: boolean;
+  /** End of a closed table that can be committed whole, even without a blank. */
+  completedTableBoundary?: number;
 }
 
 /**
@@ -185,6 +187,33 @@ export function fitPendingSlice(
   let pendingMermaid = false;
   let lastLineEmpty = true;
   let afterTable = false;
+  let tableHeaders: string[] = [];
+  let tableRows: string[][] = [];
+  let tableCost = 0;
+  let completedTableBoundary: number | undefined;
+  const layoutRows = (isStreaming: boolean) => {
+    const renderedRows = renderTableText({
+      headers: tableHeaders,
+      rows: tableRows,
+      contentWidth,
+      enableInlineMath: true,
+      isStreaming,
+    })
+      .split('\n')
+      .reduce(
+        (count, line) =>
+          count + estimateWrappedRows(line, Math.max(1, contentWidth)),
+        0,
+      );
+    // TableText collapses tiny clamps to one cue only when actually clipped.
+    const keptRows =
+      renderedRows > tableClampRows
+        ? tableClampRows <= 2
+          ? 1
+          : tableClampRows
+        : renderedRows;
+    return keptRows + TABLE_MARGIN_ROWS;
+  };
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
@@ -293,56 +322,47 @@ export function fitPendingSlice(
         continue;
       }
     }
-    if (
+    const resumesTable =
       afterTable &&
       !inMathBlock &&
-      (TABLE_ROW_RE.test(line) || TABLE_SEPARATOR_RE.test(line))
-    ) {
-      // The renderer resumes the table across code/math blocks; its cost changed.
-      kept = i;
-      break;
-    }
-    if (renderVisualBlocks && isTableStart(allLines, i)) {
-      let j = i + 2;
-      while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
-      const headers = splitMarkdownTableRow(
-        TABLE_ROW_RE.exec(allLines[i]!)![1]!,
-      );
-      const rows = allLines
-        .slice(i + 2, j)
-        .map((row) => splitMarkdownTableRow(TABLE_ROW_RE.exec(row)![1]!));
-      if (rows.length === 0) {
+      (TABLE_ROW_RE.test(line) || TABLE_SEPARATOR_RE.test(line));
+    if (renderVisualBlocks && (resumesTable || isTableStart(allLines, i))) {
+      let j = resumesTable ? i : i + 2;
+      if (!resumesTable) {
+        tableHeaders = splitMarkdownTableRow(TABLE_ROW_RE.exec(line)![1]!);
+        tableRows = [];
+        tableCost = 0;
+      }
+      while (j < allLines.length) {
+        const row = allLines[j]!;
+        if (TABLE_SEPARATOR_RE.test(row)) {
+          j++;
+        } else {
+          const match = TABLE_ROW_RE.exec(row);
+          if (!match) break;
+          tableRows.push(splitMarkdownTableRow(match[1]!));
+          j++;
+        }
+      }
+      // The renderer holds the same table open across code/math blocks.
+      rendered -= tableCost;
+      if (
+        j < allLines.length &&
+        !CODE_FENCE_RE.test(allLines[j]!) &&
+        !/^ *\$\$ *$/.test(allLines[j]!) &&
+        !(isPending && j === allLines.length - 1 && /^\s*\|/.test(allLines[j]!))
+      ) {
+        completedTableBoundary = j;
+      }
+      if (tableRows.length === 0) {
         // MarkdownDisplay holds a table until its first data row arrives.
         afterTable = true;
         i = j;
         continue;
       }
-      const layoutRows = (isStreaming: boolean) => {
-        const renderedRows = renderTableText({
-          headers,
-          rows,
-          contentWidth,
-          enableInlineMath: true,
-          isStreaming,
-        })
-          .split('\n')
-          .reduce(
-            (count, line) =>
-              count + estimateWrappedRows(line, Math.max(1, contentWidth)),
-            0,
-          );
-        // TableText collapses tiny clamps to one cue only when actually clipped.
-        const keptRows =
-          renderedRows > tableClampRows
-            ? tableClampRows <= 2
-              ? 1
-              : tableClampRows
-            : renderedRows;
-        return keptRows + TABLE_MARGIN_ROWS;
-      };
       // Each data row needs at least one row, even in vertical layout.
       const minimumCost =
-        Math.min(rows.length, tableClampRows <= 2 ? 1 : tableClampRows) +
+        Math.min(tableRows.length, tableClampRows <= 2 ? 1 : tableClampRows) +
         TABLE_MARGIN_ROWS;
       let cost =
         rendered + minimumCost > budget ? minimumCost : layoutRows(isPending);
@@ -353,7 +373,7 @@ export function fitPendingSlice(
             : j;
         break;
       }
-      if (isPending && j < allLines.length) {
+      if (isPending && completedTableBoundary === j) {
         const completedCost = layoutRows(false);
         // Keep a fitting frontier rather than drop it for unseen following text.
         if (rendered + completedCost > budget) {
@@ -363,6 +383,7 @@ export function fitPendingSlice(
         cost = Math.max(cost, completedCost);
       }
       rendered += cost;
+      tableCost = cost;
       afterTable = true;
       i = j;
       if (rendered >= budget) {
@@ -372,6 +393,16 @@ export function fitPendingSlice(
     } else {
       const listItem = /^([ \t]*)(?:([-*+])|(\d+)\.) +(.*)/.exec(line);
       if (afterTable && !inMathBlock) {
+        if (!(isPending && i === allLines.length - 1 && /^\s*\|/.test(line))) {
+          if (
+            isPending &&
+            tableRows.length > 0 &&
+            completedTableBoundary !== i
+          ) {
+            rendered += Math.max(0, layoutRows(false) - tableCost);
+          }
+          completedTableBoundary = i;
+        }
         // The renderer consumes a table's closing text line as inline text.
         rendered += isBlank ? 0 : estimateWrappedRows(line, contentWidth);
         afterTable = false;
@@ -416,5 +447,24 @@ export function fitPendingSlice(
       i++;
     }
   }
-  return { keptLines: kept, clipped: kept < allLines.length };
+  // A final delimiter prefix can still grow into a fence or table separator.
+  if (
+    completedTableBoundary === allLines.length - 1 &&
+    /^ *(?:`{1,2}|~{1,2}|\$)\s*$|^\s*[:|-][\s:|-]*$/.test(
+      allLines[completedTableBoundary]!,
+    )
+  ) {
+    completedTableBoundary = undefined;
+  }
+  const clipped = kept < allLines.length;
+  return {
+    keptLines: kept,
+    clipped,
+    ...(isPending &&
+    clipped &&
+    completedTableBoundary !== undefined &&
+    completedTableBoundary <= kept
+      ? { completedTableBoundary }
+      : {}),
+  };
 }
