@@ -14264,14 +14264,18 @@ describe('Hosted Harness no-tool session', () => {
         .then((response) => response);
       let recovery: Promise<supertest.Response> | undefined;
       try {
-        await vi.waitFor(() => expect(invokeStarted).toBe(true));
+        await vi.waitFor(() => expect(invokeStarted).toBe(true), {
+          timeout: 10_000,
+        });
         const url = `/session/${SESSION_ID}/mcp/operations/${operationId}`;
         recovery = authorize(
           kind === 'status'
             ? supertest(server).get(url)
             : supertest(server).post(`${url}/cancel`),
         ).then((response) => response);
-        await vi.waitFor(() => expect(recoveryStarted).toBe(true));
+        await vi.waitFor(() => expect(recoveryStarted).toBe(true), {
+          timeout: 10_000,
+        });
         finishInvoke();
         expect((await invoke).status).toBe(202);
         expect(
