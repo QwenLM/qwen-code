@@ -4713,20 +4713,17 @@
         }
       },
       "InputBlock": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["type", "text"],
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["input_text"]
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/InputTextBlock"
           },
-          "text": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 1000000
+          {
+            "$ref": "#/components/schemas/InputFileBlock"
+          },
+          {
+            "$ref": "#/components/schemas/InputImageBlock"
           }
-        }
+        ]
       },
       "CreateSessionRequest": {
         "type": "object",
@@ -4744,7 +4741,7 @@
             "description": "Optional explicit revision; omitted resolves the latest revision at admission and pins it. For the built-in qwen-code agent it must equal the deployment revision."
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1.",
             "type": "array",
             "maxItems": 100,
             "items": {
@@ -4789,7 +4786,7 @@
             "const": "agent.session.input.message"
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1.",
             "type": "array",
             "minItems": 1,
             "maxItems": 100,
@@ -5717,7 +5714,7 @@
             "description": "The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title."
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1.",
             "type": "array",
             "maxItems": 100,
             "items": {
@@ -5734,7 +5731,11 @@
           "approvalMode": {
             "type": "string",
             "enum": ["default", "auto-edit", "yolo"],
-            "description": "Optional policy for Workspace-bound creation only. Omission preserves the existing default and idempotency digest. Explicit selection is validated against the resolved Agent and tool profile and frozen in the Session; Shell refuses yolo and definitions retain their compiled policy."
+            "description": "Optional initial execution policy for Workspace creation, validated against the resolved Agent and profile. Omission preserves its default and idempotency digest. Independent of planMode."
+          },
+          "planMode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
           }
         }
       },
@@ -5758,7 +5759,7 @@
             "format": "uuid"
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1.",
             "type": "array",
             "minItems": 1,
             "maxItems": 100,
@@ -6000,6 +6001,14 @@
             "type": "string",
             "enum": ["default", "auto-edit", "yolo"],
             "description": "Immutable creation-time policy, used to confirm creation replay."
+          },
+          "planMode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "planModeSupported": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
           }
         }
       },
@@ -6078,6 +6087,10 @@
           "approvalModeChange": {
             "type": "boolean",
             "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
+          },
+          "inputAttachments": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
           }
         }
       },
@@ -9710,8 +9723,8 @@
         "properties": {
           "text": {
             "type": "string",
-            "maxLength": 8192,
-            "description": "Exact prefix of the stored payloadJson ({toolName,input}), at most 8192 UTF-8 bytes ending at a complete code point. Truncated text may not be valid JSON."
+            "maxLength": 65536,
+            "description": "Exact UTF-8 prefix of payloadJson ({toolName,input}). Ordinary tools retain the 8192-byte preview. exit_plan_mode includes its complete input within the 64 KiB resource ceiling so a plan can be reviewed after refresh. Truncated ordinary previews may not be valid JSON."
           },
           "truncated": {
             "type": "boolean",
@@ -9734,8 +9747,8 @@
         "properties": {
           "text": {
             "type": "string",
-            "maxLength": 8192,
-            "description": "Exact prefix of the stored payloadJson ({toolName,input}), at most 8192 UTF-8 bytes ending at a complete code point. Truncated text may not be valid JSON."
+            "maxLength": 65536,
+            "description": "Exact UTF-8 prefix of payloadJson ({toolName,input}). Ordinary tools retain the 8192-byte preview. exit_plan_mode includes its complete input within the 64 KiB resource ceiling so a plan can be reviewed after refresh. Truncated ordinary previews may not be valid JSON."
           },
           "truncated": {
             "type": "boolean",
@@ -10663,7 +10676,15 @@
               "type": "string",
               "enum": ["default", "auto-edit", "yolo"]
             },
-            "description": "Effective modes for this Agent/profile. Stored definitions offer only their pinned mode; auto and plan are unsupported."
+            "description": "Execution policies available at creation. Stored definitions retain their initial policy; existing eligible Sessions may select a policy separately. Plan is an independent overlay."
+          },
+          "planModeSupported": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
+          },
+          "inputAttachments": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
           }
         }
       },
@@ -10850,6 +10871,14 @@
           },
           "supported": {
             "type": "boolean"
+          },
+          "planMode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "planModeSupported": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
           }
         }
       },
@@ -10885,6 +10914,10 @@
           "approvalMode": {
             "type": "string",
             "enum": ["default", "auto-edit", "yolo"]
+          },
+          "planMode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
           }
         }
       },
@@ -10912,6 +10945,10 @@
           },
           "replayed": {
             "type": "boolean"
+          },
+          "planMode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
           }
         }
       },
@@ -10928,6 +10965,10 @@
             "format": "int64",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "planMode": {
+            "type": "boolean",
+            "description": "Immutable Plan overlay for this approval selection."
           }
         }
       },
@@ -11164,6 +11205,70 @@
             "maxLength": 2048
           }
         }
+      },
+      "InputTextBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "text"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["input_text", "text"]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000000
+          }
+        }
+      },
+      "InputFileBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "name", "mime_type", "text"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["input_file"]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "mime_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 49152
+          }
+        },
+        "description": "Inline UTF-8 text file. No host paths, URLs, binary or NUL. Conservative text MIME/extension validation; the complete canonical input containing attachments is limited to 48 KiB."
+      },
+      "InputImageBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "mime_type", "data"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["input_image"]
+          },
+          "mime_type": {
+            "type": "string",
+            "enum": ["image/png", "image/jpeg", "image/webp"]
+          },
+          "data": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 49152
+          }
+        },
+        "description": "Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 48 KiB."
       }
     }
   }
