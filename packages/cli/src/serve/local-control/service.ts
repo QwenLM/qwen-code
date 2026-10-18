@@ -21,7 +21,10 @@ import {
   selectLanAddress,
   type LanCandidate,
 } from './lan-interfaces.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 /** Key under which the LAN origin is registered in the mutable CORS allowlist. */
 const CORS_KEY = 'local-control';
@@ -153,8 +156,10 @@ export class LocalControlService {
   /**
    * The out-of-candidate-list address the operator granted via
    * `--local-control-address`, recorded when that enable succeeds. Survives
-   * disable: the grant is the daemon-start decision, not the session's. The
-   * HTTP enable route admits only automatic candidates or this address.
+   * disable: the grant is the daemon-start decision, not the session's. A
+   * later successful enable on a DIFFERENT address supersedes it — the
+   * operator's newer choice outranks the startup one. The HTTP enable route
+   * admits only automatic candidates or this address.
    */
   get grantedExplicitCandidate(): LanCandidate | undefined {
     return this.#grantedExplicitCandidate;
@@ -256,6 +261,15 @@ export class LocalControlService {
       !listLanCandidates().some((c) => c.address === selected.address)
     ) {
       this.#grantedExplicitCandidate = selected;
+    } else if (
+      this.#grantedExplicitCandidate !== undefined &&
+      this.#grantedExplicitCandidate.address !== selected.address
+    ) {
+      // While the grant stands, any process that can reach the trusted
+      // primary listener can re-post the named address — by construction the
+      // operator's most exposed one. A successful enable on another address
+      // is the operator's later choice and revokes that standing admission.
+      this.#grantedExplicitCandidate = undefined;
     }
     // Warn only now that the enable actually produced a live listener —
     // earlier placement recorded an exposure on enable attempts that then
@@ -265,12 +279,12 @@ export class LocalControlService {
     // candidates are pre-filtered by isLanIpv4 and isSoftwareNetwork.
     // Surface it loudly rather than letting the pairing look routine.
     if (!isLanIpv4(selected.address)) {
-      writeStderrLine(
+      writeStderrLineSafe(
         `qwen serve: WARNING: Local Control address ${selected.address} is outside RFC 1918 private / RFC 3927 link-local space. ` +
           'It was accepted only because it was named explicitly — advertise it only on a network you trust.',
       );
     } else if (isSoftwareNetwork(selected.interfaceName)) {
-      writeStderrLine(
+      writeStderrLineSafe(
         `qwen serve: WARNING: Local Control address ${selected.address} is on ${selected.interfaceName}, a VPN/tunnel or virtual interface. ` +
           'It was accepted only because it was named explicitly — advertise it only on a network you trust.',
       );

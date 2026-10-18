@@ -118,6 +118,18 @@ export class UnknownLanInterfaceError extends Error {
   }
 }
 
+export class ReservedLanAddressError extends Error {
+  readonly code = 'reserved_lan_address';
+  constructor(requested: string) {
+    super(
+      `${requested} is a reserved address shape (unspecified, loopback, ` +
+        'multicast, or reserved range) that Local Control never accepts, ' +
+        'regardless of which addresses this host currently has.',
+    );
+    this.name = 'ReservedLanAddressError';
+  }
+}
+
 // Reserved shapes an explicit name may never legitimately pick: 0/8 is the
 // unspecified address — binding it would listen on EVERY interface, the
 // opposite of the singled-out pick the operator named — while 127/8
@@ -141,18 +153,27 @@ export function findExplicitCandidate(
   interfaces: ReturnType<typeof networkInterfaces>,
 ): LanCandidate | undefined {
   if (REFUSED_EXPLICIT.test(address)) return undefined;
-  for (const [interfaceName, addresses] of Object.entries(interfaces)) {
-    // isSoftwareNetwork() is deliberately not consulted here: the tunnel
+  const matches: LanCandidate[] = [];
+  // Sorted for the same reason listLanCandidates is sorted: which interface
+  // gets reported for a dual-assigned address must not depend on the OS's
+  // enumeration order.
+  for (const [interfaceName, addresses] of Object.entries(interfaces).sort()) {
+    // isSoftwareNetwork() is deliberately not a filter here: the tunnel
     // exclusion exists to stop AUTOMATIC advertising from pointing a QR at
     // an unreachable VPN address, but an operator naming the address may be
     // on exactly that setup — phone and laptop on the same corporate VPN,
     // where the tunnel interface holds the only usable address.
     for (const info of addresses ?? []) {
       if (info.family !== 'IPv4' || info.internal) continue;
-      if (info.address === address) return { interfaceName, address };
+      if (info.address === address) matches.push({ interfaceName, address });
     }
   }
-  return undefined;
+  // A dual-assigned address reports the physical interface's name: a tunnel
+  // or bridge match is the less useful label for the QR and status rows.
+  return (
+    matches.find((match) => !isSoftwareNetwork(match.interfaceName)) ??
+    matches[0]
+  );
 }
 
 /**
@@ -181,11 +202,11 @@ export function selectLanAddress(
 ): LanCandidate {
   const candidates = listLanCandidates(interfaces);
   if (preferredAddress !== undefined) {
-    // Checked before the explicit walk so a dual-assigned address keeps its
-    // physical interfaceName: findExplicitCandidate neither sorts nor skips
-    // software networks, so it would report the tunnel instead.
-    const match = candidates.find((c) => c.address === preferredAddress);
-    if (match) return match;
+    // Refused before the host-state walk so a reserved shape is reported as
+    // never acceptable, not as absent.
+    if (REFUSED_EXPLICIT.test(preferredAddress)) {
+      throw new ReservedLanAddressError(preferredAddress);
+    }
     const explicit = findExplicitCandidate(preferredAddress, interfaces);
     if (explicit) return explicit;
     throw new UnknownLanInterfaceError(preferredAddress);

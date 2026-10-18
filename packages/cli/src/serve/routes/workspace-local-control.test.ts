@@ -354,7 +354,10 @@ describe('Local Control routes', () => {
     const app = express();
     const enable = vi.fn(async () => ({ active: true }));
     registerWorkspaceLocalControlRoutes(app, {
-      service: { enable } as unknown as LocalControlService,
+      service: {
+        enable,
+        status: vi.fn(() => ({ active: false })),
+      } as unknown as LocalControlService,
       mutate: () => (_req, _res, next) => next(),
       safeBody: () => ({ address: '203.0.113.10' }),
     });
@@ -367,14 +370,21 @@ describe('Local Control routes', () => {
     expect(enable).not.toHaveBeenCalled();
   });
 
-  it('passes a current automatic candidate through to enable', async () => {
-    vi.mocked(listLanCandidates).mockReturnValue([
-      { interfaceName: 'en0', address: '192.168.1.10' },
-    ]);
+  it('answers a re-post of the currently served address instead of gating it', async () => {
+    // The served address may have left the candidate list (DHCP reassigned
+    // the adapter) while the listener stays bound. The service no-ops an
+    // enable while active, so gating the re-post would 409 a client that
+    // should get the live pairing material back.
     const app = express();
-    const enable = vi.fn(async () => ({ active: true }));
+    const enable = vi.fn(async () => ({
+      active: true,
+      address: '192.168.1.10',
+    }));
     registerWorkspaceLocalControlRoutes(app, {
-      service: { enable } as unknown as LocalControlService,
+      service: {
+        status: vi.fn(() => ({ active: true, address: '192.168.1.10' })),
+        enable,
+      } as unknown as LocalControlService,
       mutate: () => (_req, _res, next) => next(),
       safeBody: () => ({ address: '192.168.1.10' }),
     });
@@ -382,9 +392,86 @@ describe('Local Control routes', () => {
     const response = await request(app).post('/workspace/local-control/enable');
 
     expect(response.status).toBe(200);
-    expect(enable).toHaveBeenCalledWith(
-      expect.objectContaining({ address: '192.168.1.10' }),
-    );
+    expect(enable).toHaveBeenCalledOnce();
+  });
+
+  it('names --local-control-address when the posted address is held but never granted (#14136)', async () => {
+    // The host HAS the address (a tunnel or a routable pick the automatic
+    // filter excludes), so the absence wording would mislead; the remedy is
+    // the CLI grant, and the card renders this message verbatim.
+    vi.mocked(findExplicitCandidate).mockReturnValue({
+      interfaceName: 'utun4',
+      address: '10.8.0.2',
+    });
+    const app = express();
+    const enable = vi.fn(async () => ({ active: true }));
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable,
+        status: vi.fn(() => ({ active: false })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({ address: '10.8.0.2' }),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('local_control_address_not_granted');
+    expect(response.body.error).toContain('--local-control-address');
+    expect(response.body.interfaces).toEqual([]);
+    expect(enable).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a different non-candidate address while a grant is recorded', async () => {
+    // The grant admits exactly the granted address; its existence must not
+    // relax the gate into a blanket admit for anything else.
+    const app = express();
+    const enable = vi.fn(async () => ({ active: true }));
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable,
+        status: vi.fn(() => ({ active: false })),
+        grantedExplicitCandidate: {
+          interfaceName: 'utun4',
+          address: '10.8.0.2',
+        },
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({ address: '203.0.113.99' }),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('unknown_lan_interface');
+    expect(enable).not.toHaveBeenCalled();
+  });
+
+  it('passes a current automatic candidate through to enable', async () => {
+    vi.mocked(listLanCandidates).mockReturnValue([
+      { interfaceName: 'en0', address: '192.168.1.10' },
+    ]);
+    const app = express();
+    const enable = vi.fn(async () => ({ active: true }));
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable,
+        status: vi.fn(() => ({ active: false })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({ address: '192.168.1.10' }),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(200);
+    // Exact args: the HTTP route must never forward allowExplicitAddress —
+    // minting the standing grant is the CLI flag path's alone.
+    expect(enable).toHaveBeenCalledWith({
+      address: '192.168.1.10',
+      target: undefined,
+    });
   });
 
   it('passes the operator-granted explicit address through to enable', async () => {
@@ -395,6 +482,7 @@ describe('Local Control routes', () => {
     registerWorkspaceLocalControlRoutes(app, {
       service: {
         enable,
+        status: vi.fn(() => ({ active: false })),
         grantedExplicitCandidate: {
           interfaceName: 'utun4',
           address: '10.8.0.2',
@@ -407,9 +495,10 @@ describe('Local Control routes', () => {
     const response = await request(app).post('/workspace/local-control/enable');
 
     expect(response.status).toBe(200);
-    expect(enable).toHaveBeenCalledWith(
-      expect.objectContaining({ address: '10.8.0.2' }),
-    );
+    expect(enable).toHaveBeenCalledWith({
+      address: '10.8.0.2',
+      target: undefined,
+    });
   });
 
   it('surfaces the operator-granted explicit address only while the host still holds it', async () => {
@@ -439,10 +528,57 @@ describe('Local Control routes', () => {
       interfaceName: 'utun4',
       address: '10.8.0.2',
     });
+    // The grant is surfaced as its own field, never folded into the
+    // automatic-candidate list the QR button resolves against.
+    expect(held.body.interfaces).toEqual([]);
+    // The held check must pass the live interface table: findExplicitCandidate
+    // has no default for it, so dropping the argument throws inside the GET.
+    expect(findExplicitCandidate).toHaveBeenCalledWith(
+      '10.8.0.2',
+      expect.any(Object),
+    );
 
+    vi.mocked(findExplicitCandidate).mockClear();
     vi.mocked(findExplicitCandidate).mockReturnValue(undefined);
     const gone = await request(app).get('/workspace/local-control');
     expect(gone.status).toBe(200);
     expect(gone.body.explicitCandidate).toBeUndefined();
+    expect(findExplicitCandidate).toHaveBeenCalledWith(
+      '10.8.0.2',
+      expect.any(Object),
+    );
+  });
+
+  it('keeps the granted address out of the automatic-candidate list', async () => {
+    vi.mocked(listLanCandidates).mockReturnValue([
+      { interfaceName: 'en0', address: '192.168.1.10' },
+    ]);
+    vi.mocked(findExplicitCandidate).mockReturnValue({
+      interfaceName: 'utun4',
+      address: '10.8.0.2',
+    });
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: false })),
+        grantedExplicitCandidate: {
+          interfaceName: 'utun4',
+          address: '10.8.0.2',
+        },
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).get('/workspace/local-control');
+
+    expect(response.status).toBe(200);
+    expect(response.body.interfaces).toEqual([
+      { interfaceName: 'en0', address: '192.168.1.10' },
+    ]);
+    expect(response.body.explicitCandidate).toEqual({
+      interfaceName: 'utun4',
+      address: '10.8.0.2',
+    });
   });
 });

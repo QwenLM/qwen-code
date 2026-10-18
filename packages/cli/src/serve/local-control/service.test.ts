@@ -17,7 +17,10 @@ import {
   selectLanAddress,
 } from './lan-interfaces.js';
 import { LocalControlService } from './service.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 const sleep = vi.hoisted(() => ({ release: vi.fn() }));
 const sleepInhibitorMock = vi.hoisted(() => ({
@@ -53,6 +56,7 @@ const { isLanIpv4: realIsLanIpv4, isSoftwareNetwork: realIsSoftwareNetwork } =
 vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../utils/stdioHelpers.js')>()),
   writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
 
 async function unusedPort(): Promise<number> {
@@ -66,6 +70,8 @@ async function unusedPort(): Promise<number> {
 describe('LocalControlService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(writeStderrLine).mockReset();
+    vi.mocked(writeStderrLineSafe).mockReset();
     sleepInhibitorMock.isRunning.mockReturnValue(true);
     vi.mocked(isLanIpv4).mockImplementation(realIsLanIpv4);
     vi.mocked(isSoftwareNetwork).mockImplementation(realIsSoftwareNetwork);
@@ -184,7 +190,7 @@ describe('LocalControlService', () => {
     expect(origins.allows(`http://127.0.0.1:${port}`)).toBe(false);
     // The exposure warning belongs to a listener that actually came up; a
     // rejected enable must not record one.
-    expect(vi.mocked(writeStderrLine)).not.toHaveBeenCalledWith(
+    expect(vi.mocked(writeStderrLineSafe)).not.toHaveBeenCalledWith(
       expect.stringContaining('outside RFC 1918'),
     );
   });
@@ -234,7 +240,7 @@ describe('LocalControlService', () => {
     await expect(service.enable()).rejects.toThrow();
     expect(service.active).toBe(false);
     expect(attached).toHaveLength(1);
-    expect(vi.mocked(writeStderrLine)).not.toHaveBeenCalledWith(
+    expect(vi.mocked(writeStderrLineSafe)).not.toHaveBeenCalledWith(
       expect.stringContaining('outside RFC 1918'),
     );
 
@@ -274,10 +280,49 @@ describe('LocalControlService', () => {
     // An enable on an already-active session is a no-op and must not re-warn.
     await service.enable();
 
-    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledOnce();
-    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledWith(
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledOnce();
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
       expect.stringContaining('outside RFC 1918'),
     );
+    await service.disable();
+  });
+
+  it('keeps a committed enable live when the warning write hits EPIPE', async () => {
+    // stderr may be a dead pipe (a supervisor rotated the log reader): the
+    // warnings ride writeStderrLineSafe so failing the write cannot reject an
+    // enable whose listener is already bound — a reported failure while the
+    // LAN exposure stays live. The mock below re-implements the safe
+    // variant's contract over the throwing writer; the variant's own
+    // swallowing is pinned in stdioHelpers.test.ts.
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+    vi.mocked(writeStderrLine).mockImplementation(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+    vi.mocked(writeStderrLineSafe).mockImplementation((message) => {
+      try {
+        writeStderrLine(message);
+      } catch {
+        // The reader is gone; the warning is incidental to the enable.
+      }
+    });
+
+    const status = await service.enable();
+
+    expect(status.active).toBe(true);
+    expect(service.active).toBe(true);
+    expect(status.sleepInhibited).toBe(true);
+    expect(sleepInhibitorMock.acquire).toHaveBeenCalledOnce();
     await service.disable();
   });
 
@@ -309,8 +354,8 @@ describe('LocalControlService', () => {
 
     await service.enable();
 
-    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledOnce();
-    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledWith(
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledOnce();
+    expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
       expect.stringContaining('docker0'),
     );
     await service.disable();
@@ -334,7 +379,7 @@ describe('LocalControlService', () => {
 
     await service.enable();
 
-    expect(vi.mocked(writeStderrLine)).not.toHaveBeenCalled();
+    expect(vi.mocked(writeStderrLineSafe)).not.toHaveBeenCalled();
     await service.disable();
   });
 
@@ -371,6 +416,81 @@ describe('LocalControlService', () => {
       interfaceName: 'en0',
       address: '127.0.0.1',
     });
+  });
+
+  it('supersedes the standing grant when a later enable picks a different address', async () => {
+    // While the grant stands, any process that can reach the trusted primary
+    // listener can re-post the named address — the operator's most exposed
+    // one by construction. A successful enable on another address is the
+    // operator's later choice and must revoke that standing admission.
+    // 0.0.0.0 stands in for the move-to candidate so the second bind succeeds
+    // on any host (the candidate list is stubbed, so its shape is moot).
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    await service.enable({
+      address: '127.0.0.1',
+      allowExplicitAddress: true,
+    });
+    expect(service.grantedExplicitCandidate).toEqual({
+      interfaceName: 'en0',
+      address: '127.0.0.1',
+    });
+    await service.disable();
+
+    vi.mocked(selectLanAddress).mockReturnValue({
+      interfaceName: 'en0',
+      address: '0.0.0.0',
+    });
+    vi.mocked(listLanCandidates).mockReturnValue([
+      { interfaceName: 'en0', address: '0.0.0.0' },
+    ]);
+    await service.enable({ address: '0.0.0.0' });
+
+    expect(service.grantedExplicitCandidate).toBeUndefined();
+    await service.disable();
+  });
+
+  it('keeps the standing grant when a re-enable posts the granted address', async () => {
+    // The Web Shell card's disable→enable round trip re-posts the grant
+    // through the HTTP path (no flag): superseding must fire only on a
+    // DIFFERENT pick, or the card's primary #14136 flow would drop the
+    // opt-in it exists to preserve.
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: vi.fn(),
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+
+    await service.enable({
+      address: '127.0.0.1',
+      allowExplicitAddress: true,
+    });
+    await service.disable();
+    await service.enable({ address: '127.0.0.1' });
+
+    expect(service.grantedExplicitCandidate).toEqual({
+      interfaceName: 'en0',
+      address: '127.0.0.1',
+    });
+    await service.disable();
   });
 
   it('records no grant without the CLI opt-in flag', async () => {

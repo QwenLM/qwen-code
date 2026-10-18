@@ -5,6 +5,7 @@
  */
 
 import { parseJoinLink } from '../serve/agent-host-join.js';
+import { listLanCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -88,9 +89,9 @@ async function startLocalControl(
   } catch (err) {
     // The service reports ambiguity to its caller rather than picking for
     // them; in a terminal the way to answer is a flag, which only this caller
-    // knows about. The same holds for the no-candidate failure: its message
-    // is rendered verbatim to browser clients, so the CLI-only remedy hint
-    // belongs here, not in the shared error.
+    // knows about. The same holds for the no-candidate and unknown-address
+    // failures: their messages are rendered verbatim to browser clients, so
+    // the CLI-only remedy hints belong here, not in the shared errors.
     if (
       err instanceof Error &&
       (err as { code?: string }).code === 'ambiguous_lan_interface'
@@ -103,6 +104,15 @@ async function startLocalControl(
     ) {
       throw new Error(
         `${err.message} If this host's usable address is outside private/link-local space, or sits on a VPN/tunnel interface, name it: --local-control-address <ip>.`,
+      );
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'unknown_lan_interface'
+    ) {
+      const candidates = listLanCandidates();
+      throw new Error(
+        `${err.message}${candidates.length ? ` This host currently has: ${candidates.map((c) => `${c.interfaceName} (${c.address})`).join(', ')}.` : ''}`,
       );
     }
     throw err;

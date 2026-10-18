@@ -180,17 +180,29 @@ export function registerWorkspaceLocalControlRoutes(
       // caller-supplied string: an HTTP-posted address must be a current
       // automatic candidate or the address the operator granted with
       // `--local-control-address` (recorded on the service). Anything else
-      // keeps failing closed with the pre-#14136 unknown_lan_interface 409 —
-      // otherwise any local process could move the listener onto an address
-      // the operator never named and walk away with the pairing credential.
+      // keeps failing closed — otherwise any local process could move the
+      // listener onto an address the operator never named and walk away with
+      // the pairing credential. A re-post of the address the daemon is
+      // currently serving skips the gate: the service no-ops an enable while
+      // active, and that address may legitimately have left the candidate
+      // list (DHCP reassignment) while the listener stays bound. The refusal
+      // distinguishes an address the host holds but never granted (the
+      // remedy is the CLI flag) from one the host no longer has.
       if (typeof body.address === 'string') {
-        const candidates = listLanCandidates();
-        if (
-          !candidates.some((c) => c.address === body.address) &&
-          body.address !== deps.service.grantedExplicitCandidate?.address
-        ) {
-          sendEnableError(res, new UnknownLanInterfaceError(body.address));
-          return;
+        const live = deps.service.status();
+        if (!live.active || live.address !== body.address) {
+          if (
+            !listLanCandidates().some((c) => c.address === body.address) &&
+            body.address !== deps.service.grantedExplicitCandidate?.address
+          ) {
+            sendEnableError(
+              res,
+              findExplicitCandidate(body.address, networkInterfaces())
+                ? new LocalControlAddressNotGrantedError(body.address)
+                : new UnknownLanInterfaceError(body.address),
+            );
+            return;
+          }
         }
       }
       try {
@@ -246,6 +258,25 @@ export function registerWorkspaceLocalControlRoutes(
   );
 }
 
+/**
+ * The enable gate's provenance refusal: the host holds the address, but it is
+ * neither a current automatic candidate nor the operator's
+ * `--local-control-address` grant. Distinct from UnknownLanInterfaceError —
+ * which asserts the host does NOT have the address — because the remedy
+ * differs, and the card renders this message verbatim.
+ */
+class LocalControlAddressNotGrantedError extends Error {
+  readonly code = 'local_control_address_not_granted';
+  constructor(requested: string) {
+    super(
+      `${requested} is neither a current automatic candidate nor the address ` +
+        'granted with --local-control-address. To expose it, restart the ' +
+        `daemon with --local-control-address ${requested}.`,
+    );
+    this.name = 'LocalControlAddressNotGrantedError';
+  }
+}
+
 function sendEnableError(res: Response, error: unknown): void {
   // 409 rather than 400: the request was well-formed and the operator did
   // nothing wrong — the host simply has more than one answer. The candidate
@@ -264,6 +295,14 @@ function sendEnableError(res: Response, error: unknown): void {
     return;
   }
   if (error instanceof UnknownLanInterfaceError) {
+    res.status(409).json({
+      error: error.message,
+      code: error.code,
+      interfaces: listLanCandidates(),
+    });
+    return;
+  }
+  if (error instanceof LocalControlAddressNotGrantedError) {
     res.status(409).json({
       error: error.message,
       code: error.code,

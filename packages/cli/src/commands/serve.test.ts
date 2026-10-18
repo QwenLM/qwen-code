@@ -43,6 +43,16 @@ vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
 }));
+const mockListLanCandidates = vi.hoisted(() =>
+  vi.fn((): Array<{ interfaceName: string; address: string }> => []),
+);
+vi.mock('../serve/local-control/lan-interfaces.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../serve/local-control/lan-interfaces.js')
+    >();
+  return { ...actual, listLanCandidates: mockListLanCandidates };
+});
 vi.mock('../serve/open-with-auth.js', () => ({
   applyOpenWithAuth: mockApplyOpenWithAuth,
 }));
@@ -816,6 +826,59 @@ describe('serve rate limit env parsing', () => {
     expect(stderr).toContain('No private IPv4 address is available.');
     expect(stderr).toContain('--local-control-address');
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("lists the host's current addresses when a named address is unknown (#14136)", async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // The named address is gone (typo, or the network changed after the hint
+    // was read): the retry must not be a blind guess. The shared error stays
+    // client-neutral; the candidate list is the CLI-only remedy, added here.
+    const enable = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(
+          new Error(
+            '203.0.113.99 is not an IPv4 address this host can expose right now.',
+          ),
+          { code: 'unknown_lan_interface' },
+        ),
+      );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    mockListLanCandidates.mockReturnValue([
+      { interfaceName: 'eth0', address: '172.21.106.31' },
+    ]);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--local-control --local-control-address 203.0.113.99',
+    );
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      '203.0.113.99 is not an IPv4 address this host can expose right now.',
+    );
+    expect(stderr).toContain('eth0 (172.21.106.31)');
+    expect(close).toHaveBeenCalledOnce();
+    mockListLanCandidates.mockReturnValue([]);
   });
 
   it('passes normalized named channels to runQwenServe', async () => {
