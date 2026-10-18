@@ -62,6 +62,7 @@ let logChars = 0;
 let operations = 0;
 let pumping = false;
 let builtinTool: string | undefined;
+let surface: 'terminal' | null = null;
 const send = (reply: ModReply) => port.postMessage(reply);
 const abandoned = () =>
   Atomics.load(cancelled, 0) !== 0 || Date.now() >= deadline;
@@ -356,12 +357,9 @@ async function dispatch(
     builtinTool,
   );
   if (!view) return next(input, frames);
-  const active = frames.filter((frame) => frame.plugin === index);
-  const lastFrame = frames.at(-1);
-  const leftOut = lastFrame?.plugin === index ? [lastFrame.registration] : [];
-  const told = active
-    .map((frame) => frame.registration)
-    .filter((id) => !leftOut.includes(id));
+  const leftOut = frames
+    .filter((frame) => frame.plugin === index)
+    .map((frame) => frame.registration);
   const call: ModInvocation = {
     id: ++serial,
     epoch,
@@ -373,7 +371,7 @@ async function dispatch(
     toNativeInput: view.toNativeInput,
     origin,
     frames,
-    budget: new ModBudget(told.length ? 1000 : MOD_TIMEOUT_MS),
+    budget: new ModBudget(MOD_TIMEOUT_MS),
     live: true,
     recovering: false,
     aborted: false,
@@ -391,7 +389,6 @@ async function dispatch(
           input: call.input,
           origin,
           leftOut,
-          told,
         }),
       );
       validateResult(event, value);
@@ -620,6 +617,7 @@ port.on('message', async (request: ModRequest) => {
     let result: unknown;
     if (request.type === 'load') {
       if (realms.length) throw new Error('Mods already loaded.');
+      surface = request.surface;
       for (const plugin of request.plugins) {
         assertLive();
         const realm = new Realm(plugin, realms.length);
@@ -630,23 +628,50 @@ port.on('message', async (request: ModRequest) => {
           throw new Error('Mod ' + plugin.name + ': ' + String(error));
         }
       }
+      if (surface === 'terminal') {
+        for (const realm of realms) {
+          const unsupported = realm.patterns.find((pattern) =>
+            ['tool.call', 'tool.check', 'tool.*'].includes(pattern),
+          );
+          if (unsupported)
+            throw new Error(
+              `Mod ${realm.plugin.name}: ${unsupported} is not supported in terminal sessions.`,
+            );
+        }
+        for (const realm of realms) {
+          const limited = realm.patterns.filter(
+            (pattern) =>
+              patternMatches(pattern, 'tool.call') ||
+              patternMatches(pattern, 'tool.check'),
+          );
+          if (limited.length)
+            send({
+              type: 'log',
+              plugin: realm.plugin.name,
+              to: 'transcript',
+              text: `Terminal Mod subscriptions (${limited.join(', ')}) only receive supported session, command, and ui.log events; tool.call and tool.check are not supported.`,
+            });
+        }
+      }
       starting = true;
       await dispatch(
         'session.start',
-        { cwd: request.cwd, surface: null, isInteractive: false },
+        { cwd: request.cwd, surface, isInteractive: surface === 'terminal' },
         engineOrigin,
         [],
         async (e) => ({ cwd: e['cwd'] }),
       );
       result = {
         commands: [...commands.values()],
-        tools: realms.some((realm) =>
-          realm.patterns.some(
-            (pattern) =>
-              patternMatches(pattern, 'tool.call') ||
-              patternMatches(pattern, 'tool.check'),
+        tools:
+          surface !== 'terminal' &&
+          realms.some((realm) =>
+            realm.patterns.some(
+              (pattern) =>
+                patternMatches(pattern, 'tool.call') ||
+                patternMatches(pattern, 'tool.check'),
+            ),
           ),
-        ),
       };
     } else if (request.type === 'command') {
       if (!commands.has(request.command))
@@ -656,8 +681,11 @@ port.on('message', async (request: ModRequest) => {
         {
           command: request.command,
           args: request.args,
-          origin: { kind: 'sdk' },
-          presentation: { isFullscreen: false, columns: 80 },
+          origin: { kind: surface === 'terminal' ? 'composer' : 'sdk' },
+          presentation:
+            surface === 'terminal' && request.presentation
+              ? request.presentation
+              : { isFullscreen: false, columns: 80 },
         },
         engineOrigin,
         [],
@@ -666,6 +694,10 @@ port.on('message', async (request: ModRequest) => {
         },
       );
     } else if (request.type === 'tool') {
+      if (surface === 'terminal')
+        throw new Error(
+          'Mod tool middleware is not supported in terminal sessions.',
+        );
       result = await dispatch(
         'tool.call',
         request.input,

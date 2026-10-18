@@ -193,7 +193,7 @@ if (registerStorage && process.platform !== 'linux') {
 // orphaned, and no reclaim is needed.
 if (runtimeTakeover && !harnessOnly && process.platform !== 'linux') {
   throw new Error(
-    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted MySQL CI job or a Linux container.`,
+    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
   );
 }
 // The Stage A acceptance criterion names a 15-second Runtime delay; the
@@ -209,12 +209,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 }
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
-const springModule = path.join(
-  root,
-  'packages',
-  'sdk-java',
-  'managed-agent-server',
-);
+const springModule = path.join(root, 'packages', 'managed-agent-server');
 const springTarget = path.join(springModule, 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several

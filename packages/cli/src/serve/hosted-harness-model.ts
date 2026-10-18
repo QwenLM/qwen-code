@@ -8,10 +8,12 @@ import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import {
   LlmRequestPreparationError,
+  llmPreparedProviderPin,
   type LlmPreparedRequest,
   type LlmPreparedRequestCallback,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
+import type { HostedModelSelection } from './hosted-model-selection.js';
 
 import type { Content, Part } from '@google/genai';
 import { createHash } from 'node:crypto';
@@ -29,6 +31,7 @@ import {
 } from './hosted-agent-definition.js';
 
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import type { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import {
   HostedHookRecoveryRequiredError,
   type HostedHookSession,
@@ -63,6 +66,20 @@ export interface HostedHarnessModelResult {
   text: string;
   parts?: Part[];
   model: string;
+}
+
+export class HostedModelRoundLimitError extends Error {
+  constructor() {
+    super('The Hosted Harness Turn reached its configured model round limit.');
+  }
+}
+
+export class HostedImageInputUnsupportedError extends Error {
+  constructor() {
+    super(
+      'The selected model does not support image input. Choose a model with image support or remove the image.',
+    );
+  }
 }
 
 export interface HostedHarnessTextDeltas {
@@ -119,6 +136,7 @@ export async function runHostedHarnessTextTurn(input: {
   cwd: string;
   history: readonly ChatRecord[];
   prompt: string;
+  attachmentParts?: readonly Part[];
   promptId: string;
   signal: AbortSignal;
   resumeFromToolResults?: readonly Part[];
@@ -143,12 +161,17 @@ export async function runHostedHarnessTextTurn(input: {
     Partial<
       Pick<
         HostedWorkspaceToolTurn,
-        'resumeHookResults' | 'hookStopReason' | 'setModelRound'
+        | 'resumeHookResults'
+        | 'hookStopReason'
+        | 'setModelRound'
+        | 'planModeInstructions'
       >
     >;
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
+  modelSelection?: HostedModelSelection;
   agentInstructions?: string;
+  skills?: HostedSkillCatalog;
   textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
@@ -179,11 +202,15 @@ export async function runHostedHarnessTextTurn(input: {
       input.agentInstructions
         ? `# Agent instructions\n\n${input.agentInstructions}`
         : undefined,
+      input.skills?.instructions(),
+      input.toolTurn?.planModeInstructions?.(),
       context,
     ]
       .filter(Boolean)
       .join('\n\n');
-  const model = input.agentDefinition?.model;
+  const model = input.modelSelection
+    ? { id: input.modelSelection.modelId }
+    : input.agentDefinition?.model;
   await applyHostedModelPin(config, model);
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
@@ -202,7 +229,13 @@ export async function runHostedHarnessTextTurn(input: {
       : [],
   );
   if (!input.resumeFromToolResults && !input.resumeModel)
-    initialMessages.push({ role: 'user', parts: [{ text: input.prompt }] });
+    initialMessages.push({
+      role: 'user',
+      parts: [
+        ...(input.prompt ? [{ text: input.prompt }] : []),
+        ...(input.attachmentParts ?? []),
+      ],
+    });
   const initializationHooks: Array<{
     fields: HookInput;
     signal?: AbortSignal;
@@ -290,7 +323,7 @@ export async function runHostedHarnessTextTurn(input: {
     await input.hooks?.ensureReady(input.signal);
     // Seed instructions when memory reload is skipped; restore them after
     // initialize() when its hierarchical memory refresh replaces user memory.
-    if (input.agentInstructions)
+    if (input.agentInstructions || input.skills)
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -306,7 +339,7 @@ export async function runHostedHarnessTextTurn(input: {
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    if (input.agentInstructions) {
+    if (input.agentInstructions || input.skills) {
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -317,7 +350,17 @@ export async function runHostedHarnessTextTurn(input: {
       if (model) throw new HostedModelUnavailableError(cause);
       throw cause;
     }
-    if (input.agentInstructions)
+    if (
+      [...initialMessages, ...(input.resumeModel?.prepared.history ?? [])].some(
+        (message) =>
+          message.parts?.some((part) =>
+            part.inlineData?.mimeType?.startsWith('image/'),
+          ),
+      ) &&
+      config.getEffectiveInputModalities().image !== true
+    )
+      throw new HostedImageInputUnsupportedError();
+    if (input.agentInstructions || input.skills)
       await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
@@ -441,26 +484,32 @@ export async function runHostedHarnessTextTurn(input: {
           config.getModel(),
           input.signal,
         )) ?? [...input.resumeFromToolResults])
-      : [{ text: effectivePrompt }];
+      : [
+          ...(effectivePrompt ? [{ text: effectivePrompt }] : []),
+          ...(input.attachmentParts ?? []),
+        ];
     let pendingToolResults =
       input.resumeFromToolResults !== undefined ||
       (input.resumeModel?.pendingToolResults ?? false);
     let preparedRecovery = input.resumeModel?.prepared;
     let stopHookActive =
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
+    const maxRounds = config.getMaxSessionTurns();
     for (
       let round = input.resumeModel?.round ?? input.initialRound ?? 0;
-      round < 16;
+      ;
       round++
     ) {
-      input.toolTurn?.setModelRound?.(round);
       input.signal.throwIfAborted();
+      input.toolTurn?.setModelRound?.(round);
       if (input.hooks?.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
       if (input.toolTurn?.hookStopReason) {
         const text = input.toolTurn.hookStopReason;
         return { text, parts: [{ text }], model: config.getModel() };
       }
+      if (maxRounds > 0 && round >= maxRounds)
+        throw new HostedModelRoundLimitError();
       const declarations =
         (await input.toolTurn?.declarations(input.signal)) ?? [];
       client
@@ -479,9 +528,10 @@ export async function runHostedHarnessTextTurn(input: {
           !previousTools ||
           toolNames.size !== previousTools.size ||
           [...toolNames].some((name) => !previousTools.has(name));
-        const contextAvailable = input.workspaceContext?.read();
+        const contextAvailable =
+          contextWithInstructions(input.workspaceContext?.read()) || undefined;
         const contextChanged =
-          contextAvailable !== undefined &&
+          (contextAvailable !== undefined || injectedContext !== undefined) &&
           contextAvailable !== injectedContext;
         if (toolsChanged) {
           config.setPromptToolSnapshot(toolNames);
@@ -490,7 +540,7 @@ export async function runHostedHarnessTextTurn(input: {
           injectedTools = toolNames;
         }
         if (contextChanged) {
-          config.setUserMemory(contextWithInstructions(contextAvailable));
+          config.setUserMemory(contextAvailable ?? '');
           injectedContext = contextAvailable;
         }
         // Config changes alone do not update the chat's cached instruction.
@@ -508,10 +558,17 @@ export async function runHostedHarnessTextTurn(input: {
         : await input.modelScope?.beginMainAttempt(config.getModel());
       let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
+      let contextWindowSize =
+        config.getContentGeneratorConfig()?.contextWindowSize;
       const prepare: LlmPreparedRequestCallback = async (
         prepared,
         captureUnsupported,
       ) => {
+        const activeConfig = config.getContentGeneratorConfig();
+        contextWindowSize =
+          prepared.providerPin === llmPreparedProviderPin(activeConfig)
+            ? activeConfig?.contextWindowSize
+            : undefined;
         if (completeAttempt) {
           const previous = completeAttempt;
           completeAttempt = undefined;
@@ -567,7 +624,18 @@ export async function runHostedHarnessTextTurn(input: {
             await textDeltas?.delta(event.value);
           } else if (event.type === LlmEventType.Finished) {
             finished = true;
-            usage.push(event.value?.usageMetadata ?? null);
+            const reported = event.value?.usageMetadata;
+            if (reported) {
+              const snapshot: Record<string, unknown> = { ...reported };
+              delete snapshot['contextWindowSize'];
+              if (
+                typeof contextWindowSize === 'number' &&
+                Number.isSafeInteger(contextWindowSize) &&
+                contextWindowSize > 0
+              )
+                snapshot['contextWindowSize'] = contextWindowSize;
+              usage.push(snapshot);
+            } else usage.push(null);
           } else if (event.type === LlmEventType.Retry) {
             calls = [];
             if (!event.isContinuation) {
@@ -578,6 +646,18 @@ export async function runHostedHarnessTextTurn(input: {
               text = '';
             }
           } else if (event.type === LlmEventType.ModelFallback) {
+            contextWindowSize = undefined;
+            if (!input.prepareModel && input.modelScope) {
+              const previous = completeAttempt;
+              completeAttempt = undefined;
+              await previous?.(false, usage);
+              finished = false;
+              usage.length = 0;
+              completeAttempt = await input.modelScope.beginMainAttempt(
+                event.toModel,
+              );
+              modelOccurrence = completeAttempt.attemptId ?? modelOccurrence;
+            }
             await textDeltas?.retract();
             calls = [];
             text = '';
@@ -602,6 +682,9 @@ export async function runHostedHarnessTextTurn(input: {
           } else if (event.type === LlmEventType.UserCancelled) {
             modelFailure = false;
             throw new Error('Hosted Harness turn was cancelled.');
+          } else if (event.type === LlmEventType.MaxSessionTurns) {
+            modelFailure = false;
+            throw new HostedModelRoundLimitError();
           } else if (
             event.type !== LlmEventType.ChatCompressed &&
             event.type !== LlmEventType.Thought &&
@@ -699,7 +782,6 @@ export async function runHostedHarnessTextTurn(input: {
       );
       pendingToolResults = true;
     }
-    throw new Error('Hosted tool turn exceeded 16 model rounds.');
   } finally {
     input.hooks?.setMessagesProvider(undefined);
     try {

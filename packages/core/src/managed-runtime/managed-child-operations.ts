@@ -54,11 +54,11 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
 
 /**
  * The workspace isolation policies a launch may name. `worktree` (#13753
- * I2) also needs a host that serves child Workspaces; `snapshot` waits for
- * I3.
+ * I2) also needs a host that serves child Workspaces, and `snapshot` (I3)
+ * one that serves read-only snapshots as well.
  */
 export const MANAGED_CHILD_ADMITTED_WORKSPACE_MODES: readonly ChildWorkspaceMode[] =
-  Object.freeze(['shared', 'worktree']);
+  Object.freeze(['shared', 'worktree', 'snapshot']);
 
 export interface ChildLaunchEnvelope {
   readonly description: string;
@@ -293,12 +293,19 @@ export function admitChildLaunch(params: {
   readonly workspaceMode: ChildWorkspaceMode;
   /** The control plane serves child Workspaces, so `worktree` can run. */
   readonly childWorkspaces: boolean;
+  /**
+   * The control plane also serves read-only snapshots, so `snapshot` can
+   * run; it counts only beside `childWorkspaces`.
+   */
+  readonly childSnapshots: boolean;
   readonly sameDefinition: boolean;
 }): ChildAdmission {
   if (params.closing) return { admitted: false, reason: 'closing' };
   if (
     !MANAGED_CHILD_ADMITTED_WORKSPACE_MODES.includes(params.workspaceMode) ||
-    (params.workspaceMode === 'worktree' && !params.childWorkspaces)
+    (params.workspaceMode === 'worktree' && !params.childWorkspaces) ||
+    (params.workspaceMode === 'snapshot' &&
+      !(params.childWorkspaces && params.childSnapshots))
   ) {
     return { admitted: false, reason: 'workspace_mode' };
   }
@@ -572,6 +579,37 @@ export function childCancelBody(
       state: 'cancelled',
       execution: params.started ? 'settled' : 'not_started_proven',
       delivery: Object.freeze({ target: 'session', state: 'cancelled' }),
+    }),
+  });
+}
+
+/**
+ * #14387: the recovery-blocked settlement — the Harness generation running
+ * this child was lost and its execution's outcome stays unwitnessed (the
+ * workflow kind's in-process work leaves no witness on a new generation).
+ * The run is blocked, never ended: no stop reason, the delivery is not
+ * cancelled, and the execution stays provably unknown so a later revision
+ * could still settle the run if evidence ever arrived.
+ */
+export function childRecoveryBlockedBody(
+  previous: ChildSessionRun,
+  params: {
+    readonly reason: ChildSessionRun['run']['reason'];
+    readonly childSessionId?: string;
+  },
+): ChildSessionRun {
+  return Object.freeze({
+    ...previous,
+    childSessionId: adoptChildSessionId(
+      previous,
+      params.childSessionId,
+      'recovery_blocked',
+    ),
+    run: Object.freeze({
+      ...previous.run,
+      state: 'recovery_blocked',
+      reason: params.reason,
+      execution: 'outcome_unknown',
     }),
   });
 }
