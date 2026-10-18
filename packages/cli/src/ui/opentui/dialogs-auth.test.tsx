@@ -682,6 +682,15 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       );
       await press('return'); // main: QwenCloud → qwencloud-select
       expect(screen.getByText('千问AI平台 · 接入方式')).toBeTruthy();
+      // The nav hint is the one converted symbol whose key is translated and
+      // that no other suite can observe — this file is the only importer of the
+      // real dialog — and the select branch above is what paints it
+      // (`dialogs-auth.tsx:1730`). Freezing it back to a module-scope `t(...)`
+      // keeps every other assertion in this file green, so this is the line
+      // that has to go red if the render-time conversion is reverted.
+      expect(document.body.textContent).toContain(
+        'Enter 选择，↑↓ 导航，Esc 返回',
+      );
       await press('return'); // Token Plan → provider-setup
       await vi.waitFor(() => {
         expect(document.body.textContent).toContain('千问AI平台');

@@ -202,12 +202,8 @@ const QWENCLOUD_MAIN_LABEL = 'QwenCloud';
 const selectAlibabaModelStudio = async (
   stdin: { write: (s: string) => void },
   lastFrame: () => string | undefined,
-  // The first top-level entry is translated, so a zh-locale caller has to wait
-  // for the translated label rather than the English constant; the default
-  // keeps every English-locale navigation chain unchanged.
-  mainLabel: string = QWENCLOUD_MAIN_LABEL,
 ) => {
-  await waitForSelectedOption(lastFrame, mainLabel);
+  await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Alibaba ModelStudio');
 };
 
