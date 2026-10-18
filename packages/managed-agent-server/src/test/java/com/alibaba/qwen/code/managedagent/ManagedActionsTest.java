@@ -919,20 +919,28 @@ class ManagedActionsTest {
         Duration lease = Duration.ofSeconds(2);
         properties.getDispatch().setLeaseDuration(lease);
         // 4s > leaseDuration/3, so the coordinator's clamp (min → 666ms) is
-        // what picks the period. Inverting the clamp (max → 4s) starves the
-        // lease and the competing replica must win it. The wide margins —
-        // over a second of renewal slack per period — keep scheduler jitter
-        // on a loaded CI runner from lapsing the lease mid-hold (#14476).
+        // what picks the period. renewInterval > leaseDuration is deliberate
+        // (asserted below): only then does inverting the clamp (max → 4s)
+        // starve the lease — the first renewal comes after the lease has
+        // lapsed and can no longer be extended, so the competing replica must
+        // win it. HarnessCoordinator rejects this range (renew must be
+        // <= lease/2); ActionResponseCoordinator clamps instead, and this
+        // test pins the clamp. The wide margins — over a second of renewal
+        // slack per period — keep scheduler jitter on a loaded CI runner
+        // from lapsing the lease mid-hold (#14476).
         properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
-        // Deriving the hold as lease + 3 clamped renewal periods keeps "hold
-        // outlasts the lease" structural under rescale and needs more than
-        // one renewal tick, so a one-shot renewal loop loses the claim below.
+        assertThat(properties.getDispatch().getLeaseRenewInterval()).isGreaterThan(lease);
+        // Deriving the hold as lease + 6 clamped renewal periods keeps "hold
+        // outlasts the lease" structural under rescale and leaves six renewal
+        // ticks past the lease deadline, so a renewal loop that stops after
+        // <= 5 successful renewals still loses the claim; at 3 periods only
+        // <= 3 was caught, against 7 for the literal hold this replaced.
         // The release latch and the hold await scale with the hold, so
         // widening the lease cannot strand them on a stale literal ceiling.
         long period = Math.max(1, Math.min(
                 properties.getDispatch().getLeaseRenewInterval().toMillis(),
                 lease.toMillis() / 3));
-        long holdMillis = lease.toMillis() + 3 * period;
+        long holdMillis = lease.toMillis() + 6 * period;
         long holdBudgetMillis = holdMillis + 5_000;
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
