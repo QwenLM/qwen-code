@@ -9,7 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '@xterm/headless';
 import { Writable } from 'node:stream';
 import { promises as fs } from 'node:fs';
-import { PTY_INPUT_QUEUE_FIELDS } from './pty-input-queue.js';
+import {
+  MAX_PTY_INPUT_QUEUE_TASKS,
+  PTY_INPUT_QUEUE_FIELDS,
+} from './pty-input-queue.js';
 
 const { Terminal } = pkg;
 
@@ -209,6 +212,7 @@ describe('WebTerminalRegistry', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('runs an explicit SSH command with the existing terminal lifecycle', async () => {
@@ -876,6 +880,47 @@ describe('WebTerminalRegistry', () => {
     registry.dispose();
   });
 
+  it('bounds small-frame queue scans and resumes after silent drain', async () => {
+    let visitedTasks = 0;
+    const queue: Array<{ buffer: Buffer; offset: number }> = [];
+    spawn.mockImplementation(() => ({
+      ...createSpawnedPty(),
+      _writeStream: { _writeQueue: queue },
+    }));
+    write.mockImplementation((data: string | Buffer) => {
+      const buffer = Buffer.from(data);
+      queue.push({
+        get buffer() {
+          visitedTasks++;
+          return buffer;
+        },
+        offset: 0,
+      });
+    });
+    const registry = await start('terminal:small-frames', 'linux');
+    for (let n = 0; n < MAX_PTY_INPUT_QUEUE_TASKS; n++) {
+      expect(registry.write('terminal:small-frames', 'x')).toBe('written');
+    }
+    const visitsAtLimit = visitedTasks;
+    expect(visitsAtLimit).toBeLessThanOrEqual(
+      (MAX_PTY_INPUT_QUEUE_TASKS * (MAX_PTY_INPUT_QUEUE_TASKS - 1)) / 2,
+    );
+    for (let n = 0; n < 4000; n++) {
+      expect(registry.write('terminal:small-frames', 'x')).toBe('backpressure');
+    }
+    onData('unrelated output');
+    registry.addOutputListener('terminal:small-frames', vi.fn())?.();
+    registry.addOutputListener('terminal:small-frames', vi.fn());
+    expect(registry.write('terminal:small-frames', 'x')).toBe('backpressure');
+    expect(visitedTasks).toBe(visitsAtLimit);
+    expect(write).toHaveBeenCalledTimes(MAX_PTY_INPUT_QUEUE_TASKS);
+    expect(registry.write('terminal:small-frames', '\x03')).toBe('written');
+    queue.length = 0;
+    expect(registry.write('terminal:small-frames', 'next\r')).toBe('written');
+    expect(warn).not.toHaveBeenCalled();
+    registry.dispose();
+  });
+
   it('bounds deferred Windows startup input until its input socket drains', async () => {
     const spawned = { ...createSpawnedPty(), _isReady: false };
     spawn.mockReturnValue(spawned);
@@ -987,6 +1032,48 @@ describe('WebTerminalRegistry', () => {
     },
   );
 
+  it.each([false, true])(
+    'warns once on stderr without a debug session (file enabled: %s)',
+    async (fileEnabled) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      logFileEnabled.mockReturnValue(fileEnabled);
+      logSessionEnabled.mockReturnValue(false);
+      spawn.mockImplementation(() => ({ ...createSpawnedPty(), _agent: {} }));
+      const registry = await start('terminal:daemon');
+
+      expect(registry.write('terminal:daemon', 'private input')).toBe(
+        'unavailable',
+      );
+      registry.addOutputListener('terminal:daemon', vi.fn())?.();
+      onData('private output');
+      registry.addOutputListener('terminal:daemon', vi.fn());
+      expect(registry.write('terminal:daemon', 'retry')).toBe('unavailable');
+      expect(stderr).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('cannot inspect node-pty input queue'),
+      );
+      const message = stderr.mock.calls[0][0];
+      for (const field of PTY_INPUT_QUEUE_FIELDS)
+        expect(message).toContain(field);
+      expect(message).not.toContain('private input');
+      expect(message).not.toContain('private output');
+      expect(warn).not.toHaveBeenCalled();
+      expect(registry.write('terminal:daemon', '\x03')).toBe('written');
+      expect(stderr).toHaveBeenCalledOnce();
+
+      await create(registry, 'terminal:another');
+      expect(registry.write('terminal:another', 'x')).toBe('unavailable');
+      expect(stderr).toHaveBeenCalledTimes(2);
+      expect(stderr.mock.calls[1][0]).toContain('terminal:another');
+      logFileEnabled.mockReturnValue(true);
+      logSessionEnabled.mockReturnValue(true);
+      expect(registry.write('terminal:daemon', 'retry')).toBe('unavailable');
+      expect(registry.write('terminal:daemon', 'retry')).toBe('unavailable');
+      expect(warn).toHaveBeenCalledOnce();
+      expect(stderr).toHaveBeenCalledTimes(2);
+      registry.dispose();
+    },
+  );
+
   it.each([
     { _writeStream: {} },
     { _writeStream: { _writeQueue: {} } },
@@ -1030,6 +1117,7 @@ describe('WebTerminalRegistry', () => {
   it.each(['file', 'session'])(
     'logs once through the real debug sink (%s enabled first)',
     async (firstEnabled) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       const actual = await vi.importActual<
         typeof import('../utils/debugLogger.js')
       >('../utils/debugLogger.js');
@@ -1055,6 +1143,7 @@ describe('WebTerminalRegistry', () => {
         );
         expect(warn).not.toHaveBeenCalled();
         expect(appendFile).not.toHaveBeenCalled();
+        expect(stderr).toHaveBeenCalledOnce();
 
         if (firstEnabled === 'file') {
           vi.stubEnv('QWEN_DEBUG_LOG_FILE', '1');

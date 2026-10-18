@@ -12,6 +12,10 @@ export const PTY_INPUT_QUEUE_FIELDS = [
   '_socket.writableLength',
 ] as const;
 
+export const MAX_PTY_INPUT_QUEUE_TASKS = 1024;
+
+export type PtyInputQueueBytes = number | 'saturated' | undefined;
+
 export interface PtyInputQueueInternals {
   _socket?: { writableLength?: number };
   _agent?: WindowsPtyAgentInternals;
@@ -25,15 +29,17 @@ export interface PtyInputQueueInternals {
  * POSIX write tasks, Windows input socket, and the legacy POSIX socket.
  * Recheck these shapes and deferred Windows startup writes on upgrades;
  * node-pty's public write() provides no drain signal.
- * POSIX inspection is O(queued tasks) per call; the byte limit does not bound
- * the cumulative scan cost of filling the queue with many small writes.
+ * A POSIX queue at the task limit is saturated without inspecting its entries.
+ * Below that limit every task is validated, bounding work per admission even
+ * when a stalled child retains many one-byte writes. Drain restores capacity.
  */
 export function getPtyInputQueueBytes(
   pty: PtyInputQueueInternals,
-): number | undefined {
+): PtyInputQueueBytes {
   if (pty._writeStream !== undefined) {
     const queue = pty._writeStream?._writeQueue;
     if (!Array.isArray(queue)) return undefined;
+    if (queue.length >= MAX_PTY_INPUT_QUEUE_TASKS) return 'saturated';
     let bytes = 0;
     for (const task of queue) {
       const buffer = task?.buffer;

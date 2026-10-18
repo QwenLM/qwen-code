@@ -17,6 +17,7 @@ import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
 import {
   getPtyInputQueueBytes,
   PTY_INPUT_QUEUE_FIELDS,
+  type PtyInputQueueBytes,
   type PtyInputQueueInternals,
 } from './pty-input-queue.js';
 import {
@@ -81,7 +82,7 @@ interface PtySession {
   workspaceCwd: string;
   buffer: string[];
   bufferBytes: number;
-  measureBufferedInputBytes(): number | undefined;
+  measureBufferedInputBytes(): PtyInputQueueBytes;
   exited: boolean;
   exitCode?: number;
   outputListeners: Set<(data: string) => void>;
@@ -371,6 +372,7 @@ export class WebTerminalRegistry {
     let exitDisposable: { dispose(): void } | undefined;
     let deferredInputBytes = 0;
     let warnedInputQueue = false;
+    let warnedInputQueueOnStderr = false;
     const spawnPty = (useBundled: boolean) =>
       ptyImpl.module.spawn(file, args, {
         name: 'xterm-256color',
@@ -479,16 +481,16 @@ export class WebTerminalRegistry {
         if (spawned._isReady === false) return deferredInputBytes;
         deferredInputBytes = 0;
         const bytes = getPtyInputQueueBytes(spawned);
-        if (
-          bytes === undefined &&
-          !warnedInputQueue &&
-          isDebugLogFileEnabled() &&
-          debugLogger.isEnabled()
-        ) {
-          warnedInputQueue = true;
-          debugLogger.warn(
-            `Web terminal ${terminalId}: cannot inspect ${ptyImpl.name} input queue; expected ${PTY_INPUT_QUEUE_FIELDS.join(', ')}. Input admission is unavailable.`,
-          );
+        if (bytes === undefined && !warnedInputQueue) {
+          const message = `Web terminal ${JSON.stringify(terminalId)}: cannot inspect ${ptyImpl.name} input queue; expected ${PTY_INPUT_QUEUE_FIELDS.join(', ')}. Input admission is unavailable.`;
+          if (isDebugLogFileEnabled() && debugLogger.isEnabled()) {
+            warnedInputQueue = true;
+            debugLogger.warn(message);
+          } else if (!warnedInputQueueOnStderr) {
+            // The default serve daemon has no bound debug-log session.
+            warnedInputQueueOnStderr = true;
+            process.stderr.write(message + '\n');
+          }
         }
         return bytes;
       },
@@ -560,8 +562,9 @@ export class WebTerminalRegistry {
       const bufferedBytes = session.measureBufferedInputBytes();
       if (bufferedBytes === undefined) return 'unavailable';
       if (
-        bufferedBytes !== 0 &&
-        bufferedBytes + bytes > MAX_BUFFERED_INPUT_BYTES
+        bufferedBytes === 'saturated' ||
+        (bufferedBytes !== 0 &&
+          bufferedBytes + bytes > MAX_BUFFERED_INPUT_BYTES)
       ) {
         return 'backpressure';
       }

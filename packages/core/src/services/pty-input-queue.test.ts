@@ -7,10 +7,29 @@
 import { describe, expect, it } from 'vitest';
 import {
   getPtyInputQueueBytes,
+  MAX_PTY_INPUT_QUEUE_TASKS,
   type PtyInputQueueInternals,
 } from './pty-input-queue.js';
 
 describe('getPtyInputQueueBytes', () => {
+  it.each([MAX_PTY_INPUT_QUEUE_TASKS, MAX_PTY_INPUT_QUEUE_TASKS * 4])(
+    'treats %s queued tasks as saturated without inspecting entries',
+    (length) => {
+      const queue = Array.from({ length }, () => ({
+        get buffer(): Buffer {
+          throw new Error('A saturated queue must not be scanned');
+        },
+        offset: 0,
+      }));
+      const pty = { _writeStream: { _writeQueue: queue } };
+      expect(getPtyInputQueueBytes(pty)).toBe('saturated');
+      queue.length = 0;
+      expect(getPtyInputQueueBytes(pty)).toBe(0);
+      queue.push({ buffer: Buffer.from('é'), offset: 1 });
+      expect(getPtyInputQueueBytes(pty)).toBe(1);
+    },
+  );
+
   it('sums the remaining bytes across POSIX tasks', () => {
     const queue = [
       { buffer: Buffer.from('你好😀'), offset: 4 },

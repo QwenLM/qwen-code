@@ -27,7 +27,8 @@ import {
 // and queue mutation assumptions in pty-input-queue.ts, plus deferred _isReady
 // startup writes, alongside the cleanup fields and src/win/conpty.cc (the baton erase
 // became unconditional in 1.2.0-beta.14 — see conpty-host.ts), before updating
-// the constant.
+// the constant. The native POSIX queue test cannot exercise Windows
+// _agent.inSocket or deferred _isReady writes: verify both on Windows manually.
 const VERIFIED_NODE_PTY = '1.2.0-beta.10';
 
 describe('conpty-host', () => {
