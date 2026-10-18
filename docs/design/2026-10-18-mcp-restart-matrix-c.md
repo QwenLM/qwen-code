@@ -43,7 +43,7 @@ This slice lands `HostedMcpRestartFaultGatesIT` with five cells: the two Harness
 
 ## Budget
 
-A new `Hosted*IT` class re-pins the fork budget in the same diff: the class `@Timeout` ceiling, `hostedForkHealthySeconds`, the CI fork value and its literal pin, the local profile, the workflow step comment, and the artifact path (the six accounts recorded in `hosted-fork-budget-remeasure-duty`). FG12c measured 49 s healthy over the five cases on JDK 21 + MariaDB 10.11 (~98 s budgeted at 2×), so `hostedForkHealthySeconds` moves 3889 → 3938 and the CI fork 4499 → 4548; the local `hosted-mcp-gates` profile already matches `**/HostedMcp*IT.java`.
+A new `Hosted*IT` class re-pins the fork budget in the same diff: the class `@Timeout` ceiling, `hostedForkHealthySeconds`, the CI fork value and its literal pin, the local profile, the workflow step comment, and the artifact path (the six accounts recorded in `hosted-fork-budget-remeasure-duty`). FG12c measured 25–49 s healthy over the five cases on JDK 21 + MariaDB 10.11 (49 s on the heaviest run, ~98 s budgeted at 2×). With FG13c merged, the shared healthy sum is 4238 s and the CI fork 4848 s; FG12c's 49 s allowance is included. The local `hosted-mcp-gates` profile already matches `**/HostedMcp*IT.java`.
 
 ## Acceptance
 
