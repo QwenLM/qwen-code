@@ -109,7 +109,12 @@ fork 从 6585 秒升到 7135 秒（方法本身 600 秒上限）。Verify 步骤
 
 ## 验收
 
-- `mvn -DskipTests test-compile checkstyle:check` 干净。
+- `mvn -DskipTests test-compile checkstyle:check` 干净。注意它只跑默认
+  execution；CI 还跑 `checkstyle:check@runtime-broker-checkstyle`，该 execution
+  命中 `RuntimeBrokerService.java:602-614` 的 12 处缩进违规，属 `main` 自带
+  （文件与本分支逐字节一致，`main` 的 run 39154767029 同 execution 同处变红），
+  由上游的缩进修复 PR 收口，不在本片范围。
+
 - 三个用例在本机 JDK 21 + MySQL 8.0.46 上全绿，每个都用
   `-Dqwen.fg11c.case=<case>` 单独选择；合入前每个见证都必须变红。
 - `scripts/tests/hosted-process-ci.test.js` 在预算叠加后全绿。

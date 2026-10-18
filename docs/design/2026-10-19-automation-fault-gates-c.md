@@ -128,7 +128,14 @@ composed onto
 
 ## Acceptance
 
-- `mvn -DskipTests test-compile checkstyle:check` clean.
+- `mvn -DskipTests test-compile checkstyle:check` clean. That goal runs only
+  the default execution; CI also runs
+  `checkstyle:check@runtime-broker-checkstyle`, which reports 12 indentation
+  violations in `RuntimeBrokerService.java:602-614` that belong to `main`
+  (the file is byte-identical here, and `main`'s run 39154767029 fails the
+  same execution at the same lines). The upstream re-indent PR owns it; it
+  is outside this slice.
+
 - All three cases green locally on JDK 21 + MySQL 8.0.46, each selected
   with `-Dqwen.fg11c.case=<case>`, and every witness red before merge.
 - `scripts/tests/hosted-process-ci.test.js` green with the fork budget
