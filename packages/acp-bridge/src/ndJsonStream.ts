@@ -584,10 +584,28 @@ function handleBoundedLine(
     throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
   }
   const isResponse = isJsonRpcResponseMessage(parsed);
-  if (
-    (!isResponse && !hasBoundedJsonStructure(parsed)) ||
-    (validateInboundMessage && !validateInboundMessage(parsed))
-  ) {
+  // Responses are exempt from the inbound node/depth/array-length cap: the
+  // local side already admitted the matching request, so a large result is
+  // expected (session/load replay, etc.). Requests stay fail-closed.
+  //
+  // Notifications are fire-and-forget. A session-start
+  // `available_commands_update` with a large skill library can exceed
+  // MAX_JSON_NODES well under the 64MiB byte budget. Throwing
+  // NdJsonInvalidMessageError here used to SIGKILL the ACP child, after
+  // which every later request 404s "No session with id" (issue #11908).
+  // Drop is narrowed to latest-wins snapshots
+  // (`available_commands_update`, `current_mode_update`,
+  // `session_info_update`): log bounded metadata and keep the channel up.
+  // Other oversized notifications stay fail-closed via throw. Malformed
+  // JSON and invalid envelopes still tear down.
+  if (!isResponse && !hasBoundedJsonStructure(parsed)) {
+    if (isLatestWinsSnapshotNotification(parsed)) {
+      logDroppedOversizedNotification(parsed.method, lineBytes);
+      return;
+    }
+    throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
+  }
+  if (validateInboundMessage && !validateInboundMessage(parsed)) {
     throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
   }
   if (
@@ -658,7 +676,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasBoundedJsonStructure(value: unknown): boolean {
+export function hasBoundedJsonStructure(value: unknown): boolean {
   const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
   let nodes = 0;
   while (stack.length > 0) {
@@ -715,6 +733,32 @@ function isJsonRpcRequestMessage(
     'id' in value &&
     typeof value.method === 'string' &&
     isJsonRpcId(value.id)
+  );
+}
+
+function isJsonRpcNotificationMessage(
+  value: AnyMessage,
+): value is AnyMessage & { method: string } {
+  return 'method' in value && !('id' in value);
+}
+
+function isLatestWinsSnapshotNotification(
+  value: AnyMessage,
+): value is AnyMessage & { method: string } {
+  if (
+    !isJsonRpcNotificationMessage(value) ||
+    value.method !== 'session/update'
+  ) {
+    return false;
+  }
+  // Params are unvalidated here: read only the latest-wins discriminator.
+  const sessionUpdate = (
+    value as { params?: { update?: { sessionUpdate?: unknown } } }
+  ).params?.update?.sessionUpdate;
+  return (
+    sessionUpdate === 'available_commands_update' ||
+    sessionUpdate === 'current_mode_update' ||
+    sessionUpdate === 'session_info_update'
   );
 }
 
@@ -829,6 +873,24 @@ function logBoundedInvalidMessage(
     payloadOmitted: true,
   });
   return new NdJsonInvalidMessageError(errorKind, bytes);
+}
+
+function logDroppedOversizedNotification(
+  method: string,
+  lineBytes: Uint8Array,
+): void {
+  const bytes = jsonPayloadByteLength(lineBytes);
+  const digest = createHash('sha256')
+    .update(lineBytes.subarray(0, bytes))
+    .digest('hex');
+  // eslint-disable-next-line no-console -- bounded metadata only
+  console.error('Dropped oversized JSON-RPC notification:', {
+    errorKind: 'ndjson_oversized_notification',
+    method,
+    bytes,
+    sha256: digest,
+    payloadOmitted: true,
+  });
 }
 
 function reportReceivedMessage(

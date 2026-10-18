@@ -27,9 +27,16 @@ export type FakeOpenAIToolCall = {
 
 export type FakeOpenAIResponse = {
   model?: string;
-  reasoning?: string;
   content?: string;
   contentChunks?: string[];
+  /**
+   * Reasoning text, emitted on the wire as `reasoning_content` — the field the
+   * OpenAI-compatible converter reads into a thought part. Streamed as one
+   * delta per entry of `reasoningChunks`, or as a single delta otherwise, and
+   * always before the content deltas of the same choice.
+   */
+  reasoning?: string;
+  reasoningChunks?: string[];
   errorContent?: string;
   disconnectAfterContentChunks?: number;
   /**
@@ -55,9 +62,10 @@ export type FakeOpenAIResponse = {
 
 export type FakeOpenAIChoice = {
   index: number;
-  reasoning?: string;
   content?: string;
   contentChunks?: string[];
+  reasoning?: string;
+  reasoningChunks?: string[];
   /**
    * Streaming-only mid-stream provider error: emits one chunk carrying this
    * string as `delta.content` together with `finish_reason: 'error_finish'`,
@@ -272,8 +280,8 @@ function writeNonStreamed(
         message: {
           role: 'assistant',
           content: choice.content ?? choice.contentChunks?.join('') ?? null,
-          ...(choice.reasoning !== undefined
-            ? { reasoning_content: choice.reasoning }
+          ...(choiceReasoning(choice)
+            ? { reasoning_content: choiceReasoning(choice) }
             : {}),
           ...(choice.toolCalls ? { tool_calls: choice.toolCalls } : {}),
         },
@@ -327,14 +335,15 @@ async function writeStreamed(
   const choices = responseChoices(message);
   for (const [choicePosition, choice] of choices.entries()) {
     send(chunk(choice.index, { role: 'assistant' }));
-    if (choice.reasoning !== undefined) {
-      send(chunk(choice.index, { reasoning_content: choice.reasoning }));
-    }
     if (choice.errorContent !== undefined) {
       send(
         chunk(choice.index, { content: choice.errorContent }, 'error_finish'),
       );
       continue;
+    }
+    for (const reasoning of choice.reasoningChunks ??
+      (choice.reasoning ? [choice.reasoning] : [])) {
+      send(chunk(choice.index, { reasoning_content: reasoning }));
     }
     for (const [contentIndex, content] of (
       choice.contentChunks ?? []
@@ -409,15 +418,22 @@ function responseChoices(message: FakeOpenAIResponse): FakeOpenAIChoice[] {
     message.choices ?? [
       {
         index: 0,
-        reasoning: message.reasoning,
         content: message.content,
         contentChunks: message.contentChunks,
+        reasoning: message.reasoning,
+        reasoningChunks: message.reasoningChunks,
         errorContent: message.errorContent,
         toolCalls: message.toolCalls,
         finishReason: message.finishReason,
       },
     ]
   );
+}
+
+function choiceReasoning(
+  choice: Pick<FakeOpenAIChoice, 'reasoning' | 'reasoningChunks'>,
+): string | undefined {
+  return choice.reasoningChunks?.join('') ?? choice.reasoning;
 }
 
 function finishReason(

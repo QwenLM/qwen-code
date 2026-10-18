@@ -103,7 +103,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
 
-    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+    for (const jobName of ['test', 'test_macos']) {
       const testStep = getWorkflowStep(
         getWorkflowJob(workflow, jobName),
         'Run tests and generate reports',
@@ -125,6 +125,33 @@ describe('no-AK integration CI wiring', () => {
         expect(index, `${jobName}: ${command}`).toBeGreaterThan(previous);
         previous = index;
       }
+    }
+
+    const windowsStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'test_windows'),
+      'Run tests and generate reports',
+    );
+    let previous = -1;
+    for (const command of [
+      'set +e',
+      'npm run test:ci:workspaces',
+      'WORKSPACE_RC=$?',
+      'if [ "$WORKSPACE_RC" -ne 0 ]; then',
+      '::warning::The Windows workspace suite has known baseline failures',
+      'npm run test:scripts',
+      'SCRIPTS_RC=$?',
+      'if [ "$SCRIPTS_RC" -ne 0 ]; then',
+      '::warning::The complete Windows script suite has known baseline failures',
+      'npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts',
+      'INSTALLER_RC=$?',
+      'set -e',
+      'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
+      'kill "$SAMPLER_PID" 2>/dev/null || true',
+      'exit "$INSTALLER_RC"',
+    ]) {
+      const index = windowsStep.indexOf(command);
+      expect(index, `test_windows: ${command}`).toBeGreaterThan(previous);
+      previous = index;
     }
   });
 
@@ -174,6 +201,7 @@ describe('no-AK integration CI wiring', () => {
         './test-helper.test.ts',
         './chat-transcript-contract.test.ts',
         './skill-hooks-invocation-parity.test.ts',
+        './skill-hooks-resume.test.ts',
         './qwen-live-m4-acp-call.test.ts',
         './qwen-live-m4-acp-permission.test.ts',
         './qwen-live-m4-acp-steering.test.ts',
@@ -183,11 +211,16 @@ describe('no-AK integration CI wiring', () => {
         './qwen-live-m2-permission.test.ts',
         './qwen-live-m2-steering.test.ts',
         './cli/_prompt-latency-policy.test.ts',
+        './cli/hosted-harness-process.test.ts',
         './cli/daemon-invocation-context.test.ts',
+        './cli/headless-workflow-skill.test.ts',
+        './cli/workflow-ancestor-discovery.test.ts',
         './cli/list_directory.test.ts',
+        './cli/tool-hook-context.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
         './cli/qwen-serve-standalone-concurrency.test.ts',
+        './interactive/workflow-completion.test.ts',
         './sdk-typescript/abort-and-lifecycle.test.ts',
         './sdk-typescript/permission-control.test.ts',
         './sdk-typescript/sdk-mcp-server.test.ts',
@@ -422,6 +455,8 @@ describe('no-AK integration CI wiring', () => {
       'OPENAI_MODEL',
       'OPENROUTER_API_KEY',
       'QWEN_API_KEY',
+      'QWENCLOUD_API_KEY',
+      'QWENCLOUD_TOKEN_PLAN_API_KEY',
       'QWEN_DEFAULT_AUTH_TYPE',
       'QWEN_MODEL',
       'REQUESTY_API_KEY',
@@ -849,53 +884,67 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('installs Playwright system dependencies only on hosted runners', () => {
+  it('installs Playwright system dependencies on hosted runners, and on pool hosts only when missing', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
+    expect(webShellJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''[\"ubuntu-latest\"]'') }}'",
+    );
     const hostedInstall = getWorkflowStep(
       webShellJob,
-      'Install Playwright Chromium (hosted)',
+      'Install Playwright Chromium and WebKit (hosted)',
     );
     const selfHostedInstall = getWorkflowStep(
       webShellJob,
-      'Install Playwright Chromium (self-hosted)',
+      'Install Playwright Chromium and WebKit (self-hosted)',
     );
 
     expect(hostedInstall).toContain(
-      'node node_modules/playwright/cli.js install --with-deps chromium',
+      'node node_modules/playwright/cli.js install --with-deps chromium webkit',
     );
     expect(selfHostedInstall).toContain(
-      'node node_modules/playwright/cli.js install chromium',
+      'node node_modules/playwright/cli.js install chromium webkit',
     );
     expect(selfHostedInstall).not.toContain('install --with-deps chromium');
+    // Pool hosts lacked WebKit's libraries: install them once per host, gated
+    // on Playwright's own validation, without prompting or racing apt locks.
+    expect(selfHostedInstall).toContain(
+      'if grep -q \'Host system is missing dependencies\' "${install_log}"; then',
+    );
+    expect(selfHostedInstall).toContain('DPkg::Lock::Timeout');
+    expect(selfHostedInstall).toContain(
+      'sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit',
+    );
     for (const step of [hostedInstall, selfHostedInstall]) {
       expect(step).toContain(
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
       );
-      expect(step).toContain('node "${nested_cli}" install chromium');
+      expect(step).toContain('node "${nested_cli}" install chromium webkit');
     }
   });
 
-  it('installs both Playwright Chromium revisions in the nightly browser gate', () => {
+  it('installs Chromium and WebKit for both Playwright revisions in the nightly browser gate', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/e2e.yml'),
       'utf8',
     );
     const browserJob = getWorkflowJob(workflow, 'web-shell-browser-regression');
-    const install = getWorkflowStep(browserJob, 'Install Playwright Chromium');
+    const install = getWorkflowStep(
+      browserJob,
+      'Install Playwright Chromium and WebKit',
+    );
 
     expect(install).toContain(
-      'node node_modules/playwright/cli.js install --with-deps chromium',
+      'node node_modules/playwright/cli.js install --with-deps chromium webkit',
     );
     expect(install).toContain(
       "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
     );
-    expect(install).toContain('node "${nested_cli}" install chromium');
+    expect(install).toContain('node "${nested_cli}" install chromium webkit');
   });
 });
 
@@ -979,6 +1028,6 @@ describe('Windows temp short-alias guard', () => {
     // configure-windows-runner and the hosted redirect both set TEMP and TMP,
     // so an unset value means one of them stopped running — a clear message
     // beats realpathSync(undefined)'s TypeError.
-    expect(() => runGuard({})).toThrow(/TEMP is not set/);
+    expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
 });

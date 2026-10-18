@@ -1,0 +1,262 @@
+package com.alibaba.qwen.code.daemon;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
+/** Caller-owned prompt admission request for a Hosted Harness session. */
+public final class SubmitHarnessTurn {
+    private static final long MAXIMUM_DEADLINE_MILLIS = Integer.MAX_VALUE;
+
+    private final HarnessSessionRef session;
+    private final String promptId;
+    private final List<Map<String, Object>> promptContent;
+    private final String payloadDigest;
+    private final Object wirePromptContent;
+    private final Long deadlineMillis;
+    private final Map<String, Object> modelSelection;
+    private final Map<String, Object> approvalSelection;
+
+    private SubmitHarnessTurn(Builder builder) {
+        if (builder.session == null) {
+            throw new IllegalStateException("session must be provided");
+        }
+        if (builder.promptContent.isEmpty()) {
+            throw new IllegalStateException(
+                    "at least one prompt content block is required");
+        }
+        this.session = builder.session;
+        this.promptId = HostedHarnessClient.requireUuid(
+                builder.promptId, "promptId");
+        List<Map<String, Object>> content = new ArrayList<>();
+        for (Map<String, Object> block : builder.promptContent) {
+            content.add(JsonSupport.immutableObject(block));
+        }
+        this.promptContent = Collections.unmodifiableList(content);
+        this.payloadDigest = HostedHarnessClient.requireDigest(
+                builder.payloadDigest, "payloadDigest");
+        // The hosted route recomputes the digest over the received prompt's
+        // key order before any replay check, so the digest must cover the
+        // exact bytes the wire carries. New digests are minted over the
+        // canonical (key-sorted) form; a digest persisted by a build that
+        // predates canonicalization covers the as-built key order instead,
+        // and neither the stored digest nor the stored input may be
+        // rewritten. Accept that legacy shape and keep it on the wire, or
+        // recovering such a turn row fails this self-check before any
+        // request is sent.
+        if (computePayloadDigest(this.promptContent).equals(
+                this.payloadDigest)) {
+            this.wirePromptContent = canonicalForDigest(this.promptContent);
+        } else if (digestOver(this.promptContent).equals(
+                this.payloadDigest)) {
+            this.wirePromptContent = this.promptContent;
+        } else {
+            throw new IllegalArgumentException(
+                    "payloadDigest does not match promptContent");
+        }
+        this.deadlineMillis = builder.deadlineMillis;
+        this.modelSelection = builder.modelSelection;
+        this.approvalSelection = builder.approvalSelection;
+    }
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static String computePayloadDigest(
+            List<Map<String, Object>> promptContent) {
+        if (promptContent == null || promptContent.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "promptContent must not be empty");
+        }
+        // The hosted route recomputes this value by re-serializing the
+        // parsed `prompt` member (JavaScript `JSON.stringify`
+        // semantics: compact separators, literal non-ASCII) and hashing
+        // those bytes, so the digest must cover exactly the canonical
+        // form toJson() also emits. Iteration order is only
+        // canonicalized recursively because fastjson2 does not sort
+        // maps nested in a collection.
+        return digestOver(canonicalForDigest(promptContent));
+    }
+
+    private static String digestOver(Object value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = JsonSupport.encode(value)
+                    .getBytes(StandardCharsets.UTF_8);
+            byte[] hashed = digest.digest(bytes);
+            StringBuilder result = new StringBuilder("sha256:");
+            for (byte b : hashed) {
+                result.append(String.format("%02x", b & 0xff));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+    }
+
+    private static Object canonicalForDigest(Object value) {
+        if (value instanceof Map<?, ?>) {
+            Map<String, Object> sorted = new TreeMap<>();
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                sorted.put(String.valueOf(entry.getKey()),
+                        canonicalForDigest(entry.getValue()));
+            }
+            return sorted;
+        }
+        if (value instanceof List<?>) {
+            List<?> source = (List<?>) value;
+            List<Object> ordered = new ArrayList<>(source.size());
+            for (Object item : source) {
+                ordered.add(canonicalForDigest(item));
+            }
+            return ordered;
+        }
+        return value;
+    }
+
+    HarnessSessionRef getSession() {
+        return session;
+    }
+
+    String getPromptId() {
+        return promptId;
+    }
+
+    String getPayloadDigest() {
+        return payloadDigest;
+    }
+
+    Map<String, Object> getModelSelection() { return modelSelection; }
+
+    Map<String, Object> getApprovalSelection() { return approvalSelection; }
+
+    List<Map<String, Object>> getPromptContent() { return promptContent; }
+
+    Map<String, Object> toJson() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("prompt", wirePromptContent);
+        result.put("promptId", promptId);
+        result.put("payloadDigest", payloadDigest);
+        if (deadlineMillis != null) {
+            result.put("deadlineMs", deadlineMillis);
+        }
+        if (modelSelection != null) {
+            result.put("modelSelection", modelSelection);
+        }
+        if (approvalSelection != null) {
+            result.put("approvalSelection", approvalSelection);
+        }
+        return result;
+    }
+
+    public static final class Builder {
+        private HarnessSessionRef session;
+        private String promptId;
+        private final List<Map<String, Object>> promptContent =
+                new ArrayList<>();
+        private String payloadDigest;
+        private Long deadlineMillis;
+        private Map<String, Object> modelSelection;
+        private Map<String, Object> approvalSelection;
+
+        private Builder() {
+        }
+
+        public Builder session(HarnessSessionRef session) {
+            this.session = session;
+            return this;
+        }
+
+        public Builder promptId(String promptId) {
+            this.promptId = promptId;
+            return this;
+        }
+
+        public Builder addText(String text) {
+            if (text == null || text.isEmpty()) {
+                throw new IllegalArgumentException("text must not be empty");
+            }
+            Map<String, Object> block = new LinkedHashMap<>();
+            block.put("type", "text");
+            block.put("text", text);
+            promptContent.add(block);
+            return this;
+        }
+
+        public Builder addContent(Map<String, Object> block) {
+            if (block == null || block.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "content block must not be empty");
+            }
+            promptContent.add(JsonSupport.immutableObject(block));
+            return this;
+        }
+
+        public Builder payloadDigest(String payloadDigest) {
+            this.payloadDigest = payloadDigest;
+            return this;
+        }
+
+        public Builder modelSelection(String modelId, long revision) {
+            if (modelId == null || modelId.isBlank()
+                    || modelId.getBytes(StandardCharsets.UTF_8).length > 512
+                    || modelId.chars().anyMatch(Character::isISOControl)
+                    || revision < 1 || revision > 9_007_199_254_740_991L) {
+                throw new IllegalArgumentException("Invalid Hosted model selection");
+            }
+            modelSelection = Collections.unmodifiableMap(new LinkedHashMap<>(
+                    Map.of("modelId", modelId, "revision", revision)));
+            return this;
+        }
+
+        public Builder approvalSelection(String mode, long revision) {
+            return approvalSelection(mode, revision, false);
+        }
+
+        public Builder approvalSelection(String mode, long revision, boolean planMode) {
+            if (mode == null || !List.of("default", "auto-edit", "yolo").contains(mode)
+                    || revision < 0 || revision > 9_007_199_254_740_991L || planMode && revision == 0) {
+                throw new IllegalArgumentException("Invalid Hosted approval selection");
+            }
+            Map<String, Object> fields = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision));
+            if (planMode) {
+                fields.put("planMode", true);
+            }
+            approvalSelection = Collections.unmodifiableMap(fields);
+            return this;
+        }
+
+        public Builder deadline(Duration deadline) {
+            if (deadline == null || deadline.isZero()
+                    || deadline.isNegative()) {
+                throw new IllegalArgumentException(
+                        "deadline must be positive");
+            }
+            long millis;
+            try {
+                millis = deadline.toMillis();
+            } catch (ArithmeticException e) {
+                throw new IllegalArgumentException(
+                        "deadline is outside the millisecond range", e);
+            }
+            if (millis <= 0 || millis > MAXIMUM_DEADLINE_MILLIS) {
+                throw new IllegalArgumentException(
+                        "deadline must be between 1 and 2147483647 milliseconds");
+            }
+            this.deadlineMillis = millis;
+            return this;
+        }
+
+        public SubmitHarnessTurn build() {
+            return new SubmitHarnessTurn(this);
+        }
+    }
+}

@@ -12,11 +12,14 @@ import {
   ALL_PROVIDERS,
   ALIBABA_PROVIDERS,
   AuthType,
+  QWENCLOUD_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
+  resolveModelProtocol,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  type ModelWireApi,
   type ProviderConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
@@ -193,6 +196,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         }
       };
 
+      addGroup('QwenCloud', QWENCLOUD_PROVIDERS);
       addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
       addGroup('Third Party', THIRD_PARTY_PROVIDERS);
 
@@ -250,7 +254,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
       // implementation detail; QuickPick should show human-readable labels.
       const protocolLabels: Record<string, string> = {
         [AuthType.USE_OPENAI]: 'OpenAI Compatible',
-        [AuthType.USE_OPENAI_RESPONSES]: 'OpenAI Responses',
         [AuthType.USE_ANTHROPIC]: 'Anthropic',
         [AuthType.USE_GEMINI]: 'Gemini',
       };
@@ -264,6 +267,20 @@ export class AuthMessageHandler extends BaseMessageHandler {
       );
       if (!selected) return;
       protocol = selected as AuthType;
+    }
+
+    let wireApi: ModelWireApi | undefined;
+    if (shouldShowStep(provider, 'wireApi', protocol ?? provider.protocol)) {
+      const selected = await this.pick(
+        [
+          { label: 'Chat Completions', value: 'chat-completions' },
+          { label: 'Responses', value: 'responses' },
+        ],
+        `${flowTitle}: API`,
+        'Select OpenAI API',
+      );
+      if (!selected) return;
+      wireApi = selected as ModelWireApi;
     }
 
     // Step 1: Base URL (if needed)
@@ -289,7 +306,14 @@ export class AuthMessageHandler extends BaseMessageHandler {
         // doesn't silently write the OpenAI endpoint when the user hits
         // Enter on the OpenAI default. Defaults come from core's shared
         // getDefaultBaseUrlForProtocol so CLI and VS Code stay in sync.
-        const effectiveProtocol = protocol ?? provider.protocol;
+        // The effective route includes the API step's pick: a Responses
+        // choice dials the /v1-less default endpoint, so deriving the
+        // fallback from the raw bucket protocol would persist the Chat
+        // Completions endpoint on the Responses wire.
+        const effectiveProtocol =
+          resolveModelProtocol(protocol ?? provider.protocol, { wireApi }) ??
+          protocol ??
+          provider.protocol;
         // No local fallback: getDefaultBaseUrlForProtocol owns the defaults.
         // Adding an OpenAI fallback here would silently mask a new AuthType
         // that core hadn't been taught about, diverging from the CLI flow
@@ -423,6 +447,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
     await this.authInteractiveHandler(provider, {
       protocol,
+      ...(wireApi ? { wireApi } : {}),
       baseUrl,
       apiKey,
       modelIds,

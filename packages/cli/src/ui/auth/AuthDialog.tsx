@@ -16,17 +16,16 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
+import { getRawModelProviders } from '../../config/loadedSettingsAdapter.js';
 import {
   findProviderById,
   findProviderByCredentials,
+  QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
 } from '@qwen-code/qwen-code-core/providers/all-providers.js';
 import { customProvider } from '@qwen-code/qwen-code-core/providers/presets/custom-provider.js';
-import {
-  findExistingProviderModels,
-  getDefaultModelIds,
-} from '@qwen-code/qwen-code-core/providers/provider-config.js';
+import { findExistingProviderModels } from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -37,11 +36,13 @@ import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
 type ViewLevel =
   | 'main'
+  | 'qwencloud-select'
   | 'alibaba-select'
   | 'thirdparty-select'
   | 'provider-setup';
 
 type MainOption =
+  | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
   | 'CUSTOM_PROVIDER';
@@ -51,6 +52,15 @@ type MainOption =
 // ---------------------------------------------------------------------------
 
 const MAIN_ITEMS = [
+  {
+    key: 'QWENCLOUD',
+    title: t('QwenCloud'),
+    label: t('QwenCloud'),
+    description: t(
+      'Official recommended setup: Token Plan or Standard API Key',
+    ),
+    value: 'QWENCLOUD' as MainOption,
+  },
   {
     key: 'ALIBABA_MODELSTUDIO',
     title: t('Alibaba ModelStudio'),
@@ -94,6 +104,7 @@ function providerToItem(config: ProviderConfig) {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -109,10 +120,11 @@ function getStepLabel(step: string | null, p: ProviderConfig): string {
 // View titles
 // ---------------------------------------------------------------------------
 
-const VIEW_TITLES: Record<string, string> = {
-  main: t('Connect a Provider'),
-  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': t('Third-party Providers · Provider'),
+const VIEW_TITLES: Record<string, () => string> = {
+  main: () => t('Connect a Provider'),
+  'qwencloud-select': () => t('QwenCloud · Access Method'),
+  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': () => t('Third-party Providers · Provider'),
 };
 
 // ---------------------------------------------------------------------------
@@ -136,7 +148,17 @@ export function AuthDialog(): React.JSX.Element {
   const [mainIndex, setMainIndex] = useState<number | null>(null);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
+    getRawModelProviders(settings),
+  );
 
   // -- Navigation -----------------------------------------------------------
 
@@ -167,6 +189,10 @@ export function AuthDialog(): React.JSX.Element {
 
   // -- Sub-menu definitions (data-driven) -----------------------------------
 
+  const qwencloudItems = useMemo(
+    () => QWENCLOUD_PROVIDERS.map(providerToItem),
+    [],
+  );
   const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
   const thirdPartyItems = useMemo(
     () => THIRD_PARTY_PROVIDERS.map(providerToItem),
@@ -175,14 +201,25 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
+  // The saved route and ids the wizard reopens with. Both must come from the
+  // same lookup: seeding the ids of a Responses install while the API step
+  // defaults to Chat Completions would restamp them onto the other wire.
+  const findSavedModels = (providerConfig: ProviderConfig) =>
+    findExistingProviderModels(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.modelProviders,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
+
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findSavedModels(providerConfig);
     if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    return saved.models.map((m) => m.id);
   };
 
   const handleProviderSelect = (providerId: string) => {
@@ -191,7 +228,7 @@ export function AuthDialog(): React.JSX.Element {
     if (!providerConfig) return;
     setupFlow.start(
       providerConfig,
-      undefined,
+      findSavedModels(providerConfig)?.protocol,
       existingEnv,
       getExistingModelIds(providerConfig),
     );
@@ -205,6 +242,10 @@ export function AuthDialog(): React.JSX.Element {
       onSelect: (v: string) => void;
     }
   > = {
+    'qwencloud-select': {
+      items: qwencloudItems,
+      onSelect: handleProviderSelect,
+    },
     'alibaba-select': {
       items: alibabaItems,
       onSelect: handleProviderSelect,
@@ -230,8 +271,9 @@ export function AuthDialog(): React.JSX.Element {
   // (resolveMetadataKey returns config.id for *any* provider with a static
   // models[], so it can't be used to detect "Alibaba" specifically.)
   const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 1;
-    if (matchedProvider?.uiGroup === 'custom') return 2;
+    if (matchedProvider?.uiGroup === 'third-party') return 2;
+    if (matchedProvider?.uiGroup === 'custom') return 3;
+    if (matchedProvider?.uiGroup === 'alibaba') return 1;
     return 0;
   }, [matchedProvider]);
 
@@ -240,6 +282,9 @@ export function AuthDialog(): React.JSX.Element {
   const handleMainSelect = (value: MainOption) => {
     clearErrors();
     switch (value) {
+      case 'QWENCLOUD':
+        pushView('qwencloud-select');
+        break;
       case 'ALIBABA_MODELSTUDIO':
         pushView('alibaba-select');
         break;
@@ -249,7 +294,7 @@ export function AuthDialog(): React.JSX.Element {
       case 'CUSTOM_PROVIDER':
         setupFlow.start(
           customProvider,
-          undefined,
+          findSavedModels(customProvider)?.protocol,
           existingEnv,
           getExistingModelIds(customProvider),
         );
@@ -288,11 +333,11 @@ export function AuthDialog(): React.JSX.Element {
 
   const viewTitle = useMemo(() => {
     if (viewLevel !== 'provider-setup') {
-      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
+      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');
-    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const flowTitle = t(p.uiLabels?.flowTitle ?? p.label);
     const { stepIndex, totalSteps, step } = setupFlow.state;
     return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
       flowTitle,

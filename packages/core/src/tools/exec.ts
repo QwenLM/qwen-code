@@ -38,7 +38,7 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
   }
 
   getDescription(): string {
-    return 'Execute isolated JavaScript with access to registered tools.';
+    return 'Execute isolated JavaScript with access to registered tools. Use text(), image(), audio(), or generatedImage() to return output.';
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -55,19 +55,11 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
           ? new Set(runtime.allowedToolNames)
           : undefined,
       );
-    const toolResults: Array<{
-      name: string;
-      args: Record<string, unknown>;
-      output: unknown;
-    }> = [];
     const media: Part[] = [];
+    let retainedOmniMedia = false;
     const metadata: Pick<ToolResult, 'modelOverride' | 'terminateTurn'> = {};
-    const retainedTools = new Set<string>([
-      ToolNames.SKILL,
-      ToolNames.UPDATE_GOAL,
-      'capture_screen_context',
-    ]);
     let skillAttempted = false;
+    const skillOutputs: string[] = [];
     const clearSkillTracking = () => {
       const skill = this.config.getToolRegistry().getTool(ToolNames.SKILL);
       if (
@@ -121,13 +113,17 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
               if ('modelOverride' in response)
                 metadata.modelOverride = response.modelOverride;
               if (response.terminateTurn) metadata.terminateTurn = true;
-              if (retainedTools.has(name)) {
-                toolResults.push({
-                  name,
-                  args,
-                  output: native?.response?.['output'],
-                });
-                for (const part of native?.parts ?? []) {
+              const nestedParts = (native?.parts ?? []) as Part[];
+              const hasOmniMedia =
+                this.config.isOmniEnabled() &&
+                nestedParts.some(
+                  (part) => part.fileData || part.text !== undefined,
+                );
+              if (hasOmniMedia) {
+                retainedOmniMedia = true;
+                media.push(...nestedParts);
+              } else if (name === 'capture_screen_context') {
+                for (const part of nestedParts) {
                   if (part.inlineData)
                     media.push({ inlineData: part.inlineData });
                   if (part.fileData) media.push({ fileData: part.fileData });
@@ -136,6 +132,7 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
             },
           );
           if (metadata.terminateTurn) throw new CodeModeTurnTerminated();
+          if (name === ToolNames.SKILL) skillOutputs.push(result.output);
           if (name === 'capture_screen_context') {
             const { content: _content, ...textResult } = result;
             return textResult;
@@ -165,11 +162,7 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
         signal,
       );
     } catch (error) {
-      if (
-        skillAttempted &&
-        (signal.aborted ||
-          !toolResults.some((result) => result.name === ToolNames.SKILL))
-      ) {
+      if (skillAttempted && (signal.aborted || skillOutputs.length === 0)) {
         clearSkillTracking();
       }
       if (signal.aborted) throw error;
@@ -179,16 +172,24 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
     }
     const sections: string[] = [];
     if (result.output) sections.push(result.output);
-    if (result.value !== undefined)
-      sections.push(`Return value: ${JSON.stringify(result.value)}`);
     if (failure !== undefined) sections.push(`Script error:\n${failure}`);
     const output = boundCodeModeOutput(
-      sections.join('\n') || 'JavaScript completed successfully.',
+      sections.join('\n'),
       EXEC_MAX_OUTPUT_CHARS,
     );
-    // Keep required context outside the script's output cap and before any reminders.
-    const retained = toolResults.length ? JSON.stringify({ toolResults }) : '';
-    const display = retained ? `${retained}\n${output}` : output;
+    // A skill result the script never printed did not reach the model, so
+    // the skill must stay reloadable instead of answering "already loaded".
+    // text() prints objects as JSON, which escapes the body.
+    if (
+      skillOutputs.some(
+        (skillOutput) =>
+          !output.includes(skillOutput) &&
+          !output.includes(JSON.stringify(skillOutput).slice(1, -1)),
+      )
+    ) {
+      clearSkillTracking();
+    }
+    const display = output;
     const llmContent: Part[] = [{ text: display }, ...media];
     for (const item of result.content ?? []) {
       llmContent.push({
@@ -199,11 +200,25 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
       });
     }
     return {
-      llmContent,
+      llmContent: retainedOmniMedia
+        ? [
+            {
+              functionResponse: {
+                id: runtime.parentCallId,
+                name: ToolNames.EXEC,
+                response: { output: display },
+                parts: llmContent.slice(1),
+              },
+            },
+          ]
+        : llmContent,
       returnDisplay: display,
       ...metadata,
       persistedOutputFiles: [],
-      ...(failure === undefined || toolResults.length > 0
+      // The error path would drop native media and the nested turn metadata.
+      ...(failure === undefined ||
+      media.length > 0 ||
+      Object.keys(metadata).length > 0
         ? {}
         : {
             error: { message: output, type: ToolErrorType.EXECUTION_FAILED },
@@ -217,7 +232,7 @@ export class ExecTool extends BaseDeclarativeTool<ExecParams, ToolResult> {
     super(
       ToolNames.EXEC,
       ToolDisplayNames.EXEC,
-      'Execute JavaScript in an isolated runtime.',
+      'Execute JavaScript in an isolated runtime. Use text(), image(), audio(), or generatedImage() to return output.',
       Kind.Other,
       {
         type: 'object',

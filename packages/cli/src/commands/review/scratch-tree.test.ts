@@ -52,6 +52,7 @@ import {
   plantRepository,
 } from './lib/test-utils.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 // Skipped on win32 for the same reason as the sibling suites: `mountRootFor`
 // refuses every absolute Windows path (a drive letter is a colon), so
@@ -270,7 +271,7 @@ describe('runScratchTree', () => {
     const pwned = join(repo, 'PWNED-included-smudge');
     writeFileSync(
       join(repo, 'innocuous.cfg'),
-      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+      `[filter "evil"]\n\tsmudge = touch ${pwned.replaceAll('\\', '/')}\n`,
     );
     git(worktree, 'config', 'include.path', join(repo, 'innocuous.cfg'));
     writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
@@ -809,7 +810,7 @@ describe('runScratchTree', () => {
     expect(r.note).not.toContain('already in place');
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'says linking FAILED rather than "no node_modules" when the farm throws',
     () => {
       // Folding a link failure into the same `null` the absent case uses told
@@ -929,7 +930,7 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('git checkout HEAD -- <original>');
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports UNMEASURED rather than clean when the residue check cannot run',
     () => {
       // A `git status` that dies (a tree too dirty for its buffer, an index it
@@ -1092,7 +1093,7 @@ describe('runScratchTree', () => {
   // subdirectory — the guard would be a no-op and the assertion below would fail
   // on the merge-queue-only Windows leg. Every other chmod-permission test in
   // this repo skips win32 for the same reason.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps the measured residue when the tree could not be created',
     () => {
       // The failure path must not collapse to the empty-residue default: a note
@@ -1510,15 +1511,17 @@ describe('runScratchTree --standalone', () => {
     const linked = runScratchTree({ worktree, label });
     expect(linked.available).toBe(true);
     expect(statSync(join(linked.path!, '.git')).isFile()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(
-      linked.path!,
-    );
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).toContain(linked.path!.replaceAll('\\', '/'));
 
     const r = run(label);
     expect(r.available).toBe(true);
     expect(r.path).toBe(linked.path);
     expect(statSync(join(r.path!, '.git')).isDirectory()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain(r.path!);
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).not.toContain(r.path!.replaceAll('\\', '/'));
     expect(existsSync(join(repo, '.git', 'worktrees', basename(r.path!)))).toBe(
       false,
     );
@@ -1537,9 +1540,9 @@ describe('runScratchTree --standalone', () => {
     expect(linked.reused).toBe(false);
     expect(linked.standalone).toBe(false);
     expect(statSync(join(linked.path!, '.git')).isFile()).toBe(true);
-    expect(git(repo, 'worktree', 'list', '--porcelain')).toContain(
-      linked.path!,
-    );
+    expect(
+      git(repo, 'worktree', 'list', '--porcelain').replaceAll('\\', '/'),
+    ).toContain(linked.path!.replaceAll('\\', '/'));
   });
 
   it('rebuilds over a symlink at the path without following it', () => {
@@ -1556,7 +1559,7 @@ describe('runScratchTree --standalone', () => {
     expect(existsSync(join(victim, '.git'))).toBe(false);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports a tree that could not be built — the shared tree still unmeasured',
     () => {
       const parent = join(repo, '.qwen', 'tmp');

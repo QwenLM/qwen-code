@@ -90,21 +90,29 @@ describe('Session.pendingWorktreeNotice', () => {
         ),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      getHistoryShallow: vi.fn(() => mockChat.getHistory()),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
     } as unknown as LlmChat;
 
     const mockLlmClient = {
+      isInitialized: vi.fn().mockReturnValue(true),
       getChat: vi.fn().mockReturnValue(mockChat),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      activatePreparedMemoryRecallTransition: vi
+        .fn()
+        .mockResolvedValue(undefined),
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      commitManagedAutoMemoryRecallDelivery: vi.fn(),
+      discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
+      captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };
 
@@ -118,7 +126,9 @@ describe('Session.pendingWorktreeNotice', () => {
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),
@@ -129,6 +139,7 @@ describe('Session.pendingWorktreeNotice', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         getBranchCheckpointCursor: vi.fn().mockReturnValue({
           recordId: null,
           activeRecordCount: 0,
@@ -136,6 +147,7 @@ describe('Session.pendingWorktreeNotice', () => {
         }),
         recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
         recordUserMessage: vi.fn(),
+        recordTurnAttempt: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),
         recordSlashCommand: vi.fn(),
@@ -168,6 +180,9 @@ describe('Session.pendingWorktreeNotice', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
+      getMemoryManager: vi.fn().mockReturnValue({
+        resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),

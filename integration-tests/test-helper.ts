@@ -25,6 +25,7 @@ import {
   pickE2eRenderer,
   resolveE2eCliCommand,
 } from './renderer-matrix.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from './e2e-memory-defaults.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -243,6 +244,13 @@ export class TestRig {
     // The container mounts the test directory at the same path as the host
     const telemetryPath = join(this.testDir, 'telemetry.log'); // Always use test directory for telemetry
 
+    const optionsSettings = options.settings ?? {};
+    const memorySettings =
+      typeof optionsSettings['memory'] === 'object' &&
+      optionsSettings['memory'] !== null
+        ? (optionsSettings['memory'] as Record<string, unknown>)
+        : {};
+
     const settings = {
       telemetry: {
         enabled: true,
@@ -258,6 +266,8 @@ export class TestRig {
         focusMode: false,
         ...((options.settings?.['ui'] as Record<string, unknown>) ?? {}),
       },
+      // Per-key merge: a suite opting back into one flag keeps the other off.
+      memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
     };
     writeFileSync(
       join(qwenDir, 'settings.json'),
@@ -280,16 +290,24 @@ export class TestRig {
    * between using the bundled gemini.js (the default) and using the installed
    * 'qwen' (used to verify npm bundles).
    */
-  private _getCommandAndArgs(extraInitialArgs: string[] = []): {
+  private _getCommandAndArgs(
+    extraInitialArgs: string[] = [],
+    options: { chatRecording?: boolean } = {},
+  ): {
     command: string;
     initialArgs: string[];
   } {
     const isNpmReleaseTest =
       process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
     const command = isNpmReleaseTest ? 'qwen' : 'node';
+    // Runs leave no conversation behind by default. A test that drives
+    // `--continue` has to opt back in: without a recorded session there is
+    // nothing to resume, and the resumed run then looks indistinguishable
+    // from a fresh one.
+    const recordingArgs = options.chatRecording ? [] : ['--no-chat-recording'];
     const initialArgs = isNpmReleaseTest
-      ? ['--no-chat-recording', ...extraInitialArgs]
-      : [this.bundlePath, '--no-chat-recording', ...extraInitialArgs];
+      ? [...recordingArgs, ...extraInitialArgs]
+      : [this.bundlePath, ...recordingArgs, ...extraInitialArgs];
     return { command, initialArgs };
   }
 
@@ -946,10 +964,26 @@ export class TestRig {
     ptyProcess: pty.IPty;
     promise: Promise<{ exitCode: number; signal?: number; output: string }>;
   } {
+    return this.runInteractiveWith({}, ...args);
+  }
+
+  /**
+   * `runInteractive` with the launch knobs it does not expose. Currently just
+   * `chatRecording`, which a `--continue` test needs so the first session is
+   * on disk for the second one to resume.
+   */
+  runInteractiveWith(
+    options: { chatRecording?: boolean },
+    ...args: string[]
+  ): {
+    ptyProcess: pty.IPty;
+    promise: Promise<{ exitCode: number; signal?: number; output: string }>;
+  } {
     const renderer = pickE2eRenderer();
-    const { command: cliCommand, initialArgs } = this._getCommandAndArgs([
-      '--yolo',
-    ]);
+    const { command: cliCommand, initialArgs } = this._getCommandAndArgs(
+      ['--yolo'],
+      options,
+    );
     // The renderer matrix swaps node for bun only when driving the repo
     // bundle directly; installed-release runs keep their own launcher and
     // still get the pinned QWEN_TUI_RENDERER below.
@@ -1020,6 +1054,7 @@ export async function runForcedToolCallScenario(options: {
   vi.stubEnv('QWEN_MODEL', 'fake-model');
   vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
   vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'off');
   vi.stubEnv('NO_PROXY', noProxy);
   vi.stubEnv('no_proxy', noProxy);
 

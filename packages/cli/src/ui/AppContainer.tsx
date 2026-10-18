@@ -66,6 +66,8 @@ import {
   SpeculationEvent,
   logWorkflowKeyword,
   WorkflowKeywordEvent,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuidelineSetting,
   startSpeculation,
   acceptSpeculation,
   abortSpeculation,
@@ -80,6 +82,7 @@ import {
   SendMessageType,
   clearWorktreeSession,
   restoreWorktreeContext,
+  WorktreeRestoreRefusedError,
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
@@ -88,6 +91,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -152,12 +156,15 @@ import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
+  isIdentifiedRetainedTurn,
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
+import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -193,6 +200,7 @@ import {
   isSlashCommand,
 } from './utils/commandUtils.js';
 import { buildWorkflowKeywordPrefix } from './utils/workflow-keyword.js';
+import { buildWorkflowSizeGuidelineChangePrefix } from './utils/workflow-size-notice.js';
 import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
@@ -215,6 +223,7 @@ import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { exitCleanly } from '../utils/processUtils.js';
 import {
   useMessageQueue,
   type QueuedUserSubmission,
@@ -285,7 +294,10 @@ import {
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
 } from './utils/historyUtils.js';
-import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
+import {
+  MAIN_CONTENT_HEIGHT_RESERVATION,
+  STATIC_EXTRA_HEIGHT,
+} from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 // Startup gate for the goal runtime: under session-writer lease contention
@@ -570,6 +582,11 @@ export function useQueuedSubmissionDrain({
           ...(submission.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: submission.submittedPrompt }),
+          // Route on the intent recorded at submit time, not the live
+          // shell-mode flag (#11626).
+          ...(submission.shellMode === undefined
+            ? {}
+            : { shellMode: submission.shellMode }),
           onAdmissionFailed: () => {
             // Deferred until idle, the same recovery the direct /btw
             // path uses: admission failed because a turn is active,
@@ -580,6 +597,7 @@ export function useQueuedSubmissionDrain({
               [submission.modelText],
               submission.submittedPrompt,
               true,
+              submission.shellMode,
             );
             markAdmissionFailed();
           },
@@ -832,6 +850,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [props.extensionRefreshState],
   );
   const historyManager = useHistory();
+  const addHistoryItem = historyManager.addItem;
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribe((text) => {
+        addHistoryItem({ type: MessageType.INFO, text }, Date.now());
+      }),
+    [config, addHistoryItem],
+  );
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
   // would rebuild them on every message. Mirror history into a ref so
@@ -1028,6 +1054,10 @@ export const AppContainer = (props: AppContainerProps) => {
    * parent checkout. (PR #4174 review #3259975249.)
    */
   const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  // The size guideline the model was last told about; null until the first
+  // prompt, when the startup value (the one in the tool description) applies.
+  const announcedWorkflowSizeGuidelineRef =
+    useRef<WorkflowSizeGuidelineSetting | null>(null);
   // One-shot announcement of the context files (QWEN.md / context.fileName)
   // attached to the system prompt, shown alongside the first real prompt so
   // users can verify discovery (e.g., catch typos in context.fileName)
@@ -1087,7 +1117,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [startupWarnings, setStartupWarnings] = useState(
     () => props.startupWarnings || [],
   );
-  const staticExtraHeight = 3;
 
   // Prefetch the lowlight chunk on mount so the dynamic import is already
   // in flight before the first code block needs colorizing. Without this
@@ -1119,8 +1148,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
-      // Note: the program will not work if this fails so let errors be
-      // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       // Bound the goal-runtime gate: under session-writer lease contention
@@ -1210,18 +1237,22 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         loadHistoryWithLatchReconciliation(historyItems);
 
-        // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots.
-        const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
-        }
+        // Seed past identities already claimed by the resumed transcript.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumedSessionData.conversation.messages,
+            config.getSessionId(),
+          ),
+        );
+      }
 
+      // Restore the transcript before Mod diagnostics, without making input
+      // or Mod startup wait for asynchronous session recovery.
+      void getInteractiveModSession(config)
+        ?.initialize()
+        .catch(() => {});
+
+      if (resumedSessionData) {
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
         );
@@ -1250,7 +1281,7 @@ export const AppContainer = (props: AppContainerProps) => {
         // produce an INFO message the model sees on the next turn.
         // Skipped when Phase D-1 already injected a --worktree startup
         // notice above (startup wins over resume on the same prompt).
-        if (!startupWorktreeNotice) {
+        if (!startupWorktreeNotice && !config.getShellExecutionSandbox?.()) {
           try {
             const sessionPath = config
               .getSessionService()
@@ -1258,9 +1289,21 @@ export const AppContainer = (props: AppContainerProps) => {
             const restored = await restoreWorktreeContext(
               sessionPath,
               (err) => {
+                // An ownership refusal means the session loads WITHOUT its
+                // worktree binding — the model is never told the worktree
+                // exists, so later edits land in the original checkout.
+                // That must be visible, not a debug line.
+                if (err instanceof WorktreeRestoreRefusedError) {
+                  historyManager.addItem(
+                    { type: MessageType.WARNING, text: err.message },
+                    Date.now(),
+                  );
+                  return;
+                }
                 // eslint-disable-next-line no-console
                 console.debug('worktree session restore warning:', err);
               },
+              config.getSessionId(),
             );
             if (restored.contextMessage) {
               // UI: show the notice in the transcript so the user knows.
@@ -1296,7 +1339,17 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
-    })();
+    })().catch((error: unknown) => {
+      getInteractiveModSession(config)?.failStartup(error);
+      debugLogger.error('Failed to initialize session:', error);
+      historyManager.addItem(
+        {
+          type: MessageType.ERROR,
+          text: `Failed to initialize session: ${sanitizeTerminalLine(getErrorMessage(error)).slice(0, 2000)}`,
+        },
+        Date.now(),
+      );
+    });
 
     // Register SessionEnd cleanup for process exit
     registerCleanup(async () => {
@@ -1311,6 +1364,7 @@ export const AppContainer = (props: AppContainerProps) => {
     });
 
     registerCleanup(async () => {
+      if (config.getShellExecutionSandbox?.()) return;
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
     });
@@ -1597,6 +1651,13 @@ export const AppContainer = (props: AppContainerProps) => {
       ),
   );
 
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: useTerminalBuffer,
+      columns: terminalWidth,
+    });
+  }, [config, useTerminalBuffer, terminalWidth]);
+
   // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
   // <Static> content from the viewport just like the wake path; pair it with
   // the same remount bump so keyed statics (agent tab history) re-emit. The
@@ -1712,7 +1773,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     openApprovalModeDialog,
     handleApprovalModeSelect,
-  } = useApprovalModeCommand(settings, config);
+  } = useApprovalModeCommand(settings, config, historyManager.addItem);
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
@@ -1807,6 +1868,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     isModelDialogOpen,
     isFastModelMode,
+    isAdvisorModelMode,
     isVoiceModelMode,
     isVisionModelMode,
     isCompactionModelMode,
@@ -1842,7 +1904,6 @@ export const AppContainer = (props: AppContainerProps) => {
     };
   }, [config]);
 
-  const addHistoryItem = historyManager.addItem;
   useEffect(() => {
     if (typeof config.onChatRecordingFailure !== 'function') return;
     return config.onChatRecordingFailure(() => {
@@ -1877,6 +1938,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1887,6 +1949,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1901,6 +1964,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
+    logger,
   });
 
   const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
@@ -2100,7 +2164,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getLlmClient()?.requestShutdown();
         setTimeout(async () => {
           await runExitCleanup();
-          process.exit(0);
+          await exitCleanly(0);
         }, 100);
       },
       setDebugMessage,
@@ -2206,6 +2270,16 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       setShowWorktreeExitDialog(false);
+      if (choice === 'remove' && config.getShellExecutionSandbox?.()) {
+        historyManager.addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Worktree removal is unavailable in tool sandbox.',
+          },
+          Date.now(),
+        );
+        return;
+      }
       if (choice === 'remove' && activeWorktree) {
         try {
           // Anchor at the repo top-level (captured at enter time) rather
@@ -2359,6 +2433,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getContextRuleExcludes(),
         {
           loadReason: 'refresh',
+          extensionRuleSources: config.getExtensionRuleSources(),
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),
@@ -3152,8 +3227,14 @@ export const AppContainer = (props: AppContainerProps) => {
           );
         }
       }
+      // Shell-mode submissions go to bash, not the model: a leading
+      // `<system-reminder>` is a syntax error there, and consuming the
+      // one-shot notice here would drop it before any model turn ever sees
+      // it. Leave it armed for the next model-bound prompt (#11626).
       const recoveredAgentsNotice =
-        !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
+        !shellModeActive &&
+        !isSlashCommand(userPromptText) &&
+        !isBtwCommand(userPromptText)
           ? config.consumePendingRecoveredAgentsNotice()
           : null;
       if (recoveredAgentsNotice) {
@@ -3164,10 +3245,16 @@ export const AppContainer = (props: AppContainerProps) => {
       // Phase C: one-shot worktree restore reminder. Set during --resume
       // when the persisted sidecar names a live worktree. We only inject
       // on top-level user prompts (not btw-during-response, not slash
-      // commands — those go through different paths). Once consumed,
-      // clear the ref so subsequent prompts aren't repeatedly prefixed.
+      // commands, not shell-mode commands — those go through different
+      // paths). Once consumed, clear the ref so subsequent prompts aren't
+      // repeatedly prefixed; a skipped shell-mode submission leaves the
+      // ref armed for the next model-bound prompt (#11626).
       const worktreeNotice = pendingWorktreeNoticeRef.current;
-      if (worktreeNotice && !isSlashCommand(submittedValue)) {
+      if (
+        worktreeNotice &&
+        !shellModeActive &&
+        !isSlashCommand(submittedValue)
+      ) {
         pendingWorktreeNoticeRef.current = null;
         submittedValue =
           `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
@@ -3202,8 +3289,35 @@ export const AppContainer = (props: AppContainerProps) => {
           submittedValue = prefix + submittedValue;
         }
       }
+      // The Workflow tool description states the size guideline it was built
+      // with. When the user changes the setting mid-session, say so on the next
+      // prompt the model reads, and move the runtime thresholds with it.
+      if (
+        config.isWorkflowsEnabled() &&
+        !shellModeActive &&
+        !isSlashCommand(userPromptText) &&
+        !isBtwCommand(userPromptText)
+      ) {
+        const currentSizeGuideline = resolveWorkflowSizeGuidelineSetting(
+          settings.merged.tools?.workflowSizeGuideline,
+        );
+        const sizePrefix = buildWorkflowSizeGuidelineChangePrefix(
+          announcedWorkflowSizeGuidelineRef.current ??
+            config.getWorkflowSizeGuideline(),
+          currentSizeGuideline,
+        );
+        announcedWorkflowSizeGuidelineRef.current = currentSizeGuideline;
+        if (sizePrefix) {
+          config.setWorkflowSizeGuideline(
+            currentSizeGuideline.isDefault
+              ? undefined
+              : currentSizeGuideline.size,
+          );
+          submittedValue = sizePrefix + submittedValue;
+        }
+      }
       if (options?.deferUntilIdle) {
-        addMessage(submittedValue, true, submittedPrompt);
+        addMessage(submittedValue, true, submittedPrompt, shellModeActive);
         return;
       }
       if (
@@ -3223,7 +3337,12 @@ export const AppContainer = (props: AppContainerProps) => {
           submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
             ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             onAdmissionFailed: () => {
-              addMessage(submittedValue, true, submittedPrompt);
+              addMessage(
+                submittedValue,
+                true,
+                submittedPrompt,
+                shellModeActive,
+              );
             },
           }),
         ).catch((error) => {
@@ -3321,7 +3440,7 @@ export const AppContainer = (props: AppContainerProps) => {
           })
           .catch(() => {
             // Fallback: submit normally
-            addMessage(submittedValue, false, submittedPrompt);
+            addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });
         speculationRef.current = IDLE_SPECULATION;
         return;
@@ -3351,7 +3470,7 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      addMessage(submittedValue, false, submittedPrompt);
+      addMessage(submittedValue, false, submittedPrompt, shellModeActive);
     },
     [
       addMessage,
@@ -3365,6 +3484,7 @@ export const AppContainer = (props: AppContainerProps) => {
       llmClient,
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
+      settings.merged.tools?.workflowSizeGuideline,
       setBufferText,
       shellModeActive,
       vimEnabled,
@@ -3762,18 +3882,30 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Only clone the tail — full structuredClone of a large resumed session
-      // causes transient heap peaks that trigger OOM (#4624).
-      const conversationHistory = llmClient.getHistoryTail(40, true);
-      generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        // On by default: the schema declares `default: true`, but
-        // `mergeSettings` doesn't apply schema defaults, so an unset value is
-        // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Only an explicit
-        // `false` opts out of cache sharing. This flag does not inherit the
-        // follow-up suggestion runtime gate.
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
-      })
+      const generate = async () => {
+        const mods = getInteractiveModSession(config);
+        if (mods) await mods.ready;
+        ac.signal.throwIfAborted();
+        // Only clone the tail — full structuredClone of a large resumed session
+        // causes transient heap peaks that trigger OOM (#4624).
+        const conversationHistory = llmClient.getHistoryTail(40, true);
+        return generatePromptSuggestion(
+          config,
+          conversationHistory,
+          ac.signal,
+          {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value is
+            // `undefined` and a `=== true` gate left the cache-aware fork as dead
+            // code unless the flag was explicitly set (#9230). Only an explicit
+            // `false` opts out of cache sharing. This flag does not inherit the
+            // follow-up suggestion runtime gate.
+            enableCacheSharing:
+              settings.merged.ui?.enableCacheSharing !== false,
+          },
+        );
+      };
+      void generate()
         .then((result) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {
@@ -3846,15 +3978,17 @@ export const AppContainer = (props: AppContainerProps) => {
     useState<StartupIdeConnectionStatus>({ state: 'idle' });
 
   useEffect(() => {
+    if (config.getShellExecutionSandbox?.()) return;
     const getIde = async () => {
       const ideClient = await IdeClient.getInstance();
       const currentIde = ideClient.getCurrentIde();
       setCurrentIDE(currentIde || null);
     };
     getIde();
-  }, []);
+  }, [config]);
   const shouldShowIdePrompt = Boolean(
-    currentIDE &&
+    !config.getShellExecutionSandbox?.() &&
+      currentIDE &&
       !config.getIdeMode() &&
       !settings.merged.ide?.hasSeenNudge &&
       !idePromptAnswered,
@@ -3928,7 +4062,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
-  } = useIdeTrustListener();
+  } = useIdeTrustListener(!config.getShellExecutionSandbox?.());
   const {
     isFeedbackDialogOpen,
     openFeedbackDialog,
@@ -4045,6 +4179,12 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     updateInfo,
     agentViewState.activeView,
+    // The agent tab footer grows with its own status row / queued messages /
+    // input text, none of which the deps above track; AgentComposer syncs
+    // this key to AgentViewContext whenever they change so the footer is
+    // re-measured and the transcript viewport does not stay stale-high
+    // (#9507). Mirrors the LiveAgentPanel layout key (#5798).
+    agentViewState.agentComposerLayoutKey,
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
@@ -4053,7 +4193,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
-  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
+  // `STATIC_EXTRA_HEIGHT` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
   // *inline* streaming/pending message may grow before it commits to <Static>;
   // they do NOT reserve blank rows under the composer. In legacy mode completed
   // history lives in <Static> (terminal scrollback) and the composer flows to
@@ -4064,7 +4204,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // corrects, the same way legacy mode lets the terminal scroll on growth.)
   const mainContentHeightReservation = useTerminalBuffer
     ? 0
-    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
+    : STATIC_EXTRA_HEIGHT + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
@@ -4164,6 +4304,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
       try {
+        if (
+          config.getShellExecutionSandbox?.() &&
+          (option === 'code' || option === 'both')
+        ) {
+          historyManager.addItem(
+            {
+              type: 'error',
+              text: 'File restore is unavailable in tool sandbox.',
+            },
+            Date.now(),
+          );
+          return;
+        }
+
         // For 'both', validate that conversation can be truncated BEFORE
         // touching files — otherwise we'd roll back the workspace while
         // the conversation stays at the newer state.
@@ -4199,9 +4353,16 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: 'error',
-                  text: t(
-                    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-                  ),
+                  text: isIdentifiedRetainedTurn(
+                    historyManager.history,
+                    userItem.id,
+                  )
+                    ? t(
+                        'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
+                      )
+                    : t(
+                        'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                      ),
                 },
                 Date.now(),
               );
@@ -5020,6 +5181,7 @@ export const AppContainer = (props: AppContainerProps) => {
       skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
+      isAdvisorModelMode,
       isVoiceModelMode,
       isVisionModelMode,
       isCompactionModelMode,
@@ -5087,7 +5249,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
-      staticExtraHeight,
+      staticExtraHeight: STATIC_EXTRA_HEIGHT,
       dialogsVisible,
       pendingHistoryItems,
       stickyTodos,
@@ -5168,6 +5330,7 @@ export const AppContainer = (props: AppContainerProps) => {
       skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
+      isAdvisorModelMode,
       isVoiceModelMode,
       isVisionModelMode,
       isCompactionModelMode,
@@ -5234,7 +5397,6 @@ export const AppContainer = (props: AppContainerProps) => {
       showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
-      staticExtraHeight,
       dialogsVisible,
       pendingHistoryItems,
       stickyTodos,

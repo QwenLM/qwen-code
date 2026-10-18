@@ -11,6 +11,7 @@ import { theme } from '../semantic-colors.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../config/dialogScopeUtils.js';
+import { formatSettingRowValue } from '../../utils/aux-model-selector.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
@@ -51,6 +52,7 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import {
+  isNumericSettingType,
   type SettingsValue,
   TOGGLE_TYPES,
 } from '../../config/settingsSchema.js';
@@ -209,7 +211,7 @@ export function SettingsDialog({
       } else if (def?.type === 'boolean' && typeof value === 'boolean') {
         updated = setPendingSettingValue(key, value, updated);
       } else if (
-        (def?.type === 'number' && typeof value === 'number') ||
+        (isNumericSettingType(def?.type) && typeof value === 'number') ||
         (def?.type === 'string' && typeof value === 'string') ||
         (def?.type === 'enum' &&
           (typeof value === 'string' || typeof value === 'number'))
@@ -488,7 +490,7 @@ export function SettingsDialog({
     const definition = getSettingDefinition(key);
     const type = definition?.type;
 
-    if (editBuffer.trim() === '' && type === 'number') {
+    if (editBuffer.trim() === '' && isNumericSettingType(type)) {
       // Nothing entered for a number; cancel edit
       setEditingKey(null);
       setEditBuffer('');
@@ -497,7 +499,7 @@ export function SettingsDialog({
     }
 
     let parsed: string | number | undefined;
-    if (type === 'number') {
+    if (isNumericSettingType(type)) {
       const numParsed = Number(editBuffer.trim());
       if (Number.isNaN(numParsed)) {
         // Invalid number; cancel edit
@@ -815,7 +817,7 @@ export function SettingsDialog({
 
           if (key.paste && key.sequence) {
             let pasted = key.sequence;
-            if (type === 'number') {
+            if (isNumericSettingType(type)) {
               pasted = key.sequence.replace(/[^0-9\-+.]/g, '');
             }
             if (pasted) {
@@ -857,7 +859,7 @@ export function SettingsDialog({
 
           let ch = key.sequence;
           let isValidChar = false;
-          if (type === 'number') {
+          if (isNumericSettingType(type)) {
             // Allow digits, minus, plus, and dot.
             isValidChar = /[0-9\-+.]/.test(ch);
           } else {
@@ -957,7 +959,7 @@ export function SettingsDialog({
             return;
           }
           if (
-            currentItem?.type === 'number' ||
+            isNumericSettingType(currentItem?.type) ||
             currentItem?.type === 'string'
           ) {
             startEditing(currentItem.value);
@@ -977,7 +979,7 @@ export function SettingsDialog({
           }
         } else if (/^[0-9]$/.test(key.sequence || '') && !editingKey) {
           const currentItem = items[activeSettingIndex];
-          if (currentItem?.type === 'number') {
+          if (isNumericSettingType(currentItem?.type)) {
             startEditing(currentItem.value, key.sequence);
           } else {
             // Non-number setting: route the digit into the search box instead
@@ -1000,7 +1002,7 @@ export function SettingsDialog({
                 ),
               );
             } else if (
-              defType === 'number' ||
+              isNumericSettingType(defType) ||
               defType === 'string' ||
               defType === 'enum'
             ) {
@@ -1276,7 +1278,10 @@ export function SettingsDialog({
                 // Cursor not visible
                 displayValue = editBuffer;
               }
-            } else if (item.type === 'number' || item.type === 'string') {
+            } else if (
+              isNumericSettingType(item.type) ||
+              item.type === 'string'
+            ) {
               // Settings that open a sub-dialog on Enter
               const isSubDialogSetting =
                 item.value === 'ui.theme' ||
@@ -1306,7 +1311,14 @@ export function SettingsDialog({
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                displayValue = String(effectiveCurrentValue);
+                // Aux-model selectors persist as `authType:id\0baseUrl`; the
+                // suffix can embed userinfo credentials, so the row value goes
+                // through the shared scrub-aware formatter instead of a
+                // dialog-local copy of the rule.
+                displayValue = formatSettingRowValue(
+                  item.value,
+                  effectiveCurrentValue,
+                );
               } else {
                 displayValue = '';
               }

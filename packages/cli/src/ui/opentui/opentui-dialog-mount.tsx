@@ -36,7 +36,11 @@ import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import { toOriginalKey } from './key-map.js';
 import { t } from '../../i18n/index.js';
-import { MessageType } from '../types.js';
+import {
+  MessageType,
+  type HistoryItemError,
+  type HistoryItemInfo,
+} from '../types.js';
 import { HelpOverlay } from './help-overlay.js';
 import {
   buildHelpCommandsLines,
@@ -106,13 +110,13 @@ import {
   OpenTuiDeleteDialog,
   OpenTuiDiffDialog,
   OpenTuiEditorDialog,
-  OpenTuiHooksDialog,
   OpenTuiResumeDialog,
   OpenTuiRewindDialog,
   OpenTuiSubagentCreateDialog,
   OpenTuiSubagentListDialog,
   OpenTuiTrustDialog,
 } from './dialogs-misc.js';
+import { OpenTuiHooksDialog } from './dialogs-hooks.js';
 
 export interface OpenTuiDialogMountProps {
   request: OpenTuiDialogRequest;
@@ -129,8 +133,15 @@ export interface OpenTuiDialogMountProps {
   onSelectSetting?: (name: string, scope: SettingScope) => void;
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
-  /** Row budget for the model/settings/theme dialog bodies. */
-  availableTerminalHeight?: number;
+  /** Row budget of the popup region, handed to every dialog leg — the legs
+   * that window a body (model, theme, approval mode, settings, effort,
+   * output style, the permission rule and directory lists, the hooks and
+   * extension lists, the MCP tool and resource lists, the arena pickers, the
+   * session picker's, the diff and subagent scrollboxes) size themselves
+   * from it, and the rest ignore it — and to the help overlay's body rows.
+   * Required so a caller cannot budget the overlay from the raw terminal
+   * height — five rows more than the region holds — by forgetting it. */
+  availableTerminalHeight: number;
 }
 
 export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
@@ -138,6 +149,31 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   const { request, host, config, settings, commands, onClose, notify } = props;
   const isHelp = request.dialog === 'help';
   const dimensions = useTerminalDimensions();
+
+  /**
+   * ink writes these dialog outcomes to the transcript, and for the commands
+   * whose result phase closes while the dialog is still open it records the
+   * same row, so nothing else would replay on resume. The shell's notify slot
+   * is transient and closes with the dialog. A null `rawCommand` is a command
+   * ink keeps out of the recording (`SLASH_COMMANDS_SKIP_RECORDING`).
+   */
+  const reportResult = (
+    rawCommand: string | null,
+    text: string,
+    level: 'info' | 'error' = 'info',
+  ) => {
+    const item: HistoryItemInfo | HistoryItemError =
+      level === 'error'
+        ? { type: MessageType.ERROR, text }
+        : { type: MessageType.INFO, text };
+    host.addItem(item, Date.now());
+    if (!rawCommand) return;
+    config.getChatRecordingService?.()?.recordSlashCommand({
+      phase: 'result',
+      rawCommand,
+      outputHistoryItems: [{ ...item }],
+    });
+  };
 
   // --- permission rules (rebuild after add/delete) ------------------------
   const [permissions, setPermissions] = useState(() =>
@@ -258,10 +294,18 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   const modelSelectionInFlightRef = useRef(false);
 
   // --- help overlay interaction -------------------------------------------
-  const [helpTab, setHelpTab] = useState<HelpTab>('general');
+  const [helpTab, setHelpTabState] = useState<HelpTab>('general');
+  // A held Tab hands the whole burst to the handler from the last render, so
+  // the cycle must read where the previous key of the burst landed.
+  const helpTabRef = useRef(helpTab);
+  helpTabRef.current = helpTab;
+  const setHelpTab = (next: HelpTab) => {
+    helpTabRef.current = next;
+    setHelpTabState(next);
+  };
   const [helpScroll, setHelpScroll] = useState(0);
   const dialogWidth = dialogAreaWidth(dimensions.width);
-  const helpBodyRows = computeHelpBodyRows(dimensions.height);
+  const helpBodyRows = computeHelpBodyRows(props.availableTerminalHeight);
   const helpWindowRows = helpCommandWindowRows(helpBodyRows);
   // Only the two command tabs have a scrollable window, and its bound is that
   // tab's line count. Clamping here rather than leaving it to the render keeps
@@ -284,7 +328,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return;
     }
     const tabCount = HELP_TABS.length;
-    const activeIndex = HELP_TABS.findIndex((entry) => entry.tab === helpTab);
+    const activeIndex = HELP_TABS.findIndex(
+      (entry) => entry.tab === helpTabRef.current,
+    );
     if (name === 'tab') {
       const step = shift ? -1 : 1;
       setHelpTab(HELP_TABS[(activeIndex + step + tabCount) % tabCount]!.tab);
@@ -360,7 +406,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       );
 
     case 'statusline':
-      return <OpenTuiStatusLineDialog settings={settings} onClose={onClose} />;
+      return (
+        <OpenTuiStatusLineDialog
+          settings={settings}
+          onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
+        />
+      );
 
     case 'memory':
       return (
@@ -368,6 +420,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -378,7 +431,10 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           initialError={request.initialError}
           onClose={onClose}
-          notify={notify}
+          notify={(text) =>
+            reportResult(request.openedViaCommand ? '/auth' : null, text)
+          }
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -388,7 +444,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
-          notify={notify}
+          notify={(text) => reportResult('/editor', text)}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -398,6 +455,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -408,6 +466,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           rules={data.rules}
           directories={data.directories}
           initialDirectories={data.initialDirectories}
+          availableTerminalHeight={props.availableTerminalHeight}
           onAddRule={(ruleText, type, scope) => {
             addPermissionRule(config, settings, ruleText, type, scope);
             reloadPermissions();
@@ -439,6 +498,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
             props.onApprovalModeChanged?.(mode);
             onClose();
           }}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -448,6 +508,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          notify={(text, level) => reportResult('/effort', text, level)}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -457,7 +519,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
-          notify={notify}
+          notify={(text, level) => reportResult('/output-style', text, level)}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -467,7 +530,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
-          notify={notify}
+          notify={(text, level) => reportResult(null, text, level)}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
@@ -477,12 +541,20 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
           matchedSessions={
             request.matchedSessions as SessionListItem[] | undefined
           }
           onSelect={(sessionId) => {
             void host.handleResume(sessionId).catch((error: unknown) => {
-              notify(error instanceof Error ? error.message : String(error));
+              // handleResumeSession reports the failures it handles as
+              // transcript rows itself; this only catches a throw from outside
+              // its try, where no row was written.
+              reportResult(
+                null,
+                error instanceof Error ? error.message : String(error),
+                'error',
+              );
             });
             onClose();
           }}
@@ -497,6 +569,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           onClose={onClose}
           status={extStatus}
           busy={extBusy}
+          availableTerminalHeight={props.availableTerminalHeight}
           discoverFilter={extDiscoverFilter}
           onDiscoverFilterChange={setExtDiscoverFilter}
           rowsByTab={rowsByTab}
@@ -516,6 +589,17 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         <OpenTuiHooksDialog
           config={config}
           settings={settings}
+          availableTerminalHeight={props.availableTerminalHeight}
+          notice={
+            config?.getHookSystem()
+              ? [
+                  t('Reopen this menu to reload hook definitions.'),
+                  t(
+                    'Hook controls and HTTP security settings require a restart.',
+                  ),
+                ].join('\n')
+              : undefined
+          }
           onClose={onClose}
         />
       );
@@ -523,6 +607,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
     case 'mcp':
       return (
         <OpenTuiMcpDialog
+          availableTerminalHeight={props.availableTerminalHeight}
           servers={mcpServers}
           getServerTools={(server) => getMcpServerTools(config, server.name)}
           getServerResources={(server) =>
@@ -538,13 +623,32 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       // list + a rewind action that is not part of the command-host surface;
       // Batch 5 mounts the self-contained placeholder (Batch 6 wires the
       // full selector into the shell transcript).
-      return <OpenTuiRewindDialog settings={settings} onClose={onClose} />;
+      return (
+        <OpenTuiRewindDialog
+          settings={settings}
+          onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
+        />
+      );
 
     case 'diff':
-      return <OpenTuiDiffDialog settings={settings} onClose={onClose} />;
+      return (
+        <OpenTuiDiffDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
+        />
+      );
 
     case 'stats':
-      return <OpenTuiStatsDialog config={config} onClose={onClose} />;
+      return (
+        <OpenTuiStatsDialog
+          config={config}
+          onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
+        />
+      );
 
     case 'arena':
       return (
@@ -552,7 +656,13 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           mode={request.mode}
           onClose={onClose}
-          notify={notify}
+          availableTerminalHeight={props.availableTerminalHeight}
+          notify={
+            request.mode === 'select' || request.mode === 'stop'
+              ? (text, level) =>
+                  reportResult(`/arena ${request.mode}`, text, level)
+              : notify
+          }
           // Enter in the model picker starts an arena session by writing the
           // command into the composer, which the entry layer owns. Without that
           // owner the selection would vanish behind a closed dialog, so say so.
@@ -568,7 +678,11 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
 
     case 'subagent_create':
       return (
-        <OpenTuiSubagentCreateDialog settings={settings} onClose={onClose} />
+        <OpenTuiSubagentCreateDialog
+          settings={settings}
+          onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
+        />
       );
 
     case 'subagent_list':
@@ -577,11 +691,18 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
         />
       );
 
     case 'skills_manage':
-      return <OpenTuiSkillsDialog config={config} onClose={onClose} />;
+      return (
+        <OpenTuiSkillsDialog
+          config={config}
+          onClose={onClose}
+          availableTerminalHeight={props.availableTerminalHeight}
+        />
+      );
 
     case 'model': {
       const entries = buildModelEntries(config, request.mode);
@@ -591,11 +712,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         entries,
         mode: request.mode,
       });
-      // ink writes all three model outcomes to the transcript — a pick, an
-      // escape, an auxiliary pick — so the row outlives the dialog. The shell's
-      // notify slot is transient and closes with it.
       const reportModel = (text: string) =>
-        host.addItem({ type: MessageType.INFO, text }, Date.now());
+        reportResult(request.mode === 'advisor' ? '/advisor' : '/model', text);
       return (
         <OpenTuiModelDialog
           entries={entries}

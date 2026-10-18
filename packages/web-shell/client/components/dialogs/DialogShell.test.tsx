@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -243,16 +245,48 @@ describe('DialogShell', () => {
     });
 
     const toggle = document.querySelector<HTMLButtonElement>(
-      '[aria-label="Fullscreen"]',
+      'button[aria-label="Fullscreen"]',
+    )!;
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-dialog]',
     )!;
     expect(toggle.querySelector('.lucide-expand')).not.toBeNull();
+    expect(panel.hasAttribute('data-fullscreen')).toBe(false);
 
     act(() => toggle.click());
 
     expect(
       document
-        .querySelector('[aria-label="Exit fullscreen"]')
+        .querySelector('button[aria-label="Exit fullscreen"]')
         ?.querySelector('.lucide-shrink'),
     ).not.toBeNull();
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>('[data-web-shell-dialog]'),
+      ).some((candidate) => candidate.hasAttribute('data-fullscreen')),
+    ).toBe(true);
+
+    act(() =>
+      document
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Exit fullscreen"]',
+        )!
+        .click(),
+    );
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>('[data-web-shell-dialog]'),
+      ).every((candidate) => !candidate.hasAttribute('data-fullscreen')),
+    ).toBe(true);
+  });
+
+  it('keeps the fullscreen panel height on the dynamic viewport', () => {
+    const css = readFileSync(
+      resolve(__dirname, 'DialogShell.module.css'),
+      'utf8',
+    );
+    expect(css).toMatch(
+      /@supports \(height: 100dvh\)[\s\S]*\.viewportPanel\[data-fullscreen\][\s\S]*height: calc\(100dvh - 32px\);[\s\S]*max-height: calc\(100dvh - 32px\);/,
+    );
   });
 });

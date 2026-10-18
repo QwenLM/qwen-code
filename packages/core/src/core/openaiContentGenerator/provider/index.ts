@@ -5,6 +5,7 @@ export { ZaiOpenAICompatibleProvider } from './zai.js';
 export { MiniMaxOpenAICompatibleProvider } from './minimax.js';
 export { MistralOpenAICompatibleProvider } from './mistral.js';
 export { CerebrasOpenAICompatibleProvider } from './cerebras.js';
+export { FireworksOpenAICompatibleProvider } from './fireworks.js';
 export { MiMoOpenAICompatibleProvider } from './mimo.js';
 export { DefaultOpenAICompatibleProvider } from './default.js';
 export type {

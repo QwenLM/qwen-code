@@ -1,8 +1,10 @@
 # Settings File Change Detection (Issue #3696 Sub-task 1)
 
+[English](settings-change-detection.md) | [简体中文](settings-change-detection.zh-CN.md)
+
 ## Context
 
-Qwen Code currently has no settings file change detection mechanism. Users must restart the session after modifying `settings.json` for changes to take effect. This proposal implements the infrastructure layer for the #3696 hot-reload system — automatic detection and event dispatching for settings file changes.
+When this infrastructure was proposed, Qwen Code had no settings file change detection mechanism. Users had to restart the session after modifying `settings.json` for changes to take effect. This design describes the infrastructure layer for the #3696 hot-reload system — automatic detection and event dispatching for settings file changes.
 
 **Scope**: This sub-task is only responsible for "detect file changes → reload → notify listeners". `Config` copies many settings fields at construction time (`approvalMode`, `mcpServers`, `telemetry`, etc.), and these snapshots are NOT automatically updated by this sub-task. Only consumers that read `LoadedSettings.merged` in real time (e.g., the `useSettings()` hook, `disabledSkillNamesProvider`) will immediately see changes. Other sub-tasks (MCP reconnection, `/reload` command) are responsible for pushing updates to Config's internal state.
 
@@ -17,7 +19,7 @@ Qwen Code currently has no settings file change detection mechanism. Users must 
 
 ### Watching Strategy: Watch Parent Directory + Strict Path Filtering
 
-The `writeWithBackupSync` write flow is `write(.tmp) → rename(target, .orig) → rename(.tmp, target) → unlink(.orig)`, which causes the target file to briefly disappear. Watching the file path directly would cause chokidar to lose the watch. Therefore, we watch the parent directory (`depth: 0`) and filter by **exact basename match**, only responding to `settings.json` file events and ignoring `.tmp`, `.orig`, editor temporary files, etc. The `.orig` backup is an in-flight safety net and is **removed on success** (final `unlink` step), so it never lingers in the user's directory.
+The `writeWithBackupSync` write flow stages complete bytes and copies the old settings inside an invocation-owned `settings.json.write-*` directory, then publishes with one replacement rename. An existing target stays present; publication replaces its inode. Watching the parent directory (`depth: 0`) detects replacement and later file creation or deletion without tying the watch to the old inode. We filter by **exact basename match**, only responding to `settings.json` file events and ignoring `settings.json.write-*` directories, their children, legacy `.tmp`/`.orig` files and editor temporary files. Successful publication cleans its private artifacts best effort; failed saves, crashes or cleanup failures may retain them, and the watcher must ignore these leftovers. See the [atomic settings save design](../2026-09-30-atomic-settings-save.md) for the publication and recovery contract.
 
 ### Lazy Directory Handling: Never Create `.qwen/` at Startup
 
@@ -319,7 +321,7 @@ settingsWatcher?.addChangeListener(async (events) => {
 | File created after startup (dir existed) | Directory watcher catches `add` event, `reloadScopeFromDisk` reads the new file                               |
 | Stale callback during promote/demote     | Per-scope generation token makes the closing watcher's in-flight callback a no-op (no watcher stacking)       |
 | Editor atomic writes                     | Directory watching + strict basename filtering (excludes `.tmp`/`.orig`) + 300ms debounce coalescing          |
-| `.tmp`/`.orig` file events               | Basename filter exact-matches `settings.json`, all other filenames are ignored                                |
+| Save artifacts and `.tmp`/`.orig` events | Basename filter exact-matches `settings.json`; other names and private directory contents are ignored         |
 | Self-write (`setValue` → `saveSettings`) | Semantic diff: reload content matches in-memory snapshot → no notification                                    |
 | Self-write concurrent with external edit | External edit changes content → diff detects the change → correctly notifies                                  |
 | Format/comment-only changes              | `reloadScopeFromDisk` resolves settings without comments → diff matches → no notification                     |
@@ -365,7 +367,7 @@ settingsWatcher?.addChangeListener(async (events) => {
 Mock chokidar (reusing the `skill-manager.test.ts` mock pattern):
 
 1. **Lifecycle**: `startWatching` creates watchers, `stopWatching` closes watchers, both are idempotent
-2. **Path filtering**: Only `settings.json` basename events trigger refresh; `.tmp`/`.orig`/other files are ignored
+2. **Path filtering**: Only `settings.json` basename events trigger refresh; `settings.json.write-*` directories, their children, `.tmp`/`.orig` and other files are ignored
 3. **Debouncing**: Multiple rapid events coalesce into one reload (`vi.useFakeTimers()`)
 4. **Semantic diff**: Unchanged content → listener not called; changed content → listener called with correct events
 5. **Self-write suppression**: `setValue()`-triggered watcher events are naturally filtered by identical diff

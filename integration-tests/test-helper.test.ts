@@ -66,6 +66,31 @@ describe('TestRig', () => {
     expect(existsSync(rig.testDir!)).toBe(true);
   });
 
+  it('disables managed auto-memory by default and honors a suite override', async () => {
+    const rig = new TestRig();
+    await rig.setup('managed memory default off');
+
+    const written = JSON.parse(
+      readFileSync(join(rig.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(written.memory).toEqual({
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: false,
+    });
+
+    const override = new TestRig();
+    await override.setup('managed memory opted back in', {
+      settings: { memory: { enableManagedAutoMemory: true } },
+    });
+    const overridden = JSON.parse(
+      readFileSync(join(override.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(overridden.memory).toEqual({
+      enableManagedAutoMemory: true,
+      enableManagedAutoDream: false,
+    });
+  });
+
   it('removes the test directory during cleanup', async () => {
     delete process.env['KEEP_OUTPUT'];
     const rig = new TestRig();

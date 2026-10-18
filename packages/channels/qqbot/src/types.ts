@@ -21,6 +21,17 @@ export const Intent = {
   GROUP_MESSAGE: 1 << 26, // 群聊全量消息事件 (GROUP_MESSAGE_CREATE)
 } as const;
 
+export interface QQMessageAttachment {
+  url: string;
+  content_type?: string;
+  /** Present on `content_type: voice`: the SILK-converted WAV file URL. */
+  voice_wav_url?: string;
+  filename?: string;
+  size?: number;
+  width?: number;
+  height?: number;
+}
+
 export interface QQMessageEvent {
   id: string;
   author: {
@@ -38,6 +49,7 @@ export interface QQMessageEvent {
     username?: string;
   };
   content: string;
+  attachments?: QQMessageAttachment[];
 }
 
 /** Extended fields available on group message events. */

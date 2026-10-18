@@ -7,7 +7,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { runInNewContext } from 'node:vm';
+import { describe, expect, it, vi } from 'vitest';
 import { parseSkillContent } from '../../skill-load.js';
 
 function loadComputerUseSkill() {
@@ -15,99 +16,128 @@ function loadComputerUseSkill() {
     path.dirname(fileURLToPath(import.meta.url)),
     'SKILL.md',
   );
-  const content = fs.readFileSync(skillPath, 'utf8');
-  const config = parseSkillContent(content, skillPath);
+  const config = parseSkillContent(
+    fs.readFileSync(skillPath, 'utf-8'),
+    skillPath,
+  );
   return { config, body: config.body };
 }
 
 describe('bundled computer-use skill', () => {
-  it('preserves the Codex API-surface and workflow structure', () => {
-    const { body } = loadComputerUseSkill();
+  it.each([true, false])(
+    'runs the forwarding example with desktop relay available=%s',
+    async (desktopAvailable) => {
+      const { body } = loadComputerUseSkill();
+      const example = body.match(/```js\n([\s\S]*?)\n```/)?.[1];
+      expect(example).toBeDefined();
+      const screenshot = {
+        type: 'image',
+        data: 'screenshot',
+        mimeType: 'image/png',
+      };
+      const result = {
+        content: [{ type: 'text', text: 'macos' }, screenshot],
+      };
+      const desktop = vi.fn().mockResolvedValue(result);
+      const regular = vi.fn().mockResolvedValue(result);
+      const text = vi.fn();
+      const image = vi.fn();
+      // Mirror the code-mode host (host.ts): a Proxy that throws on an
+      // unknown key, so an unbound desktop tool must be probed with `in`.
+      const toolTarget = Object.assign(Object.create(null), {
+        mcp__node_repl__node_repl: regular,
+        ...(desktopAvailable
+          ? { mcp__desktop_node_repl__node_repl: desktop }
+          : {}),
+      }) as Record<string, unknown>;
+      const tools = new Proxy(toolTarget, {
+        get(target, property) {
+          if (typeof property === 'string' && !(property in target)) {
+            throw new Error(
+              `Unknown or unavailable code mode tool: ${property}`,
+            );
+          }
+          return Reflect.get(target, property) as unknown;
+        },
+      });
+      await runInNewContext(`(async () => {${example}})()`, {
+        tools,
+        ALL_TOOLS: desktopAvailable
+          ? [{ name: 'mcp__desktop_node_repl__node_repl' }]
+          : [],
+        code: 'return platform',
+        text,
+        image,
+      });
+      expect(desktopAvailable ? desktop : regular).toHaveBeenCalledWith({
+        code: 'return platform',
+      });
+      expect(desktopAvailable ? regular : desktop).not.toHaveBeenCalled();
+      expect(text).toHaveBeenCalledWith('macos');
+      expect(image).toHaveBeenCalledWith(screenshot);
+    },
+  );
 
-    expect(body).toContain('## API surface');
-    expect(body).toContain('## Workflow');
-    expect(body).toContain('### 1. Initialize');
-    expect(body).toContain('### 2. Actions using app');
-    expect(body).not.toContain('## Essential API');
-    expect(body).not.toContain('## Observe and act');
-  });
-
-  it('maps the Codex action-batch workflow onto the typed SDK', () => {
-    const { body } = loadComputerUseSkill();
-
-    expect(body).toContain("import('@qwen-code/cua-sdk/computer-use')");
-    expect(body).toContain('ComputerUse.create()');
-    expect(body).toContain('computer.listApps()');
-    expect(body).toContain('computer.listWindows({ pid: matches[0].pid })');
-    expect(body).toContain('computer.observeWindow(target)');
-    expect(body).toMatch(/After performing one or more UI actions/);
-    expect(body).toMatch(/Perform one or more actions, and then fetch/);
-    expect(body).toContain('hotkey:');
-    expect(body).toContain('modifiers?: string[]');
-    expect(body).not.toMatch(/after every action/i);
-  });
-
-  it('maps Codex diff guidance to automatic cursors and disableDiff', () => {
-    const { body } = loadComputerUseSkill();
-
-    expect(body).toMatch(/accessibility tree will be returned\s+as a diff/);
-    expect(body).toContain('Prefer this default diff output');
-    expect(body).toContain('disableDiff?: boolean');
-    expect(body).toContain('`disableDiff: true` only when');
-    expect(body.match(/disableDiff/g)).toHaveLength(2);
-    expect(body).toMatch(
-      /`state\.elements` remains the current full actionable/,
-    );
-    expect(body).not.toMatch(/full response replaces the previous token set/i);
-    expect(body).not.toMatch(/discard tokens from before/i);
-    expect(body).toContain('automation_id?: string');
-    expect(body).toMatch(
-      /disregard the text[\s\S]*get the full tree next time/,
-    );
-    expect(body).not.toMatch(/baseRevisionId|revisionId|cuaRevisions/);
-    expect(body).not.toContain('forceFull');
-  });
-
-  it('exposes only real typed SDK names and screenshot data', () => {
+  it('loads a self-contained App workflow for every connected platform', () => {
     const { config, body } = loadComputerUseSkill();
-
     expect(config.name).toBe('computer-use');
-    expect(body).toContain('type ComputerUse =');
-    expect(body).toContain('elementToken: string');
-    expect(body).toContain('doubleClick:');
-    expect(body).toContain('rightClick:');
-    expect(body).toContain('modifier?: string[]');
-    expect(body).toContain('deliveryMode?: DeliveryMode');
-    expect(body).toContain('includeScreenshot?: boolean');
-    expect(body).toContain('image.dataBase64');
+    expect(config.allowedTools).toBeUndefined();
+    expect(body).toContain('`desktop-node-repl` MCP server');
+    expect(body).toContain('mcp__desktop_node_repl__node_repl');
+    expect(body).toContain('skip the installation commands below');
+    expect(body).toContain('ComputerUse.create()');
+    expect(body).toContain('await computer.getPlatform()');
+    expect(body).toContain('computer.getApp(');
+    expect(body).toContain('app.getState(');
+    expect(body).toContain('app.click(37)');
+    expect(body).not.toMatch(
+      /references\/|computer\.observeWindow\(|computer\.listWindows\(|elementToken|windowId/,
+    );
+  });
+
+  it('preserves batching, incremental observation and safe refresh guidance', () => {
+    const { body } = loadComputerUseSkill();
+    expect(body).toMatch(/After performing one or more UI actions/);
+    expect(body).toMatch(/Batch actions whose target remains the same/);
+    expect(body).toContain('Prefer this default diff output');
+    expect(body).toContain('disableDiff: true');
+    expect(body).toMatch(/window or session changes/);
+    expect(body).toContain('maxTextChars?: number');
+    expect(body).toContain('12,000 characters');
+    expect(body).toContain('Only currently captured actionable IDs');
+    expect(body).toMatch(
+      /Partial, unconfirmed or cancelled actions must not be blindly repeated/,
+    );
+    expect(body).not.toMatch(
+      /RecreationBench|benchmark|evaluator|score|failure count/i,
+    );
+  });
+
+  it('requests screenshots separately and keeps the persistent REPL lifecycle', () => {
+    const { body } = loadComputerUseSkill();
+    const screenshotSection = body.split('## Reading screenshots')[1];
+    expect(screenshotSection).toContain('includeScreenshot: true');
+    expect(screenshotSection).not.toContain('disableDiff');
+    expect(screenshotSection).toContain('image.dataBase64');
+    expect(screenshotSection).toContain('nodeRepl.write(state.text)');
+    expect(body).toContain('await computer.close()');
     expect(body).toContain(
       'Reset the Node REPL only when no other persistent state is needed.',
     );
-    expect(body).not.toMatch(/sky\.|get_app_state|element_index/);
-    expect(body).not.toMatch(/computer\.(?:paste|selectText)/);
-    expect(body).not.toMatch(/verifyState|actAndVerify|callTool/);
   });
 
-  it('keeps screenshot capture independent from full AX observations', () => {
+  it('documents the macOS text methods and their uncertainty boundaries', () => {
     const { body } = loadComputerUseSkill();
-    const screenshotSection = body.split('## Reading screenshots')[1];
-    const screenshotExample =
-      screenshotSection.match(/```js([\s\S]*?)```/)?.[1];
-
-    expect(screenshotSection).toContain(
-      '`includeScreenshot: true` is the parameter that requests a screenshot.',
+    expect(body).toContain('app.selectText(37,');
+    expect(body).toContain("await app.paste('ready')");
+    expect(body).toContain("format?: 'text' | 'md' | 'html'");
+    expect(body).toContain(
+      "selection?: 'text' | 'cursor_before' | 'cursor_after'",
     );
-    expect(screenshotSection).not.toContain('disableDiff');
-    expect(screenshotExample).toContain('includeScreenshot: true');
-    expect(screenshotExample).not.toContain('disableDiff');
-    expect(screenshotExample).toContain('nodeRepl.write(state.text)');
-  });
-
-  it('stays generic and free of benchmark-specific policy', () => {
-    const { body } = loadComputerUseSkill();
-
-    expect(body).not.toMatch(
-      /RecreationBench|benchmark|evaluator|score|bcrypt|ovonote|failure count/i,
-    );
+    expect(body).toContain('immediately adjacent');
+    expect(body).toContain('Missing or');
+    expect(body).toContain('ambiguous matches fail');
+    expect(body).toContain('Observe state before');
+    expect(body).toContain('newer external clipboard change');
   });
 });

@@ -117,11 +117,10 @@ export default {
   'Search:': 'Suche:',
   'type to filter…': 'Tippen zum Filtern…',
   'No skills are currently available.': 'Derzeit sind keine Skills verfügbar.',
-  'All available skills are locked at a higher scope (see below).':
-    'Alle verfügbaren Skills sind in einer höheren Ebene gesperrt (siehe unten).',
   'No skills match the search.': 'Keine Skills passen zur Suche.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
+  'Locked by settings entries you cannot toggle here:':
+    'Gesperrt durch Einstellungseinträge, die hier nicht umgeschaltet werden können:',
+  '{{count}} locked not shown': '{{count}} gesperrte Skills nicht angezeigt',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',
@@ -170,6 +169,8 @@ export default {
     'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Zu einem komprimierten Turn kann nicht zurückgespult werden. Bitte einen aktuelleren Turn versuchen.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Die Unterhaltung kann nicht zu diesem Turn zurückgespult werden: Er passt nicht mehr zum Modellverlauf (z. B. nach einem erneuten Versuch). Bitte einen aktuelleren Turn versuchen.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Datei-Wiederherstellung ist für diesen Turn nicht verfügbar (keine erfassten Dateiänderungen, oder dieser Turn liegt vor der aktuellen Sitzung).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -577,6 +578,10 @@ export default {
     'Diese Erweiterung wird folgende Fähigkeiten installieren:',
   'This extension will install the following subagents:':
     'Diese Erweiterung wird folgende Unteragenten installieren:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Diese Erweiterung wird folgende Workflows installieren (JavaScript-Skripte, die Unteragenten starten können):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Diese Workflow-Skripte wurden seit der installierten Version geändert: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation von "{{name}}" abgebrochen.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -745,6 +750,12 @@ export default {
   '{{count}} hooks configured': '{{count}} Hooks konfiguriert',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Dieses Menü ist schreibgeschützt. Um Hooks hinzuzufügen oder zu ändern, bearbeiten Sie settings.json direkt oder fragen Sie Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Öffnen Sie dieses Menü erneut, um Hook-Definitionen neu zu laden.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook-Steuerungsoptionen und HTTP-Sicherheitseinstellungen erfordern einen Neustart.',
+  'Failed to reload hook definitions: {{error}}':
+    'Hook-Definitionen konnten nicht neu geladen werden: {{error}}',
   'Enter to select · Esc to cancel': 'Enter zum Auswählen · Esc zum Abbrechen',
   // Hooks - Detail Step
   'Exit codes:': 'Exit-Codes:',
@@ -1149,6 +1160,13 @@ export default {
   'Clear Authentication': 'Authentifizierung löschen',
   disabled: 'deaktiviert',
   enabled: 'aktiviert',
+  'disabled (bare mode)': 'deaktiviert (Bare-Modus)',
+  'disabled (safe mode)': 'deaktiviert (Sicherheitsmodus)',
+  'disabled (disableAllHooks)': 'deaktiviert (disableAllHooks)',
+  'disabled (folder not trusted)':
+    'deaktiviert (Ordner nicht vertrauenswürdig)',
+  'disabled (turned off for this session)':
+    'deaktiviert (für diese Sitzung ausgeschaltet)',
   'Server:': 'Server:',
   Reconnect: 'Neu verbinden',
   'View tools': 'Werkzeuge anzeigen',
@@ -1554,6 +1572,11 @@ export default {
   'No tasks currently running': 'Derzeit laufen keine Aufgaben',
   'No entry to show.': 'Kein Eintrag zum Anzeigen.',
   'needs approval': 'wartet auf Genehmigung',
+  'Large workflow': 'Großer Workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Großer Workflow: {{agents}} Agenten eingeplant (Warnschwelle {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Großer Workflow: ~{{tokens}} Ausgabe-Tokens erwartet (Warnschwelle {{cap}}).',
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
@@ -1850,13 +1873,17 @@ export default {
     'Kontext überschreitet Limit! Verwenden Sie /compress oder /clear zum Reduzieren.',
   'No API response yet. Send a message to see actual usage.':
     'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
+  'Estimated usage, including the conversation':
+    'Geschätzte Nutzung inkl. Unterhaltung',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Noch keine Nutzungsdaten vom Anbieter. Dies sind lokale Schätzungen einschließlich der Unterhaltung.',
   'Estimated pre-conversation overhead':
     'Geschätzte Vorabkosten vor der Unterhaltung',
   'Context window': 'Kontextfenster',
   tokens: 'Tokens',
   Used: 'Verwendet',
   Free: 'Frei',
-  'Autocompact buffer': 'Autokomprimierungs-Puffer',
+  'Autocompact buffer': 'Komprimierungspuffer',
   'Usage by category': 'Verwendung nach Kategorie',
   'System prompt': 'System-Prompt',
   'Built-in tools': 'Integrierte Tools',
@@ -1864,6 +1891,9 @@ export default {
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
+  'Startup context': 'Startkontext',
+  Unattributed: 'Nicht zugeordnet',
+  'Cached prefix': 'Cache-Präfix',
   'Run /context detail for per-item breakdown.':
     'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
   active: 'aktiv',
@@ -2127,6 +2157,10 @@ export default {
   'to retry last request': 'um die letzte Anfrage erneut zu versuchen',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Ungültiger API Key. Coding Plan API Keys beginnen mit "sk-sp-". Bitte prüfen.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Ungültiger API Key. Pay-as-you-go-Keys beginnen mit "sk-" oder "sk-ws-". Token Plan Keys ("sk-sp-") benötigen den Token Plan Eintrag.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Ungültiger API Key. Token Plan API Keys beginnen mit "sk-sp-". Erstellen Sie einen in der Token Plan Konsole oder verwenden Sie den Standard API Key Eintrag für einen Pay-as-you-go-Key.',
   'Lock release warning': 'Warnung zur Sperrfreigabe',
   'Metadata write warning': 'Warnung beim Schreiben der Metadaten',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -2155,6 +2189,7 @@ export default {
 
   // === Same-as-English optimization ===
   'Agents:': 'Agenten:',
+  'Workflows:': 'Workflows:',
   Prompt: 'Eingabe',
   'Prompts:': 'Eingaben:',
   'Resources:': 'Ressourcen:',
@@ -2274,6 +2309,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

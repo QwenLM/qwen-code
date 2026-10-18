@@ -15,7 +15,16 @@ const {
   latestMessageListProps,
   latestOpenSubagent,
   messages,
+  previewTest,
+  previewCapabilities,
 } = vi.hoisted(() => ({
+  previewTest: { enabled: false },
+  previewCapabilities: {
+    workspaceCwd: '/work/project',
+    workspaces: [
+      { id: 'primary', cwd: '/work/project', trusted: true, primary: true },
+    ],
+  },
   animationFrameBlocks: [{ id: 'frame-block' }],
   connection: {
     sessionId: 'subagent-session',
@@ -26,6 +35,7 @@ const {
   messagesFromBlocks: vi.fn(),
   workspaceActions: {
     readFile: vi.fn(),
+    stat: vi.fn().mockResolvedValue({ type: 'file' }),
   },
   workspaceClient: {
     resolveSubagentSession: vi.fn(),
@@ -35,7 +45,9 @@ const {
     current: undefined as Record<string, unknown> | undefined,
   },
   latestOpenSubagent: {
-    current: undefined as ((tool: ACPToolCall) => void) | undefined,
+    current: undefined as
+      | ((tool: ACPToolCall, parentSessionId?: string) => void)
+      | undefined,
   },
   messages: [
     {
@@ -58,7 +70,11 @@ const {
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
   useConnection: () => connection,
-  useWorkspace: () => ({ client: workspaceClient }),
+  useWorkspace: () => ({
+    client: workspaceClient,
+    status: 'connected',
+    capabilities: previewCapabilities,
+  }),
   useWorkspaceActions: () => workspaceActions,
 }));
 
@@ -86,6 +102,9 @@ vi.mock('../../WebShellContexts', async () => {
 
 vi.mock('../MessageList', async () => {
   const React = await import('react');
+  const { ToolFilePreviewButton } = await import(
+    '../messages/ToolFilePreviewButton'
+  );
   const { CompactModeContext } = await import('../../WebShellContexts');
   const { useSubagentDetails } = await import('../../subagentDetailsContext');
   return {
@@ -93,10 +112,27 @@ vi.mock('../MessageList', async () => {
       latestMessageListProps.current = props;
       latestOpenSubagent.current = useSubagentDetails()?.onOpen;
       const compactMode = React.useContext(CompactModeContext);
-      return React.createElement('div', {
-        'data-testid': 'subagent-transcript',
-        'data-compact-mode': String(compactMode),
-      });
+      return React.createElement(
+        'div',
+        {
+          'data-testid': 'subagent-transcript',
+          'data-compact-mode': String(compactMode),
+        },
+        previewTest.enabled
+          ? React.createElement(ToolFilePreviewButton, {
+              tool: {
+                callId: 'read-1',
+                toolName: 'read_file',
+                status: 'completed',
+                args: { file_path: '/work/project/note.txt' },
+              },
+              workspaceCwd: props['workspaceCwd'] as string,
+              onOpen: props['onTurnOutputOpen'] as Parameters<
+                typeof ToolFilePreviewButton
+              >[0]['onOpen'],
+            })
+          : null,
+      );
     },
   };
 });
@@ -117,6 +153,9 @@ afterEach(() => {
   latestMessageListProps.current = undefined;
   latestOpenSubagent.current = undefined;
   messagesFromBlocks.mockClear();
+  previewTest.enabled = false;
+  connection.sessionId = 'subagent-session';
+  workspaceActions.stat.mockReset().mockResolvedValue({ type: 'file' });
   workspaceClient.resolveSubagentSession.mockReset();
   vi.useRealTimers();
 });
@@ -280,6 +319,12 @@ it('opens a nested subagent within the parent session scope', async () => {
     'parent-session',
     '/work/project',
   );
+  act(() => latestOpenSubagent.current?.(nestedTool, 'original-chat-a'));
+  expect(onOpenSubagent).toHaveBeenLastCalledWith(
+    nestedTool,
+    'original-chat-a',
+    '/work/project',
+  );
 });
 
 it('backs off polling after repeated failures following a running result', async () => {
@@ -352,3 +397,111 @@ it('resets the retry budget after a running poll recovers', async () => {
   await act(async () => vi.advanceTimersByTimeAsync(6_000));
   expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(8);
 });
+
+it.each([false, true])(
+  'handles a pending file preview across a subagent rerender with session change=%s',
+  async (changeSession) => {
+    previewTest.enabled = true;
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: 'subagent-session',
+      status: 'running',
+    });
+    const onRightPanelOpen = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderDetail = async () => {
+      await act(async () => {
+        root!.render(
+          <I18nProvider language="en">
+            <SubagentDetail
+              sessionId="parent-session"
+              rootToolCallId="agent-1"
+              initialRootTool={
+                (messages[0] as Extract<Message, { role: 'tool_group' }>)
+                  .tools[0]
+              }
+              workspaceCwd="/work/project"
+              onRightPanelOpen={onRightPanelOpen}
+            />
+          </I18nProvider>,
+        );
+      });
+    };
+    await renderDetail();
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="View the current file"]',
+    );
+    expect(button).not.toBeNull();
+    let resolveStat!: (value: { type: string }) => void;
+    workspaceActions.stat.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStat = resolve;
+      }),
+    );
+    await act(async () => button!.click());
+    if (changeSession) connection.sessionId = 'another-subagent-session';
+    await renderDetail();
+    expect(workspaceActions.stat).toHaveBeenCalledTimes(2);
+    await act(async () => resolveStat({ type: 'file' }));
+    if (changeSession) {
+      expect(onRightPanelOpen).not.toHaveBeenCalled();
+    } else {
+      expect(onRightPanelOpen).toHaveBeenCalledTimes(1);
+      expect(onRightPanelOpen).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'attachment',
+          workspacePath: '/work/project/note.txt',
+          workspaceCwd: '/work/project',
+          sourceSessionId: 'subagent-session',
+        }),
+      );
+    }
+  },
+);
+
+it.each([true, false])(
+  'only offers standalone agent cancellation (workflow=%s)',
+  async (workflow) => {
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: 'subagent-session',
+      status: 'running',
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="workflow-agent"
+            initialRootTool={{
+              callId: 'workflow-agent',
+              toolName: 'agent',
+              status: 'in_progress',
+              rawOutput: {
+                type: 'task_execution',
+                ...(workflow ? { workflowRunId: 'wf-1' } : {}),
+              },
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Stop',
+    );
+    expect(Boolean(stop)).toBe(!workflow);
+    if (stop) {
+      workspaceClient.cancelSubagentSession.mockResolvedValue({
+        cancelled: true,
+      });
+      await act(async () => stop.click());
+      expect(workspaceClient.cancelSubagentSession).toHaveBeenCalledWith(
+        'parent-session',
+        'workflow-agent',
+      );
+    }
+  },
+);

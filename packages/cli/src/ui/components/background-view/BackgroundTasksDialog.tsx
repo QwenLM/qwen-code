@@ -1268,6 +1268,35 @@ const WorkflowDetailBody: React.FC<{
         </Fragment>
       )}
 
+      {entry.sizeWarning && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text color={theme.status.warning} wrap="wrap">
+              {`⚠ ${
+                entry.sizeWarning.axis === 'agents'
+                  ? t(
+                      'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+                      {
+                        agents: String(entry.sizeWarning.scheduledAgents),
+                        cap: String(entry.sizeWarning.agentCap),
+                      },
+                    )
+                  : t(
+                      'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
+                      {
+                        tokens: formatTokenCount(
+                          entry.sizeWarning.projectedTokens,
+                        ),
+                        cap: formatTokenCount(entry.sizeWarning.tokenCap),
+                      },
+                    )
+              }`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
       <Box />
       <Box>
         <Text bold dimColor>

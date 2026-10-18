@@ -13,6 +13,7 @@ import {
   openRouterProvider,
   tokenPlanProvider,
   customProvider,
+  minimaxProvider,
   generateCustomEnvKey as generateCustomApiKeyEnvKey,
   getDefaultModelIds,
   resolveBaseUrl,
@@ -23,6 +24,7 @@ import {
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import { setNestedPropertySafe } from '../../config/settingsUtils.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
@@ -46,18 +48,24 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
-const createSettings = () => ({
-  merged: {
-    modelProviders: {},
-  },
-  setValue: vi.fn(),
-  recomputeMerged: vi.fn(),
-  forScope: vi.fn(() => ({
+const createSettings = () => {
+  const file = {
     path: '/tmp/settings.json',
-    settings: {},
-    originalSettings: {},
-  })),
-});
+    settings: { modelProviders: {} } as Record<string, unknown>,
+    originalSettings: {} as Record<string, unknown>,
+  };
+  return {
+    get merged() {
+      return file.settings;
+    },
+    setValue: vi.fn((_scope: unknown, key: string, value: unknown) => {
+      setNestedPropertySafe(file.settings, key, value);
+      setNestedPropertySafe(file.originalSettings, key, value);
+    }),
+    recomputeMerged: vi.fn(),
+    forScope: vi.fn(() => file),
+  };
+};
 
 const createConfig = (recordSlashCommand = vi.fn()) => {
   const modelsConfig = {
@@ -67,6 +75,7 @@ const createConfig = (recordSlashCommand = vi.fn()) => {
     getAuthType: vi.fn(() => AuthType.USE_OPENAI),
     getUsageStatisticsEnabled: vi.fn(() => false),
     reloadModelProvidersConfig: vi.fn(),
+    syncModelSelection: vi.fn(),
     refreshAuth: vi.fn(async () => undefined),
     getModelsConfig: vi.fn(() => modelsConfig),
     getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
@@ -110,6 +119,36 @@ describe('useAuthCommand', () => {
     });
     expect(result.current.isAuthDialogOpen).toBe(false);
     expect(result.current.authError).toBe(null);
+  });
+
+  it('keeps first-time authentication open after saving only a preset image model', async () => {
+    const settings = createSettings();
+    const config = { ...createConfig(), getAuthType: vi.fn(() => undefined) };
+    const addItem = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    await act(async () => {
+      await result.current.handleProviderSubmit(minimaxProvider, {
+        baseUrl: resolveBaseUrl(minimaxProvider),
+        apiKey: 'test-image',
+        modelIds: ['image-01'],
+      });
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'image-01', imageOnly: true }),
+      ]),
+    );
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(result.current.authError).toBe(
+      'Service models saved. Configure a conversation model to start chatting.',
+    );
+    expect(addItem).not.toHaveBeenCalled();
   });
 
   it('configures DeepSeek via the unified provider submit', async () => {
@@ -326,6 +365,32 @@ describe('useAuthCommand', () => {
       'custom-model',
     );
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('uses the effective Responses auth state after OpenAI setup', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, vi.fn()),
+    );
+    await act(async () => {
+      await result.current.handleProviderSubmit(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        wireApi: 'responses',
+        baseUrl: 'https://responses.test/v1',
+        apiKey: 'test',
+        modelIds: ['model'],
+      });
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    expect(result.current.pendingAuthType).toBeUndefined();
   });
 
   it('cancelAuthentication resets dialog + flags + clears authError', async () => {

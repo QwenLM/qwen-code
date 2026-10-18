@@ -11,21 +11,31 @@ import {
 import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { GoalApprovalContent } from './GoalApprovalContent';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
-import { localizeToolDisplayName } from './toolFormatting';
+import {
+  getEmptyMcpToolTitleDescription,
+  localizeToolDisplayName,
+  sanitizeControlChars,
+} from './toolFormatting';
 import {
   ThinkingTranslateButton,
   type SessionContentGenerator,
 } from './AssistantMessage';
 import styles from './ToolApproval.module.css';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { DiffView } from './tools/DiffView';
+import { useWebShellCustomization } from '../../customization';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
   disabled?: boolean;
+  showBrowserNotifications?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -37,6 +47,14 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  /**
+   * Id of an extra description the caller renders beside this panel, added to
+   * `aria-describedby`. The Managed approvals card states there that the tool
+   * arguments are unavailable, which is exactly the case where the panel's own
+   * description (tool name only) would let a screen-reader user confirm blind.
+   * Pass it only while that element is mounted, so no IDREF dangles.
+   */
+  extraDescriptionId?: string;
   planTodos?: readonly TodoItem[];
   planExecutionMode?: string;
   generateContent?: SessionContentGenerator;
@@ -75,12 +93,15 @@ function extractContentText(request: PermissionRequest): string {
 }
 
 function isExecKind(request: PermissionRequest): boolean {
+  // `toolKind` carries the ACP frame's kind (`execute` for shell tools);
+  // `PermissionRequest.kind` is never assigned by any producer.
+  const toolKind = request.toolKind?.toLowerCase();
   const toolName = request.toolName?.toLowerCase();
   return (
-    request.kind === 'bash' ||
-    request.kind === 'exec' ||
-    request.kind === 'execute' ||
-    request.kind === 'shell' ||
+    toolKind === 'bash' ||
+    toolKind === 'exec' ||
+    toolKind === 'execute' ||
+    toolKind === 'shell' ||
     toolName === 'run_shell_command'
   );
 }
@@ -97,6 +118,14 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   const description = request.rawInput?.description;
   if (typeof description === 'string' && description.trim()) {
     return description.trim();
+  }
+  const emptyMcpDescription = getEmptyMcpToolTitleDescription(
+    request.toolName,
+    request.title,
+    request.rawInput,
+  );
+  if (emptyMcpDescription !== undefined) {
+    return emptyMcpDescription || undefined;
   }
   return request.title;
 }
@@ -228,13 +257,16 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   disabled = false,
+  showBrowserNotifications = false,
   keyboardActive = true,
+  extraDescriptionId,
   planTodos = [],
   planExecutionMode,
   generateContent,
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
+  const isGoal = request.toolName === 'propose_goal';
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
   const hasPlanExecutionMode =
     isExitPlanApproval && planExecutionMode !== undefined;
@@ -245,6 +277,7 @@ export function ToolApproval({
           ? request.options.filter(
               (option) =>
                 option.id === 'restore_previous' ||
+                option.id === 'allow' ||
                 option.kind === 'reject_once' ||
                 option.kind === 'reject_always',
             )
@@ -271,7 +304,14 @@ export function ToolApproval({
       if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
     }
     return (option: PermissionRequest['options'][number]) => {
-      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+      if (isGoal && keyCount.get(getOptionI18nKey(option) ?? '') === 1) {
+        if (option.kind === 'allow_once') return t('approval.goal.confirm');
+        if (option.kind === 'reject_once') return t('approval.goal.reject');
+      }
+      if (
+        hasPlanExecutionMode &&
+        (option.id === 'restore_previous' || option.id === 'allow')
+      ) {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
         });
@@ -299,12 +339,23 @@ export function ToolApproval({
     };
   }, [
     displayOptions,
+    isGoal,
     showsPlanWorkflow,
     hasPlanExecutionMode,
     planExecutionMode,
     t,
   ]);
   const [selected, setSelected] = useState(safeDefaultIndex);
+  const [submissionState, setSubmissionState] = useState<{
+    requestId: string;
+    status: 'pending' | 'failed';
+  } | null>(null);
+  const submitting =
+    submissionState?.requestId === request.id &&
+    submissionState.status === 'pending';
+  const submissionFailed =
+    submissionState?.requestId === request.id &&
+    submissionState.status === 'failed';
   const requestRef = useRef(request);
   requestRef.current = request;
   const selectedRef = useRef(selected);
@@ -318,6 +369,7 @@ export function ToolApproval({
   const questionId = useId();
   const descId = useId();
   const commandId = useId();
+  const contentId = useId();
 
   // Reset only when a NEW request arrives. Reading the safe default through a
   // ref keeps this keyed strictly to request identity: if the same request's
@@ -326,6 +378,7 @@ export function ToolApproval({
   // request the user already answered.
   useEffect(() => {
     submittedRef.current = false;
+    setSubmissionState(null);
     selectedRef.current = safeDefaultIndexRef.current;
     setSelected(safeDefaultIndexRef.current);
   }, [request.id]);
@@ -333,13 +386,18 @@ export function ToolApproval({
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
-  const toolName = showsPlanWorkflow
-    ? t('workflow.planReview.title')
-    : localizeToolDisplayName(rawToolName, t);
-  const descriptionText = showsPlanWorkflow
-    ? undefined
-    : getDescriptionText(request);
+  const toolName = isGoal
+    ? t('approval.goal.title')
+    : showsPlanWorkflow
+      ? t('workflow.planReview.title')
+      : localizeToolDisplayName(rawToolName, t);
+  const descriptionText =
+    showsPlanWorkflow || isGoal ? undefined : getDescriptionText(request);
   const contentText = extractContentText(request);
+  const goalObjective =
+    typeof request.rawInput?.objective === 'string'
+      ? request.rawInput.objective
+      : '';
   const showsContent = Boolean(
     contentText && (request.contentIsInput || contentText !== request.title),
   );
@@ -349,21 +407,26 @@ export function ToolApproval({
       if (disabled || submittedRef.current) return;
       submittedRef.current = true;
       const requestId = requestRef.current.id;
-      const submission = onConfirm(requestId, optionId);
-      if (submission) {
-        void submission.catch(() => {
-          // Re-arm only if the rejected submission still belongs to the
-          // current request. This instance is reused across successive
-          // requests (no key at the mount sites), and a submission can
-          // reject late (up to the action timeout); a stale rejection would
-          // otherwise disarm the successor's double-submit guard mid-flight.
-          if (requestRef.current.id === requestId) {
-            submittedRef.current = false;
+      if (isGoal) {
+        setSubmissionState({ requestId, status: 'pending' });
+      }
+      const onFailure = () => {
+        // A late rejection must not re-arm a newer request's submission.
+        if (requestRef.current.id === requestId) {
+          submittedRef.current = false;
+          if (isGoal) {
+            setSubmissionState({ requestId, status: 'failed' });
           }
-        });
+        }
+      };
+      try {
+        const submission = onConfirm(requestId, optionId);
+        if (submission) void submission.catch(onFailure);
+      } catch {
+        onFailure();
       }
     },
-    [onConfirm, disabled],
+    [onConfirm, disabled, isGoal],
   );
 
   const focusOption = useCallback((index: number) => {
@@ -440,6 +503,18 @@ export function ToolApproval({
       ) {
         return;
       }
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        !isEditableTarget(e.target) &&
+        ((e.key >= '1' && e.key <= '9') ||
+          ((e.key === 'Enter' || e.key === ' ') &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-permission-option]')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
@@ -476,27 +551,97 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
+  const diffs = useMemo(
+    () =>
+      hostOwnsEditDiffPreview
+        ? []
+        : request.content
+            .filter((block) => block.type === 'diff')
+            .map((block) => {
+              const oldText = block.oldText ?? '';
+              const newText = block.newText ?? '';
+              // Approval cards render into an [role=alertdialog] and stay
+              // synchronous — a giant edit here freezes the panel and makes
+              // the deletion/addition rows unreadable at a glance. Gate on
+              // the raw payload before running the LCS; the transcript
+              // completed-edit view calls buildUnifiedDiff directly and
+              // keeps its previous coarse rendering.
+              const OMITTED =
+                ' Diff omitted because it is too large to display safely.';
+              const tooManyChars = oldText.length + newText.length > 100_000;
+              const oldLines = oldText ? oldText.split('\n').length : 0;
+              const newLines = newText ? newText.split('\n').length : 0;
+              const tooManyLines = oldLines + newLines > 1_000;
+              return {
+                path: block.path,
+                diff:
+                  tooManyChars || tooManyLines
+                    ? OMITTED
+                    : buildUnifiedDiff(oldText, newText),
+              };
+            }),
+    [request.content, hostOwnsEditDiffPreview],
+  );
   const command = getCommandFromRawInput(request);
-  const showsCommandBlock = Boolean((isExec && command) || showsContent);
-  const questionText = showsPlanWorkflow
-    ? t('workflow.planReview.question')
-    : isAgent
-      ? t('approval.launchAgentQuestion')
-      : isExec
-        ? t('approval.execQuestion', { tool: toolName })
-        : t('approval.changeQuestion');
+  // `rawInput.command` is model-supplied and reaches this block verbatim, so
+  // neutralise the invisible controls `sanitizeControlChars` covers — C0/ANSI,
+  // C1, and the bidi embedding/isolate controls — before an approver reads it.
+  // That is the whole of its coverage: zero-width and line/paragraph separator
+  // code points are not in its character class and still pass through here.
+  // The raw `command` is kept for execution and for the explain button below.
+  const commandDisplay = sanitizeControlChars(command ?? '');
+  // The description is model-supplied too (`rawInput.description`, or a title
+  // built from the tool's own `getDescription()`), and renders one element
+  // above the command block, in its tooltip and in the `aria-describedby`
+  // target. Sanitise the text only: the element gate below must stay on the
+  // raw value or the IDREF dangles.
+  const descriptionDisplay = descriptionText
+    ? sanitizeControlChars(descriptionText)
+    : undefined;
+  const showsCommandBlock =
+    !isGoal && Boolean((isExec && command) || showsContent);
+  // Exec warnings (e.g. command-substitution notices) arrive as real content
+  // blocks, not the input fallback — render them next to the command instead
+  // of letting the command block swallow them.
+  const execWarningsText =
+    isExec && command && showsContent && !request.contentIsInput
+      ? contentText
+      : null;
+  // The warnings text interpolates the model's raw `directory` argument
+  // (see `buildOutsideWorkspaceWarning`), so treat it like the command.
+  const execWarningsDisplay = execWarningsText
+    ? sanitizeControlChars(execWarningsText)
+    : undefined;
+  // The content text is model- or peer-supplied as well, and this block renders
+  // it in the body, in the `title` tooltip and as the `aria-describedby`
+  // target. Neutralise the text only: `showsContent` above stays on the raw
+  // value so the IDREF is still gated by whether the element renders.
+  const contentDisplay = sanitizeControlChars(contentText);
+  const questionText = isGoal
+    ? t('approval.goal.hint')
+    : showsPlanWorkflow
+      ? t('workflow.planReview.question')
+      : isAgent
+        ? t('approval.launchAgentQuestion')
+        : isExec
+          ? t('approval.execQuestion', { tool: toolName })
+          : t('approval.changeQuestion');
 
   return (
     <div
       ref={panelRef}
-      className={
-        variant === 'floating'
-          ? `${styles.approval} ${styles.floating}${
-              isExitPlanApproval ? ` ${styles.floatingWorkflow}` : ''
-            }`
-          : styles.approval
-      }
+      className={[
+        styles.approval,
+        variant === 'floating' && styles.floating,
+        variant === 'floating' && isExitPlanApproval && styles.floatingWorkflow,
+        isGoal && styles.goalApproval,
+      ]
+        .filter(Boolean)
+        .join(' ')}
       data-web-shell-permission-panel
+      data-web-shell-goal-approval={isGoal || undefined}
+      aria-busy={isGoal ? submitting : undefined}
       role="alertdialog"
       aria-labelledby={headingId}
       // Expose the question, the tool description, and the command/content to
@@ -507,7 +652,9 @@ export function ToolApproval({
       aria-describedby={[
         questionId,
         descriptionText ? descId : null,
-        showsCommandBlock ? commandId : null,
+        extraDescriptionId ?? null,
+        showsCommandBlock || isGoal ? commandId : null,
+        execWarningsText ? contentId : null,
       ]
         .filter(Boolean)
         .join(' ')}
@@ -520,31 +667,69 @@ export function ToolApproval({
         <span className={styles.name} id={headingId}>
           {toolName}
         </span>
+        {showBrowserNotifications && <BrowserNotificationControl />}
       </div>
 
       {descriptionText && (
-        <div className={styles.desc} id={descId} title={descriptionText}>
-          {descriptionText}
+        <div className={styles.desc} id={descId} title={descriptionDisplay}>
+          {descriptionDisplay}
         </div>
       )}
 
-      {isExec && command ? (
-        <div className={styles.code}>
-          <pre className={styles.codeBlock} id={commandId} title={command}>
-            {command}
-          </pre>
-        </div>
+      {isGoal ? (
+        <GoalApprovalContent
+          key={request.id}
+          id={commandId}
+          objective={goalObjective}
+          content={contentText || (goalObjective ? '' : request.title || '')}
+        />
+      ) : isExec && command ? (
+        <>
+          <div className={styles.code}>
+            <pre
+              className={styles.codeBlock}
+              id={commandId}
+              title={commandDisplay}
+            >
+              {commandDisplay}
+            </pre>
+          </div>
+          {execWarningsText && (
+            <pre
+              className={styles.content}
+              id={contentId}
+              title={execWarningsDisplay}
+            >
+              {execWarningsDisplay}
+            </pre>
+          )}
+        </>
       ) : showsContent ? (
         <pre
           className={`${styles.content}${
             isExitPlanApproval ? ` ${styles.planContent}` : ''
           }`}
           id={commandId}
-          title={contentText}
+          title={contentDisplay}
         >
-          {contentText}
+          {contentDisplay}
         </pre>
       ) : null}
+
+      {diffs.length > 0 && (
+        // `data-plan-interactive` is the existing Escape-exempt opt-out the
+        // panel's handleKeyDown already recognises: it lets Arrow/j/k/Home/End
+        // reach the focused diff row for native scroll instead of moving the
+        // approval selection, while Escape still bubbles up and rejects.
+        <div className={styles.content} data-plan-interactive>
+          {diffs.map((block, index) => (
+            <div key={index}>
+              <div>{block.path}</div>
+              <DiffView diff={block.diff} />
+            </div>
+          ))}
+        </div>
+      )}
 
       {showsPlanWorkflow && (
         <div className={styles.workflow}>
@@ -564,9 +749,24 @@ export function ToolApproval({
         </div>
       )}
 
-      <div className={styles.question} id={questionId}>
+      <div
+        className={isGoal ? styles.goalHint : styles.question}
+        id={questionId}
+      >
         {questionText}
       </div>
+
+      {isGoal && (
+        <div className={styles.goalFeedback}>
+          {submissionFailed ? (
+            <span role="alert">{t('approval.goal.failed')}</span>
+          ) : (
+            <span role="status">
+              {submitting ? t('approval.goal.pending') : ''}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* radiogroup semantics — the approval choice is single-select. No label
           on the group: the alertdialog already exposes the question via
@@ -587,7 +787,7 @@ export function ToolApproval({
                 isSelected ? styles.optionActive : ''
               }`}
               data-web-shell-permission-option
-              disabled={disabled}
+              disabled={disabled || (isGoal && submitting)}
               data-option-id={option.id}
               tabIndex={isSelected ? 0 : -1}
               role="radio"

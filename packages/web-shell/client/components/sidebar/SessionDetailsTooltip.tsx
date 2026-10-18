@@ -110,13 +110,15 @@ export function SessionDetailsTooltip({
       ? t('sessionsOverview.status.askUserQuestion')
       : session.hasActivePrompt
         ? t('sidebar.running')
-        : session.activeWorkState === 'active'
-          ? t('sidebar.activeWork')
-          : session.activeWorkState === 'unknown'
-            ? t('sidebar.activityUnknown')
-            : completedUnread
-              ? t('sidebar.completedUnread')
-              : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
+        : session.hasRunningBackgroundTasks
+          ? t('background.running')
+          : session.activeWorkState === 'active'
+            ? t('sidebar.activeWork')
+            : session.activeWorkState === 'unknown'
+              ? t('sidebar.activityUnknown')
+              : completedUnread
+                ? t('sidebar.completedUnread')
+                : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
 
   useEffect(() => {
     return () => {

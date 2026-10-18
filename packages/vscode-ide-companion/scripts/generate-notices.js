@@ -7,12 +7,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const projectRoot = path.resolve(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
 );
 const packagePath = path.join(projectRoot, 'packages', 'vscode-ide-companion');
-const noticeFilePath = path.join(packagePath, 'NOTICES.txt');
 
 /**
  * Standard MIT license text used when a package declares MIT but ships no
@@ -44,19 +44,14 @@ SOFTWARE.`;
  *
  * @param {string} depName - Package name
  * @param {string} depVersion - Resolved version string
- * @param {string} resolvedKey - Lockfile key indicating where the package is installed
+ * @param {string} packageDir - Directory the package is installed in
  * @returns {Promise<{name: string, version: string, repository: string, license: string}>}
  */
-async function getDependencyLicense(depName, depVersion, resolvedKey) {
+async function getDependencyLicense(depName, depVersion, packageDir) {
   let licenseContent = 'License text not found.';
   let repositoryUrl = 'No repository found';
 
-  // Derive the on-disk path directly from the lockfile key
-  const depPackageJsonPath = path.join(
-    projectRoot,
-    resolvedKey,
-    'package.json',
-  );
+  const depPackageJsonPath = path.join(packageDir, 'package.json');
 
   try {
     const depPackageJsonContent = await fs.readFile(
@@ -100,6 +95,17 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
     // and an Apache-style NOTICE file (required by Apache-2.0 §4(d)).
     // Append both so the notices they accompany are actually shipped.
     const extraSections = [];
+    // pako 1.0.11's top-level LICENSE omits its lib/zlib/inflate.js header.
+    // Original: https://registry.npmjs.org/pako/-/pako-1.0.11.tgz
+    if (depName === 'pako' && depVersion === '1.0.11') {
+      const zlibLicense = await fs.readFile(
+        new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+        'utf-8',
+      );
+      extraSections.push(
+        `--- lib/zlib/inflate.js (Zlib) ---\n\n${zlibLicense.trim()}`,
+      );
+    }
     for (const supplementaryFile of await findSupplementaryLicenseFiles(
       packageDir,
     )) {
@@ -183,6 +189,7 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
     licenseFileHint,
     'LICENSE',
     'LICENSE.md',
+    'LICENSE.markdown',
     'LICENSE.txt',
     'LICENSE-MIT.txt',
     'LICENSE-MIT',
@@ -309,8 +316,8 @@ export function normalizeRepositoryUrl(repository) {
 
 /**
  * Produce fallback license text for packages that declare a known SPDX
- * license but ship no license file. Currently only MIT is covered, as it is
- * the only such declaration in the dependency graph.
+ * license but ship no license file. Only exact MIT declarations use this
+ * fallback; bundled packages with other licenses retain their original texts.
  *
  * @param {unknown} license - The `license` field from package.json
  * @param {unknown} author - The `author` field from package.json
@@ -333,180 +340,201 @@ export function getFallbackLicenseText(license, author) {
 }
 
 /**
- * Resolve a package in the lockfile by walking up the node_modules chain,
- * mirroring Node.js module resolution algorithm.
+ * Find where `packageName` resolves from `fromDir` by walking up the
+ * node_modules chain the way Node.js does. This reads the installed tree
+ * rather than a lockfile, so the notices describe what the extension actually
+ * bundles, whichever package manager laid that tree out.
  *
  * @param {string} packageName - Package to find
- * @param {object} packages - packageLock.packages map
- * @param {string} resolveFrom - Lockfile key to start resolution from
- * @returns {{info: object, key: string} | null}
+ * @param {string} fromDir - Real directory of the package that depends on it
+ * @returns {Promise<{dir: string, manifest: object} | null>}
  */
-function resolveInLockfile(packageName, packages, resolveFrom) {
-  // Walk up from resolveFrom, trying each node_modules level
-  let current = resolveFrom;
-  while (current) {
-    const candidate = `${current}/node_modules/${packageName}`;
-    if (packages[candidate]) {
-      return { info: packages[candidate], key: candidate };
+async function resolveInstalled(packageName, fromDir) {
+  let dir = fromDir;
+  for (;;) {
+    const candidate = path.join(dir, 'node_modules', packageName);
+    try {
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(candidate, 'package.json'), 'utf-8'),
+      );
+      return { dir: await fs.realpath(candidate), manifest };
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
     }
-    // Move up: strip the last /node_modules/... segment
-    const lastNm = current.lastIndexOf('/node_modules/');
-    if (lastNm === -1) break;
-    current = current.slice(0, lastNm);
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
-  // Finally try root hoisted level
-  const hoistedKey = `node_modules/${packageName}`;
-  if (packages[hoistedKey]) {
-    return { info: packages[hoistedKey], key: hoistedKey };
-  }
-  return null;
 }
 
 /**
- * Recursively collect third-party dependencies by walking the lockfile.
- * Mirrors Node.js module resolution: walks up the node_modules chain from
- * the current package's location.
+ * Recursively collect third-party dependencies from the installed tree,
+ * resolving each one from the real location of the package that needs it.
  *
  * @param {string} packageName - Package to resolve
- * @param {object} packageLock - Parsed package-lock.json
- * @param {Map<string, {version: string, resolvedKey: string}>} dependenciesMap - Accumulated results
- * @param {string} resolveFrom - Lockfile key prefix to resolve from (e.g. "packages/vscode-ide-companion")
- * @param {Set<string>} visitedKeys - Lockfile keys already traversed
+ * @param {string} fromDir - Real directory to resolve from
+ * @param {Map<string, {name: string, version: string, dir: string}>} dependenciesMap - Accumulated results
+ * @param {Set<string>} visitedDirs - Installed directories already traversed
  */
-export function collectDependencies(
+export async function collectDependencies(
   packageName,
-  packageLock,
+  fromDir,
   dependenciesMap,
-  resolveFrom,
-  visitedKeys,
+  visitedDirs,
 ) {
-  const resolved = resolveInLockfile(
-    packageName,
-    packageLock.packages,
-    resolveFrom,
-  );
+  const resolved = await resolveInstalled(packageName, fromDir);
   if (!resolved) {
     console.warn(
-      `Warning: Could not find package info for ${packageName} in package-lock.json.`,
+      `Warning: ${packageName} is not installed where ${fromDir} resolves it.`,
     );
     return;
   }
 
-  const { info: packageInfo, key: resolvedKey } = resolved;
+  const { dir, manifest } = resolved;
 
-  // Traversal guard: skip if this exact lockfile path was already visited.
-  // Keyed by resolved path (not package name) so different installed versions
-  // of the same package are each traversed once.
-  if (visitedKeys.has(resolvedKey)) {
+  // Traversal guard: keyed by real directory, not package name, so different
+  // installed versions of the same package are each traversed once.
+  if (visitedDirs.has(dir)) {
     return;
   }
-  visitedKeys.add(resolvedKey);
+  visitedDirs.add(dir);
 
-  // Workspace-linked packages: follow resolved pointer to collect their third-party deps
-  if (packageInfo.link) {
-    const realInfo = packageLock.packages[packageInfo.resolved];
-    if (realInfo?.dependencies) {
-      for (const depName of Object.keys(realInfo.dependencies)) {
-        collectDependencies(
-          depName,
-          packageLock,
-          dependenciesMap,
-          packageInfo.resolved,
-          visitedKeys,
-        );
-      }
+  // A workspace package resolves outside every node_modules directory: follow
+  // it for its third-party dependencies without listing it.
+  if (dir.split(path.sep).includes('node_modules')) {
+    // Output dedup: emit each (name, version) pair once, even when the same
+    // version is installed at multiple paths.
+    const outputKey = `${packageName}@${manifest.version}`;
+    if (!dependenciesMap.has(outputKey)) {
+      dependenciesMap.set(outputKey, {
+        name: packageName,
+        version: manifest.version,
+        dir,
+      });
     }
-    return;
   }
 
-  // Output dedup: emit each (name, version) pair once, even when the same
-  // version is installed at multiple paths.
-  const outputKey = `${packageName}@${packageInfo.version}`;
-  if (!dependenciesMap.has(outputKey)) {
-    dependenciesMap.set(outputKey, {
-      name: packageName,
-      version: packageInfo.version,
-      resolvedKey,
-    });
-  }
-
-  if (packageInfo.dependencies) {
-    for (const depName of Object.keys(packageInfo.dependencies)) {
-      // Resolve transitive deps from THIS package's location
-      collectDependencies(
-        depName,
-        packageLock,
-        dependenciesMap,
-        resolvedKey,
-        visitedKeys,
-      );
-    }
+  const bundled = dir.split(path.sep).includes('node_modules')
+    ? []
+    : (manifest.bundledDevDependencies ?? []);
+  for (const depName of [
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...bundled,
+  ]) {
+    // Web Shell uses ExcelJS's prebuilt browser entry. These Node-only branches
+    // are not in that bundle; its actual embedded packages are inventoried below.
+    if (
+      packageName === 'exceljs' &&
+      ['archiver', 'unzipper', 'tmp'].includes(depName)
+    )
+      continue;
+    await collectDependencies(depName, dir, dependenciesMap, visitedDirs);
   }
 }
 
-async function main() {
-  try {
-    const packageJsonPath = path.join(packagePath, 'package.json');
-    const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
-    const packageJson = JSON.parse(packageJsonContent);
-
-    const packageLockJsonPath = path.join(projectRoot, 'package-lock.json');
-    const packageLockJsonContent = await fs.readFile(
-      packageLockJsonPath,
+// ExcelJS ships a prebuilt browser bundle whose embedded dependencies are not
+// discoverable by walking its runtime package.json dependencies.
+export async function getExceljsBrowserNotices(packageDir) {
+  const inventory = JSON.parse(
+    await fs.readFile(
+      new URL('./licenses/exceljs-browser.json', import.meta.url),
       'utf-8',
+    ),
+  );
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(packageDir, 'package.json'), 'utf-8'),
+  );
+  const bundle = await fs.readFile(path.join(packageDir, inventory.browser));
+  if (
+    manifest.version !== inventory.exceljsVersion ||
+    manifest.browser !== inventory.browser ||
+    createHash('sha256').update(bundle).digest('hex') !== inventory.bundleSha256
+  ) {
+    throw new Error(
+      'ExcelJS browser bundle changed; refresh its bundled license inventory.',
     );
-    const packageLockJson = JSON.parse(packageLockJsonContent);
-
-    const allDependencies = new Map();
-    const visitedKeys = new Set();
-    const directDependencies = Object.keys(packageJson.dependencies);
-    const workspacePrefix = path.relative(projectRoot, packagePath);
-
-    for (const depName of directDependencies) {
-      collectDependencies(
-        depName,
-        packageLockJson,
-        allDependencies,
-        workspacePrefix,
-        visitedKeys,
-      );
-    }
-
-    const dependencyEntries = Array.from(allDependencies.values());
-
-    const licensePromises = dependencyEntries.map(
-      ({ name, version, resolvedKey }) =>
-        getDependencyLicense(name, version, resolvedKey),
-    );
-
-    const dependencyLicenses = await Promise.all(licensePromises);
-
-    let noticeText =
-      'This file contains third-party software notices and license terms.\n\n';
-
-    for (const dep of dependencyLicenses) {
-      noticeText +=
-        '============================================================\n';
-      noticeText += `${dep.name}@${dep.version}\n`;
-      noticeText += `(${dep.repository})\n\n`;
-      noticeText += `${dep.license}\n\n`;
-    }
-
-    // Normalize line endings to LF. Third-party license files may use CRLF,
-    // which would otherwise be embedded verbatim and produce spurious diffs
-    // (the file is declared `eol=lf` in .gitattributes).
-    noticeText = noticeText.replace(/\r\n/g, '\n');
-
-    await fs.writeFile(noticeFilePath, noticeText);
-    console.log(`NOTICES.txt generated at ${noticeFilePath}`);
-    console.log(`Total dependencies: ${dependencyEntries.length}`);
-  } catch (error) {
-    console.error('Error generating NOTICES.txt:', error);
-    process.exit(1);
   }
+  return inventory.packages;
 }
 
-export async function runNoticeGeneration(env = process.env) {
+async function main({ packageDir = packagePath, bundledOnly = false } = {}) {
+  const packageJsonPath = path.join(packageDir, 'package.json');
+  const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
+  const packageJson = JSON.parse(packageJsonContent);
+
+  const allDependencies = new Map();
+  const visitedDirs = new Set();
+  const directDependencies = bundledOnly
+    ? (packageJson.bundledDevDependencies ?? [])
+    : Object.keys(packageJson.dependencies);
+
+  if (bundledOnly) {
+    if (directDependencies.length === 0)
+      throw new Error('No bundled dependency seeds declared');
+    for (const name of directDependencies) {
+      if (!(await resolveInstalled(name, packageDir)))
+        throw new Error(`Bundled dependency ${name} is not installed`);
+    }
+  }
+
+  // Sequential on purpose: the traversal order is the file's order, and it
+  // must not depend on which filesystem read finishes first.
+  for (const depName of directDependencies) {
+    await collectDependencies(
+      depName,
+      packageDir,
+      allDependencies,
+      visitedDirs,
+    );
+  }
+
+  const dependencyEntries = Array.from(allDependencies.values());
+
+  const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
+  const browserLicenses = exceljs
+    ? await getExceljsBrowserNotices(exceljs.dir)
+    : [];
+  const bundledLicenses = new Map(
+    browserLicenses.map((license) => [
+      `${license.name}@${license.version}`,
+      license,
+    ]),
+  );
+  const licensePromises = dependencyEntries.map(
+    ({ name, version, dir }) =>
+      bundledLicenses.get(`${name}@${version}`) ??
+      getDependencyLicense(name, version, dir),
+  );
+  const dependencyLicenses = [
+    ...(await Promise.all(licensePromises)),
+    ...browserLicenses.filter(
+      ({ name, version }) => !allDependencies.has(`${name}@${version}`),
+    ),
+  ];
+
+  let noticeText =
+    'This file contains third-party software notices and license terms.\n\n';
+
+  for (const dep of dependencyLicenses) {
+    noticeText +=
+      '============================================================\n';
+    noticeText += `${dep.name}@${dep.version}\n`;
+    noticeText += `(${dep.repository})\n\n`;
+    noticeText += `${dep.license}\n\n`;
+  }
+
+  // Normalize line endings to LF. Third-party license files may use CRLF,
+  // which would otherwise be embedded verbatim and produce spurious diffs
+  // (the file is declared `eol=lf` in .gitattributes).
+  noticeText = noticeText.replace(/\r\n/g, '\n');
+
+  const noticeFilePath = path.join(packageDir, 'NOTICES.txt');
+  await fs.writeFile(noticeFilePath, noticeText);
+  console.log(`NOTICES.txt generated at ${noticeFilePath}`);
+  console.log(`Total dependencies: ${dependencyLicenses.length}`);
+}
+
+export async function runNoticeGeneration(env = process.env, options) {
   const skipGeneration = ['1', 'true'].includes(
     (env.QWEN_SKIP_NOTICE_GENERATION ?? '').toLowerCase(),
   );
@@ -518,7 +546,7 @@ export async function runNoticeGeneration(env = process.env) {
     return;
   }
 
-  await main();
+  await main(options);
 }
 
 // Only run when executed directly (e.g. `npm run generate:notices`), not when
@@ -527,5 +555,12 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  runNoticeGeneration().catch(console.error);
+  const options =
+    process.argv[2] === '--bundled'
+      ? { packageDir: path.resolve(process.argv[3]), bundledOnly: true }
+      : undefined;
+  runNoticeGeneration(process.env, options).catch((error) => {
+    console.error('Error generating NOTICES.txt:', error);
+    process.exitCode = 1;
+  });
 }

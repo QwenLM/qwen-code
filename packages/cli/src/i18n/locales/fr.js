@@ -135,12 +135,12 @@ export default {
   'type to filter…': 'tapez pour filtrer…',
   'No skills are currently available.':
     'Aucune compétence n’est actuellement disponible.',
-  'All available skills are locked at a higher scope (see below).':
-    'Toutes les compétences disponibles sont verrouillées à une portée supérieure (voir ci-dessous).',
   'No skills match the search.':
     'Aucune compétence ne correspond à la recherche.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
+  'Locked by settings entries you cannot toggle here:':
+    'Verrouillées par des entrées de paramètres (impossible de basculer ici) :',
+  '{{count}} locked not shown':
+    '{{count}} compétences verrouillées non affichées',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [verrouillée : {{scope}}]',
@@ -194,6 +194,8 @@ export default {
     'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Impossible de revenir à un tour qui a été compressé. Essayez un tour plus récent.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    "Impossible de ramener la conversation à ce tour : il ne correspond plus à l'historique du modèle (par exemple après une nouvelle tentative). Essayez un tour plus récent.",
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'La restauration des fichiers est indisponible pour ce tour (aucune modification capturée, ou ce tour est antérieur à la session actuelle).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -439,6 +441,12 @@ export default {
   active: 'actif',
   disabled: 'désactivé',
   enabled: 'activé',
+  'disabled (bare mode)': 'désactivé (mode minimal)',
+  'disabled (safe mode)': 'désactivé (mode sécurisé)',
+  'disabled (disableAllHooks)': 'désactivé (disableAllHooks)',
+  'disabled (folder not trusted)': 'désactivé (dossier non approuvé)',
+  'disabled (turned off for this session)':
+    'désactivé (désactivé pour cette session)',
   'View Details': 'Voir les détails',
   'Update failed:': 'Échec de la mise à jour :',
   'Updating {{name}}...': 'Mise à jour de {{name}}...',
@@ -654,6 +662,10 @@ export default {
     'Cette extension installera les compétences suivantes :',
   'This extension will install the following subagents:':
     'Cette extension installera les sous-agents suivants :',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Cette extension installera les workflows suivants (scripts JavaScript pouvant lancer des sous-agents) :',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Ces scripts de workflow ont changé depuis la version installée : {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation annulée pour "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -719,6 +731,7 @@ export default {
   'Context files:': 'Fichiers de contexte :',
   'Skills:': 'Compétences :',
   'Agents:': 'Agents :',
+  'Workflows:': 'Workflows :',
   'MCP servers:': 'MCP servers :',
   'Link extension failed to install.':
     "Échec de l'installation de l'extension liée.",
@@ -820,6 +833,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurés',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Ce menu est en lecture seule. Pour ajouter ou modifier des hooks, éditez settings.json directement ou demandez à Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Rouvrez ce menu pour recharger les définitions des hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Les options de contrôle des hooks et les paramètres de sécurité HTTP nécessitent un redémarrage.',
+  'Failed to reload hook definitions: {{error}}':
+    'Échec du rechargement des définitions des hooks : {{error}}',
   'Enter to select · Esc to cancel':
     'Enter pour sélectionner · Esc pour annuler',
   'Exit codes:': 'Codes de sortie :',
@@ -1624,6 +1643,11 @@ export default {
   'No tasks currently running': 'Aucune tâche en cours',
   'No entry to show.': 'Aucune entrée à afficher.',
   'needs approval': 'nécessite une approbation',
+  'Large workflow': 'Workflow volumineux',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow volumineux : {{agents}} agents planifiés (seuil d’alerte {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow volumineux : ~{{tokens}} jetons de sortie prévus (seuil d’alerte {{cap}}).',
   'rejected — edit config to re-approve':
     'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':
@@ -1897,12 +1921,16 @@ export default {
   'Context Usage': 'Utilisation du contexte',
   'No API response yet. Send a message to see actual usage.':
     "Pas encore de réponse API. Envoyez un message pour voir l'utilisation réelle.",
+  'Estimated usage, including the conversation':
+    'Utilisation estimée, conversation comprise',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Pas encore d'utilisation du fournisseur. Ce sont des estimations locales, conversation comprise.",
   'Estimated pre-conversation overhead':
     'Surcharge estimée avant la conversation',
   'Context window': 'Fenêtre de contexte',
   Used: 'Utilisé',
   Free: 'Libre',
-  'Autocompact buffer': 'Tampon de compaction automatique',
+  'Autocompact buffer': 'Réserve de compaction',
   'Usage by category': 'Utilisation par catégorie',
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',
@@ -1910,6 +1938,9 @@ export default {
   'Memory files': 'Fichiers mémoire',
   Skills: 'Compétences',
   Messages: 'Messages',
+  'Startup context': 'Contexte de démarrage',
+  Unattributed: 'Non attribué',
+  'Cached prefix': 'Préfixe en cache',
   'Run /context detail for per-item breakdown.':
     'Exécutez /context detail pour une répartition par élément.',
   'body loaded': 'corps chargé',
@@ -2129,6 +2160,10 @@ export default {
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key invalide. Les clés à la demande commencent par "sk-" ou "sk-ws-". Les clés Token Plan ("sk-sp-") nécessitent l\'entrée Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key invalide. Les Token Plan API Keys commencent par "sk-sp-". Générez-en une depuis la console Token Plan, ou utilisez l\'entrée Standard API Key pour une clé à la demande.',
   'Lock release warning': 'Avertissement de libération du verrou',
   'Metadata write warning': "Avertissement d'écriture des métadonnées",
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -2278,6 +2313,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

@@ -48,3 +48,13 @@ test('does not treat an imported module as the main module', () => {
   );
   assert.equal(isMainModule(undefined, exporterUrl), false);
 });
+
+test('returns false for a path that is not on disk instead of throwing', () => {
+  // `runner.py` above exists, so it exercises the realpath success path and
+  // leaves the ENOENT fallback unpinned. The fallback is reachable only
+  // because the helper is exported, so pin it here: without it a caller
+  // passing a stale or mistyped path gets an exception instead of `false`.
+  const missingPath = path.join(path.dirname(exporterPath), 'no-such-entry.js');
+  assert.equal(fs.existsSync(missingPath), false);
+  assert.equal(isMainModule(missingPath, exporterUrl), false);
+});

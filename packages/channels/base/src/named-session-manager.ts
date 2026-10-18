@@ -48,6 +48,7 @@ export interface NamedSessionManagerOptions {
   filePath: string;
   router: SessionRouter;
   isBusy(sessionId: string): boolean;
+  onSessionRetiring?(sessionId: string): void;
   now?: () => number;
 }
 
@@ -104,6 +105,7 @@ export class NamedSessionManager {
   private readonly filePath: string;
   private readonly router: SessionRouter;
   private readonly isBusy: (sessionId: string) => boolean;
+  private readonly onSessionRetiring?: (sessionId: string) => void;
   private readonly now: () => number;
   private registry: StoredRegistry;
   private taskBySessionId: Map<string, NamedSessionTaskReference>;
@@ -122,6 +124,7 @@ export class NamedSessionManager {
     this.filePath = options.filePath;
     this.router = options.router;
     this.isBusy = options.isBusy;
+    this.onSessionRetiring = options.onSessionRetiring;
     this.now = options.now ?? Date.now;
     this.registry = this.readRegistry();
     this.taskBySessionId = this.buildTaskIndex(this.registry);
@@ -486,7 +489,9 @@ export class NamedSessionManager {
         );
       }
       try {
-        await this.router.detachManagedSession(task.sessionId);
+        await this.router.detachManagedSession(task.sessionId, () =>
+          this.onSessionRetiring?.(task.sessionId),
+        );
       } catch (error) {
         // The fallback's load may have healed its own superseded redirect
         // mid-close; restoring the raw snapshot would undo that heal.
@@ -613,6 +618,7 @@ export class NamedSessionManager {
         updatedTask.cwd,
         { isolation: updatedTask.isolation, workspaceCwd: this.cwd },
       );
+      this.onSessionRetiring?.(task.sessionId);
       this.router.forgetManagedSession(task.sessionId);
       this.repointSupersededSessionIds(task.sessionId, sessionId);
       this.supersededSessionIds.delete(task.sessionId);
@@ -864,6 +870,7 @@ export class NamedSessionManager {
         task.target,
         this.cwd,
         task.cwd,
+        () => this.onSessionRetiring?.(task.sessionId),
       );
     } catch (error) {
       throw new NamedSessionTaskError(

@@ -1,0 +1,139 @@
+import { describe, expect, it } from 'vitest';
+import {
+  buildAuthProviderCatalog,
+  parseAuthProviderInstallRequest,
+} from './auth-provider-helpers.js';
+
+const request = {
+  providerId: 'custom-openai-compatible',
+  protocol: 'openai',
+  baseUrl: 'https://media.example/v1',
+  apiKey: 'test-only',
+  modelIds: ['qwen3-asr-flash'],
+};
+describe('custom service model purpose', () => {
+  it('rejects Responses voice before installation', () => {
+    expect(
+      parseAuthProviderInstallRequest({
+        ...request,
+        wireApi: 'responses',
+        advancedConfig: { purpose: 'voice' },
+      }),
+    ).toMatchObject({
+      ok: false,
+      code: 'invalid_voice_model',
+      error: expect.stringContaining('Chat Completions'),
+    });
+    expect(
+      parseAuthProviderInstallRequest({
+        ...request,
+        wireApi: 'chat-completions',
+        advancedConfig: { purpose: 'voice' },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('defaults an omitted voice protocol to OpenAI', () => {
+    expect(
+      parseAuthProviderInstallRequest({
+        ...request,
+        protocol: undefined,
+        advancedConfig: { purpose: 'voice' },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+  it.each(['voice', 'image'])(
+    'accepts %s and preserves it in the setup inputs',
+    (purpose) => {
+      expect(
+        parseAuthProviderInstallRequest({
+          ...request,
+          advancedConfig: { purpose },
+        }),
+      ).toMatchObject({ ok: true, value: { advancedConfig: { purpose } } });
+    },
+  );
+  it.each([
+    { modelIds: [], advancedConfig: { purpose: 'image' } },
+    { modelIds: undefined, advancedConfig: { purpose: 'image' } },
+    { advancedConfig: { purpose: 'unknown' } },
+    { providerId: 'minimax', advancedConfig: { purpose: 'image' } },
+    { protocol: 'anthropic', advancedConfig: { purpose: 'voice' } },
+    { modelIds: ['chat-model'], advancedConfig: { purpose: 'voice' } },
+    { baseUrl: undefined, advancedConfig: { purpose: 'voice' } },
+    {
+      baseUrl: 'https://media.example/v1?key=secret',
+      advancedConfig: { purpose: 'image' },
+    },
+    {
+      baseUrl: 'https://media.example/v1#secret',
+      advancedConfig: { purpose: 'image' },
+    },
+    {
+      baseUrl: 'http://media.example/v1',
+      advancedConfig: { purpose: 'image' },
+    },
+  ])('rejects unsupported purpose configuration: %j', (override) => {
+    expect(
+      parseAuthProviderInstallRequest({ ...request, ...override }),
+    ).toMatchObject({ ok: false });
+  });
+});
+
+describe('advanced form replacement', () => {
+  it.each([true, false, 'true', 1, null, undefined])(
+    'requires an explicit true boolean for %j',
+    (replaceExisting) => {
+      const parsed = parseAuthProviderInstallRequest({
+        ...request,
+        advancedConfig: { replaceExisting, contextWindowSize: 32768 },
+      });
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) throw new Error('Request rejected');
+      expect(parsed.value.advancedConfig).toEqual({
+        ...(replaceExisting === true ? { replaceExisting: true } : {}),
+        contextWindowSize: 32768,
+      });
+    },
+  );
+});
+
+describe('buildAuthProviderCatalog', () => {
+  it('lists QwenCloud first and pins every group membership', () => {
+    const catalog = buildAuthProviderCatalog('/tmp/workspace');
+    expect(catalog.workspaceCwd).toBe('/tmp/workspace');
+    expect(catalog.groups[0]).toMatchObject({
+      id: 'qwencloud',
+      label: 'QwenCloud',
+      providerIds: ['qwencloud-token-plan', 'qwencloud-standard'],
+    });
+    expect(catalog.groups.map((group) => group.id)).toEqual([
+      'qwencloud',
+      'alibaba',
+      'third-party',
+      'custom',
+    ]);
+    expect(catalog.groups[1]).toMatchObject({
+      id: 'alibaba',
+      providerIds: ['coding-plan', 'token-plan', 'alibabaStandard'],
+    });
+    expect(catalog.groups[2]).toMatchObject({
+      id: 'third-party',
+      providerIds: [
+        'deepseek',
+        'grok',
+        'minimax',
+        'zai',
+        'moonshot',
+        'idealab',
+        'modelscope',
+        'openrouter',
+        'requesty',
+      ],
+    });
+    expect(catalog.groups[3]).toMatchObject({
+      id: 'custom',
+      providerIds: ['custom-openai-compatible'],
+    });
+  });
+});

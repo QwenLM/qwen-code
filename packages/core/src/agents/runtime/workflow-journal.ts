@@ -15,8 +15,14 @@
  * hash diverges, or that has no journaled result, runs live, and every call
  * after it runs live too.
  *
- * Only `result` feeds the cache; `started` and `failed` are diagnostic. What
- * they buy on resume is the ability to say WHY a call is running live again:
+ * A run's first line is `launched`, written once at its start and never on a
+ * resume, so the journal of a run that launched is never empty. A resume whose
+ * journal is not on disk is refused: there is nothing to replay, and running
+ * every agent again under the old run id would only read as a continuation.
+ *
+ * `started` and `failed` invalidate older results for the same key. On the
+ * first cache miss, results outside the reused prefix are removed atomically
+ * before live work begins. Diagnostic records remain to explain retries:
  * `failed` means the previous run's dispatch settled without a value, while
  * a bare `started` means the run was interrupted with that agent in flight.
  * A run the user cancelled writes no `failed` records at all, so every key it
@@ -30,9 +36,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
- * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
- * don't bust the cache.
+ * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
+ * `disallowedTools`, `tools`) with object keys sorted, so cosmetic opt
+ * differences (a re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -40,13 +46,21 @@
  * precondition that makes prefix-hash caching correct.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
-import { read, writeLine } from '../../utils/jsonl-utils.js';
+import {
+  parseLineTolerantWithIntegrity,
+  writeLine,
+} from '../../utils/jsonl-utils.js';
+import { renameWithRetry } from '../../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../workflow-correlation.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
 
@@ -82,14 +96,41 @@ export interface JournalFailedEntry {
   agentId: string;
 }
 
+/**
+ * The first record of every run, written once when the run starts and never on
+ * a resume. It carries nothing: its job is to make the journal of a run that
+ * launched non-empty before any agent settles, so "this run was interrupted
+ * before its first result" and "this run's journal is gone" are different
+ * files on disk.
+ */
+export interface JournalLaunchedEntry {
+  type: 'launched';
+  version: 1;
+}
+
 export type JournalEntry =
+  | JournalLaunchedEntry
   | JournalStartedEntry
   | JournalResultEntry
-  | JournalFailedEntry;
+  | JournalFailedEntry
+  | { type: 'source'; version: 1; sourceRef: WorkflowSourceRef };
+
+/**
+ * What reading a run's journal found. `missing` and `unreadable` are kept
+ * apart from an empty replay because a resume means something different for
+ * each: an empty journal belongs to a run that had nothing to cache yet, while
+ * a journal that is not there leaves nothing to resume at all.
+ */
+export type JournalLoadResult =
+  | { kind: 'loaded'; replay: JournalReplay }
+  | { kind: 'missing' }
+  | { kind: 'unreadable'; reason: string };
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
-  /** key → the completed result entry (last write wins). */
+  sourceRef?: WorkflowSourceRef;
+  sourceError?: string;
+  /** key → the latest success, unless a later attempt invalidated it. */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
   started: Map<string, JournalStartedEntry[]>;
@@ -98,11 +139,38 @@ export interface JournalReplay {
 }
 
 /**
+ * The `agent()` options that change what a dispatch does, as one list: the
+ * resume key projects exactly these, and the orchestrator's fast path, which
+ * hands the session config to the agent untouched, is taken only when every
+ * one of them is absent. `label` / `phase` / `stallMs` are deliberately not
+ * here: they are cosmetic or operational.
+ */
+export const DISPATCH_AFFECTING_AGENT_OPTS = [
+  'schema',
+  'model',
+  'effort',
+  'isolation',
+  'agentType',
+  'workingDir',
+  'disallowedTools',
+  'tools',
+] as const;
+
+/**
  * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
- * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
- * operational and must NOT bust the cache. Object keys are sorted recursively
- * so a re-serialized schema with reordered keys hashes the same.
+ * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
+ * `disallowedTools` / `tools` change what the dispatch does; `label` / `phase` /
+ * `stallMs` are cosmetic or operational and must NOT bust the cache. Object
+ * keys are sorted recursively so a re-serialized schema with reordered keys
+ * hashes the same.
+ *
+ * `effort`, `disallowedTools` and `tools` change how hard the agent thinks and
+ * what it may do, so a resume that changed any of them has to run live. The
+ * sandbox normalizes them before they get here — an effort alias to its tier, a
+ * tool list to a sorted, de-duplicated array with built-in display names mapped
+ * to tool names — so `'med'` and `'medium'`, `Edit` and `edit`, or the same
+ * tools in another order, are one key. Any other name is kept as written, so
+ * two spellings that reach the same MCP tool are two keys.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
@@ -111,13 +179,7 @@ export interface JournalReplay {
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of [
-    'schema',
-    'model',
-    'isolation',
-    'agentType',
-    'workingDir',
-  ] as const) {
+  for (const k of DISPATCH_AFFECTING_AGENT_OPTS) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;
@@ -186,23 +248,25 @@ export function deriveArgsSeed(args: unknown): string {
 }
 
 /**
- * Build the replay maps from a flat list of journal entries. `result`
- * entries win last-write; `started` entries accumulate (so a key started
- * N times surfaces N prior attempts for the respawn telemetry); `failed`
- * keys are collected as a set.
+ * Build replay maps in record order: the latest attempt supersedes an older
+ * success or failure. Starts accumulate for respawn telemetry.
  *
  * An entry type this build does not know is skipped rather than rejected, so
  * a journal written by a newer build still replays here for the records this
  * one understands.
  */
 export function buildReplay(entries: JournalEntry[]): JournalReplay {
+  let sourceRef: WorkflowSourceRef | undefined;
+  let sourceError: string | undefined;
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
   const failed = new Set<string>();
   for (const e of entries) {
     if (e.type === 'result') {
       results.set(e.key, e);
+      failed.delete(e.key);
     } else if (e.type === 'started') {
+      results.delete(e.key);
       // A later attempt supersedes the prior terminal failure. If it is
       // interrupted, the next resume must describe it as interrupted rather
       // than carrying the stale failure classification forward forever.
@@ -211,20 +275,86 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
       if (list) list.push(e);
       else started.set(e.key, [e]);
     } else if (e.type === 'failed') {
+      results.delete(e.key);
       failed.add(e.key);
+    } else if (e.type === 'source') {
+      try {
+        const ref = readWorkflowSourceRef(e.sourceRef);
+        if (
+          e.version !== 1 ||
+          !ref ||
+          (sourceRef &&
+            (sourceRef.id !== ref.id || sourceRef.revision !== ref.revision))
+        ) {
+          throw new Error('Conflicting or unsupported workflow source record.');
+        }
+        sourceRef = ref;
+      } catch {
+        sourceError = 'Workflow journal contains invalid source metadata.';
+      }
     }
   }
-  return { results, started, failed };
+  return {
+    results,
+    started,
+    failed,
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(sourceError ? { sourceError } : {}),
+  };
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export class WorkflowJournalWriteError extends Error {
+  readonly __wfRunFailure = true;
+
+  constructor(cause: unknown) {
+    super(
+      'Could not persist workflow replay invalidation; subsequent agents were not started. Check storage and retry.',
+      { cause },
+    );
+    this.name = 'WorkflowJournalWriteError';
+  }
+}
+
+async function readEntries(journalPath: string): Promise<JournalEntry[]> {
+  const contents = await fs.readFile(journalPath, 'utf8');
+  const entries: JournalEntry[] = [];
+  for (const line of contents.split('\n')) {
+    if (!line.trim()) continue;
+    const parsed = parseLineTolerantWithIntegrity<Record<string, unknown>>(
+      line,
+      journalPath,
+    );
+    if (!parsed.complete)
+      throw new Error('Workflow journal contains incomplete records.');
+    for (const entry of parsed.records) {
+      if (
+        typeof entry['type'] !== 'string' ||
+        (['started', 'failed', 'result'].includes(entry['type']) &&
+          (typeof entry['key'] !== 'string' ||
+            typeof entry['agentId'] !== 'string' ||
+            (entry['type'] === 'result' && !Object.hasOwn(entry, 'result')))) ||
+        (entry['type'] === 'launched' && entry['version'] !== 1)
+      ) {
+        throw new Error('Workflow journal contains invalid records.');
+      }
+      entries.push(entry as unknown as JournalEntry);
+    }
+  }
+  return entries;
 }
 
 /**
- * Append-only JSONL journal for one workflow run. Reads tolerate a missing
- * file (fresh run); appends are fire-and-forget at the call site (the
- * orchestrator does not await them on the hot path — a journal write
- * failure must not fail the dispatch).
+ * JSONL journal with serialized append and atomic replay-prefix retention.
+ * Ordinary appends are best-effort at the call site. Prefix retention must
+ * succeed before a resumed run starts live work.
  */
 export class WorkflowJournal {
   private pending = Promise.resolve();
+  private writeError: WorkflowJournalWriteError | undefined;
   readonly path: string;
 
   constructor(
@@ -273,8 +403,16 @@ export class WorkflowJournal {
     }
   }
 
-  /** Remove a never-registered run's journal file, best-effort. */
+  /**
+   * Remove a never-registered run's journal file, best-effort.
+   *
+   * Waits for every append already queued first. An append still in flight
+   * would otherwise land after the delete and recreate the file, leaving a run
+   * id that never registered with a non-empty journal a later resume would
+   * accept.
+   */
   async remove(): Promise<void> {
+    await this.drain();
     try {
       if (await this.hasSymlinkedPath()) return;
       await fs.rm(this.path, { force: true });
@@ -289,20 +427,103 @@ export class WorkflowJournal {
     }
   }
 
-  /** Load + parse all entries into replay maps. Empty maps if no file. */
-  async load(): Promise<JournalReplay> {
+  /**
+   * Load and parse every entry into replay maps. A file that is not there and
+   * a file that cannot be read are reported as such rather than as an empty
+   * replay; a file that exists and holds no entries is `loaded`.
+   */
+  async load(): Promise<JournalLoadResult> {
     try {
-      const entries = await read<JournalEntry>(this.path);
-      return buildReplay(entries);
+      if (await this.hasSymlinkedPath())
+        throw new Error('Workflow journal path is symlinked.');
+      await fs.stat(this.path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { kind: 'missing' };
+      }
+      debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
+      return { kind: 'unreadable', reason: describeError(e) };
+    }
+    try {
+      const entries = await readEntries(this.path);
+      return { kind: 'loaded', replay: buildReplay(entries) };
     } catch (e) {
       debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
-      return { results: new Map(), started: new Map(), failed: new Set() };
+      return { kind: 'unreadable', reason: describeError(e) };
     }
   }
 
-  /** Append one entry. Rejects only on I/O error (callers `.catch`). */
+  /**
+   * Record that the run launched. Best-effort: the record only sharpens what a
+   * later resume can say, so failing to write it must not fail the launch.
+   */
+  async markLaunched(): Promise<void> {
+    await this.append({ type: 'launched', version: 1 }).catch((error) =>
+      debugLogger.warn(
+        `WorkflowJournal.markLaunched failed for ${this.path}: ${error}`,
+      ),
+    );
+  }
+
+  retainReplayPrefix(keys: ReadonlySet<string>): Promise<void> {
+    const prefix = new Set(keys);
+    const operation = this.pending.then(async () => {
+      if (this.writeError) throw this.writeError;
+      let temporaryPath: string | undefined;
+      try {
+        if (await this.hasSymlinkedPath())
+          throw new Error('Workflow journal path is symlinked.');
+        const stat = await fs.stat(this.path);
+        if (process.geteuid && stat.uid !== process.geteuid()) {
+          throw new Error('Workflow journal is owned by another user.');
+        }
+        const entries = await readEntries(this.path);
+        const replay = buildReplay(entries);
+        if (replay.sourceError) throw new Error(replay.sourceError);
+        const retained = entries.filter(
+          (entry) => entry.type !== 'result' || prefix.has(entry.key),
+        );
+        const candidate = `${this.path}.${randomUUID()}.tmp`;
+        const file = await fs.open(candidate, 'wx', 0o600);
+        temporaryPath = candidate;
+        try {
+          await file.writeFile(
+            retained.map((entry) => JSON.stringify(entry) + '\n').join(''),
+            'utf8',
+          );
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        if (await this.hasSymlinkedPath())
+          throw new Error('Workflow journal path is symlinked.');
+        await renameWithRetry(temporaryPath, this.path, 3, 10, fs.rename);
+        temporaryPath = undefined;
+      } catch (cause) {
+        this.writeError = new WorkflowJournalWriteError(cause);
+        throw this.writeError;
+      } finally {
+        if (temporaryPath) {
+          await fs
+            .unlink(temporaryPath)
+            .catch((error) =>
+              debugLogger.warn(
+                `Workflow journal temporary file cleanup failed: ${error}`,
+              ),
+            );
+        }
+      }
+    });
+    this.pending = operation.catch(() => undefined);
+    return operation;
+  }
+
+  /** Append one entry; a failed invalidation blocks all later writes. */
   append(entry: JournalEntry): Promise<void> {
-    const operation = this.pending.then(() => writeLine(this.path, entry));
+    const operation = this.pending.then(() => {
+      if (this.writeError) throw this.writeError;
+      return writeLine(this.path, entry);
+    });
     this.pending = operation.catch(() => undefined);
     return operation;
   }

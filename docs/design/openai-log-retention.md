@@ -14,7 +14,7 @@ Deletion is restricted to the exact filename shape emitted by `OpenAILogger`: a 
 
 The UTC date in a valid filename avoids one `stat` call per file. Files on the cutoff day use mtime for sub-day precision. A missing directory is a successful no-op; a root scan failure aborts the throttled task so it does not write a success marker. Individual file failures are counted and do not stop later batches, while a file that disappears during deletion is benign.
 
-The first-pass scheduler checks both the global file-history marker and the marker for the resolved OpenAI log directory. A missing or stale OpenAI marker selects the one-minute catch-up delay even when file-history cleanup ran recently.
+The first-pass scheduler checks the global file-history marker, the marker for the resolved session debug-log directory, and the marker for the resolved OpenAI log directory. A missing or stale marker for any of them selects the one-minute catch-up delay even when the others ran recently.
 
 One-shot and stream-json cleanup starts immediately before model-capable execution, while ACP registers a target after each workspace session config initializes successfully. Cleanup never blocks startup or session creation. One directory is scanned at a time per process, while the existing cross-process marker and lock prevent duplicate work between interactive, headless, SDK, and ACP processes. A long-lived process retries completed work daily, a fresh marker when its remaining interval expires, lock contention after one minute, and failures after ten minutes.
 

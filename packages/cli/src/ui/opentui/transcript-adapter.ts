@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import type { Part } from '@google/genai';
 import { toolResultPresentation } from './tool-result-presentation.js';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
   extractStructuredResult,
   formatToolArgs,
@@ -32,6 +33,8 @@ interface SessionPart {
 }
 interface SessionLine {
   type?: string;
+  /** ISO 8601 record time; ink's resume stamps it on the first display run. */
+  timestamp?: string;
   message?: { role?: string; parts?: SessionPart[] };
 }
 
@@ -127,7 +130,7 @@ export function transcribeSession(
       }
       continue;
     }
-    if (o.type === 'tool_result') {
+    if (o.type === 'tool_result' && !isInternalCodeModeToolResult(o)) {
       const r = o.toolCallResult ?? {};
       const id = r.callId ?? pendingIdlessIds.shift() ?? `tool-${++toolSeq}`;
       const presentation = toolResultPresentation(
@@ -172,6 +175,8 @@ export function transcribeSession(
     }
     if (o.type === 'assistant') {
       let thinkingOpen = false;
+      const recorded = o.timestamp ? Date.parse(o.timestamp) : NaN;
+      let stamped = false;
       for (const p of parts) {
         if (p.thought && p.text) {
           events.push({ type: 'thinking', delta: p.text });
@@ -195,13 +200,17 @@ export function transcribeSession(
               title: opts.toolTitle?.(name) ?? name,
             });
             requests.set(id, { name, args: p.functionCall.args });
-            const args = p.functionCall.args;
-            if (args && typeof args === 'object' && !Array.isArray(args)) {
-              const text = formatToolArgs(args as Record<string, unknown>);
-              if (text) events.push({ type: 'tool-args', id, args: text });
-            }
+            const args = formatToolArgs(
+              p.functionCall.args as Record<string, unknown> | undefined,
+            );
+            if (args) events.push({ type: 'tool-args', id, args });
           } else if (p.text) {
-            events.push({ type: 'text', delta: p.text });
+            const stamp =
+              !stamped && Number.isFinite(recorded)
+                ? { timestamp: recorded }
+                : {};
+            stamped = true;
+            events.push({ type: 'text', delta: p.text, ...stamp });
           }
         }
       }

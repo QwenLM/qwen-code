@@ -133,10 +133,10 @@ describe('Focus mode', () => {
       expect(focused).toContain('Shell failed (Ctrl+O for details)');
       expect(focused).toContain('FOCUS_ERROR_HANDLED');
 
-      session.sendKey('\u000f');
+      session.pressKey('\u000f');
       await session.idle();
       expect(await session.screen()).toContain('FOCUS_ERROR_DETAILS');
-      session.sendKey('\u000f');
+      session.pressKey('\u000f');
       await session.idle();
       expect(await session.screen()).not.toContain('FOCUS_ERROR_DETAILS');
       await session.send('/focus');
@@ -207,11 +207,11 @@ describe('Focus mode', () => {
       await session.send('Inspect the fixture.');
       await session.waitFor('FOCUS_ANSWER');
       await session.idle();
-      session.sendKey('\u000f');
+      session.pressKey('\u000f');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).toContain('FOCUS_REASONING_TRACE');
-      session.sendKey('\u000f');
+      session.pressKey('\u000f');
       await session.idle();
       expect(await session.screen()).toMatch(/\bThought\b|\bThinking\b/);
       expect(JSON.stringify(server.requests[1]!.body)).toContain(
@@ -227,12 +227,12 @@ describe('Focus mode', () => {
       expect(focused).not.toMatch(/\bThought\b|\bThinking\b/);
       expect(focused).toContain('FOCUS_ANSWER');
 
-      session.sendKey('\u000f');
+      session.pressKey('\u000f');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).toContain('FOCUS_REASONING_TRACE');
       expect(await session.screen()).not.toMatch(readSummary);
-      session.sendKey('\u000f');
+      session.pressKey('\u000f');
       await session.idle();
       expect(await session.screen()).not.toContain('FOCUS_REASONING_TRACE');
       expect(await session.screen()).toMatch(readSummary);
@@ -268,11 +268,11 @@ describe('Focus mode', () => {
       await session.send('ui.focusMode');
       await session.idle(200, 5000);
       expect(await session.screen()).toContain('Focus Mode');
-      session.sendKey('\r');
+      session.pressKey('\r');
       await session.idle(200, 5000);
-      session.sendKey('\u001b');
+      session.pressKey('\u001b');
       await session.idle(500, 5000);
-      session.sendKey('\u001b');
+      session.pressKey('\u001b');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).not.toMatch(readSummary);
@@ -285,11 +285,11 @@ describe('Focus mode', () => {
       await session.idle(200, 5000);
       await session.send('ui.focusMode');
       await session.idle(200, 5000);
-      session.sendKey('\u000c');
+      session.pressKey('\u000c');
       await session.idle(200, 5000);
-      session.sendKey('\u001b');
+      session.pressKey('\u001b');
       await session.idle(500, 5000);
-      session.sendKey('\u001b');
+      session.pressKey('\u001b');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).not.toMatch(readSummary);
@@ -306,7 +306,7 @@ describe('Focus mode', () => {
       await session.send('/config ui.focusMode');
       await session.idle();
       // The first Enter accepts the setting-key completion.
-      session.sendKey('\r');
+      session.pressKey('\r');
       await session.idle();
       expect(await session.screen()).toContain('focus-result.txt');
       expect(await session.screen()).not.toMatch(readSummary);

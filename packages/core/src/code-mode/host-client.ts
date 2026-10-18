@@ -8,9 +8,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { CodeModeBindingPlan } from '../tools/code-mode.js';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import {
   CodeModeTurnTerminated,
   type CodeModeToolResult,
@@ -28,7 +29,9 @@ import {
   type ParentMessage,
 } from './protocol.js';
 
-const CODE_MODE_HOST_STARTUP_GRACE_MS = 5000;
+// Startup grace must cover host spawn + QuickJS WASM init, which takes
+// several seconds on slow or heavily loaded machines.
+const CODE_MODE_HOST_STARTUP_GRACE_MS = 30_000;
 
 export interface CodeModeExecutionResult {
   output: string;
@@ -48,23 +51,24 @@ export class CodeModeExecutionError extends Error {
 
 function hostCommand(): { command: string; args: string[] } {
   const currentFile = fileURLToPath(import.meta.url);
+  const { command } = getJsInterpreterCommand(import.meta.url);
   if (currentFile.endsWith('.ts')) {
     const require = createRequire(import.meta.url);
     return {
-      command: process.execPath,
+      command,
       args: [
         '--import',
-        require.resolve('tsx'),
+        pathToFileURL(require.resolve('tsx')).href,
         path.join(path.dirname(currentFile), 'host.ts'),
       ],
     };
   }
   const sibling = path.join(path.dirname(currentFile), 'host.js');
   if (existsSync(sibling)) {
-    return { command: process.execPath, args: [sibling] };
+    return { command, args: [sibling] };
   }
   return {
-    command: process.execPath,
+    command,
     args: [path.join(resolveBundleDir(import.meta.url), 'codeModeHost.js')],
   };
 }
@@ -169,7 +173,9 @@ export async function executeCodeMode(
   };
   const onWallTimeout = () => {
     protocolError = new Error(
-      `JavaScript execution timed out after ${timeoutMs}ms.`,
+      `JavaScript execution timed out after ${
+        timeoutMs + CODE_MODE_HOST_STARTUP_GRACE_MS
+      }ms (guest budget ${timeoutMs}ms; the code-mode host may not have finished starting).`,
     );
     cancelNested(protocolError);
     terminate(child);

@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
@@ -104,13 +105,15 @@ const realPkillPath = realUtilityPath('pkill');
 const realPgrepPath = realUtilityPath('pgrep');
 
 describe('qwen pr review runner routing', () => {
-  it('isolates the long-running review job on the agent pool', () => {
+  it('isolates the long-running review job on the schedule-sized review pool', () => {
+    // Review and autofix use separate runner pools.
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
     expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-agent"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
     );
     expect(runsOn).not.toContain('ecs-qwen');
+    expect(runsOn).not.toContain('ecs-agent');
   });
 });
 
@@ -3424,7 +3427,8 @@ describe('checkout self-heal', () => {
   // A workspace whose entries the owning user cannot unlink: find -exec rm
   // exits nonzero, so the user-mode wipe leg fails deterministically. Root
   // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
-  // skip there, and win32 has no POSIX permission bits to honor.
+  // skip where it keeps that capability, and win32 has no POSIX permission
+  // bits to honor.
   const lockFixture = () => {
     const parent = realpathSync(
       mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
@@ -3440,7 +3444,7 @@ describe('checkout self-heal', () => {
     rmSync(parent, { recursive: true, force: true });
   };
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'exits 0 and keeps survivors when BOTH wipe legs fail',
     () => {
       // The wipe step has no continue-on-error, so its own never-fail exit
@@ -3470,7 +3474,7 @@ describe('checkout self-heal', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'escalates to the sudo leg when the user-mode wipe fails',
     () => {
       // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
@@ -3671,13 +3675,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
-    // Same invariant for the fallback job's TWO bodies (failure and
-    // cancelled): the cross-job dedup matches `actions/runs/<id>)`, anchored
-    // on the markdown link's closing paren — a body that rendered the URL
-    // differently would escape it.
+    // Same invariant for the fallback job's THREE bodies (queue-expiry,
+    // cancelled and failure): the cross-job dedup matches
+    // `actions/runs/<id>)`, anchored on the markdown link's closing paren — a
+    // body that rendered the URL differently would escape it.
     expect(
       step.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -3731,8 +3735,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   it('opens the gate on any upstream failure but never on skip or resolve', () => {
     // Every job whose failure marks review-pr 'skipped' is enumerated: the
     // incident's trigger can kill the chain's self-hosted jobs first
-    // (authorize / review-config), and a transient API failure can kill the
-    // hosted ones (precheck-pr / delay-automatic-review).
+    // (authorize / review-config / delay-automatic-review), and a transient
+    // API failure can kill the hosted one (precheck-pr).
     expect(job.needs).toEqual([
       'precheck-pr',
       'review-config',
@@ -3901,7 +3905,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it.skipIf(!hasGnuMktemp)(
+  // Both cases make a directory unwritable, which only binds where
+  // permission bits do: not for root with its DAC capabilities.
+  it.skipIf(!hasGnuMktemp || !arePermissionBitsEnforced())(
     'repairs a single unwritable directory instead of failing fast',
     () => {
       // Mutant control: a status=1 right after the first failed touch would
@@ -3912,15 +3918,20 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     },
   );
 
-  it('fails fast when repair is impossible', () => {
-    // Mutant control: dropping the post-repair re-probe would report this
-    // unusable directory as repaired (exit 0) and die at FinalizeJob — the
-    // exact PR #8894 death the probe exists to prevent.
-    const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
-    expect(r.status).toBe(1);
-    expect(r.stdout).toContain('still unusable after repair');
-    expect(r.stdout).toContain('failing fast instead of dying at job finalize');
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'fails fast when repair is impossible',
+    () => {
+      // Mutant control: dropping the post-repair re-probe would report this
+      // unusable directory as repaired (exit 0) and die at FinalizeJob — the
+      // exact PR #8894 death the probe exists to prevent.
+      const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('still unusable after repair');
+      expect(r.stdout).toContain(
+        'failing fast instead of dying at job finalize',
+      );
+    },
+  );
 
   it('does not probe _diag when it does not exist', () => {
     // Polarity: an inverted `[ -d ]` guard probes the missing directory,
@@ -3958,6 +3969,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       runCreated = '',
       runStartedAttempt = '',
       reviewPrResult = 'failure',
+      jobs = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3992,6 +4004,17 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
           '  echo "qwen-code-ci-bot"; exit 0',
           'fi',
+          // The never-started guard asks this run's job list whether review-pr
+          // ever got a runner. It runs the step's REAL --jq filter over the
+          // fixture, like the reviews branch below. Leaving JOBS_JSON unset
+          // keeps every pre-existing case on the unreadable-list path
+          // ("unknown"), where posting wins — the same posture they had before
+          // this branch existed.
+          'case "$*" in',
+          '  *"/actions/runs/12345/jobs"*)',
+          '    [ -n "${JOBS_JSON:-}" ] || exit 1',
+          '    printf "%s" "$JOBS_JSON" | jq -r "$filter"; exit 0 ;;',
+          'esac',
           'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
           '  case "$*" in',
           '    *createdAt*|*startedAt*)',
@@ -4086,6 +4109,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
               REVIEW_PR_RESULT: reviewPrResult,
+              JOBS_JSON: jobs,
             },
           },
         );
@@ -4137,6 +4161,145 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // The failure path keeps the original body.
     const failed = runFallbackStep('default', { reviewPrResult: 'failure' });
     expect(failed.posted).toContain('did not complete successfully');
+  });
+
+  it.skipIf(!hasJq)(
+    'posts a cause-neutral body when no runner ever started review-pr',
+    () => {
+      // The review pool is closed for 12 of every 24 hours, so a review-pr job
+      // queued into the dark window can expire without a runner ever picking it
+      // up: no runner_name and no steps. Nothing ran, so the failure body's
+      // "did not complete successfully / retried automatically" claims would
+      // both be false. Silence is not the alternative to a false claim, though:
+      // ack-review-request has already told a hand-requesting maintainer the
+      // result is posted here and that a command-triggered review is not listed
+      // under this PR's checks, and a head nobody pushes again never queues
+      // another run. So the branch posts a body that is true instead, under the
+      // same marker-plus-run-URL shape the dedupe anchors on.
+      const jobs = JSON.stringify({
+        total_count: 2,
+        jobs: [
+          {
+            name: 'precheck-pr',
+            runner_name: 'ubuntu-latest',
+            steps: [{ name: 'Checkout' }],
+          },
+          { name: 'review-pr', runner_name: '', status: 'queued', steps: [] },
+        ],
+      });
+      for (const reviewPrResult of ['failure', 'cancelled']) {
+        const r = runFallbackStep('never_started', {
+          reviewPrResult,
+          jobs,
+        });
+        expect(r.status).toBe(0);
+        expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+        expect(r.posted).toContain('never started');
+        expect(r.posted).not.toContain('24-hour queue limit');
+        expect(r.posted).toContain('cannot determine the cause');
+        expect(r.summary).not.toContain('queue expired');
+        expect(r.posted).toContain('actions/runs/12345)');
+        expect(r.posted).toContain('@qwen-code /review');
+        expect(r.posted).not.toContain('did not complete successfully');
+        expect(r.posted).not.toContain('retried automatically');
+        expect(r.summary).toContain('never started by a runner');
+      }
+    },
+  );
+
+  it.skipIf(!hasJq)('still posts when review-pr did run on a runner', () => {
+    // The control for the body above: the same job list with a runner recorded
+    // must keep the failure body. Without it the never-started branch could
+    // widen (an `and` relaxed to an `or`, the runner_name clause dropped) and
+    // relabel every genuine failure as a queue expiry, telling the author to
+    // re-request a review that actually ran and failed.
+    const r = runFallbackStep('ran', {
+      reviewPrResult: 'failure',
+      jobs: JSON.stringify({
+        total_count: 1,
+        jobs: [
+          {
+            name: 'review-pr',
+            runner_name: 'ecs-qwen-hk1-3',
+            steps: [{ name: 'Run review' }],
+          },
+        ],
+      }),
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(r.posted).toContain('did not complete successfully');
+  });
+
+  it.skipIf(!hasJq)(
+    'still posts when a runner was assigned before any step was recorded',
+    () => {
+      // The guard's two clauses only disagree on this mixed state: a runner
+      // accepted review-pr and the job was lost before it recorded a step
+      // (worker killed, host deregistered mid-assignment). Both clauses must
+      // hold for "nothing ran" — widening the `and` to an `or`, or dropping
+      // the runner_name clause, reads this row as never-started and relabels
+      // a genuine failure as a queue expiry — the body assertion below is
+      // what forbids it.
+      const r = runFallbackStep('ran_no_steps', {
+        reviewPrResult: 'failure',
+        jobs: JSON.stringify({
+          total_count: 1,
+          jobs: [
+            { name: 'review-pr', runner_name: 'ecs-qwen-hk1-3', steps: [] },
+          ],
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+      expect(r.posted).toContain('did not complete successfully');
+      expect(r.posted).not.toContain('never started');
+    },
+  );
+
+  it.skipIf(!hasJq)(
+    'still posts when the listing carries no review-pr job',
+    () => {
+      // The listing is read with `?per_page=100` and no pagination, so a
+      // listing that drops review-pr (or a run large enough to push it off the
+      // first page) leaves the filter with an empty list. An empty list is
+      // "unknown", not "nothing ran": the step cannot prove the job never
+      // started, and the comment has to post.
+      const r = runFallbackStep('no_review_pr_job', {
+        reviewPrResult: 'failure',
+        jobs: JSON.stringify({
+          total_count: 1,
+          jobs: [
+            {
+              name: 'precheck-pr',
+              runner_name: 'ubuntu-latest',
+              steps: [{ name: 'Checkout' }],
+            },
+          ],
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+      // Dropping the filter's `length == 0` arm makes jq's `all` vacuously
+      // true on an empty list, and this row then claims a review never
+      // started when the step simply could not see it.
+      expect(r.posted).toContain('did not complete successfully');
+      expect(r.posted).not.toContain('never started');
+    },
+  );
+
+  it('posts when the job list cannot be read', () => {
+    // No fixture, so the listing fails and the step cannot prove the job
+    // never started. An unreadable list must not be read as "nothing ran".
+    const r = runFallbackStep('jobs_unreadable', {
+      reviewPrResult: 'failure',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    // The guard's read site is `= "true"`, not `!= "false"`: the third state
+    // has to fall through to the generic body, not into the queue-expiry one.
+    expect(r.posted).toContain('did not complete successfully');
+    expect(r.posted).not.toContain('never started');
   });
 
   it('dedupes on the marker plus this run URL', () => {

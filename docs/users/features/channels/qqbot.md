@@ -59,7 +59,7 @@ export QQ_APP_SECRET=<your-app-secret>
       "appID": "YOUR_APP_ID",
       "appSecret": "$QQ_APP_SECRET",
       "sandbox": false,
-      "senderPolicy": "open",
+      "privatePolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "instructions": "你是一个通过 QQ Bot 对话的 AI 助手。回复控制在 2000 字符以内。",
@@ -81,7 +81,7 @@ export QQ_APP_SECRET=<your-app-secret>
 | `sandbox`   | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`) |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
-`senderPolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
+`privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
 
 ## Running
 
@@ -102,7 +102,7 @@ To use the bot in QQ groups:
 1. Set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"` in your channel config
 2. Add the bot to a QQ group via the QQ Bot Open Platform dashboard or by having a group admin invite it
 3. Group members must **@mention** the bot to trigger a response
-4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot; `senderPolicy` and `allowedUsers` do not gate members of an approved group.
+4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot by default (restrict with the group's `senders: "allowlist"` and `allowedUsers`); `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved group.
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
 
@@ -115,6 +115,41 @@ The QQ Bot channel supports Markdown formatting (`msg_type=2`). The agent's Mark
 If the QQ server rejects a Markdown message for any reason, the channel automatically retries it as plain text — so your messages always go through even if the bot's Markdown capability is restricted server-side.
 
 This is the opposite of the WeChat channel, which strips all Markdown. You can let the agent use full Markdown with the QQ channel.
+
+## Images, Videos, and Files
+
+Users can send images, videos, files, and voice messages to the bot. An image is passed to the agent as vision input, so the agent sees the picture itself — screenshots, error messages, and diagrams all work — and the same file is also saved to a temporary local path for the case where the model cannot take images. A video, a file, or a voice message is saved to a temporary local path and the agent is told that path.
+
+A media message does not need any text — an image-only, video-only, file-only, or voice-only message starts a turn, and the channel uses `(image)`, `(video)`, `(file)`, or `(voice)` as the placeholder. When the message does carry text, that text is kept as the caption.
+
+A file is anything the platform delivers as `content_type: file` — Word documents, PDFs, spreadsheets, archives, source files. QQ reports no MIME type for a file, so the channel keeps the sender's own extension (restricted to letters and digits, falling back to `.bin` when there is none) and saves the bytes under `channel-files/<uuid>/` in the system temporary directory; the agent's read tool uses that extension to decide how to open the document.
+
+A voice message arrives as `content_type: voice`. Alongside the original SILK URL, QQ provides `voice_wav_url` — the same audio already converted to WAV — and the channel prefers it; when the platform does not send one, the channel falls back to the original URL. The bytes are saved under `channel-files/<uuid>/` as `qq_voice.wav`, or `qq_voice.silk` when the original SILK URL was used, and the agent is told that path. The platform's ASR text is not used; the agent works from the saved audio file.
+
+- Images are limited to 8 MB and videos, files, and voice messages to 20 MB, and at most five attachments per message are handled. Anything larger is skipped and logged to the channel's stderr.
+- Downloaded files are not deleted. They stay under the system temporary directory, which the system clears on its own schedule.
+
+Image input requires a model that accepts images. Declare the capability when the model is multimodal but not recognised by name. The field belongs on the provider entry that serves the model, because a top-level `model.generationConfig` value is ignored for provider-backed models:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "your-model-id",
+        "baseUrl": "https://example.invalid/v1",
+        "generationConfig": {
+          "modalities": { "image": true }
+        }
+      }
+    ]
+  }
+}
+```
+
+With a text-only model the agent receives an "unsupported image" note plus the saved path instead of the picture.
+
+Sending images, videos, files, or voice messages back to QQ is not supported.
 
 ## Token Management
 
@@ -135,7 +170,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 - **Use Markdown freely** — Unlike WeChat, QQ renders Markdown natively. Bold, code blocks, lists, and links all work.
 - **Keep responses under 2000 characters** — Longer responses are automatically split into chunks. Adding a length hint to your instructions helps the agent stay concise.
 - **Sandbox for testing** — Set `"sandbox": true` to use the sandbox API during development. No production messages will be affected.
-- **Restrict access** — Use `senderPolicy: "allowlist"` for a fixed set of QQ users, or `"pairing"` to approve new users from the CLI. See [DM Pairing](./overview#dm-pairing) for details.
+- **Restrict access** — Use `privatePolicy: "allowlist"` for a fixed set of QQ users, or `"pairing"` to approve new users from the CLI. See [DM Pairing](./overview#dm-pairing) for details.
 
 ## Key Differences from Telegram
 
@@ -154,7 +189,7 @@ Token refresh continues across WebSocket reconnects — the channel never goes o
 
 - Check the terminal output for errors
 - Verify the channel is running (`qwen channel status`)
-- If using `senderPolicy: "allowlist"`, make sure your QQ user ID is in `allowedUsers`
+- If using `privatePolicy: "allowlist"`, make sure your QQ user ID is in `allowedUsers`
 - On first start, a QR code will appear in the terminal — scan it with your QQ app
 
 ### Bot doesn't respond in groups

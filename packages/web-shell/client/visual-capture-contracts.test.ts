@@ -9,9 +9,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { FIXED_CAPTURE_TIME } from './e2e/visuals/constants';
+import smokeConfig from '../playwright.config';
 
 /*
- * Three contracts the visuals pipeline depends on and that no runtime assertion
+ * Contracts the visuals pipeline depends on and that no runtime assertion
  * can reach.
  *
  * They live in a vitest file OUTSIDE `e2e/` on purpose. `vitest.config.ts`
@@ -80,14 +81,18 @@ describe('visual capture contracts', () => {
     expect(sources.length).toBeGreaterThan(5);
   });
 
-  it('keeps both navigation helpers freezing the clock before they navigate', () => {
+  it('keeps every navigation helper freezing the clock before it navigates', () => {
     // `freezeWallClock` runs only implicitly, and nothing in the visuals suite
     // reads the page clock -- so dropping the call, or moving it after
     // `page.goto`, leaves every test green while timestamped captures silently
     // resume drifting between the base and head passes.
     const harness = readFileSync(join(VISUALS_DIR, 'harness.ts'), 'utf8');
 
-    for (const helper of ['gotoSession', 'gotoNewSession']) {
+    for (const helper of [
+      'gotoSession',
+      'gotoNewSession',
+      'gotoSettingsHarness',
+    ]) {
       const body = harness.slice(
         harness.indexOf(`export async function ${helper}(`),
       );
@@ -146,6 +151,152 @@ describe('visual capture contracts', () => {
           /^\s*bottom:/m,
         );
       }
+    }
+  });
+
+  it('keeps the visuals suite rendering with prefers-reduced-motion: reduce', () => {
+    // `captureScreenshot` passes `animations: 'disabled'`, which only settles
+    // animations that are ALREADY running when the screenshot starts. The
+    // artifact dock's open animation is not one it can be relied on for:
+    // `artifactPanelDockOpen` drives `flex-basis`/`width` from 0 to
+    // `--artifact-panel-dock-width` over 200ms, so the docked panel's divider
+    // sweeps the full panel width, and no assertion in any screenshot spec
+    // gates on the dock. Measured on the cockpit scenario (#11465): at the
+    // mutation that inserts `.artifactPanelDock`, `dock.getAnimations()`
+    // reports `artifactPanelDockOpen` as `running` at `currentTime: 0` with the
+    // dock's rect at `width: 0` and the divider at `x: 1276`; once settled it
+    // is `width: 504` at `x: 772`. Whether a capture lands inside that window
+    // is then a timing race between the dock mounting and the spec's
+    // pre-capture waits -- the shape #11465 reports for this view: a
+    // full-height divider a few px off, 1.31% on one render of a tree and 0%
+    // on a re-run of the same commit.
+    //
+    // The CSS already ships an opt-out for exactly this, but Playwright's
+    // default is `no-preference` (measured in the same runs:
+    // `matchMedia('(prefers-reduced-motion: reduce)').matches === false`), so
+    // it never applied. Both halves are asserted because either one alone is
+    // inert: dropping the config setting re-arms the race, and dropping the CSS
+    // block makes the config setting a no-op while every test stays green.
+    //
+    // The config half has to be asserted in its `contextOptions` form, not just
+    // as a bare `reducedMotion: 'reduce'`. The runner only forwards the options
+    // it declares itself (`viewport`, `userAgent`, `colorScheme`, ...);
+    // `reducedMotion` is not one of them, so hoisting it out of
+    // `contextOptions` reads back correctly from `project.use` and still leaves
+    // the page on `no-preference`. That refactor looks like a cleanup, keeps
+    // this suite green on the string alone, and silently re-arms the race.
+    const config = readFileSync(
+      join(HERE, '..', 'playwright.visuals.config.ts'),
+      'utf8',
+    );
+    expect(
+      config,
+      'visuals config must force reduced motion through contextOptions',
+    ).toMatch(/contextOptions:\s*\{[^}]*reducedMotion:\s*'reduce'/);
+
+    const appCss = readFileSync(join(HERE, 'App.module.css'), 'utf8');
+    expect(
+      appCss,
+      'the reduced-motion media block must still opt the dock out of its open animation',
+    ).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{[^@]*?\.artifactPanelDock\s*\{[^}]*animation:\s*none/,
+    );
+  });
+
+  it('keeps the cockpit capture dropping the autofocus ring before the shutter', () => {
+    // Which element holds focus is capture-relevant state, and nothing else in
+    // the pipeline pins it. The cockpit autofocuses its back button on mount
+    // (`SessionWorkflowCockpit.tsx`: `backButtonRef.current?.focus()`), and
+    // whether Chrome paints the `:focus-visible` ring for a *programmatic*
+    // focus is a heuristic — so the same tree rendered both ways. Measured over
+    // five consecutive captures of one unchanged tree (#11465): the ring was
+    // present in 3/5 light renders and 3/5 dark ones, and each presence flipped
+    // that view to CHANGED at 0.05%, 2.5x the threshold. All 499 differing
+    // pixels were inside the ring's box (x 280-360, y 69-112); the button's own
+    // border and label were byte-identical.
+    //
+    // Asserted as an ordering, like the `freezeWallClock` guard above: moving
+    // the call after `captureScreenshot` — or dropping it, since no scenario
+    // fails without it — leaves the coin flip in place and every test green.
+    // Scoped to the cockpit spec rather than to `captureScreenshot` because a
+    // blanket blur moved 11 of 68 views, `slash-menu-dark` by 30.1%.
+    const harness = readFileSync(join(VISUALS_DIR, 'harness.ts'), 'utf8');
+    expect(harness, 'harness must define clearFocus').toMatch(
+      /export async function clearFocus\(/,
+    );
+    expect(
+      harness.slice(
+        harness.indexOf('export async function captureScreenshot('),
+        harness.indexOf('export async function clearFocus('),
+      ),
+      'clearFocus must stay opt-in per scenario, not blanket-applied',
+    ).not.toMatch(/clearFocus\(page\)/);
+
+    const spec = readFileSync(
+      join(VISUALS_DIR, 'session-workflow.spec.ts'),
+      'utf8',
+    );
+    const clearAt = spec.indexOf('await clearFocus(page);');
+    const shotAt = spec.indexOf('await captureScreenshot(');
+    expect(clearAt, 'the cockpit spec must clear focus').toBeGreaterThan(-1);
+    expect(shotAt, 'the cockpit spec must capture').toBeGreaterThan(-1);
+    expect(clearAt, 'focus must be cleared before the capture').toBeLessThan(
+      shotAt,
+    );
+  });
+  it('keeps the background-dot action hide inside the hover media query', () => {
+    // Touch devices get no hover reveal: the (hover: none) block keeps row
+    // actions always visible, and this (0,4,0) rule would out-specify it on a
+    // sticky tap-hover, hiding (but not disarming) the buttons.
+    const css = readFileSync(
+      join(HERE, 'components/sidebar/WebShellSidebar.module.css'),
+      'utf8',
+    );
+    const hideRule =
+      '.sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions';
+    expect(css.indexOf(hideRule)).toBe(css.lastIndexOf(hideRule));
+    expect(css, 'the hide rule must live inside @media (hover: hover)').toMatch(
+      /@media \(hover: hover\) \{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
+    );
+  });
+});
+
+describe('smoke lane browser projects', () => {
+  // `npm run test:e2e:smoke` selects `--grep @smoke` across every project in
+  // playwright.config.ts. Nothing reads that project list at test time, and
+  // Playwright does not fail when a project definition disappears — it just
+  // collects fewer tests — so deleting or re-scoping the WebKit project would
+  // silently drop the repo's only WebKit execution while the separately
+  // pinned WebKit install steps (scripts/tests/no-ak-integration-ci.test.js)
+  // keep every gate green.
+  it('keeps a WebKit and a Chromium mobile project intersecting --grep @smoke', () => {
+    const projects = smokeConfig.projects ?? [];
+    const coversMobileSpecs = (project: (typeof projects)[number]) =>
+      [project.testMatch ?? []]
+        .flat()
+        .some((pattern) =>
+          typeof pattern === 'string'
+            ? pattern.includes('*.mobile.spec.ts')
+            : pattern.test('fake.mobile.spec.ts'),
+        );
+    const intersectsSmokeGrep = (project: (typeof projects)[number]) => {
+      const greps = [project.grep ?? []].flat();
+      return (
+        greps.length === 0 ||
+        greps.some((grep) => new RegExp(grep).test('@smoke'))
+      );
+    };
+    for (const browserType of ['chromium', 'webkit'] as const) {
+      const matching = projects.filter(
+        (project) =>
+          project.use?.defaultBrowserType === browserType &&
+          coversMobileSpecs(project) &&
+          intersectsSmokeGrep(project),
+      );
+      expect(
+        matching.length,
+        `playwright.config.ts must keep a ${browserType} mobile project reachable from --grep @smoke`,
+      ).toBeGreaterThan(0);
     }
   });
 });

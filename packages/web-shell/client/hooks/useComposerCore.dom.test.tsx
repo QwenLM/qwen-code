@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { undo } from '@codemirror/commands';
+import { EditorView } from '@codemirror/view';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -34,11 +36,17 @@ function Harness({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
+  allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
   attachmentsEnabled,
+  disabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -55,15 +63,25 @@ function Harness({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
   attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  disabled?: UseComposerCoreOptions['disabled'];
 }) {
   const composer = useComposerCore({
     onSubmit,
     commands: commands ?? [],
+    allowEmptySlashMenu,
+    cycleModeOnTab,
+    onCycleMode,
+    onFocusFooter,
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
@@ -74,18 +92,21 @@ function Harness({
     atWorkspaceCwd,
     composerScopeKey,
     disableLegacyHistoryFallback,
+    shellModeEnabled,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
     workspaceUploadBusy,
     fileDragEnabled,
     attachmentsEnabled,
+    disabled,
   });
   latest = composer;
 
   return (
     <div data-web-shell-composer-surface {...composer.imageTransferHandlers}>
       <div ref={composer.containerRef} />
+      <input data-testid="composer-surface-input" />
     </div>
   );
 }
@@ -102,11 +123,17 @@ async function mount({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
+  allowEmptySlashMenu,
+  cycleModeOnTab,
+  onCycleMode,
+  onFocusFooter,
   onImageIngestionNotice,
   workspaceUploadBusy,
   fileDragEnabled,
   attachmentsEnabled,
+  disabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -123,11 +150,17 @@ async function mount({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
+  allowEmptySlashMenu?: boolean;
+  cycleModeOnTab?: boolean;
+  onCycleMode?: UseComposerCoreOptions['onCycleMode'];
+  onFocusFooter?: UseComposerCoreOptions['onFocusFooter'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
   attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  disabled?: UseComposerCoreOptions['disabled'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -135,6 +168,8 @@ async function mount({
 
   let currentPortalRoot: HTMLElement | null = null;
   let currentSessionId = sessionId;
+  let currentCommands = commands;
+  let currentAllowEmptySlashMenu = allowEmptySlashMenu;
   let currentWorkspaceCwd = atWorkspaceCwd;
   let currentAttachmentsEnabled = attachmentsEnabled;
   const render = () => {
@@ -153,11 +188,17 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={composerScopeKey}
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
-            commands={commands}
+            shellModeEnabled={shellModeEnabled}
+            commands={currentCommands}
+            allowEmptySlashMenu={currentAllowEmptySlashMenu}
+            cycleModeOnTab={cycleModeOnTab}
+            onCycleMode={onCycleMode}
+            onFocusFooter={onFocusFooter}
             onImageIngestionNotice={onImageIngestionNotice}
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
             attachmentsEnabled={currentAttachmentsEnabled}
+            disabled={disabled}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -169,6 +210,14 @@ async function mount({
   });
   return {
     onSubmit,
+    setCommands(next: UseComposerCoreOptions['commands']) {
+      currentCommands = next;
+      act(() => render());
+    },
+    setAllowEmptySlashMenu(next: boolean) {
+      currentAllowEmptySlashMenu = next;
+      act(() => render());
+    },
     setPortalRoot(portalRoot: HTMLElement | null) {
       currentPortalRoot = portalRoot;
       act(() => render());
@@ -289,6 +338,139 @@ describe('useComposerCore history and drafts', () => {
     act(() => view.dispatch({ selection: { anchor: 3 } }));
     mounted.rerender();
     expect(view.state.selection.main.head).toBe(3);
+  });
+
+  it('keeps a pasted unknown slash query open until its catalog arrives', async () => {
+    const commands: UseComposerCoreOptions['commands'] = [];
+    const mounted = await mount({ commands, allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu).toMatchObject({ query: 'review', items: [] });
+    mounted.setCommands([
+      { name: 'review', description: 'Review', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu?.items[0]?.label).toBe('/review');
+    act(() => latest!.closeSlashMenu());
+    mounted.setCommands([
+      { name: 'review-all', description: 'Review all', source: 'skill' },
+    ]);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it.each(['/skills ', '/skills rev'])(
+    'opens an unloaded skill catalog for pasted %s',
+    async (text) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText(text));
+      expect(latest!.slashMenu).toMatchObject({
+        kind: 'subcommand',
+        items: [],
+      });
+    },
+  );
+
+  it.each([
+    ['Escape', false],
+    ['Tab', true],
+  ] as const)(
+    'empty menu retains prior %s default behavior',
+    async (key, prevented) => {
+      await mount({ allowEmptySlashMenu: true });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(prevented);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'empty menu owns %s instead of recalling history',
+    async (key) => {
+      const workspaceCwd = '/workspace/empty-menu-arrows';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(workspaceCwd),
+        JSON.stringify(['previous prompt']),
+      );
+      // ArrowDown's no-menu fall-through is the footer focus handoff.
+      const onFocusFooter = vi.fn(() => true);
+      await mount({
+        allowEmptySlashMenu: true,
+        atWorkspaceCwd: workspaceCwd,
+        onFocusFooter,
+      });
+      act(() => latest!.insertText('/zzz'));
+      expect(latest!.slashMenu?.items).toEqual([]);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+      expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it('empty menu owns Tab on a cycle-mode host', async () => {
+    const onCycleMode = vi.fn();
+    await mount({
+      allowEmptySlashMenu: true,
+      cycleModeOnTab: true,
+      onCycleMode,
+    });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(onCycleMode).not.toHaveBeenCalled();
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('/zzz');
+  });
+
+  it('closes an unmatched menu when catalog loading completes without new commands', async () => {
+    const mounted = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/zzz'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    mounted.setAllowEmptySlashMenu(false);
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('submits a typed command even when its lazy catalog has no matches', async () => {
+    const { onSubmit } = await mount({ allowEmptySlashMenu: true });
+    act(() => latest!.insertText('/review'));
+    expect(latest!.slashMenu?.items).toEqual([]);
+    await act(async () => {
+      container!.querySelector('.cm-content')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      '/review',
+      undefined,
+      undefined,
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
   });
 
   it('does not serialize the whole document again for a slash menu refresh', async () => {
@@ -867,6 +1049,54 @@ describe('useComposerCore history and drafts', () => {
     expect(latest!.searchState.searchMatches).toEqual([]);
   });
 
+  it('keeps submitted slash commands out of desktop history search matches', async () => {
+    const workspaceCwd = '/workspace/desktop-slash-filter';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['/theme dark', 'plain prompt']),
+    );
+    await mount({
+      sessionId: 'session-desktop-slash',
+      atWorkspaceCwd: workspaceCwd,
+    });
+
+    act(() => latest!.searchState.openHistorySearch());
+    // The desktop panel hides slash entries because the slash completion
+    // menu re-offers them; only the touch backend lists them (pinned by the
+    // mobile suite).
+    expect(latest!.searchState.searchMatches).toEqual(['plain prompt']);
+  });
+
+  it('keeps the stored draft when a history panel recall is followed by a session switch', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/panel-recall',
+    });
+    act(() => {
+      latest!.setText('older saved input');
+      latest!.submitText();
+      latest!.setText('my draft');
+    });
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    expect(latest!.getText()).toBe('older saved input');
+    // The panel click flow closes without restoring the pre-search draft.
+    act(() => latest!.searchState.closeSearch(false));
+
+    mounted.switchSession('session-b', '/workspace/panel-recall');
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', '/workspace/panel-recall');
+    expect(latest!.getText()).toBe('my draft');
+  });
+
   it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {
     vi.useFakeTimers();
     await mount({
@@ -936,11 +1166,14 @@ describe('useComposerCore paste', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
-  it('lets long plain text paste directly into the editor', async () => {
+  it('lets short plain text paste directly into the editor', async () => {
     await mount();
     const event = new Event('paste', { bubbles: true, cancelable: true });
     Object.defineProperty(event, 'clipboardData', {
@@ -948,7 +1181,7 @@ describe('useComposerCore paste', () => {
         files: [],
         items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
         types: ['text/plain'],
-        getData: () => 'line\n'.repeat(200),
+        getData: () => 'line\n'.repeat(20),
       },
     });
 
@@ -956,8 +1189,396 @@ describe('useComposerCore paste', () => {
       container!.querySelector('.cm-content')!.dispatchEvent(event);
     });
 
-    expect(latest!.getText()).toBe('line\n'.repeat(200));
-    expect(latest!.getText()).not.toContain('Pasted Content');
+    expect(latest!.getText()).toBe('line\n'.repeat(20));
+    expect(latest!.pastedFiles).toEqual([]);
+  });
+
+  it.each([
+    { draft: 'old draft', from: 0, to: 9, paste: 'x'.repeat(8000) },
+    { draft: '', from: 0, to: 0, paste: '!echo ' + 'x'.repeat(8000) },
+    { draft: '', from: 0, to: 0, paste: '/fork ' + 'x'.repeat(8000) },
+    { draft: '/fork ', from: 6, to: 6, paste: 'x'.repeat(8000) },
+    { draft: '/clear', from: 0, to: 0, paste: 'x'.repeat(8000) },
+    { draft: '/fork do something', from: 0, to: 0, paste: 'x'.repeat(8000) },
+    { draft: '!echo hi', from: 0, to: 0, paste: 'x'.repeat(8000) },
+    { draft: '  !echo ', from: 8, to: 8, paste: 'x'.repeat(8000) },
+  ])(
+    'keeps replacement and command pastes inline: $draft',
+    async ({ draft, from, to, paste }) => {
+      const { onSubmit } = await mount();
+      act(() => {
+        latest!.setText(draft);
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: from, head: to },
+        });
+      });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: { getData: () => paste },
+      });
+      act(() => {
+        container!.querySelector('.cm-content')!.dispatchEvent(event);
+      });
+      const expected = draft.slice(0, from) + paste + draft.slice(to);
+      expect(latest!.getText()).toBe(expected);
+      expect(latest!.pastedFiles).toEqual([]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]![0]).toBe(expected.trim());
+      expect(onSubmit.mock.calls[0]![2]).toBeUndefined();
+    },
+  );
+
+  it('folds a long plain text paste into an attachment card', async () => {
+    await mount();
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect(latest!.getText()).toBe('');
+    expect(latest!.pastedFiles).toEqual([
+      {
+        name: 'line line line line line….txt',
+        media_type: 'text/plain',
+        text,
+        size: text.length,
+      },
+    ]);
+  });
+
+  it('folds a single minified line into a card', async () => {
+    await mount();
+    const text = 'x'.repeat(8_000);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect.soft(latest!.getText()).toBe('');
+    expect.soft(latest!.pastedFiles).toHaveLength(1);
+  });
+
+  it('keeps inline when attachments are unavailable', async () => {
+    await mount({ attachmentsEnabled: false });
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    expect.soft(latest!.getText()).toBe(text);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+  });
+
+  it('folds the text and skips the image when both are on the clipboard', async () => {
+    await mount();
+    const text = 'line\n'.repeat(200);
+    const image = new File(['png'], 'shot.png', { type: 'image/png' });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [image],
+        items: [
+          { kind: 'file', type: 'image/png', getAsFile: () => image },
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+        ],
+        types: ['Files', 'text/plain'],
+        getData: (type: string) => (type === 'text/plain' ? text : ''),
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+    await waitForImageIngestion();
+
+    expect.soft(latest!.getText()).toBe('');
+    expect.soft(latest!.pastedImages).toEqual([]);
+    expect.soft(latest!.pastedFiles).toHaveLength(1);
+  });
+
+  it('submits a folded paste as an attachment alongside the typed text', async () => {
+    const { onSubmit } = await mount();
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    act(() => latest!.insertText('summarise this'));
+    act(() => latest!.submitText());
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      'summarise this',
+      undefined,
+      [
+        {
+          name: 'line line line line line….txt',
+          media_type: 'text/plain',
+          text,
+          size: text.length,
+        },
+      ],
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('submits the folded paste rather than a visible follow-up suggestion', async () => {
+    const { onSubmit } = await mount({
+      followupState: {
+        isVisible: true,
+        shownAt: Date.now(),
+        suggestion: 'inspect the orders table and summarize',
+      },
+    });
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    act(() => latest!.submitText());
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '',
+      undefined,
+      [
+        {
+          name: 'line line line line line….txt',
+          media_type: 'text/plain',
+          text,
+          size: text.length,
+        },
+      ],
+      expect.any(Function),
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
+    );
+  });
+
+  it('leaves a paste aimed at another control on the surface alone', async () => {
+    await mount();
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-testid="composer-surface-input"]')!
+        .dispatchEvent(event);
+    });
+
+    expect.soft(event.defaultPrevented).toBe(false);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+    expect.soft(latest!.getText()).toBe('');
+  });
+
+  it('keeps "!" and "?" typed into a focused Managed composer literal', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    const view = EditorView.findFromDOM(
+      document.querySelector<HTMLElement>('.cm-content')!,
+    )!;
+    for (const key of ['!', '?']) {
+      const handled = view.state
+        .facet(EditorView.inputHandler)
+        .some((handler) =>
+          handler(view, 0, 0, key, () =>
+            view.state.update({ changes: { from: 0, insert: key } }),
+          ),
+        );
+      expect({ key, handled }).toEqual({ key, handled: false });
+      expect(latest!.shellMode).toBe(false);
+    }
+  });
+
+  it('keeps Managed bang input literal and cannot enter the global Shell history mode', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+    act(() => latest!.setShellMode(true));
+    expect(latest!.shellMode).toBe(false);
+    const event = new KeyboardEvent('keydown', {
+      key: '!',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      (document.activeElement as HTMLElement)?.blur();
+      document.body.dispatchEvent(event);
+    });
+    expect(latest!.shellMode).toBe(false);
+    expect(latest!.getText()).toBe('!');
+  });
+
+  it('leaves a long paste inline in shell mode', async () => {
+    await mount();
+    act(() => latest!.toggleShellMode());
+    expect.soft(latest!.shellMode).toBe(true);
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    // CodeMirror preventDefaults its own pastes, so the behaviour is the
+    // oracle here: the command text stays in the editor and no card appears.
+    expect.soft(latest!.pastedFiles).toEqual([]);
+    expect(latest!.getText()).toBe(text);
+  });
+
+  it('leaves a long paste inline in a disabled composer', async () => {
+    await mount({ disabled: true });
+    const text = 'line\n'.repeat(250);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    // A disabled composer has no prompt to attach to, so nothing is folded.
+    expect(latest!.pastedFiles).toEqual([]);
+  });
+
+  it('deduplicates the name of a second folded paste', async () => {
+    await mount();
+    const paste = (text: string) => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [],
+          items: [
+            { kind: 'string', type: 'text/plain', getAsFile: () => null },
+          ],
+          types: ['text/plain'],
+          getData: () => text,
+        },
+      });
+      act(() => {
+        container!.querySelector('.cm-content')!.dispatchEvent(event);
+      });
+    };
+
+    // Two pastes of the same content share a title, so the second one still
+    // needs a name of its own.
+    paste('line\n'.repeat(200));
+    paste('line\n'.repeat(200));
+
+    expect(latest!.pastedFiles.map((file) => file.name)).toEqual([
+      'line line line line line….txt',
+      'line line line line line… (1).txt',
+    ]);
+  });
+
+  it('moves a folded paste into the editor and undoes it in one step', async () => {
+    await mount();
+    act(() => latest!.insertText('prefix'));
+    const text = 'line\n'.repeat(200);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+        getData: () => text,
+      },
+    });
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(event);
+    });
+
+    act(() => latest!.expandPastedText(0));
+
+    expect.soft(latest!.getText()).toBe('prefix' + text);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+
+    act(() => {
+      undo(latest!.viewRef.current!);
+    });
+
+    expect(latest!.getText()).toBe('prefix');
   });
 
   it('ingests copied file references after a drop intent choice', async () => {
@@ -1046,7 +1667,10 @@ describe('useComposerCore paste', () => {
       [expect.objectContaining({ media_type: 'image/png' })],
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1088,7 +1712,10 @@ describe('useComposerCore paste', () => {
         expect.objectContaining({ name: 'my app (1).log' }),
       ],
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1421,7 +2048,11 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      { inputAnnotations },
+      {
+        inputAnnotations,
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1458,6 +2089,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({ start: 0, end: 2, text: '@b' }),
           expect.objectContaining({ start: 7, end: 9, text: '@a' }),
@@ -1492,6 +2125,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 7,
@@ -1528,7 +2163,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1643,8 +2281,18 @@ describe('useComposerCore tags', () => {
         }
         return appendChild.call(this, child);
       });
+    // The failed tooltip root's unmount is only observable from inside the
+    // catch: mount()'s act() drains the deferred microtask before returning.
+    const probeRoot = createRoot(document.createElement('span'));
+    const unmount = vi.spyOn(
+      Object.getPrototypeOf(probeRoot) as Root,
+      'unmount',
+    );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {
       expect(readFailingChipTitle?.()).toBe('Details');
+      // Root.unmount() flushes sync work across ALL roots, which would re-enter
+      // CodeMirror mid-update (#12826), so it must not run inside the catch.
+      expect(unmount).not.toHaveBeenCalled();
     });
 
     try {
@@ -1660,6 +2308,8 @@ describe('useComposerCore tags', () => {
         '[WebShell] inline tag tooltip render failed',
         error,
       );
+      // Deferred, not skipped: the failed root is still unmounted exactly once.
+      expect(unmount).toHaveBeenCalledTimes(1);
       const chip = document.body.querySelector('[title="Details"]');
       expect(chip).not.toBeNull();
       expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
@@ -1667,6 +2317,8 @@ describe('useComposerCore tags', () => {
       expect(failingTooltip?.style.display).toBe('none');
     } finally {
       warn.mockRestore();
+      unmount.mockRestore();
+      probeRoot.unmount();
       appendChildSpy.mockRestore();
     }
   });
@@ -1858,6 +2510,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           {
             end: 9,
@@ -1919,6 +2573,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2099,6 +2755,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2160,6 +2818,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2197,7 +2857,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2242,7 +2905,10 @@ describe('useComposerCore tags', () => {
       undefined,
       undefined,
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -2279,6 +2945,8 @@ describe('useComposerCore tags', () => {
       undefined,
       expect.any(Function),
       {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
         inputAnnotations: [
           expect.objectContaining({
             start: 8,
@@ -2291,5 +2959,101 @@ describe('useComposerCore tags', () => {
     );
     expect(editor.textContent).toContain('orders');
     expect(editor.textContent).not.toContain(serialized);
+  });
+});
+
+it('invalidates a pending capacity continuation when the composer draft changes', async () => {
+  const onSubmit = vi.fn(() => false);
+  await mount({ onSubmit });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const metadata = onSubmit.mock.calls[0]?.[4] as unknown as {
+    isCurrentDraft(): boolean;
+  };
+  expect(metadata.isCurrentDraft()).toBe(true);
+  act(() => latest!.setText('new draft'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+  act(() => latest!.setText('original'));
+  expect(metadata.isCurrentDraft()).toBe(false);
+});
+
+it('retains the guarded retry draft across its initial session allocation and clears it only on acceptance', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(
+    async (onSessionAllocated) => {
+      onSessionAllocated('created-session');
+      mounted.switchSession('created-session', '/work/b');
+      await act(async () => {});
+      expect(latest!.getText()).toBe('original');
+      expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+        true,
+      );
+      act(() => call[3]());
+    },
+  );
+  expect(latest!.getText()).toBe('');
+});
+
+it('unrelated existing session keeps its draft during retry creation', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+      false,
+    );
+    expect(latest!.getText()).toBe('B draft');
+    expect(localStorage.getItem(getSessionDraftKey('existing-b'))).toBe(
+      'B draft',
+    );
+  });
+});
+it('late acceptance does not clear unrelated existing session draft', async () => {
+  const onSubmit = vi.fn(() => false);
+  const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+  localStorage.setItem(getSessionDraftKey('existing-b'), 'B draft');
+  act(() => {
+    latest!.setText('original');
+    latest!.submitText();
+  });
+  const call = onSubmit.mock.calls[0] as unknown as [
+    string,
+    unknown,
+    unknown,
+    () => void,
+    import('./useComposerCore').ComposerSubmitMetadata,
+  ];
+  await call[4].retainDraftDuringSessionCreation!(async () => {
+    mounted.switchSession('existing-b', '/work/b');
+    await act(async () => {});
+    act(() => call[3]());
+    expect(latest!.getText()).toBe('B draft');
   });
 });

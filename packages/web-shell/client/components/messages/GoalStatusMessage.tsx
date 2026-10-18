@@ -10,6 +10,7 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'blocked'
   | 'usage_limited'
   | 'paused'
   | 'checking';
@@ -36,6 +37,7 @@ const VALID_GOAL_KINDS = new Set<string>([
   'cleared',
   'failed',
   'aborted',
+  'blocked',
   'usage_limited',
   // A paused goal is not running. Dropping it here left the footer and
   // the active-goal derivation falling through to the previous `set`
@@ -130,6 +132,11 @@ function getTitle(
         title: t('goal.aborted'),
         colorClass: styles.warning,
       };
+    case 'blocked':
+      return {
+        title: t('goal.blocked'),
+        colorClass: styles.warning,
+      };
     case 'usage_limited':
       return {
         title: t('goal.usageLimited'),
@@ -166,6 +173,7 @@ export function GoalStatusMessage({
       status.kind === 'achieved' ||
       status.kind === 'failed' ||
       status.kind === 'aborted' ||
+      status.kind === 'blocked' ||
       status.kind === 'usage_limited' ||
       status.kind === 'paused') &&
     status.lastReason?.trim();

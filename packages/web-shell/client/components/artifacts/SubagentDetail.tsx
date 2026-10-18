@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -11,7 +11,10 @@ import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFra
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
-import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+import {
+  SubagentDetailsProvider,
+  type OpenSubagentDetails,
+} from '../../subagentDetailsContext';
 import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
@@ -125,13 +128,13 @@ function SubagentDetailContent({
 }: {
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
-  onStop: () => Promise<{ cancelled: boolean }>;
+  onStop?: () => Promise<{ cancelled: boolean }>;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
-  onOpenSubagent?: (tool: ACPToolCall) => void;
+  onOpenSubagent?: OpenSubagentDetails;
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
@@ -172,12 +175,15 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
-  const handleRightPanelOpen = (request: TurnOutputOpenRequest) => {
-    onRightPanelOpen?.({
-      ...request,
-      sourceSessionId: connection.sessionId,
-    });
-  };
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      onRightPanelOpen?.({
+        ...request,
+        sourceSessionId: connection.sessionId,
+      });
+    },
+    [connection.sessionId, onRightPanelOpen],
+  );
 
   useEffect(() => {
     if (isRunning) return;
@@ -186,7 +192,7 @@ function SubagentDetailContent({
   }, [isRunning]);
 
   const handleStop = async () => {
-    if (stopping) return;
+    if (stopping || !onStop) return;
     setStopping(true);
     setStopError('');
     try {
@@ -213,6 +219,7 @@ function SubagentDetailContent({
       firstTurnMetrics={metrics}
       includeSubagentToolUsageInMetrics={false}
       turnFileChanges={fileChangesByTurn}
+      sourceSessionId={connection.sessionId}
       turnArtifacts={artifactsByTurn}
       onTurnOutputOpen={handleRightPanelOpen}
       onError={onError}
@@ -234,7 +241,7 @@ function SubagentDetailContent({
             >
               {statusLabel(metrics.status, t)}
             </Badge>
-            {isRunning && (
+            {isRunning && onStop && (
               <button
                 type="button"
                 className={styles.stopButton}
@@ -390,12 +397,21 @@ export function SubagentDetail({
         onArtifactsChange={onArtifactsChange}
         onOpenSubagent={
           onOpenSubagent
-            ? (tool) => onOpenSubagent(tool, sessionId, workspaceCwd)
+            ? (tool, parentSessionId) =>
+                onOpenSubagent(tool, parentSessionId ?? sessionId, workspaceCwd)
             : undefined
         }
         onError={onError}
-        onStop={() =>
-          workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
+        onStop={
+          initialRootTool.rawOutput &&
+          typeof initialRootTool.rawOutput === 'object' &&
+          'workflowRunId' in initialRootTool.rawOutput
+            ? undefined
+            : () =>
+                workspace.client.cancelSubagentSession(
+                  sessionId,
+                  rootToolCallId,
+                )
         }
       />
     </DaemonSessionProvider>

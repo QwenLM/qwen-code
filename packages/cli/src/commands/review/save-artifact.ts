@@ -560,6 +560,12 @@ function validateVerdict(value: unknown): PersistedVerdict {
       verdict['remediation'],
       'Composed verdict.remediation',
     ),
+    // Absent from verdicts composed before the field existed: nothing was
+    // withheld that those could name.
+    waivedFixes:
+      verdict['waivedFixes'] === undefined
+        ? []
+        : stringArray(verdict['waivedFixes'], 'Composed verdict.waivedFixes'),
     deferredCount,
     floorEnforced: floorEnforced as number[],
     ...(postedInline === undefined ? {} : { postedInline }),

@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonClient,
+  DaemonBackgroundTurn,
   DaemonSessionArchiveState,
   DaemonSessionListPageOptions,
   DaemonSessionSummary,
@@ -188,8 +189,10 @@ export function useSessionActivePromptState(
 ): {
   hasActivePrompt: boolean;
   activeWorkState: DaemonSessionSummary['activeWorkState'];
+  backgroundTurn?: DaemonBackgroundTurn;
   authoritative: boolean;
   observationRevision: number | undefined;
+  requestStartedAt?: number;
 } {
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const subscribeLiveSessionObservations = useCallback(
@@ -288,8 +291,11 @@ export function useSessionActivePromptState(
     return {
       hasActivePrompt: liveActivePrompt,
       activeWorkState: liveActiveWorkState,
+      backgroundTurn: store.getLiveSession(workspaceCwd, sessionId)
+        ?.backgroundTurn,
       authoritative: liveAnswerIsFreshForTarget,
       observationRevision: liveSessionRevision,
+      requestStartedAt: store.getLiveSessionRequestStartedAt(workspaceCwd),
     };
   }
   const row = page
@@ -298,6 +304,7 @@ export function useSessionActivePromptState(
   return {
     hasActivePrompt: row?.hasActivePrompt === true,
     activeWorkState: row?.activeWorkState,
+    backgroundTurn: row?.backgroundTurn,
     // Never settle-grade, whether or not the row is on the page. A row that
     // drops off a bounded page between refetches is indistinguishable from one
     // whose turn ended, and treating that as "the turn ended" is exactly the
@@ -333,6 +340,8 @@ export function useDaemonSessionActivityBridge(
     activeWorkState,
     authoritative,
     observationRevision,
+    backgroundTurn,
+    requestStartedAt,
   } = useSessionActivePromptState(client, workspaceCwd, sessionId);
   // Idempotent, so the main view and its ChatPane sharing one provider both
   // publishing the same value is harmless; a split pane, which renders a
@@ -350,11 +359,18 @@ export function useDaemonSessionActivityBridge(
     // untouched until a fresh response arrives. No revision means coverage was
     // actually lost, so `undefined` must still be published.
     if (!authoritative && observationRevision !== undefined) return;
-    setDaemonActivePrompt(daemonActivePrompt, { workspaceCwd, sessionId });
+    setDaemonActivePrompt(
+      daemonActivePrompt,
+      { workspaceCwd, sessionId },
+      backgroundTurn,
+      requestStartedAt,
+    );
   }, [
     authoritative,
+    backgroundTurn,
     daemonActivePrompt,
     observationRevision,
+    requestStartedAt,
     sessionId,
     setDaemonActivePrompt,
     workspaceCwd,

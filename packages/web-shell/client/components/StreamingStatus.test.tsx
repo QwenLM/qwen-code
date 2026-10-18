@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act } from 'react';
+import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
@@ -15,12 +16,13 @@ import {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-// Keep StreamingStatus active (it renders null when idle) and give the real
-// useStreamingLoadingMetrics an empty transcript so it reports zero tokens.
-const mocks = vi.hoisted(() => ({ streamingState: 'responding' as string }));
+const mocks = vi.hoisted(() => ({
+  streamingState: 'responding' as string,
+  blocks: [] as DaemonTranscriptBlock[],
+}));
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useStreamingState: () => mocks.streamingState,
-  useTranscriptBlocks: () => [],
+  useTranscriptBlocks: () => mocks.blocks,
 }));
 
 const { StreamingStatus } = await import('./StreamingStatus');
@@ -32,15 +34,20 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  mocks.streamingState = 'responding';
+  mocks.blocks = [];
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 function render(
   customization: WebShellCustomization = {},
   props: {
+    showResponseTokensPerSecond?: boolean;
     showPhrase?: boolean;
     hasActivePrompt?: boolean;
     startedAt?: number;
+    backgroundLabel?: string;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -346,5 +353,80 @@ describe('StreamingStatus daemon keep-alive (#9487)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+it('restores background execution time and label during a silent tool call', () => {
+  mocks.streamingState = 'idle';
+  const now = Date.now();
+  vi.spyOn(Date, 'now').mockReturnValue(now);
+  const container = render(
+    {},
+    {
+      hasActivePrompt: true,
+      startedAt: now - 42_000,
+      backgroundLabel: 'Explore',
+      showPhrase: false,
+    },
+  );
+  expect(container.textContent).toContain('Processing Explore results');
+  expect(container.textContent).toContain('42s');
+  mocks.streamingState = 'responding';
+});
+
+describe('StreamingStatus response speed', () => {
+  function stream(text: string): void {
+    mocks.blocks = [
+      {
+        id: 'reply',
+        kind: 'assistant',
+        text,
+        streaming: true,
+        createdAt: 1,
+        updatedAt: 1,
+        clientReceivedAt: 1,
+      },
+    ];
+  }
+
+  it.each([
+    { chars: 80, rate: '4.0 t/s' },
+    { chars: 400, rate: '20 t/s' },
+  ])(
+    'shows $rate from the current token estimate over elapsed time',
+    ({ chars, rate }) => {
+      vi.useFakeTimers();
+      stream('x'.repeat(chars));
+      const container = render({}, { showResponseTokensPerSecond: true });
+      expect(container.textContent).not.toContain('t/s');
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(container.textContent).toContain(`${chars / 4} tokens`);
+      expect(container.textContent).toContain(rate);
+    },
+  );
+
+  it('keeps the token counter without a rate when the setting is disabled', () => {
+    vi.useFakeTimers();
+    stream('x'.repeat(80));
+    const container = render();
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(container.textContent).toContain('20 tokens');
+    expect(container.textContent).not.toContain('t/s');
+  });
+
+  it('hides the rate while waiting even if the transcript retains a streaming block', () => {
+    vi.useFakeTimers();
+    mocks.streamingState = 'waiting';
+    stream('x'.repeat(80));
+    const container = render({}, { showResponseTokensPerSecond: true });
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(container.textContent).toContain('20 tokens');
+    expect(container.textContent).not.toContain('t/s');
   });
 });
