@@ -465,6 +465,36 @@ class ManagedSessionGuardConvoyIT {
         assertThat(published.resourceId()).isEqualTo("result-content-1");
     }
 
+    @Test
+    void heldSessionRowsBoundRetentionReads() throws Exception {
+        var journal = PublicationJournalFixture.create(source, false);
+        var retention = new ToolPublicationRetentionStore(journal.jdbc, journal.manager);
+        try (var lease = retention.read("tenant-1", "session-1")) {
+            lease.check();
+        }
+
+        for (String table : List.of("ma_session", "ma_session_head")) {
+            var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+            try {
+                if ("ma_session".equals(table)) {
+                    journal.sessions.renewWriter("tenant-1", "session-1", PublicationJournalFixture.WRITER_TOKEN,
+                            new RenewWriterRequest("workspace-1", "writer-1", 1, 60_000L));
+                } else {
+                    journal.jdbc.query("SELECT session_id FROM ma_session_head"
+                                    + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+                            (row, index) -> row.getString("session_id"), "tenant-1", "session-1");
+                }
+                assertFastGuardFailure(() -> retention.read("tenant-1", "session-1"));
+            } finally {
+                journal.manager.rollback(hold);
+            }
+            try (var lease = retention.read("tenant-1", "session-1")) {
+                lease.check();
+            }
+            assertThat(journal.jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
+        }
+    }
+
     /**
      * The writer-acquisition lane takes the placement guard before reading
      * the drain fence: begin paths insert drain rows only after locking

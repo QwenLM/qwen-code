@@ -464,7 +464,7 @@ class WorkspaceSessionRetentionMySqlIT {
     private ManagedAgentStore observingCompletion(CountDownLatch reachedPublicLock) {
         var observedJdbc = new ManagedSchemaJdbcTemplate(source) {
             @Override
-            public int update(String sql, Object... arguments) {
+            public int update(String sql, org.springframework.jdbc.core.PreparedStatementSetter arguments) {
                 if (sql.startsWith("INSERT INTO ma_session")) {
                     reachedPublicLock.countDown();
                 }
