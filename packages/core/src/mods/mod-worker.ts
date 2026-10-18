@@ -357,12 +357,9 @@ async function dispatch(
     builtinTool,
   );
   if (!view) return next(input, frames);
-  const active = frames.filter((frame) => frame.plugin === index);
-  const lastFrame = frames.at(-1);
-  const leftOut = lastFrame?.plugin === index ? [lastFrame.registration] : [];
-  const told = active
-    .map((frame) => frame.registration)
-    .filter((id) => !leftOut.includes(id));
+  const leftOut = frames
+    .filter((frame) => frame.plugin === index)
+    .map((frame) => frame.registration);
   const call: ModInvocation = {
     id: ++serial,
     epoch,
@@ -374,7 +371,7 @@ async function dispatch(
     toNativeInput: view.toNativeInput,
     origin,
     frames,
-    budget: new ModBudget(told.length ? 1000 : MOD_TIMEOUT_MS),
+    budget: new ModBudget(MOD_TIMEOUT_MS),
     live: true,
     recovering: false,
     aborted: false,
@@ -392,7 +389,6 @@ async function dispatch(
           input: call.input,
           origin,
           leftOut,
-          told,
         }),
       );
       validateResult(event, value);
