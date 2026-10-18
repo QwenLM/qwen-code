@@ -210,6 +210,18 @@ public interface RuntimeTransport {
     }
 
     /**
+     * Finishes durable ownership for a Session the Broker has already retired.
+     * The caller must hold durable proof that the Runtime stopped holding the
+     * Session — a persisted drain receipt matching the binding and no active
+     * executions — and must never call this on a mere transport failure. A
+     * transport without durable ownership has nothing to clear.
+     */
+    default CompletionStage<Boolean> releaseRetired(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.completedFuture(true);
+    }
+
+    /**
      * Claims the Workspace execution mount again for an acquired Session
      * whose mount was handed back by {@link #releaseMount}; a mount the
      * Session still holds is left as it is. A transport without Workspace
