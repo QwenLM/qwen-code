@@ -178,6 +178,12 @@ export interface ScheduleExtractParams {
    * Cadence skips (#13004) need `true`; near compaction every turn extracts.
    */
   belowCompactionWarn?: boolean;
+  /**
+   * Internal, #13004 flush only: threading the flush deadline into the fork
+   * so an abandoned run is cancelled instead of detaching past its boundary.
+   * Callers scheduling per-turn extractions never set this.
+   */
+  abortSignal?: AbortSignal;
 }
 
 export interface ScheduleSkillReviewParams {
@@ -675,9 +681,41 @@ export class MemoryManager {
       armed: boolean;
       skips: number;
       lastExtractedLength: number;
+      /**
+       * Sequence of the last run that consumed its history and settled the
+       * entry. Compared against a parked snapshot's sequence, not its
+       * length: lengths from different index spaces (a compaction between
+       * schedule and settle) prove nothing, order does (#13004).
+       */
+      lastSettledSeq?: number;
       pending?: ScheduleExtractParams;
     }
   >();
+  // #13004 ordering stamps, in memory only. Every accepted run and every
+  // parked skip snapshot carries a per-manager monotonic sequence, so
+  // recordCadenceOutcome and the flush can tell which came first without
+  // comparing history lengths across a compaction.
+  private extractParamSeq = new WeakMap<ScheduleExtractParams, number>();
+  private nextExtractSeq = 0;
+  private stampExtractSeq<T extends ScheduleExtractParams>(params: T): T {
+    if (!this.extractParamSeq.has(params)) {
+      this.extractParamSeq.set(params, ++this.nextExtractSeq);
+    }
+    return params;
+  }
+  private seqOfExtractParams(params: ScheduleExtractParams | undefined): number {
+    return (params && this.extractParamSeq.get(params)) ?? 0;
+  }
+  /** Clone preserving the sequence: the flush replays the parked snapshot. */
+  private cloneExtractParams(
+    params: ScheduleExtractParams,
+    extra: Partial<ScheduleExtractParams>,
+  ): ScheduleExtractParams {
+    const clone = { ...params, ...extra };
+    const seq = this.extractParamSeq.get(params);
+    if (seq !== undefined) this.extractParamSeq.set(clone, seq);
+    return clone;
+  }
   // Bumped by every cadence discard. An extraction that was in flight, or a
   // trailing request already queued, when the discard lands drops its outcome:
   // the discarded id can come back (/resume, or a failed resume restoring the
@@ -1247,6 +1285,11 @@ export class MemoryManager {
       };
     }
 
+    // Stamp the accepted request before it can be queued or run: every
+    // completion below is ordered against parked snapshots by this sequence,
+    // never by history length (#13004).
+    params = this.stampExtractSeq(params);
+
     if (this.extractRunning.has(params.projectRoot)) {
       const currentTaskId = this.extractCurrentTaskId.get(params.projectRoot);
       if (!currentTaskId) {
@@ -1352,10 +1395,10 @@ export class MemoryManager {
       return false;
     }
     state.skips += 1;
-    state.pending = {
+    state.pending = this.stampExtractSeq({
       ...params,
       skippedHistory: params.history.slice(state.lastExtractedLength),
-    };
+    });
     return true;
   }
 
@@ -1373,11 +1416,17 @@ export class MemoryManager {
     // everything after it. Only the snapshot this run's own root parked is
     // covered: after a `/cd` the entry belongs to the live root, whose newer
     // snapshot this run never extracted (see the guard below).
+    // Coverage is an ordering test, not a length test: a run scheduled before
+    // the snapshot was parked cannot have seen its turns, and its
+    // `processedOffset` counts entries in its own (possibly pre-compaction)
+    // index space, so it must never delete that snapshot.
+    const runSeq = this.seqOfExtractParams(params);
     if (result && !result.skippedReason) {
       const covered = this.extractCadence.get(params.sessionId);
       if (
         covered?.pending !== undefined &&
         covered.pending.projectRoot === params.projectRoot &&
+        runSeq > this.seqOfExtractParams(covered.pending) &&
         (result.cursor.processedOffset ?? 0) >= covered.pending.history.length
       ) {
         delete covered.pending;
@@ -1414,29 +1463,27 @@ export class MemoryManager {
       return;
     }
     if (result.skippedReason) return;
-    // A trailing request queued before a later skip carries older history;
-    // keep that skipped turn pending rather than treating it as extracted, and
+    // A snapshot parked after this run was scheduled cannot have been covered
+    // by it — whether the run is a trailing request with older history or a
+    // direct run a compaction made shorter than the parked snapshot. Keep
+    // that skipped turn pending rather than treating it as extracted, and
     // keep its spent skip budget: the carried turn is still un-extracted, so
     // refunding here would let a streak reach twice the documented N.
+    // Conversely, a snapshot parked before this run was scheduled is owed
+    // across this settle only when the coverage delete above did not already
+    // consume it.
     const carried = this.extractCadence.get(params.sessionId);
     const previous = carried?.pending;
-    // History also shrinks under the snapshot when compaction runs, which is
-    // not a trailing request: a run shorter than what this session already
-    // extracted means the snapshot predates the shrink, so it must neither be
-    // carried forward nor replayed by a close-time flush.
-    const shrank =
-      carried !== undefined &&
-      params.history.length < carried.lastExtractedLength;
     const carry =
-      !shrank &&
       previous !== undefined &&
-      previous.history.length > params.history.length;
+      runSeq < this.seqOfExtractParams(previous);
     this.extractCadence.set(params.sessionId, {
       projectRoot: params.projectRoot,
       armed:
         result.extractorEngaged === true && result.touchedTopics.length === 0,
       skips: carry ? (carried?.skips ?? 0) : 0,
       lastExtractedLength: params.history.length,
+      lastSettledSeq: runSeq,
       ...(carry && { pending: previous }),
     });
   }
@@ -1453,9 +1500,10 @@ export class MemoryManager {
    * `false` when this call did not settle within `timeoutMs`, when the run
    * extracted nothing (skipped or threw — the turns stay recorded so a later
    * boundary can retry them), when the snapshot went stale before it ran, and
-   * when the budget expired while the shared run was parked: the run is then
-   * abandoned rather than left to fork after the caller has moved on, and the
-   * pending turns stay recorded for a later boundary.
+   * when the budget expired while the shared run was parked or mid-fork: the
+   * run is then abandoned — its scheduled extraction is aborted — rather
+   * than left to run after the caller has moved on, and the pending turns
+   * stay recorded for a later boundary.
    * Overlapping calls for one session share a single run while keeping their
    * own timeout. That shared run is tracked here, not in `inFlight`, so
    * `drain()` does not wait for the flush wrapper itself — but the extraction
@@ -1527,6 +1575,17 @@ export class MemoryManager {
     pending: ScheduleExtractParams,
     deadline: number,
   ): Promise<boolean> {
+    // The deadline cancels the run, not only the wait: a budget that expires
+    // mid-fork aborts the extraction instead of letting it run against a
+    // Config the close path has since torn down. Abandoned outcomes resolve
+    // false below and leave the entry pending for a later boundary.
+    const controller = new AbortController();
+    const killer = setTimeout(
+      () => {
+        controller.abort();
+      },
+      Math.max(0, deadline - Date.now()),
+    );
     try {
       // This session's own in-flight or trailing extraction may hold the
       // slot, and so can a run recorded for a session this Config has since
@@ -1588,16 +1647,25 @@ export class MemoryManager {
       // Leave the newer entry alone; only clear one this snapshot still owns.
       const state = this.extractCadence.get(sessionId);
       if (state !== undefined && state.pending !== pending) return false;
+      // Staleness is an ordering test plus a length test: only a run
+      // scheduled AFTER this snapshot was parked can have covered it, and a
+      // bare length comparison mis-dates post-compaction settles (a run can
+      // carry a longer length from a different index space).
       if (
         state !== undefined &&
+        state.lastSettledSeq !== undefined &&
+        state.lastSettledSeq > this.seqOfExtractParams(pending) &&
         state.lastExtractedLength >= pending.history.length
       ) {
         this.extractCadence.delete(sessionId);
         return false;
       }
-      const result = await this.scheduleExtract(pending, {
-        bypassCadence: true,
-      });
+      const result = await this.scheduleExtract(
+        this.cloneExtractParams(pending, { abortSignal: controller.signal }),
+        {
+          bypassCadence: true,
+        },
+      );
       // Nothing was extracted (session mismatch, memory pressure, a queued
       // slot, or the throw below): keep the entry so the next boundary retries
       // the same turns instead of a no-op consuming them.
@@ -1626,6 +1694,8 @@ export class MemoryManager {
         error,
       );
       return false;
+    } finally {
+      clearTimeout(killer);
     }
   }
 

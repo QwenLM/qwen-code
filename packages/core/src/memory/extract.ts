@@ -133,6 +133,9 @@ export async function runAutoMemoryExtract(params: {
   now?: Date;
   config?: Config;
   skippedHistory?: Content[];
+  // Only the close-time cadence flush (#13004) sets this: an abandoned flush
+  // run aborts here instead of keeping a fork alive past its boundary.
+  abortSignal?: AbortSignal;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -140,6 +143,7 @@ export async function runAutoMemoryExtract(params: {
       'Managed auto-memory extraction requires config for forked-agent execution.',
     );
   }
+  params.abortSignal?.throwIfAborted();
   const expectedSessionId = params.config.getSessionId();
   const earlyMismatch = getSessionMismatchResult(
     params.sessionId,
@@ -177,12 +181,18 @@ export async function runAutoMemoryExtract(params: {
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. partToString runs only on this small slice and without the
   // global whitespace regex — the .trim().length check preserves the old
-  // behaviour of ignoring empty-text user turns.
-  const hasNewUserMessages = params.history
-    .slice(startOffset)
-    .some(
-      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
-    );
+  // behaviour of ignoring empty-text user turns. A parked supplement
+  // (#13004) counts as new content on its own: the turns it holds are owed
+  // to the extractor, and an image-only live tail must not let this run
+  // advance the cursor past them without a fork.
+  const hasNewUserMessages =
+    (params.skippedHistory?.length ?? 0) > 0 ||
+    params.history
+      .slice(startOffset)
+      .some(
+        (m) =>
+          m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+      );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
@@ -204,6 +214,7 @@ export async function runAutoMemoryExtract(params: {
     params.config,
     params.projectRoot,
     params.skippedHistory,
+    params.abortSignal,
   );
 
   if (agentResult.touchedTopics.length > 0) {

@@ -302,7 +302,9 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
   skippedHistory: Content[] = [],
+  abortSignal?: AbortSignal,
 ): Promise<AutoMemoryExtractionExecutionResult> {
+  abortSignal?.throwIfAborted();
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(
@@ -351,6 +353,7 @@ export async function runAutoMemoryExtractionByAgent(
       ToolNames.EDIT,
     ],
     extraHistory,
+    abortSignal,
   });
 
   if (result.status !== 'completed') {

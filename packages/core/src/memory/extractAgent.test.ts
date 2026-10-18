@@ -91,6 +91,7 @@ describe('auto-memory extraction with agent planner', () => {
       mockConfig,
       projectRoot,
       undefined,
+      undefined,
     );
 
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);

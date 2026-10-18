@@ -2789,6 +2789,110 @@ describe('MemoryManager', () => {
       expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
     });
 
+    // Regression: an in-flight run scheduled BEFORE a skip cannot cover the
+    // snapshot parked behind it — not even when a compaction lands between
+    // the run's schedule and its settle, making its `processedOffset` larger
+    // than the snapshot's live-space length (R6-2).
+    it('keeps a skipped turn pending when a compaction lands inside an in-flight run', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4); // arm at 4
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        (params) =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
+          }),
+      );
+      // A above-compaction turn starts a direct run at 20 and hangs in it.
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(20)),
+      );
+      // Compaction collapses the live history, the following turn regrows it
+      // to 9 and skips, parking a genuine snapshot at length 9.
+      expect((await turn(mgr, 9)).skippedReason).toBe('cadence');
+      // The pre-compaction run settles having consumed its own index space.
+      release();
+      await direct;
+
+      // The snapshot was parked after that run was scheduled, so it must
+      // survive the settle and be extracted by the close flush.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls.map(
+          (call) => (call[0].history as Content[]).length,
+        ),
+      ).toEqual([4, 20, 9]);
+    });
+
+    // Regression: a snapshot parked AFTER a compaction shrink, by a skip that
+    // landed while the shorter post-shrink run was still in flight, is not a
+    // pre-shrink snapshot — the short run's settle must carry it (R13-1).
+    it('carries a snapshot parked after a shrink when the short in-flight run settles', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 10); // arm at 10
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        (params) =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
+          }),
+      );
+      // A post-compaction short history starts a run at 3 and hangs.
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(3)),
+      );
+      // The history regrows; the turn at 12 skips and parks slice(10).
+      expect((await turn(mgr, 12)).skippedReason).toBe('cadence');
+      release();
+      await direct;
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls.map(
+          (call) => (call[0].history as Content[]).length,
+        ),
+      ).toEqual([10, 3, 12]);
+    });
+
+    // Regression: the flush deadline cancels the run, not only the wait — an
+    // expired budget aborts the fork instead of detaching it past the close,
+    // and the abandoned outcome leaves the entry pending for a retry (R13-2).
+    it('aborts the flush fork when the budget expires mid-run', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      let captured: { abortSignal?: AbortSignal } | undefined;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce((params) => {
+        captured = params;
+        return new Promise((_, reject) => {
+          params.abortSignal?.throwIfAborted();
+          params.abortSignal?.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          );
+        });
+      });
+      await expect(mgr.flushPendingExtract('sess', 50)).resolves.toBe(false);
+      expect(captured?.abortSignal?.aborted).toBe(true);
+
+      // Abandoned, not consumed: the snapshot survives for a later boundary.
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
+      ).toHaveLength(4);
+    });
+
     it('drops a snapshot a partial compaction left above the cursor', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
       const mgr = new MemoryManager();
