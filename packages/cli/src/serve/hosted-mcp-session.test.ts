@@ -1022,6 +1022,46 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   await mcp.close();
 });
 
+it('hands its mount back after a recovery block only once its MCP work settles, then claims it again (#13800)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const operationId = randomUUID();
+  unknown = true;
+  await mcp.invoke(operationId, 'demo', {
+    kind: 'prompt_get',
+    name: 'greet',
+    arguments: {},
+  });
+  // The Broker cannot see an MCP operation: an unknown effect keeps the
+  // Session-scoped mount, as does a Hook run sharing this owner.
+  await expect(mcp.mountHandback(() => false)!()).rejects.toThrow(/unproven/);
+  replies.set(operationId, {
+    operationId,
+    state: 'settled',
+    response: {
+      messages: [{ role: 'user', content: { type: 'text', text: 'one' } }],
+    },
+  });
+  await mcp.status(operationId);
+  await expect(mcp.mountHandback(() => true)!()).rejects.toThrow(/unproven/);
+  expect(releaseMount).not.toHaveBeenCalled();
+  await mcp.mountHandback(() => false)!();
+  expect(releaseMount).toHaveBeenCalledWith('mcp-claim');
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  acquire.mockClear();
+  unknown = false;
+  await mcp.invoke(randomUUID(), 'demo', {
+    kind: 'resource_read',
+    uri: 'memory://blob',
+  });
+  expect(acquire).toHaveBeenCalled();
+  await mcp.close();
+});
+
 it('refuses duplicate servers, unpinned definitions and credentials in Hosted input', () => {
   expect(parseHostedMcpServers([pin])).toEqual([pin]);
   for (const input of [

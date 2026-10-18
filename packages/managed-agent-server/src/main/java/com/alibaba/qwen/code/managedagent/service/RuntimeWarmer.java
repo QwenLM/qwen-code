@@ -16,6 +16,14 @@ public interface RuntimeWarmer {
         return false;
     }
 
+    default boolean supportsWorkspaceClose(ContextBinding binding) {
+        return supportsWorkspaceClose();
+    }
+
+    static boolean supportsClose(RuntimeWarmer warmer, ContextBinding binding) {
+        return warmer != null && warmer.supportsWorkspaceClose(binding);
+    }
+
     default void requestWorkspaceClose(String tenantId, String sessionId) {
         throw new UnsupportedOperationException("Workspace close is unavailable");
     }
@@ -48,6 +56,10 @@ public interface RuntimeWarmer {
     default void verifyWorkspaceCwdTarget(ContextBinding binding,
             String targetCwdRelative) {
         throw WorkspaceExecutionStore.unavailable();
+    }
+
+    default boolean supportsWorkspaceCwdChange(ContextBinding binding) {
+        return true;
     }
 
     /**

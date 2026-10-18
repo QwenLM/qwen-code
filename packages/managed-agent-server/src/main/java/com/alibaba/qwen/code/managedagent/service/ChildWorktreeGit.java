@@ -535,24 +535,70 @@ public final class ChildWorktreeGit {
     /**
      * The paths of a clean merge that cannot be written into the parent's
      * working tree, which decision 5 reports as conflicts: a submodule
-     * pointer the merge moves (a patch cannot move one), and a path the
+     * pointer the merge moves (a patch cannot move one); a path the
      * merge adds where the parent holds content its snapshot does not
      * carry: an ignored file or directory at the path, or an ignored file
-     * or link where one of its directories must be.
+     * or link where one of its directories must be; and a path the merge
+     * deletes whose content the parent keeps nowhere else (see
+     * {@link #unkept}).
      */
     private List<String> unwritable(Path root, Repository repository, String parentTree, String mergedTree) {
         Map<String, Change> changes = diffTree(root, repository, parentTree, mergedTree);
+        Set<String> unkept = unkept(root, repository, parentTree, changes);
         List<String> unwritable = new ArrayList<>();
         for (Map.Entry<String, Change> change : changes.entrySet()) {
             Change record = change.getValue();
             // A name that is not UTF-8 decodes to U+FFFD and cannot be
             // written back byte for byte.
             if (record.gitlink() || change.getKey().indexOf('\uFFFD') >= 0 || ABSENT.equals(record.fromMode())
-                    && occupied(repository.top(), change.getKey(), changes)) {
+                    && occupied(repository.top(), change.getKey(), changes) || unkept.contains(change.getKey())) {
                 unwritable.add(change.getKey());
             }
         }
         return unwritable;
+    }
+
+    /**
+     * The paths the merge deletes whose content the parent keeps nowhere
+     * else: its HEAD does not hold that content at the path, and the merge
+     * writes it at no other path. Such content was the working tree's
+     * alone (a child that untracks a file the parent never committed, for
+     * one: the snapshot the child started from committed it as its own, so
+     * removing it there says nothing about the parent's copy), and its only
+     * other copy is the base snapshot, whose pin goes when the row ends.
+     * The index does not count: the parent's next {@code git add -A}
+     * stages the written deletion and drops an entry no commit holds.
+     */
+    private Set<String> unkept(Path root, Repository repository, String parentTree, Map<String, Change> changes) {
+        Set<String> written = new HashSet<>();
+        Set<String> deleted = new LinkedHashSet<>();
+        for (Map.Entry<String, Change> change : changes.entrySet()) {
+            if (ABSENT.equals(change.getValue().toMode())) {
+                deleted.add(change.getKey());
+            } else {
+                written.add(change.getValue().toObjectId());
+            }
+        }
+        deleted.removeIf(path -> written.contains(changes.get(path).fromObjectId()));
+        if (deleted.isEmpty()) {
+            return deleted;
+        }
+        String head = head(root, repository.top());
+        if (head != null) {
+            Map<String, Change> committed = diffTree(root, repository, parentTree, head);
+            deleted.removeIf(path -> keeps(committed, path, changes.get(path).fromObjectId()));
+        }
+        return deleted;
+    }
+
+    /**
+     * Whether the other side of a diff from the parent tree holds
+     * {@code object} at {@code path}; a path the diff does not list holds
+     * the parent tree's own.
+     */
+    private static boolean keeps(Map<String, Change> fromParent, String path, String object) {
+        Change change = fromParent.get(path);
+        return change == null || object.equals(change.toObjectId());
     }
 
     /**
@@ -595,7 +641,9 @@ public final class ChildWorktreeGit {
      * version. A path holding anything else was changed outside the lease
      * and is never overwritten. Each owed path is judged by what is on
      * disk, ignored or not, so resuming after an interruption writes only
-     * what is still owed; the index and HEAD are never touched.
+     * what is still owed; the index and HEAD are never touched. A deletion
+     * still owed is judged again as the merge judged it: if the parent no
+     * longer keeps that content elsewhere, it is never written.
      */
     public void apply(Path root, Repository repository, String parentTree, String mergedTree) {
         Map<String, Change> recorded = diffTree(root, repository, parentTree, mergedTree);
@@ -621,6 +669,14 @@ public final class ChildWorktreeGit {
             }
         }
         if (!toWrite.isEmpty()) {
+            // A resume that owes nothing spawns no Git for a probe whose
+            // answer it could never use, so no fault there can block it.
+            for (String path : unkept(root, repository, parentTree, recorded)) {
+                if (toWrite.containsKey(path)) {
+                    throw ChildWorkspaceException.diverged(
+                            "The parent no longer keeps the content deleted at " + path);
+                }
+            }
             write(root, repository, working, toWrite);
         }
         String written = snapshotTree(root, repository.top(), owed.keySet());
@@ -938,7 +994,7 @@ public final class ChildWorktreeGit {
     private record Entry(String mode, String objectId) {
     }
 
-    private record Change(String fromMode, String toMode, String toObjectId) {
+    private record Change(String fromMode, String toMode, String fromObjectId, String toObjectId) {
         boolean gitlink() {
             return GITLINK.equals(fromMode) || GITLINK.equals(toMode);
         }
@@ -955,7 +1011,7 @@ public final class ChildWorktreeGit {
                 throw new ChildWorkspaceException(ChildWorkspaceException.GIT, false,
                         "diff-tree answered an unexpected record");
             }
-            changes.put(tokens.get(index + 1), new Change(fields[0].substring(1), fields[1], fields[3]));
+            changes.put(tokens.get(index + 1), new Change(fields[0].substring(1), fields[1], fields[2], fields[3]));
         }
         return changes;
     }

@@ -198,6 +198,55 @@ export function createJavaManagedAgentProvider(
     },
     ...(options.productScope?.trim()
       ? {
+          approvalChange: {
+            async queryOptions(sessionId, request) {
+              const result = await client.getSessionApproval(
+                sessionId,
+                request.signal,
+              );
+              if (
+                !isManagedApprovalMode(result.approvalMode) ||
+                !Number.isSafeInteger(result.approvalRevision) ||
+                result.approvalRevision < 0 ||
+                typeof result.supported !== 'boolean' ||
+                !Array.isArray(result.availableApprovalModes) ||
+                !result.availableApprovalModes.every(isManagedApprovalMode) ||
+                !result.availableApprovalModes.includes(result.approvalMode)
+              )
+                throw new Error('Invalid Session approval options');
+              return {
+                approvalMode: result.approvalMode,
+                approvalRevision: result.approvalRevision,
+                availableApprovalModes: result.availableApprovalModes,
+                supported: result.supported,
+              };
+            },
+            async submit(sessionId, request, command) {
+              const result = await client.changeApproval(
+                {
+                  ...request,
+                  sessionId,
+                  idempotencyKey: command.idempotencyKey,
+                  requestId: command.requestId,
+                },
+                command.signal,
+              );
+              if (
+                result.sessionId !== sessionId ||
+                result.approvalMode !== request.approvalMode ||
+                !Number.isSafeInteger(result.approvalRevision) ||
+                result.approvalRevision <= request.expectedRevision ||
+                typeof result.replayed !== 'boolean'
+              )
+                throw new Error('Approval change identity mismatch');
+              return {
+                sessionId: result.sessionId,
+                approvalMode: result.approvalMode,
+                approvalRevision: result.approvalRevision,
+                replayed: result.replayed,
+              };
+            },
+          },
           modelChange: {
             async queryOptions(sessionId, request) {
               const result = await client.getSessionModels(
@@ -362,6 +411,46 @@ export function createJavaManagedAgentProvider(
           workspaceBinding: {
             agentId,
             modelPresets: options.modelPresets,
+            registration: {
+              listNodes: (request) => client.listRuntimeNodes(request.signal),
+              async checkDirectory(request, options) {
+                const checked = await client.checkWorkspaceDirectory(
+                  request,
+                  options.signal,
+                );
+                if (checked.nodeId !== request.nodeId)
+                  throw new Error('Workspace directory identity mismatch');
+                return checked;
+              },
+              async create(request, command) {
+                const operation = await client.registerWorkspace(
+                  {
+                    ...request,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  !operation.operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+              async query(operationId, request) {
+                const operation = await client.getWorkspaceOperation(
+                  operationId,
+                  request.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  operation.operationId !== operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+            },
             async list(request) {
               const page = await client.listWorkspaces(
                 { cursor: request.cursor, limit: request.limit },
@@ -374,6 +463,8 @@ export function createJavaManagedAgentProvider(
                 supported: page.capabilities?.workspaceBinding === true,
                 canCreateWorkspace:
                   page.capabilities?.workspaceCreation === true,
+                canSelectDirectory:
+                  page.capabilities?.workspaceDirectorySelection === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
@@ -386,6 +477,8 @@ export function createJavaManagedAgentProvider(
                 { ...request, idempotencyKey: command.idempotencyKey },
                 command.signal,
               ),
+            directories: (request, command) =>
+              client.workspaceDirectories(request, command.signal),
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (
@@ -535,6 +628,13 @@ function toSessionSummary(
     ...(isManagedApprovalMode(session.approvalMode)
       ? { approvalMode: session.approvalMode }
       : {}),
+    ...(isManagedApprovalMode(session.initialApprovalMode)
+      ? { initialApprovalMode: session.initialApprovalMode }
+      : {}),
+    ...(Number.isSafeInteger(session.approvalRevision) &&
+    Number(session.approvalRevision) >= 0
+      ? { approvalRevision: session.approvalRevision }
+      : {}),
     ...(observation ? { modelContext: observation } : {}),
     ...(selectedModel ? { modelSelection: selectedModel } : {}),
     activeTurnId: session.activeTurn?.turnId,
@@ -564,6 +664,9 @@ function toSessionSummary(
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
+        : {}),
+      ...(session.capabilities?.approvalModeChange === true
+        ? { approvalModeChange: true }
         : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },

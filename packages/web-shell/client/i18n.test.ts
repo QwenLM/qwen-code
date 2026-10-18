@@ -15,8 +15,8 @@ describe('web-shell i18n catalog', () => {
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
-    expect(en('managed.tasks.title')).toBe('Child Agent tasks');
-    expect(zh('managed.tasks.title')).toBe('子 Agent 任务');
+    expect(en('managed.tasks.title')).toBe('Session tasks');
+    expect(zh('managed.tasks.title')).toBe('会话任务');
     expect(en('managed.tasks.cancel.stopping')).toBe(
       'Stop requested. Waiting for the task to end.',
     );

@@ -18,6 +18,7 @@ import {
   hostedRuntimeSessionId,
   HostedWorkspaceBroker,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import {
@@ -464,6 +465,11 @@ it.each([
     const readOnly = mode === 'retired-read-only' || readProfile;
     try {
       let runtime = f.broker.runtime;
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = runtime;
@@ -735,14 +741,17 @@ const prepared: LlmPreparedRequest = {
 
 it.each(
   [false, true].flatMap((finished) =>
-    [undefined, false, true].map((allowPersistentRetry) => ({
-      finished,
-      allowPersistentRetry,
-    })),
+    [0, 16].flatMap((round) =>
+      [undefined, false, true].map((allowPersistentRetry) => ({
+        finished,
+        allowPersistentRetry,
+        round,
+      })),
+    ),
   ),
 )(
   'restores an unfinished request even when stream Finished was recorded (%s)',
-  async ({ finished, allowPersistentRetry }) => {
+  async ({ finished, allowPersistentRetry, round }) => {
     const f = await fixture();
     const request = createHostedModelRequest(
       f.session,
@@ -751,7 +760,7 @@ it.each(
         ...prepared,
         ...(allowPersistentRetry === undefined ? {} : { allowPersistentRetry }),
       },
-      0,
+      round,
       false,
       undefined,
       { bootId: 'source-boot', eventEpoch: 'source-epoch' },

@@ -13,7 +13,7 @@ final class ManagedReceipts {
     record Receipt(String tenantId, String scopeId, String idempotencyKey,
             String requestDigest, String sessionId, String turnId, String state,
             String sessionStatusBefore, byte[] actorKey, Boolean workspaceBound, long createdAt,
-            long updatedAt, String operation, String resultJson) {
+            long updatedAt, String operation, String resultJson, String resultOperationKey) {
     }
 
     private ManagedReceipts() {}
@@ -38,7 +38,7 @@ final class ManagedReceipts {
                 jdbc.query(
                         "SELECT tenant_id, scope_id, idempotency_key, request_digest, session_id,"
                             + " turn_id, state, session_status_before, actor_id, workspace_bound, gmt_create,"
-                            + " gmt_modified, operation, result_json FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
+                            + " gmt_modified, operation, result_json, result_operation_key FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
                             + " AND tenant_key = ? AND scope_key = ?"
                                 + (lock ? " FOR UPDATE" : ""),
                         (row, index) -> new Receipt(
@@ -53,7 +53,8 @@ final class ManagedReceipts {
                                 row.getBytes("actor_id"),
                                 row.getObject("workspace_bound", Boolean.class),
                                 row.getLong("gmt_create"), row.getLong("gmt_modified"),
-                                row.getString("operation"), row.getString("result_json")),
+                                row.getString("operation"), row.getString("result_json"),
+                                row.getString("result_operation_key")),
                         ManagedSchemaKeys.receiptKey(
                                 namespace, tenant, scopeKind, scopeId, idempotencyKey),
                         namespace.name(),
@@ -172,6 +173,16 @@ final class ManagedReceipts {
                 previousStatus,
                 null,
                 now);
+    }
+
+    // A Turn input or cancel command names its durable operation (D7-1), so
+    // a replay of the key resolves to that original operation.
+    static void linkCommandOperation(
+            JdbcTemplate jdbc, String tenant, String operation, String key, String operationKey) {
+        jdbc.update(
+                "UPDATE ma_request_receipt SET result_operation_key = ? WHERE receipt_key = ?",
+                operationKey,
+                commandKey(tenant, operation, key));
     }
 
     static Receipt command(
