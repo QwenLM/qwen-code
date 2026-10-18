@@ -3996,6 +3996,8 @@ export class LlmClient {
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     /** Hook context appended to this turn's request, if any. */
     let appendedHookContext: string | undefined;
+    /** Hook context suppressed as already delivered; compression may need it back. */
+    let suppressedHookContext: string | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
     let userPromptSubmitFailureMessage = 'UserPromptSubmit hook failed';
@@ -4122,6 +4124,8 @@ export class LlmClient {
               createUserPromptSubmitContextPart(additionalContext),
             ];
             appendedHookContext = additionalContext;
+          } else {
+            suppressedHookContext = additionalContext;
           }
           if (messageType === SendMessageType.UserQuery) {
             // A suppressed turn appends nothing, so it records no
@@ -4680,6 +4684,7 @@ export class LlmClient {
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
         options?.retractDeliveredOutputOnRetry,
         options?.onPreparedRequest,
+        suppressedHookContext,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

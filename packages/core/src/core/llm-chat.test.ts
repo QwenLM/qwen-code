@@ -3576,6 +3576,31 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('re-appends a suppressed hook block when the send compacts', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .some((entry) =>
+            entry.parts?.some((part) => part.text?.includes('CTX')),
+          ),
+      ).toBe(true);
+    });
+
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
       mockCompressOnce(
         compressed(1000, 200, [userText('summary'), modelText('ok')]),

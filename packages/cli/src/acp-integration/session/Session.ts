@@ -6826,10 +6826,10 @@ export class Session implements SessionContext {
               const additionalContext = hookOutput?.getAdditionalContext();
               if (
                 additionalContext &&
-                parts.length > 0 &&
-                !this.#getCurrentChat().findLastHistoryEntry((entry) =>
-                  hasUserPromptSubmitContext(entry, additionalContext),
-                )
+                (parts.length === 0 ||
+                  !this.#getCurrentChat().findLastHistoryEntry((entry) =>
+                    hasUserPromptSubmitContext(entry, additionalContext),
+                  ))
               ) {
                 parts = [
                   ...parts,

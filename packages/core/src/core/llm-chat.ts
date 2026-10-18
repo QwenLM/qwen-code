@@ -123,6 +123,7 @@ import {
   makeChatCompressionEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import {
   type ChatCompressionInfo,
   CompressionStatus,
@@ -679,6 +680,12 @@ export interface LlmChatSendOptions {
    * public transcript (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * A `UserPromptSubmit` block suppressed as already delivered. Compression
+   * can drop the history entry holding its only copy inside this same send,
+   * so it is re-appended when the send compacts.
+   */
+  suppressedHookContext?: string;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -3395,6 +3402,17 @@ export class LlmChat {
               trigger: shouldForceFromHard ? 'auto' : undefined,
             },
           );
+        }
+        if (
+          options?.suppressedHookContext &&
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+        ) {
+          // Compaction replaced the history holding the block's only copy, so
+          // the model would otherwise not see it on this turn at all.
+          userContent.parts = [
+            ...(userContent.parts ?? []),
+            createUserPromptSubmitContextPart(options.suppressedHookContext),
+          ];
         }
         const localPromptTokensAfterCompression = shouldForceFromHard
           ? estimatePromptTokens(
