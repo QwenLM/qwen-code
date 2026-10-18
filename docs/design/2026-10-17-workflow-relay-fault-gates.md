@@ -1,4 +1,4 @@
-# Workflow child_run relay fault gates FG10b, FG10c, FG10e, FG10f
+# Workflow child_run relay fault gates FG10b–FG10f
 
 [English](2026-10-17-workflow-relay-fault-gates.md) | [简体中文](2026-10-17-workflow-relay-fault-gates.zh-CN.md)
 
@@ -12,11 +12,12 @@ crash) was deferred there with the production finding it caught, #14387 —
 the recovery re-drove an unsettled workflow Turn after a Harness kill —
 whose fix (#14461) makes the coordinator leave a bound, non-cancelling
 workflow Turn unsettled instead of re-driving it.
-This design covers the four letters that remain: **FG10b (lost replies),
+This design covers the five letters that remain: **FG10b (lost replies),
 FG10c (store failures), FG10e (cancellation) and FG10f (notification and
-output delivery).**
+output delivery)**, plus **FG10d (process crash)**, which joined as slice 3
+once #14461 merged (below).
 
-The a+d design called these four "largely kind-agnostic". They are not
+The a+d design called the first four "largely kind-agnostic". They are not
 free, though: every one of them lives in the record's **relay-driven
 settlement** — the walk from the launch to the parent's notification —
 which FG10a's driver-held parent could not reach (its parent attach
@@ -28,7 +29,7 @@ seconds: the lead's `workflow` call is admitted, the relay creates and
 binds the child Session, the child Turn runs the script and its
 in-process `agent()` dispatch, the result revision settles the record,
 the notification lands on the lead as a `<task-notification>` input, and
-the lead's wake Turn reads it. The four letters pin that walk's
+the lead's wake Turn reads it. FG10b, c, e and f pin that walk's
 workflow-specific promises under fault:
 
 - **at most one workflow instance per launch** — one child Session, one
@@ -44,7 +45,16 @@ workflow-specific promises under fault:
 - the notification is **delivered at most once**, and a stream cut
   mid-workflow resumes with no gap and no duplicate (FG10f).
 
-It touches **no production code**.
+FG10d (process crash) joins as slice 3 once #14461 merged. It lands here
+rather than in the a+d design's driver-held class for the reason above:
+what it pins after the kill — the record's blocked settlement, its ledger
+and the lead's notification — is the relay-driven walk. Under it, a run
+the Harness died under is **never re-executed and never settled as if
+its outcome had been observed** (FG10d).
+
+Slices 1 and 2 touch **no production code**. Slice 3 fixes the two
+defects its gate found and a third its review found (FG10d's _Findings
+fixed with the gate_).
 
 ## Current state
 
@@ -111,11 +121,12 @@ probe on the FG9 fixture (one background workflow with one `agent()` call).
 
 ## Scope decisions
 
-1. **Four letters, two slices.** Slice 1 = **FG10b + FG10f** — lost and
+1. **Five letters, three slices.** Slice 1 = **FG10b + FG10f** — lost and
    delayed replies and stream continuity, no restart. Slice 2 = **FG10c + FG10e** — store
-   refusals with a cold restart, and cancellation. FG10d stays with
-   #14387. Each slice is its own PR and marks its letters delivered on
-   #14165.
+   refusals with a cold restart, and cancellation. Slice 3 = **FG10d** —
+   the Harness killed under a running workflow Turn, after #14387's fix
+   (#14461) merged. Each slice is its own PR and marks its letters
+   delivered on #14165.
 2. **A new class on the FG9 fixture.** The letters live in
    `HostedWorkflowRelayFaultGatesIT`: Java-only, coordinator-owned lead,
    in-JVM Spring, the packaged Harness, a scripted model, selectors
@@ -139,8 +150,8 @@ probe on the FG9 fixture (one background workflow with one `agent()` call).
    re-driven), and the FG10d gate pins it. So FG10c refuses only
    commits made after the child Turn completed — the result revision and
    the notification — and its restart reloads the lead alone. Nothing in
-   this round arms a kill or a restart across a running workflow Turn;
-   that is FG10d's.
+   slices 1 and 2 arms a kill or a restart across a running workflow Turn;
+   that is FG10d's, in slice 3.
 4. **Pinned outcomes, not error codes.** As in FG9, a gate asserts what the
    record, the journals and the model saw, and attributes each fault by
    its own witness: a drop counter, a fire count, a held request.
@@ -150,9 +161,9 @@ probe on the FG9 fixture (one background workflow with one `agent()` call).
    fired before its expectations; JDBC mutations are scoped to the case
    tenant; the lead's own Turn has settled before any refusal or restart
    arm (the FG9 slice-3 lesson).
-6. **Closeability.** After slice 2 only FG10d remains on #14165, blocked
-   on #14387. Whether the tracker stays open for it or hands it to #14387
-   is the tracker owner's call, recorded on #14165 when slice 2 lands.
+6. **Closeability.** After slice 2 only FG10d remained on #14165, blocked
+   on #14387. With slice 3 every FG10 letter is delivered; closing the
+   tracker is its owner's call.
 
 ## The gate ledger
 
@@ -296,6 +307,86 @@ Mechanics notes recorded at landing:
   `TaskCancelCoordinator`'s reconciliation of parked rows; the live cancel
   path these cases drive is green on top of it.
 
+### FG10d — process crash (slice 3, delivered)
+
+The packaged Harness is SIGKILLed under an **attached** run (the record
+reads `running_attached`) after the lead's own Turn settled, and a cold
+one starts on the same port. Two windows:
+
+- the run's `agent()` request is held at the model. Its abort, a failed
+  keepalive write (FG10e's witness), shows that the kill took the
+  in-flight subagent with it;
+- the run's work is done — its answer is in the child journal — and the
+  child Turn's settlement commit is swallowed at the store, never
+  forwarded, so the kill lands before that commit leaves the wire. The
+  swallow is the deterministic form of the a+d design's
+  settlement-observed kill.
+
+| Case                                         | Injection                                                                                                                                                  | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kill-mid-workflow-subagents-in-flight`      | SIGKILL the Harness while the run's `agent()` request is held; start a cold one                                                                            | The kill aborts the held request. Nothing settles the Turn while no Harness runs. After the restart the Turn stays `RUNNING`, marked `hosted_workflow_recovery_blocked` — never settled — and the restarted Harness answers the child's load `hosted_turn_recovery_required`. The record settles `recovery_blocked` / `outcome_unknown` / `runtime_lost`, with no stop reason and no result, its `definitionDigest` still the script's sha256. Never re-executed: one `agent()` dispatch, no answer in the child journal, no Turn result reading `completed`. The `CHILD_RESULT` row reads `unknown/pending/pending`, the walk's ledger row `unknown`. The lead gets one `<status>blocked</status>` notification whose result line says the run is recovery blocked (outcome unknown), read by one wake round |
+| `kill-after-last-subagent-before-settlement` | Let the subagent answer and swallow the child Turn's `settleTurn` commit at the store; SIGKILL the Harness while it waits on that commit; start a cold one | The swallow is witnessed once and the swallowed command never passes through. The run's answer is in the child journal exactly once, and stays so. Every other `kill-mid-workflow-subagents-in-flight` expectation holds: the work that finished is not taken for an observed outcome                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+Mechanics notes recorded at landing:
+
+- The coordinator's in-flight drive of the child Turn fails with the
+  Harness and retries with backoff (1, 2, 4, 8 s). The first drive
+  against the cold Harness takes the recovery path (the Session is
+  bound). The restarted Harness's takeover load first meets the dead
+  writer (`managed_session_writer_conflict`), then refuses with
+  `hosted_turn_recovery_required` / `takeover_unrecovered`, and the
+  coordinator's takeover-refusal arm parks the Turn blocked. The relay
+  settles the record on its next scan, about 20 s after the restart in
+  both windows. The reason is a mechanics fact, not an expectation
+  (decision 4); the gate asserts the refusal and the mark.
+- Before refusing, the takeover closes the child journal's Turn as
+  interrupted (`cancelled` / `harness_interruption`, a journal fact),
+  while the managed Turn row stays `RUNNING` and marked. That commit is a
+  new command, never the swallowed one.
+- A blocked background child owes its parent a notification
+  (`settleRecoveryBlocked` commits it with the record and kicks the
+  idle lead), so FG10d expects exactly one notification and one wake,
+  not none.
+- The relay is the walk's only writer after the restart: the lead itself
+  is idle and reloads on demand.
+
+**Findings fixed with the gate.** On the first runs the gate went red on
+two production defects. Both were in the honest-settlement path #14461
+added, and slice 3 fixes them:
+
+1. **A close debt rewrote the walk's classification.** This fixture's
+   host cannot close a Workspace Session, so every settled arm retains a
+   close debt. `ChildResultRelayStore.advance(close_debt)` retired the
+   walk `done` and its `CHILD_RESULT` row `delivered` whatever the arm
+   proved. The `unknown` that the recovery-blocked arm (#14461) and the
+   relay's give-up chain intend therefore read as a delivered result
+   wherever the close is not admitted at once. The debt now parks under
+   the walk's own classification (`retainCloseDebt`), exactly as the
+   closed arm's `classify` does. Unit tests pin both classifications
+   (`ChildResultRelayStoreTest`) and the blocked arm passing `unknown`
+   (`ChildResultRelayTest`).
+2. **The blocked notification described the running revision.**
+   `settleRecoveryBlocked` rendered the parent's notification from the
+   record it replaces, so under `<status>blocked</status>` the result
+   line read "Workflow child run running (unknown).". It now renders the
+   blocked revision it commits, as a unit test in
+   `hosted-child-agent-session.test.ts` pins.
+
+Review found a third, which fix 1 widened:
+
+3. **An `unknown` child start held its parent's collection forever.**
+   `SessionResourceCollectionCollector` holds a retired parent's
+   resources while a `CHILD_SESSION_START` walk is not `done` or
+   `orphaned`. But `unknown` is just as terminal: the relay's discovery
+   page and claim exclude it, and nothing rewrites it. So an `unknown`
+   walk held the collection with no release, wherever the close is
+   admitted at once, and fix 1 carried the same hold to hosts without
+   close capability. The collector now treats `unknown` as terminal. An
+   owed close rides its own `CHILD_SESSION_CLOSE` row and reads no parent
+   resource, so it does not hold the collection either, as before.
+   `SessionResourceCollectionCollectorTest` pins the hold and its release
+   for all three classifications.
+
 ## Fixture design
 
 **Shape.** `HostedWorkflowRelayFaultGatesIT` is the FG9 class's fixture
@@ -330,6 +421,14 @@ the public API for FG10e's lost cancel reply.
 fire table and `restartHarness` with the writer-generation witness,
 applied only after the child Turn settled.
 
+**Kills** (slice 3) reuse `killHarness`, the kill half of
+`restartHarness`. The store proxy gains a `SWALLOW` disposition, which
+never forwards and answers 503 once released. The proxy runs every
+handler on its one dispatcher thread, so a swallow (like a hold) stalls
+all store traffic while it waits. FG10d therefore releases it as soon as
+the kill is confirmed, before the cold Harness needs the store; the 503
+then meets a closed connection.
+
 **CI.** The class name places it in the `hosted-harness-mysql` lane
 (`Hosted*IT`; `check-failsafe-reports.js hosted` enforces it ran), and the
 existing `hosted-workflow-gates` profile runs it locally. Each slice
@@ -359,6 +458,15 @@ composes onto main's allowance after slice 1: 3545 + 198 ≈ 3743 s. One
 4155→4353 s. The Verify step moves 85→90 minutes (447 s of margin; 85 would
 leave 147), and the job ceiling moves 330→335 to stay above the summed
 step ceilings (320) plus the uncapped setup steps.
+
+Slice 3 re-measures the five-letter class at 246.1–246.8 s healthy
+locally across three runs (FG10d ~65 s, the other letters unchanged),
+~494 s budgeted at the same 2×, 131 s over slice 2's 363 s. It composes
+onto main's allowance after slice 2: 3743 + 131 = 3874 s. One 600 s
+ceiling plus that needs a fork of at least 4474 s, so the fork moves
+4353→4484 s. The Verify step's 90 minutes still wrap the fork plus its
+600 s (316 s of margin), so the Verify step and the job ceiling (185 since
+#14467 moved the failover arms to their own job) stay as they are.
 
 ## Mutation checks
 
@@ -425,6 +533,38 @@ Slice 2, each run against its case alone (`-Dqwen.fg10c.case` /
     `cancel-after-settlement` red; the cancel is admitted with 202 instead
     of 409 `task_action_unavailable`.
 
+Slice 3, each run against its case alone (`-Dqwen.fg10d.case`); the
+Harness-side mutation patches the packaged bundle's chunk and restores it
+byte for byte, the others patch the Java source:
+
+12. FG10d — the coordinator no longer recognizes a workflow Turn
+    (`isWorkflowLaunchTurn` always false), so every #14461 refusal arm is
+    off: `kill-mid-workflow-subagents-in-flight` red at the mark. The
+    takeover's refusal keeps the drive on the generic retry path — five
+    retries by the time the case gives up — so the Turn is never parked
+    and the record never settles.
+13. FG10d — the relay ignores the recovery-blocked mark on the Turn line:
+    `kill-mid-workflow-subagents-in-flight` red; the Turn parks marked,
+    but the record stays `running`.
+14. FG10d — a close debt retires every walk `done` (slice 3's relay fix
+    reverted): `kill-after-last-subagent-before-settlement` red at the
+    ledger, whose `CHILD_RESULT` row reads `delivered/pending/pending`.
+15. FG10d — the blocked notification renders the running revision it
+    replaces (slice 3's Harness fix reverted):
+    `kill-after-last-subagent-before-settlement` red at the notification,
+    whose result line reads "Workflow child run running (unknown).".
+
+The fixes' unit tests are red with their fix reverted:
+`ChildResultRelayStoreTest.retainsACloseDebtUnderTheWalksOwnClassification`
+and, in `ChildResultRelayTest`,
+`aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown`,
+`aGiveUpWithoutCloseSupportRetainsItsCloseDebt` (red when the give-up arm passes
+`done`) and `aHostWithoutCloseSettlesAndRetainsTheCloseDebt` for the
+relay; `tells a background child's parent the run is blocked, not
+running` in `hosted-child-agent-session.test.ts` for the Harness; and
+`SessionResourceCollectionCollectorTest.aChildStartHoldsCollectionOnlyUntilTheRelayClassifiesIt`
+(its `unknown` case) for the collector.
+
 ## Validation and acceptance
 
 - The new class green on a local MySQL 8.4, three consecutive full-class
@@ -436,6 +576,8 @@ Slice 2, each run against its case alone (`-Dqwen.fg10c.case` /
   workflow/pom meta-tests green, with the composed budget.
 - This design lands in both languages with slice 1; each slice records
   its letters on #14165.
+- Slice 3's three fixes ship with their unit tests, each shown red with
+  its fix reverted.
 
 ## Open questions
 

@@ -115,7 +115,7 @@ Ordinary H2 tests use the real public Workspace creation producer, preserve full
 
 This change attributes live inventory only. It does not extend historical carrier decoders or qualify arbitrary concurrent foreign activity; whole saved OTHER rows still participate in image comparisons.
 
-## Main fbc698a651 compatibility
+## Main b3c5d3ed1e compatibility
 
 The merge retains published V1–V9 resources byte for byte and appends only the unchanged private retirement DDL at V10. Both explicit initialization and Flyway must recognize and preserve all published predecessors, ordinary rows and installed history. The canonical DDL composer supports main's complete check replacement together with K2 table/column/unique-index additions; the same-Connection validation overload used by live inventory and retained history remains mandatory. A former private V7 catalog is not a published V7 predecessor and must refuse without repair or partial migration.
 

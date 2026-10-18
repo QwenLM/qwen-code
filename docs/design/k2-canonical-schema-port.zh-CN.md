@@ -93,7 +93,7 @@ checkpoint 协议检查、精确应用像和回滚/重试行为、同步读端�
 
 本次仅增加 live 清单归属，不扩展历史 carrier 解码器，也不资格化任意并发 foreign 活动；已保存 OTHER 完整行仍参与全像比较。
 
-## 主干 fbc698a651 兼容
+## 主干 b3c5d3ed1e 兼容
 
 合并逐字保留已发布 V1–V9 资源，仅将不变的私有退役 DDL 追加为 V10。显式初始化与 Flyway 均须识别并保留全部已发布前序、普通行和已安装历史。标准 DDL 组合器同时支持主干完整 check 替换和 K2 表/列/unique-index 增量；live 清单与保留历史使用的同 Connection 验证重载保持必需。旧私有 V7 catalog 不是已发布 V7 前序，必须拒绝，不 repair 或部分迁移。
 
