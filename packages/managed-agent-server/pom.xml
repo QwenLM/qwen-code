@@ -414,8 +414,11 @@
                                  inside the same envelope: the healthy
                                  sum becomes 4189 s, so the fork moves
                                  to 4799 s and the Verify step to 95
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>4799</forkedProcessTimeoutInSeconds>
+                                 minutes. The FG13d cancel/timeout
+                                 cells (two cases, issue #14449) add
+                                 200 s: the healthy sum becomes
+                                 4389 s, so the fork moves to 4999 s. -->
+                            <forkedProcessTimeoutInSeconds>4999</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

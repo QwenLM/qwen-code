@@ -591,12 +591,14 @@ describe('Hosted real-process gates', () => {
       // moves to 4484, still inside those 90 minutes; the FG12a MCP
       // reply-loss letter adds ~15 s, so the fork moves to 4499; the FG13c
       // Hook owner-restart cells add three cases budgeted at 300 s, so the
-      // fork moves to 4799 and the Verify step to 95 minutes):
+      // fork moves to 4799 and the Verify step to 95 minutes; the FG13d
+      // cancel/timeout cells add two cases budgeted at 200 s, so the fork
+      // moves to 4999):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4799);
+        expect(forkSeconds).toBe(4999);
       }
     },
   );
@@ -629,10 +631,11 @@ describe('Hosted real-process gates', () => {
   // in the fork ran 3085s from the first class's start to the last
   // class's end. The FG13c Hook owner-restart cells (issue #14449, three
   // cases) are budgeted at 300s until the lane measures them, so the
-  // healthy sum becomes 4189s.
+  // healthy sum becomes 4189s; the FG13d cancel/timeout cells (issue
+  // #14449, two cases) add 200s, so it becomes 4389s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4189;
+  const hostedForkHealthySeconds = 4389;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -697,6 +700,7 @@ describe('Hosted real-process gates', () => {
       'HostedConcurrentTurnBurstMySqlIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMonitorRunFaultGatesIT',
