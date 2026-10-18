@@ -531,24 +531,6 @@ describe('Session ID Support (E2E)', () => {
     });
 
     it('should generate different session IDs for different queries', async () => {
-      const q1 = query({
-        prompt: 'Say one',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          debug: false,
-        },
-      });
-
-      const q2 = query({
-        prompt: 'Say two',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          debug: false,
-        },
-      });
-
       // Read each query only up to its init system message, which echoes the
       // session ID the CLI is running under. The init message arrives before
       // any model call, so this test does not depend on a model completion.
@@ -563,35 +545,62 @@ describe('Session ID Support (E2E)', () => {
         return undefined;
       };
 
+      // The Query constructor starts the CLI initialize handshake eagerly, so
+      // the two queries are started one after another: constructing both up
+      // front spawns two CLI containers concurrently, whose handshakes have
+      // exceeded the control-request timeout under CI shard contention
+      // (#14579). This matches the other multi-query tests in this file.
+      const q1 = query({
+        prompt: 'Say one',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: testDir,
+          debug: false,
+        },
+      });
+
+      let cliSessionId1: string | undefined;
       try {
-        const [cliSessionId1, cliSessionId2] = await Promise.all([
-          readInitSessionId(q1),
-          readInitSessionId(q2),
-        ]);
-
-        const sessionId1 = q1.getSessionId();
-        const sessionId2 = q2.getSessionId();
-
-        // Session IDs should be different
-        expect(sessionId1).toBeDefined();
-        expect(sessionId2).toBeDefined();
-        expect(sessionId1).not.toBe(sessionId2);
-
-        // The CLI runs each query under its SDK-generated session ID
-        expect(cliSessionId1).toBe(sessionId1);
-        expect(cliSessionId2).toBe(sessionId2);
-
-        // Both should be valid UUIDs
-        expect(sessionId1).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-        );
-        expect(sessionId2).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-        );
+        cliSessionId1 = await readInitSessionId(q1);
       } finally {
         await q1.close();
+      }
+
+      const q2 = query({
+        prompt: 'Say two',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: testDir,
+          debug: false,
+        },
+      });
+
+      let cliSessionId2: string | undefined;
+      try {
+        cliSessionId2 = await readInitSessionId(q2);
+      } finally {
         await q2.close();
       }
+
+      const sessionId1 = q1.getSessionId();
+      const sessionId2 = q2.getSessionId();
+
+      // Session IDs should be different
+      expect(sessionId1).toBeDefined();
+      expect(sessionId2).toBeDefined();
+      expect(sessionId1).not.toBe(sessionId2);
+
+      // The CLI runs each query under its SDK-generated session ID
+      expect(cliSessionId1).toBe(sessionId1);
+      expect(cliSessionId2).toBe(sessionId2);
+
+      // Both should be valid UUIDs
+      expect(sessionId1).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+      expect(sessionId2).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
     });
   });
 });
