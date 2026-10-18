@@ -408,8 +408,30 @@
                                  locally on macOS JDK 21 + MariaDB
                                  10.11 (~15 s budgeted at 2x): the
                                  healthy sum becomes 3889 s, so the
-                                 fork moves to 4499 s. -->
-                            <forkedProcessTimeoutInSeconds>4499</forkedProcessTimeoutInSeconds>
+                                 fork moves to 4499 s. The FG12c MCP
+                                 restart matrix (HostedMcpRestartFault
+                                 GatesIT, five process-kill cases)
+                                 measures ~49 s healthy locally (~98 s
+                                 budgeted at 2x); the FG13c Hook
+                                 owner-restart cells (three cases,
+                                 issue #14449) are budgeted at 300 s:
+                                 the healthy sum becomes 4238 s, so the
+                                 fork moves to 4848 s. The FG13d
+                                 cancel/timeout cells (two cases, issue
+                                 #14449) add 200 s: the healthy sum
+                                 becomes 4438 s, so the fork moves to
+                                 5048 s. The FG11a automation lost-reply
+                                 letter (HostedAutomationFaultGatesIT,
+                                 eight cases on one minute boundary)
+                                 measures 46.3-85.0 s locally on JDK 21
+                                 + MySQL 8.4.6 (~170 s budgeted at 2x):
+                                 the healthy sum becomes 4608 s, so the
+                                 fork moves to 5218 s and the Verify
+                                 step to 100 minutes. The FG13d
+                                 worker-stop cancel cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 4758 s, so the fork moves to 5368 s. -->
+                            <forkedProcessTimeoutInSeconds>5368</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -561,6 +583,24 @@
                 <version>${maven-failsafe-plugin.version}</version>
                 <configuration>
                     <includes><include>**/HostedMcp*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Mirrors the hosted-harness-mysql lane's
+                         per-ceiling rule for this class: one @Timeout
+                         ceiling (600 s) plus the healthy runtime must
+                         fit 1200 s. -->
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-automation-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedAutomation*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
                          per-ceiling rule for this class: one @Timeout
