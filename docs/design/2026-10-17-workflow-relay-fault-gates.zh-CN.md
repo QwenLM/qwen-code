@@ -9,10 +9,11 @@ Issue #14165 是 #12380 Stage F 的 FG10 轮（伞形 issue #14054）：为 #138
 #14390 落地，见 [a+d 设计](2026-10-16-workflow-fault-gates-ad.zh-CN.md)。FG10d
 （进程崩溃）在那里被延后，并带出了它抓到的生产问题 #14387：Harness 被杀后，恢复
 流程会重新驱动一个未结算的 workflow Turn。它的修复 #14461 让协调器对已绑定、且
-不在取消中的 workflow Turn 保持未结算，不再重新驱动。本设计覆盖剩下的四个字母：
-**FG10b（应答丢失）、FG10c（存储故障）、FG10e（取消）和 FG10f（通知与输出投递）。**
+不在取消中的 workflow Turn 保持未结算，不再重新驱动。本设计覆盖剩下的五个字母：
+**FG10b（应答丢失）、FG10c（存储故障）、FG10e（取消）和 FG10f（通知与输出投递）**，
+以及在 #14461 合入后作为第 3 片加入的 **FG10d（进程崩溃）**（见下文）。
 
-a+d 设计说这四个"大体与 kind 无关"。但它们并不能白拿：每一个都落在记录的
+a+d 设计说前四个"大体与 kind 无关"。但它们并不能白拿：每一个都落在记录的
 **relay 驱动的结算**上，也就是从启动到父 Session 收到通知的整条流程。FG10a 由
 driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操作冲突，而由协调器
 持有父 Session 的方案需要 workspace 执行，macOS 本地跑不了。在 Linux 上，协调器
@@ -25,7 +26,7 @@ driver 持有父 Session，走不到这里：它的父 attach 和 relay 的操�
 4. 结果 revision 让记录结算；
 5. 通知以 `<task-notification>` 输入的形式落到 lead 上，lead 的唤醒 Turn 读取它。
 
-这四个字母钉住的，是这条流程在故障下的 workflow 专属承诺：
+FG10b、c、e、f 钉住的，是这条流程在故障下的 workflow 专属承诺：
 
 - **每次启动至多一个 workflow 实例**：一个子 Session、脚本只执行一次、每次调用
   只派发一次 `agent()`，无论流程中哪一个应答丢失（FG10b）；
@@ -41,8 +42,8 @@ driver 持有 parent 的那个类，原因同上：kill 之后它要钉住的东
 ledger 以及 lead 收到的通知）都在 relay 驱动的流程里。在这条流程下，Harness 死在
 其上的运行**绝不会被重新执行，也绝不会被当作结果已被观察到而结算**（FG10d）。
 
-第 1、2 片**不改任何生产代码**。第 3 片修复了它的门禁发现的两个缺陷（见 FG10d 的
-"随门禁修复的问题"）。
+第 1、2 片**不改任何生产代码**。第 3 片修复了它的门禁发现的两个缺陷，以及评审发现的
+第三个（见 FG10d 的"随门禁修复的问题"）。
 
 ## 现状
 
@@ -303,6 +304,17 @@ store 客户端在一次提交调用内部重驱的丢弃，根本到不了 rela
    "Workflow child run running (unknown)."。现在它用自己提交的阻断 revision 生成，
    由 `hosted-child-agent-session.test.ts` 里的一条单测钉住。
 
+评审发现了第三个，修复 1 扩大了它的范围：
+
+3. **`unknown` 的子启动永久扣住父 Session 的资源回收。**
+   `SessionResourceCollectionCollector` 在 `CHILD_SESSION_START` 流程不是 `done` 或
+   `orphaned` 时扣住已退役父 Session 的资源。但 `unknown` 同样是终态：relay 的发现查询
+   和 claim 都排除它，也没有任何代码会再改写它。所以凡是 close 能立即受理的地方，
+   `unknown` 流程都会无释放口地扣住回收，而修复 1 又把这个扣住带到了没有 close 能力的
+   host 上。现在 collector 把 `unknown` 当作终态。欠下的 close 走它自己的
+   `CHILD_SESSION_CLOSE` 行，不读父 Session 的任何资源，所以和以前一样也不扣住回收。
+   `SessionResourceCollectionCollectorTest` 对三种归类钉住了扣住与释放。
+
 ## 夹具设计
 
 **形态。** `HostedWorkflowRelayFaultGatesIT` 是 FG9 类的夹具，按一个父 Session 加
@@ -427,10 +439,13 @@ main 的配额上：3743 + 131 = 3874 s。一个 600 s 上限加上它，需要�
 
 两处修复的单测在撤掉对应修复后都会变红：relay 一侧是
 `ChildResultRelayStoreTest.retainsACloseDebtUnderTheWalksOwnClassification`，以及
-`ChildResultRelayTest` 里的 `aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown` 和
+`ChildResultRelayTest` 里的 `aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown`、
+`aGiveUpWithoutCloseSupportRetainsItsCloseDebt`（放弃分支改传 `done` 时变红）和
 `aHostWithoutCloseSettlesAndRetainsTheCloseDebt`；Harness 一侧是
 `hosted-child-agent-session.test.ts` 里的
-`tells a background child's parent the run is blocked, not running`。
+`tells a background child's parent the run is blocked, not running`；collector 一侧是
+`SessionResourceCollectionCollectorTest.aChildStartHoldsCollectionOnlyUntilTheRelayClassifiesIt`
+（其 `unknown` 用例）。
 
 ## 验证与验收
 
@@ -440,7 +455,7 @@ main 的配额上：3743 + 131 = 3874 s。一个 600 s 上限加上它，需要�
 - 模块 `mvn verify`（surefire、Checkstyle、SpotBugs）以及 workflow/pom 元测试，在
   叠加后的预算下全绿。
 - 本设计随第 1 片以中英文落地；每片都在 #14165 上记录其字母。
-- 第 3 片的两处修复连同各自的单测一起交付，每条单测都在撤掉对应修复后被证明会变红。
+- 第 3 片的三处修复连同各自的单测一起交付，每条单测都在撤掉对应修复后被证明会变红。
 
 ## 开放问题
 

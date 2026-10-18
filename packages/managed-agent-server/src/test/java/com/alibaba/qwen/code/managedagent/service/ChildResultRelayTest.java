@@ -704,9 +704,9 @@ class ChildResultRelayTest {
 
     // The bounded give-up on a capability-less host settles the parent's
     // record on time — the give-up and its started pairing are proven
-    // facts — but never classifies `unknown` over the owed close: the
-    // row parks as `close_debt`, still names the child, and discharges
-    // once a capable scan sees it.
+    // facts — and retires the walk under `unknown`, never `done`: the
+    // owed close parks on its own close-debt row, still names the child,
+    // and discharges once a capable scan sees it.
     @Test
     void aGiveUpWithoutCloseSupportRetainsItsCloseDebt() {
         when(childCloses.closeSupported()).thenReturn(false);
@@ -714,6 +714,9 @@ class ChildResultRelayTest {
                 "watching", "owner", now + 30_000, 63, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
         relay.scan();
+        verify(store).retainCloseDebt(any(RelayRow.class), anyString(),
+                Mockito.eq("unknown"), Mockito.eq(CHILD), anyLong(), any(),
+                anyLong(), anyLong());
         assertThat(row.get().state()).isEqualTo("close_debt");
         assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         assertThat(harness.operations)

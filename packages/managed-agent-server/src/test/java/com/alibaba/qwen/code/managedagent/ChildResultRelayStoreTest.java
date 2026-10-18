@@ -478,6 +478,10 @@ class ChildResultRelayStoreTest {
         assertThatThrownBy(() -> relayStore.retainCloseDebt(other, "owner",
                 "orphaned", "child-g", now + 1_000, null, now + 30_000, now))
                 .isInstanceOf(IllegalArgumentException.class);
+        RelayRow owed = relayStore.find(TENANT, session, "run-debt-done");
+        assertThatThrownBy(() -> relayStore.retainCloseDebt(owed, "owner",
+                "done", "child-g", now + 1_000, null, now + 30_000, now))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     // A give-up whose settle committed and whose close_debt write then

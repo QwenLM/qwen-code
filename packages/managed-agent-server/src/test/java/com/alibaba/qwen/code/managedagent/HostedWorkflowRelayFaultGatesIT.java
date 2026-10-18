@@ -77,7 +77,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 /**
- * FG10 (#14165) b/c/e/f: the relay-driven settlement of a `child_run`
+ * FG10 (#14165) b–f: the relay-driven settlement of a `child_run`
  * `workflow` launch under fault — a real Spring managed-agent server on
  * MySQL, the embedded Runtime Broker, the packaged Hosted Harness and a
  * scripted model. A coordinator-owned team lead calls `workflow` with a

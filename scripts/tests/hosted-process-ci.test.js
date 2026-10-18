@@ -611,7 +611,7 @@ describe('Hosted real-process gates', () => {
   // MySQL 8.4.6 (~290s budgeted at 2x), and the FG10a workflow digest
   // letter — four cases since #14390 — measures 15.9–16.2s for the letter
   // locally on macOS JDK 26 + MySQL 8.4.6 across four acceptance runs
-  // (~33s budgeted at 2x), and the FG10b/c/e/f workflow relay letters
+  // (~33s budgeted at 2x), and the FG10b–f workflow relay letters
   // (HostedWorkflowRelayFaultGatesIT, five letters since slice 3's FG10d)
   // measure 246.1–246.8s for the class locally on JDK 21 + MySQL 8.4.6
   // across three acceptance runs (~494s budgeted at 2x, as FG10a, up from

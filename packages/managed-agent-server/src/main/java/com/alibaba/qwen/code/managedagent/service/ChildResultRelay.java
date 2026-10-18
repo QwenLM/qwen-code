@@ -1453,9 +1453,10 @@ public class ChildResultRelay {
      * owes through the ordinary defer; the row never retires with the
      * debt airborne. A host without close capability at all settles the
      * parent record on time (the give-up and its pairing are proven
-     * facts, not capability-held), then parks the row as `close_debt` —
-     * the settlement is nobody's close, so the ledger keeps the owed
-     * admission discoverable instead of classifying `unknown` over it.
+     * facts, not capability-held) and retires the walk under its own
+     * `unknown`; the settlement is nobody's close, so the owed admission
+     * parks beside that classification on its own close-debt row, still
+     * discoverable — the debt never stands in for the result's truth.
      * A worktree run whose merge was asked is the exception (#13753 I2):
      * the merge needs the child closed and holds the settlement, so that
      * run waits for a host that can close it.

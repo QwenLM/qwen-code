@@ -12,11 +12,12 @@ crash) was deferred there with the production finding it caught, #14387 —
 the recovery re-drove an unsettled workflow Turn after a Harness kill —
 whose fix (#14461) makes the coordinator leave a bound, non-cancelling
 workflow Turn unsettled instead of re-driving it.
-This design covers the four letters that remain: **FG10b (lost replies),
+This design covers the five letters that remain: **FG10b (lost replies),
 FG10c (store failures), FG10e (cancellation) and FG10f (notification and
-output delivery).**
+output delivery)**, plus **FG10d (process crash)**, which joined as slice 3
+once #14461 merged (below).
 
-The a+d design called these four "largely kind-agnostic". They are not
+The a+d design called the first four "largely kind-agnostic". They are not
 free, though: every one of them lives in the record's **relay-driven
 settlement** — the walk from the launch to the parent's notification —
 which FG10a's driver-held parent could not reach (its parent attach
@@ -28,7 +29,7 @@ seconds: the lead's `workflow` call is admitted, the relay creates and
 binds the child Session, the child Turn runs the script and its
 in-process `agent()` dispatch, the result revision settles the record,
 the notification lands on the lead as a `<task-notification>` input, and
-the lead's wake Turn reads it. The four letters pin that walk's
+the lead's wake Turn reads it. FG10b, c, e and f pin that walk's
 workflow-specific promises under fault:
 
 - **at most one workflow instance per launch** — one child Session, one
@@ -52,7 +53,8 @@ the Harness died under is **never re-executed and never settled as if
 its outcome had been observed** (FG10d).
 
 Slices 1 and 2 touch **no production code**. Slice 3 fixes the two
-defects its gate found (FG10d's _Findings fixed with the gate_).
+defects its gate found and a third its review found (FG10d's _Findings
+fixed with the gate_).
 
 ## Current state
 
@@ -370,6 +372,21 @@ added, and slice 3 fixes them:
    blocked revision it commits, as a unit test in
    `hosted-child-agent-session.test.ts` pins.
 
+Review found a third, which fix 1 widened:
+
+3. **An `unknown` child start held its parent's collection forever.**
+   `SessionResourceCollectionCollector` holds a retired parent's
+   resources while a `CHILD_SESSION_START` walk is not `done` or
+   `orphaned`. But `unknown` is just as terminal: the relay's discovery
+   page and claim exclude it, and nothing rewrites it. So an `unknown`
+   walk held the collection with no release, wherever the close is
+   admitted at once, and fix 1 carried the same hold to hosts without
+   close capability. The collector now treats `unknown` as terminal. An
+   owed close rides its own `CHILD_SESSION_CLOSE` row and reads no parent
+   resource, so it does not hold the collection either, as before.
+   `SessionResourceCollectionCollectorTest` pins the hold and its release
+   for all three classifications.
+
 ## Fixture design
 
 **Shape.** `HostedWorkflowRelayFaultGatesIT` is the FG9 class's fixture
@@ -540,10 +557,13 @@ byte for byte, the others patch the Java source:
 The fixes' unit tests are red with their fix reverted:
 `ChildResultRelayStoreTest.retainsACloseDebtUnderTheWalksOwnClassification`
 and, in `ChildResultRelayTest`,
-`aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown` and
-`aHostWithoutCloseSettlesAndRetainsTheCloseDebt` for the relay;
-`tells a background child's parent the run is blocked, not running` in
-`hosted-child-agent-session.test.ts` for the Harness.
+`aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown`,
+`aGiveUpWithoutCloseSupportRetainsItsCloseDebt` (red when the give-up arm passes
+`done`) and `aHostWithoutCloseSettlesAndRetainsTheCloseDebt` for the
+relay; `tells a background child's parent the run is blocked, not
+running` in `hosted-child-agent-session.test.ts` for the Harness; and
+`SessionResourceCollectionCollectorTest.aChildStartHoldsCollectionOnlyUntilTheRelayClassifiesIt`
+(its `unknown` case) for the collector.
 
 ## Validation and acceptance
 
@@ -556,7 +576,7 @@ and, in `ChildResultRelayTest`,
   workflow/pom meta-tests green, with the composed budget.
 - This design lands in both languages with slice 1; each slice records
   its letters on #14165.
-- Slice 3's two fixes ship with their unit tests, each shown red with
+- Slice 3's three fixes ship with their unit tests, each shown red with
   its fix reverted.
 
 ## Open questions

@@ -104,19 +104,21 @@ hosted-harness`）、`hosted-monitor-run-fault-driver.ts` 的
    依据：issue 自述 a 与 d 是本轮欠的两道；triage 结论建议正好先落
    这两道；Hosted fork 预算正在修（#14148，open）且主干 CI 有红色
    邻居（#14023，open），所以本切片只花能交付 workflow 特有价值的
-   最小预算。
+   最小预算。_实际交付时只有 FG10a 落在这里；FG10b–f（含 FG10d）落在
+   [relay 设计](2026-10-17-workflow-relay-fault-gates.zh-CN.md)中。_
 2. **排序约束重新评估，而非照旧继承。** issue 的「排在 FG8 与
    #14147 之后」写于 FG8 尚未开工时。FG8 的切片 1（#14120）此后已
    合入并证明了本切片照抄的按 letter 驱动器模式；#14147（抽取共享
    helper）仍阻塞于 P3，故本切片遵循**当前未抽取**的模式，接受
    FG8/FG9 已携带的重复——正如 FG8 各切片所为。
-3. **一个 IT 类；不杀 Spring；无 cgroup 依赖。** 两个 letter 都在
+3. **一个 IT 类；不杀 Spring；无 cgroup 依赖。** FG10a 在
    `HostedWorkflowFaultGatesIT` 内、in-JVM Spring，选择器
-   `-Dqwen.fg10a.case` / `-Dqwen.fg10d.case`，证据在
-   `target/fg10-cases/`。workflow kind 不拥有 OS 进程，因此不需要
-   FG8 的 cgroup v2 委托；SIGKILL 目标是打包 Harness 本体——父
-   session 与进程内 workflow run 都住在其中。POSIX 信号使崩溃
-   letter 限 Linux/macOS，与 FG6c/FG7c/FG8 相同。
+   `-Dqwen.fg10a.case`，证据在 `target/fg10-cases/`。原本也规划在这里的
+   FG10d 落在了 `HostedWorkflowRelayFaultGatesIT`（relay 设计的第 3 片，
+   选择器 `-Dqwen.fg10d.case`），所以本类不读取任何 FG10d 选择器。
+   workflow kind 不拥有 OS 进程，因此不需要 FG8 的 cgroup v2 委托；
+   崩溃 letter 的 SIGKILL 目标是打包 Harness 本体——父 session 与
+   进程内 workflow run 都住在其中。
 4. **relay 必须在 in-JVM Spring 里运行。** `ChildResultRelay` 是
    `@Service`（`ChildResultRelay.java:47-48`），随应用启动；本夹具
    保持其启用（FG8 的夹具关掉了它不需要的 Harness 侧服务——后台
@@ -221,17 +223,19 @@ child_run 记录体与 relay operation 账本行；`tamper-envelope` 执行
 **驱动器。** `integration-tests/helpers/hosted-workflow-fault-driver.ts`，
 按 letter 以 `node --import tsx … <driver.json>` 启动，与每个
 FG6–FG8 驱动器相同。它持有：每 case 的 `HostedHarnessProcess`
-（隔离 `HOME`/`QWEN_HOME`/`QWEN_RUNTIME_DIR`）；store 前置代理
-（仅供 FG10d 的「结算在飞即杀」臂——FG10a 经 probe 注入）；假
+（隔离 `HOME`/`QWEN_HOME`/`QWEN_RUNTIME_DIR`）；store 前置代理，
+其 commit 日志是启动在 store 侧的证据（FG10a 经 probe 注入；原本为
+FG10d 规划的「结算在飞即杀」臂改由 relay 类的 Java 代理承担）；假
 OpenAI 服务器（见下）；以及预置的 workflow 脚本。标记：
 `FG10_CASE_OK <case>` 供 IT 排序，`FG10_STEP` / `FG10_DIAG` 追踪与
-转储，`FG10_TAMPERED` / `FG10_KILLED` 证明注入。若驱动器调用
+转储，`FG10_TAMPERED` 证明注入。若驱动器调用
 `relayUpstream`，须加入 `hosted-relay-headers.test.ts` 的被钉调用者
 名单。
 
 **模型。** 一个预置的 OpenAI 兼容服务器：父 turn 得到恰好一次
 `fakeToolCall('workflow', …)`；child run 的 `agent()` 派发得到简短
-固定应答——在飞击杀用例里按请求挂起，其余立即应答。模型永远不是
+固定应答，立即应答（原本为 FG10d 在飞击杀规划的挂起应答改由 relay 类
+的脚本化模型承担）。模型永远不是
 被门禁的对象；它的请求日志是在飞见证。
 
 **CI。** 类名使其落入 `hosted-harness-mysql` 车道（`Hosted*IT`

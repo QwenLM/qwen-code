@@ -820,6 +820,9 @@ public class ChildResultRelayStore {
         if (!Set.of("done", "unknown").contains(classification)) {
             throw new IllegalArgumentException("Unknown close-debt classification " + classification);
         }
+        if ("CHILD_SESSION_CLOSE".equals(row.operationKind())) {
+            throw new IllegalArgumentException("A close-debt row cannot retain another close debt");
+        }
         transactions.executeWithoutResult(status -> {
             int changed = jdbc.update("UPDATE ma_operation SET state = ?, claim_owner = NULL, claim_until = NULL, result_json = ?, gmt_modified = ? WHERE operation_key = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                     classification, resultBody(childSessionId, lastError), now, operationKey(row.operationKind(),
