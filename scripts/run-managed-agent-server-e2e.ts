@@ -1352,7 +1352,7 @@ try {
               QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
               QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: `http://127.0.0.1:${springPort}`,
               QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
-              QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
+              QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
@@ -2070,7 +2070,7 @@ try {
             QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
             QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: replacementSpringUrl,
             QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
-            QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
+            QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
             QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(
@@ -3142,7 +3142,7 @@ try {
           30_000,
           owners,
         );
-        // Several lease periods for anything the wake set in motion.
+        // Several dispatch lease periods for anything the wake set in motion.
         await new Promise((resolve) => setTimeout(resolve, 6_000));
         const afterWake = fencedState();
         // The probes are synchronous: let the loop record an exit during
