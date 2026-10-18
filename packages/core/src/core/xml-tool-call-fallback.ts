@@ -447,6 +447,28 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     let closeStart = match.index + match[0].length - closeTag.length;
     // Where this match's own closer sat before the advance below moved it.
     const lazyCloseStart = closeStart;
+    // `match[0]` is exactly openTag + body + closeTag, so the body length is
+    // what separates this block's open tag from its parameters. Deriving the
+    // split location by scanning instead returns an offset inside the body
+    // whenever the name attribute opens with one quote character and closes
+    // with the other — the name group's delimiters are independent classes —
+    // which silently drops every parameter before that offset. This reads
+    // nothing the advance below produces, and must precede it: a block it
+    // rejects locally would otherwise end the whole turn first.
+    const paramsStart = lazyCloseStart - (match[2] ?? match[4]).length;
+    const openTagEndOffset = openTagEnd(match[0]);
+    if (openTagEndOffset !== paramsStart - matchStart) {
+      // Only this block's boundary is untrustworthy: a quote run in the name
+      // leaves no unquoted `>` (`-1`), or quote pairs put the flat boundary
+      // inside an attribute. Reject the block and resume past its open tag
+      // rather than costing the whole turn; resuming at or before
+      // `matchStart` would spin the `/g` scan, so fall back to the match end.
+      TOOL_CALL_PATTERN.lastIndex =
+        openTagEndOffset === -1
+          ? match.index + match[0].length
+          : match.index + openTagEndOffset;
+      continue;
+    }
     // The ranges are sorted and disjoint and `closeStart` only moves forward,
     // so the scan resumes past every range it has already left instead of
     // re-finding from index 0: a turn built of many value-quoting blocks makes
@@ -465,26 +487,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     }
     if (closeStart === -1) {
       return [];
-    }
-    // `match[0]` is exactly openTag + body + closeTag, so the body length is
-    // what separates this block's open tag from its parameters. Deriving the
-    // split location by scanning instead returns an offset inside the body
-    // whenever the name attribute opens with one quote character and closes
-    // with the other — the name group's delimiters are independent classes —
-    // which silently drops every parameter before that offset.
-    const paramsStart = lazyCloseStart - (match[2] ?? match[4]).length;
-    const openTagEndOffset = openTagEnd(match[0]);
-    if (openTagEndOffset !== paramsStart - matchStart) {
-      // Only this block's boundary is untrustworthy: a quote run in the name
-      // leaves no unquoted `>` (`-1`), or quote pairs put the flat boundary
-      // inside an attribute. Reject the block and resume past its open tag
-      // rather than costing the whole turn; resuming at or before
-      // `matchStart` would spin the `/g` scan, so fall back to the match end.
-      TOOL_CALL_PATTERN.lastIndex =
-        openTagEndOffset === -1
-          ? match.index + match[0].length
-          : match.index + openTagEndOffset;
-      continue;
     }
     const paramsBlock = text.slice(paramsStart, closeStart);
     const blockEnd = closeStart + closeTag.length;
@@ -698,11 +700,14 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   parameterRanges.length = rangeCount;
 
   if (extendedMasks) {
+    // Pass 2 must see the same inputs as pass 1: without the quoted values it
+    // cannot re-derive `ambiguousFrom`, so the ambiguity range pass 1 widened
+    // to would read as an ownership disagreement and cost the whole turn.
     exampleRanges = computeExampleRanges(
       text,
       parameterRanges,
       exampleTagPositions(text, parameterRanges),
-      [],
+      quotedValueRanges,
     );
     const refreshedBlocks = blocks.filter(isEligibleBlock);
     if (

@@ -941,6 +941,23 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
   });
 
+  it('keeps a block that ends before the ambiguity when a mask extends', () => {
+    // The refreshed masks must re-derive the ambiguity range pass 1 did;
+    // reading that difference as an ownership disagreement dropped the intact
+    // block that ends before it.
+    const inner = invoke('read_file', param('file_path', 'a.ts'));
+    const quoting = invoke('write_file', param('content', inner));
+    const documented = invoke(
+      'doc',
+      param('content', `<example>d</example>${inner}`),
+    );
+    const real = invoke('real', param('p', 'v'));
+    const text = `${quoting}\n<example>\n${documented}\n</example>\n${real}`;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'write_file', args: { content: inner } },
+    ]);
+  });
+
   it('does not run the markdown lexer when the text has no example tag', () => {
     const spy = vi.spyOn(Lexer, 'lexInline');
     try {
@@ -1288,6 +1305,19 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       functionCallParts: [],
       remainingText: text,
     });
+  });
+
+  it('rejects only the truncated block before a quoted-value advance', () => {
+    // The boundary cross-check reads nothing the advance produces, so it must
+    // run first: a block it rejects locally otherwise ends the whole turn at
+    // the advance before its own local rejection is reached.
+    const text =
+      `${OPEN} name='weird">` +
+      param('content', invoke('doc', param('p', 'v'))) +
+      '\n<function=real><parameter=q>w</parameter></function>';
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'real', args: { q: 'w' } },
+    ]);
   });
 
   it('never dispatches a truncated value when a parameter name mixes quote characters', () => {
