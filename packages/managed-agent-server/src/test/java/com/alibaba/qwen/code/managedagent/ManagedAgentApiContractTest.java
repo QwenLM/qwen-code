@@ -2628,7 +2628,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false}
                                 """);
                 if (javaDurableAdmission != null) {
                     ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)
@@ -2710,7 +2710,7 @@ class ManagedAgentApiContractTest {
         assertThat(publishedKib * 1024)
                 .as("published durable-record limit is the enforced one")
                 .isEqualTo(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
-        assertThat(CONTRACT.node("/components/schemas/InputBlock"
+        assertThat(CONTRACT.node("/components/schemas/InputTextBlock"
                 + "/properties/text/maxLength").asLong())
                 .as("published per-block maxLength is the enforced"
                         + " per-block cap")
