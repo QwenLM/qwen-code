@@ -306,7 +306,7 @@ class HostedWorkspaceToolTurnIT {
             // Give initialized roots an unambiguous birth time without a timing-dependent sleep.
             Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
-        boolean verifiedRecovery = "Linux".equals(System.getProperty("os.name"));
+        boolean verifiedRecovery = List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (unicode) {
