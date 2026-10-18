@@ -354,6 +354,16 @@ publication 车道在到达 `lockPublicationWriter` 之前就已触租户守卫�
 首次获取现均以同一逐语句上界运行并共享 `tenant_guard_contended` 映射。见
 证：`ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`。
 
+取得 tenant 行后，`lockSessionHead` 也为 root UPSERT、root 加锁读取与 head
+加锁读取设置每条语句五秒的上界，并共享 `tenant_guard_contended` 映射，
+包括锁等待超时 1205，避免因一个 Session 的 writer 占住 publication 守卫，
+一直等到数据库默认锁等待超时。既有更短的语句或事务超时继续生效；普通
+root-only writer 路径保留原等待设置与死锁映射。见证
+`ManagedSessionGuardConvoyIT#heldSessionRowsBoundRetentionReads` 检查 root 与
+head 被持有时的有界拒绝，以及释放后的成功读取，覆盖 #14393 A.2。
+producer/dispatch placement 和更早的 lifecycle 获取仍由 #14393 A.1/A.3
+独立跟踪。
+
 ### F3. writer 获取保持 placement 先于 drain 栅栏
 
 普通分支的 `checkLifecycleWriter` 早退后，`acquireWriter` 先读
