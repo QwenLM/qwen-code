@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (115 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (116 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 195, 210],
+    ['hosted-harness-mysql', 196, 210],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -605,13 +605,15 @@ describe('Hosted real-process gates', () => {
       // minutes; FG11b slice 2's Harness-side store faults add ~145 s, so
       // the fork moves to 5643, still inside those 105 minutes; the
       // event-stream liveness gates add ~440 s, so the fork moves to 6083;
-      // the FG13d dropped-reply cancel cell adds 150 s, so the fork moves
-      // to 6233 and the Verify step to 115 minutes):
+      // the FG13d dropped-reply cancel cell adds 150 s, so the fork moves to
+      // 6233; the FG12b store-failure class adds ~120 s (49.6 s measured
+      // locally on JDK 21 + MySQL 8.0.46), so the fork moves to 6353 and the
+      // Verify step to 116 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(6233);
+        expect(forkSeconds).toBe(6353);
       }
     },
   );
@@ -661,10 +663,12 @@ describe('Hosted real-process gates', () => {
   // the shipped 15s keepalive and 45s bound) measure 214.4–215.0s for the
   // class locally on JDK 21 and 25 + MySQL 8.4.6 across four acceptance runs
   // (~440s budgeted at 2x), so it becomes 5473s; the FG13d dropped-reply
-  // cancel cell adds 150s, so it becomes 5623s.
+  // cancel cell adds 150s, so it becomes 5623s; the FG12b store-failure
+  // class adds ~120s (49.6s measured on JDK 21 + MySQL 8.0.46), so it
+  // becomes 5743s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 5623;
+  const hostedForkHealthySeconds = 5743;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -735,6 +739,7 @@ describe('Hosted real-process gates', () => {
       'HostedHookFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
+      'HostedMcpStoreFaultGatesIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',
