@@ -91,6 +91,9 @@ public class ManagedExtensionRecordStore {
             + "):[0-9]+$");
     private static final Pattern TASK_ID = Pattern.compile(
             "^task_([0-9a-f]{64})$");
+    /** The task kinds a child Session of their own runs (H4b, H4c). */
+    private static final Set<String> CHILD_SESSION_TASK_KINDS = Set.of(
+            "child_agent", "workflow");
     private static final Set<String> SESSION_KEY_FIELDS = Set.of("tenantId",
             "workspaceId", "sessionId");
     private static final Set<String> PAYLOAD_FIELDS = Set.of("domain",
@@ -132,8 +135,9 @@ public class ManagedExtensionRecordStore {
         this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
+    /** A task's projection row and the resource holding its record's latest committed body. */
     public record TaskRow(String taskId, String kind,
-            TaskProjection projection) {
+            TaskProjection projection, String resourceId) {
     }
 
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
@@ -781,6 +785,21 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
+     * #13746 F2: the child Session that runs a child agent or workflow task, once the run's
+     * committed record names it (the attach, or a verdict that names a minted child), else null.
+     * The record body is the only place that fact lives; no other kind has a child Session.
+     */
+    public String childSessionId(String tenantId, String sessionId,
+            TaskRow task) {
+        if (!CHILD_SESSION_TASK_KINDS.contains(task.kind())) {
+            return null;
+        }
+        JsonNode named = readBody(readResource(tenantId, sessionId,
+                task.resourceId())).get("childSessionId");
+        return named == null || named.isNull() ? null : named.textValue();
+    }
+
+    /**
      * The event-level checks the Session authority's reader runs on every event line: a closed
      * envelope with an optional subject, version 1, the sequence of the line's place among the
      * transaction's events, a well-formed id, this Session's closed key, and a valid time and kind.
@@ -1345,6 +1364,11 @@ public class ManagedExtensionRecordStore {
         String deliveryState = delivery.isNull() ? null
                 : delivery.get("state").textValue();
         long revision = previous == null ? 1 : previous.revision() + 1;
+        // A row's task kind is fixed at its insert: a row written before
+        // its domain projected tasks (a channel delivery planned before
+        // #13746 F3) stays a non-task on every later revision.
+        String taskKind = previous == null ? body.taskKindOf().apply(record)
+                : previous.taskKind();
         if (previous == null) {
             try {
                 jdbc.update("INSERT INTO ma_session_record"
@@ -1360,8 +1384,8 @@ public class ManagedExtensionRecordStore {
                                 + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         scopeKey, recordKey, tenantId, workspaceId, sessionId,
                         domain, recordId, operationHash, revision, resourceId,
-                        body.taskKindOf().apply(record),
-                        body.taskKindOf().apply(record) == null ? null : projection.state(), projection.runtimeState(),
+                        taskKind, taskKind == null ? null : projection.state(),
+                        projection.runtimeState(),
                         projection.definitionRevision(), deliveryTarget,
                         deliveryState, projection.createdAt(),
                         projection.startedAt(), projection.settledAt(), sequence,
@@ -1384,7 +1408,7 @@ public class ManagedExtensionRecordStore {
                         + " = ?, runtime_state = ?, definition_revision = ?, delivery_target = ?,"
                         + " delivery_state = ?, started_at = ?, settled_at = ? WHERE record_kind ="
                         + " 'DOMAIN' AND session_scope_key = ? AND record_key = ?",
-                    revision, resourceId, body.taskKindOf().apply(record) == null ? null : projection.state(),
+                    revision, resourceId, taskKind == null ? null : projection.state(),
                     projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.startedAt(),
@@ -1399,7 +1423,7 @@ public class ManagedExtensionRecordStore {
         jdbc.update(
                 "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scopeKey, recordKey, revision, ManagedSchemaKeys.key(scopeKey, resourceId), tenantId, workspaceId, sessionId, resourceId);
-        if (body.taskKindOf().apply(record) != null && (previous == null
+        if (taskKind != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
             if (isBeingDeleted(tenantId, sessionId)) {
@@ -1434,14 +1458,16 @@ public class ManagedExtensionRecordStore {
         }
         return new TaskRow(ManagedExtensionProjection.taskId(
                 result.getString("record_key")),
-                result.getString("task_kind"), projection(result));
+                result.getString("task_kind"), projection(result),
+                result.getString("record_resource_id"));
     }
 
     private static StoredRow storedRow(ResultSet result, int row)
             throws SQLException {
         return new StoredRow(result.getString("domain"),
                 result.getString("record_id"), result.getLong("revision"),
-                result.getString("record_resource_id"), projection(result));
+                result.getString("record_resource_id"),
+                result.getString("task_kind"), projection(result));
     }
 
     private static TaskProjection projection(ResultSet result)
@@ -1891,7 +1917,7 @@ public class ManagedExtensionRecordStore {
     }
 
     private record StoredRow(String domain, String recordId, long revision,
-            String resourceId, TaskProjection projection) {
+            String resourceId, String taskKind, TaskProjection projection) {
     }
 
     /** Whether the event id sits in the domain's own reserved {@code <domain>:<n>} namespace. */
