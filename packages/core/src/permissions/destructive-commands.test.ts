@@ -36,6 +36,10 @@ describe('isDestructiveCommand — text that is not executed', () => {
     `grep -rn 'terraform destroy' docs`,
     `rg 'git stash drop'`,
     `grep -rn 'git reset --hard' . || true`,
+    // Search patterns and file names are data, not a wrapped command.
+    'grep -e git -e reset -e --hard notes.txt',
+    'rg -e git -e reset -e --hard notes.txt',
+    `path=notes.txt; rg 'git -C /repo reset --hard' "$path"`,
     `rg 'git checkout -- .' . src`,
     `git commit -m 'docs: explain git reset --hard'`,
     `git log --grep 'git checkout -- .'`,
@@ -108,6 +112,9 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     'git stash list',
     // The message value is not an option.
     'git commit -m --amend',
+    // A prefix of a value option takes the next word as its value.
+    'git commit --mes --amend',
+    'git clean --ex -f',
     'git commit -m "fix" -- ./',
     'git -C /repo reset -- --hard',
     'terraform plan -out destroy',
@@ -145,6 +152,12 @@ describe('isDestructiveCommand — wrappers and shell structure', () => {
     `bash <<< 'git reset --hard'`,
     `eval "git reset --hard"`,
     `git -c alias.x=status submodule foreach 'git reset --hard'`,
+    // Wrappers that run a command line.
+    `env -S 'git reset --hard'`,
+    `env --split-string='git reset --hard'`,
+    `flock /tmp/lock -c 'git reset --hard'`,
+    `su -c 'git reset --hard' build`,
+    `watch -n 5 git reset --hard`,
     `cmd /c "git reset --hard"`,
     `g"it" reset --hard`,
     'g\\it reset --hard',

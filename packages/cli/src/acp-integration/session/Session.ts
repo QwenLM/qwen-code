@@ -15192,6 +15192,9 @@ export class Session implements SessionContext {
             denyMessage,
             requiresUserInteraction,
           } = flowResult;
+          // The ask state of the input that will actually run; a
+          // PermissionRequest hook's replacement brings its own.
+          let effectivePmForcedAsk = pmForcedAsk;
 
           // ---- L5: ApprovalMode overrides ----
           approvalMode = this.config.getApprovalMode();
@@ -15903,6 +15906,7 @@ export class Session implements SessionContext {
                       cleanupSubAgentTracking();
                       invocation = replacement;
                       args = replacementArgs;
+                      effectivePmForcedAsk = replacementFlow.pmForcedAsk;
                       confirmationDetails = replacementDetails;
                       trackAgentInvocation();
                     }
@@ -16010,7 +16014,7 @@ export class Session implements SessionContext {
 
               const permissionOptions = toPermissionOptions(
                 confirmationDetails,
-                pmForcedAsk,
+                effectivePmForcedAsk,
                 this.requiresManagedConversationBinding
                   ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
                   : undefined,

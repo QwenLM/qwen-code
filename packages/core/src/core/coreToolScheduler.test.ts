@@ -5952,21 +5952,50 @@ describe('CoreToolScheduler', () => {
       expect(execute).toHaveBeenCalledOnce();
     });
 
-    it('blocks git -C reset --hard before a classifier that would allow it', async () => {
-      runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+    it.each(['git -C /repo reset --hard', "env -S 'git reset --hard'"])(
+      'blocks %s before a classifier that would allow it',
+      async (command) => {
+        runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+        const execute = vi.fn().mockResolvedValue(textResult('executed'));
+        const harness = autoScheduler(shellTool(command, vi.fn(), execute));
+
+        await scheduleAndSettle(
+          harness,
+          shellRequest('global-option', command),
+        );
+
+        const [blocked] = firstBatch<CompletedToolCall>(
+          harness.onAllToolCallsComplete,
+        );
+        expect(blocked.status).toBe('error');
+        expect(blocked.response.error?.message).toContain(
+          'Blocked destructive git command: "git reset --hard".',
+        );
+        expect(runSideQueryMock).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+      },
+    );
+
+    it('waits for a human on an ask-ruled env -S destructive call even when a PermissionRequest hook allows', async () => {
+      const command = "env -S 'git reset --hard'";
       const execute = vi.fn().mockResolvedValue(textResult('executed'));
-      const command = 'git -C /repo reset --hard';
-      const harness = autoScheduler(shellTool(command, vi.fn(), execute));
+      const messageBus = permissionRequestHookBus({ behavior: 'allow' });
+      const harness = autoScheduler(shellTool(command, vi.fn(), execute), {
+        messageBus,
+        disableHooks: false,
+        permissionManager: rulesResolving('ask'),
+      });
 
-      await scheduleAndSettle(harness, shellRequest('global-option', command));
+      await harness.scheduler.schedule(
+        shellRequest('ask-env-split', command),
+        new AbortController().signal,
+      );
 
-      const [blocked] = firstBatch<CompletedToolCall>(
-        harness.onAllToolCallsComplete,
-      );
-      expect(blocked.status).toBe('error');
-      expect(blocked.response.error?.message).toContain(
-        'Blocked destructive git command: "git reset --hard".',
-      );
+      const waiting = await waitForApproval(harness.onToolCallsUpdate);
+      expect(waiting.confirmationDetails).toMatchObject({
+        hideAlwaysAllow: true,
+      });
+      expect(permissionRequests(messageBus)).toHaveLength(1);
       expect(runSideQueryMock).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
     });

@@ -39289,6 +39289,66 @@ describe('Session', () => {
       },
     );
 
+    it('offers only single-use approval when a hook replacement hits an ask rule', async () => {
+      const { execute } = configureAutoModeShellFallback({
+        callId: 'ask-ruled-replacement',
+        command: 'python -c "print(1)"',
+        denialState: {
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 20,
+          totalUnavailable: 0,
+        },
+      });
+      // Only the replacement matches the ask rule.
+      const asked = (ctx: { command?: string }) =>
+        ctx.command === 'git reset --hard';
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        isToolEnabled: vi.fn().mockResolvedValue(true),
+        hasRelevantRules: asked,
+        evaluate: vi.fn(async (ctx: { command?: string }) =>
+          asked(ctx) ? 'ask' : 'default',
+        ),
+        hasMatchingAskRule: asked,
+        findMatchingDenyRule: () => undefined,
+      });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+      });
+      vi.spyOn(core, 'firePermissionRequestHook').mockResolvedValue({
+        hasDecision: true,
+        shouldAllow: true,
+        updatedInput: { command: 'git reset --hard' },
+      });
+      vi.mocked(mockClient.requestPermission)
+        .mockReset()
+        .mockImplementation(async (request) => {
+          expect(request.toolCall.rawInput).toEqual({
+            command: 'git reset --hard',
+          });
+          expect(
+            request.options.filter(
+              (option: { kind: string }) => option.kind === 'allow_always',
+            ),
+          ).toEqual([]);
+          return {
+            outcome: {
+              outcome: 'selected',
+              optionId: core.ToolConfirmationOutcome.Cancel,
+            },
+          };
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run tool' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+    });
+
     it.each([
       { answer: core.ToolConfirmationOutcome.ProceedOnce, runs: 1 },
       { answer: core.ToolConfirmationOutcome.Cancel, runs: 0 },

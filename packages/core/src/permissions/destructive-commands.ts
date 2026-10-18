@@ -118,8 +118,64 @@ const SHELL_OPTIONS_WITH_VALUE = words('-o +o -O +O --rcfile --init-file');
 /** Run the rest of their arguments as one script. */
 const SCRIPT_RUNNERS = words('eval cmd powershell pwsh');
 const DIRECTORY_CHANGES = words('cd pushd popd');
-/** Only print their arguments. */
-const PRINTERS = words('echo printf');
+/** Only read their arguments as data: text to print, patterns, files. */
+const DATA_ONLY = words(
+  'echo printf grep egrep fgrep zgrep rg ag ack cat less more head tail wc sort uniq cut nl jq diff ls stat file test [',
+);
+
+interface Wrapper {
+  /** Options whose value is the next word. */
+  value?: string;
+  /** Options whose value is a command line to run. */
+  script?: string;
+  /** Operands before the command: `timeout`'s duration, `flock`'s file. */
+  skip?: number;
+  /** Runs nothing unless given a `script` option. */
+  scriptOnly?: boolean;
+  /** Joins the command words into one shell command line. */
+  joins?: boolean;
+}
+
+/** Programs that run the command in their argv, and how to find it. */
+const WRAPPERS: Record<string, Wrapper> = {
+  sudo: {
+    value:
+      '-u --user -g --group -C --close-from -D --chdir -p --prompt -r --role -t --type -T --command-timeout -U --other-user -h --host',
+  },
+  doas: { value: '-u -C' },
+  env: { value: '-u --unset -C --chdir', script: '-S --split-string' },
+  nice: { value: '-n --adjustment' },
+  ionice: { value: '-c --class -n --classdata' },
+  nohup: {},
+  setsid: {},
+  unbuffer: {},
+  chronic: {},
+  exec: { value: '-a' },
+  time: { value: '-f --format -o --output' },
+  timeout: { value: '-s --signal -k --kill-after', skip: 1 },
+  stdbuf: { value: '-i --input -o --output -e --error' },
+  flock: {
+    value: '-w --wait --timeout -E --conflict-exit-code',
+    script: '-c --command',
+    skip: 1,
+  },
+  xargs: {
+    value:
+      '-a --arg-file -d --delimiter -E --eof -I -L --max-lines -n --max-args -P --max-procs -s --max-chars --process-slot-var',
+  },
+  npx: { value: '-p --package', script: '-c --call' },
+  watch: { value: '-n --interval -q --equexit', joins: true },
+  su: {
+    value: '-g --group -G --supp-group -s --shell -w --whitelist-environment',
+    script: '-c --command',
+    scriptOnly: true,
+  },
+  script: {
+    value: '-E --echo -I --log-in -O --log-out -T --log-timing',
+    script: '-c --command',
+    scriptOnly: true,
+  },
+};
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = words(
   '-C -c --git-dir --work-tree --namespace --super-prefix --config-env --attr-source',
 );
@@ -424,7 +480,7 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
     scan.movesRepository = true;
     return;
   }
-  if (PRINTERS.has(program)) return;
+  if (DATA_ONLY.has(program)) return;
   if (program === 'command' || program === 'builtin') {
     // Run the rest, builtins such as `.` included; `command -v` only looks
     // the name up.
@@ -440,17 +496,107 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   }
   // A program file, which may be a script, or one about to become runnable.
   if (head.includes('/') || program === 'chmod') scan.hiddenCode = true;
-  // sudo, env, xargs, timeout, npx and similar run the rest of their argv,
-  // possibly from another directory. `find -exec` and `xargs -I` put a
-  // run-time argument where `{}` stands, and xargs appends what it reads.
+  if (program === 'find') return runFindCommands(args, ctx, scan);
+  const wrapper = WRAPPERS[program];
+  if (wrapper) return runWrapped(program, wrapper, args, ctx, scan);
+  // An unknown program may still wrap a command the guard interprets.
   for (let i = 1; i < argv.length; i++) {
-    if (isDynamic(argv[i]!) || isInterpreted(argv[i]!)) {
-      const suffix = argv
-        .slice(i)
-        .map((word) => word.replaceAll('{}', DYNAMIC));
-      if (program === 'xargs') suffix.push(SPLIT);
-      runArgv(suffix, { ...ctx, cwd: undefined }, scan);
+    if (isInterpreted(argv[i]!)) {
+      runArgv(argv.slice(i), { ...ctx, cwd: undefined }, scan);
     }
+  }
+}
+
+/** Checks the command a wrapper runs, possibly from another directory. */
+function runWrapped(
+  program: string,
+  wrapper: Wrapper,
+  args: string[],
+  ctx: CommandContext,
+  scan: Scan,
+): void {
+  const withValue = words(wrapper.value ?? '');
+  const scriptOptions = words(wrapper.script ?? '');
+  const inner = { ...ctx, cwd: undefined };
+  let replace: string | undefined;
+  let skipped = 0;
+  let i = 0;
+  for (; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--') {
+      i++;
+      break;
+    }
+    // `env FOO=1 cmd`, `sudo FOO=1 cmd`.
+    if (/^[A-Za-z_]\w*=/.test(arg)) continue;
+    if (!literalOf(arg).startsWith('-') || arg === '-') {
+      // Operands before the command; options may follow them.
+      if (skipped++ < (wrapper.skip ?? 0)) continue;
+      break;
+    }
+    const equals = arg.indexOf('=');
+    const name = equals < 0 ? arg : arg.slice(0, equals);
+    const attached = name.length > 2 && !name.startsWith('--');
+    const short = attached ? name.slice(0, 2) : name;
+    if (scriptOptions.has(short) || scriptOptions.has(name)) {
+      // `env -S 'cmd args'`, `flock -c 'cmd'`: the value is a command line.
+      const value =
+        equals >= 0
+          ? arg.slice(equals + 1)
+          : attached
+            ? arg.slice(2)
+            : (args[++i] ?? '');
+      const line = [value, ...args.slice(i + 1)];
+      return runScript(line.join(' '), inner, scan, [arg, ...line]);
+    }
+    if (
+      program === 'xargs' &&
+      (short === '-I' || short === '-i' || name === '--replace')
+    ) {
+      replace =
+        equals >= 0
+          ? arg.slice(equals + 1)
+          : attached
+            ? arg.slice(2)
+            : short === '-I'
+              ? args[i + 1]
+              : '{}';
+    }
+    if (equals < 0 && !attached && withValue.has(name)) i++;
+  }
+  if (wrapper.scriptOnly) return;
+  const command = args.slice(i);
+  if (command.length === 0) return;
+  if (wrapper.joins) {
+    return runScript(command.join(' '), inner, scan, command);
+  }
+  if (program === 'xargs') {
+    // It fills in what it reads where the replacement string stands, else
+    // appends it.
+    const marked = command.map((word) =>
+      word.replaceAll(replace ?? '{}', DYNAMIC),
+    );
+    if (replace === undefined) marked.push(SPLIT);
+    return runArgv(marked, inner, scan);
+  }
+  runArgv(command, inner, scan);
+}
+
+/** `find -exec cmd {} ;` runs `cmd` with each found path where `{}` stands. */
+function runFindCommands(
+  args: string[],
+  ctx: CommandContext,
+  scan: Scan,
+): void {
+  for (let i = 0; i < args.length; i++) {
+    if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[i]!)) continue;
+    let end = i + 1;
+    while (end < args.length && args[end] !== ';' && args[end] !== '+') end++;
+    const command = args
+      .slice(i + 1, end)
+      .map((word) => word.replaceAll('{}', DYNAMIC));
+    if (command.length > 0) runArgv(command, { ...ctx, cwd: undefined }, scan);
+    i = end;
   }
 }
 
@@ -615,7 +761,15 @@ function parseOptions(
       }
       const name = literal.slice(2, equals < 0 ? undefined : equals);
       parsed.long.push(name);
-      if (equals < 0 && longWithValue.has(name)) consume(args[++i]);
+      // Git also accepts a prefix of a value option (`--mes` for
+      // `--message`); an ambiguous prefix makes git refuse to run.
+      if (
+        equals < 0 &&
+        name !== '' &&
+        [...longWithValue].some((option) => option.startsWith(name))
+      ) {
+        consume(args[++i]);
+      }
     } else {
       let j = 1;
       while (j < literal.length && !shortWithValue.includes(literal[j]!)) {
