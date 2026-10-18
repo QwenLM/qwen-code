@@ -7184,7 +7184,12 @@ class HostedHarnessClientTest {
         // integrator sizes an outer supervisor deadline against, so the
         // watchdog interval formula is pinned here: with a 2000 ms budget
         // the abort must land before 2000 + 200 ms (plus scheduling
-        // slack); a half-budget interval could land as late as 3000 ms.
+        // slack). The ticks run from the stream's creation, so a park
+        // right after it sits on a tick of a half-budget 1000 ms interval
+        // too, and a tick a few ms late aborts that one at ~2000 ms.
+        // Parking 300 ms in puts the park mid-interval for both: the
+        // shipped 200 ms tick aborts at 2100 ms, a 1000 ms tick not
+        // before 2700 ms.
         advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch release = new CountDownLatch(1);
@@ -7214,6 +7219,7 @@ class HostedHarnessClientTest {
                             .session(session)
                             .eventEpoch(EVENT_EPOCH)
                             .build())) {
+                Thread.sleep(300);
                 long parkedAt = System.nanoTime();
                 DaemonTransportException failure = assertThrows(
                         DaemonTransportException.class,
@@ -7225,7 +7231,7 @@ class HostedHarnessClientTest {
                         failure.getMessage());
                 assertTrue(elapsedMillis >= 1950,
                         "aborted before the budget: " + elapsedMillis);
-                assertTrue(elapsedMillis < 2600,
+                assertTrue(elapsedMillis < 2400,
                         "aborted outside the published window: "
                                 + elapsedMillis);
             }
