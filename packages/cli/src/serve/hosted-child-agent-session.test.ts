@@ -957,6 +957,47 @@ describe('hosted child agent session (H4b)', () => {
     });
   });
 
+  // #14165 FG10d: a background child's blocked line rides the blocked
+  // commit and must describe that revision — never the running one it
+  // replaces ("run running (unknown)" under `<status>blocked</status>`).
+  it("tells a background child's parent the run is blocked, not running", async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams());
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: BINDING,
+      });
+      await children.attach('run-1', 'session-child');
+      await children.settleRecoveryBlocked('run-1', {
+        reason: 'runtime_lost',
+      });
+      const input = authority
+        .readEvents({ afterSequence: 0, limit: 64 })
+        .findLast((event) => event.kind === 'input.accepted');
+      expect(input?.payload['turnId']).toBe('run-1:blocked:notify');
+      const text = JSON.parse(
+        (
+          await harness.store.read(
+            input!.payload['contentRef'] as unknown as Parameters<
+              typeof harness.store.read
+            >[0],
+          )
+        ).toString('utf8'),
+      ).text as string;
+      expect(text).toContain('<status>blocked</status>');
+      expect(text).toContain(
+        `<result>\n${childRunEndedText(children.record('run-1')!)}\n</result>`,
+      );
+      expect(text).toContain('recovery blocked (outcome unknown).');
+      expect(text).not.toContain('running');
+    });
+  });
+
   it('refuses consumption steps the acceptance never reached', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
