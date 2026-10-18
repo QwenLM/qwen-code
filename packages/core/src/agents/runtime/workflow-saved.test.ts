@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
+import { isSubpath } from '../../utils/paths.js';
 import { getShellContextEnvVars } from '../../services/shellContextEnv.js';
 import {
   registerSessionProjectDir,
@@ -948,20 +949,41 @@ describe('workflow-saved — local ancestor discovery', () => {
     expect((await listSavedWorkflows(config())).map((e) => e.name)).toEqual([
       'near',
     ]);
-    expect(trust).toHaveBeenCalledExactlyOnceWith([parent, repo]);
+    expect(trust).toHaveBeenCalledExactlyOnceWith([parent, repo], target);
   });
 
   it('C03: no Git root and a nested Git boundary do not expose outer definitions', async () => {
     await writeWorkflow(workflows(repo), 'outer', 'return 1;');
     await fs.rm(path.join(repo, '.git'), { recursive: true });
+    const original = fs.lstat.bind(fs);
+    const outerProbes: string[] = [];
+    const gitProbe = vi.spyOn(fs, 'lstat').mockImplementation(((
+      file,
+      ...args
+    ) => {
+      if (
+        path.basename(String(file)) === '.git' &&
+        !isSubpath(base, String(file))
+      ) {
+        outerProbes.push(String(file));
+        return Promise.reject(
+          Object.assign(new Error('fixture: no outer Git marker'), {
+            code: 'ENOENT',
+          }),
+        );
+      }
+      return original(file, ...args);
+    }) as typeof fs.lstat);
     expect(await listSavedWorkflows(config())).toEqual([]);
+    expect(outerProbes).toContain(path.join(path.parse(base).root, '.git'));
+    gitProbe.mockRestore();
     await fs.mkdir(path.join(repo, '.git'));
     await fs.writeFile(
       path.join(path.dirname(target), '.git'),
       'gitdir: /elsewhere',
     );
     expect(await listSavedWorkflows(config())).toEqual([]);
-    expect(trust).toHaveBeenLastCalledWith([path.dirname(target)]);
+    expect(trust).toHaveBeenLastCalledWith([path.dirname(target)], target);
   });
 
   it('C04: refuses uncertain Git boundaries instead of walking past them', async () => {
@@ -1208,7 +1230,10 @@ describe('workflow-saved — local ancestor discovery', () => {
         )
       ).script,
     ).toBe('return 6;');
-    expect(trust).toHaveBeenLastCalledWith([path.join(repo, 'packages'), repo]);
+    expect(trust).toHaveBeenLastCalledWith(
+      [path.join(repo, 'packages'), repo],
+      await fs.realpath(target),
+    );
   });
 
   it('C07: a selected file swapped for a symlink does not read the link or a farther namesake', async () => {
@@ -1459,6 +1484,335 @@ describe('workflow-saved — local ancestor discovery', () => {
     await expect(
       resolveSavedWorkflowScript(
         { scriptPath: path.join(workflows(alias), 'user-only.js') },
+        config(),
+      ),
+    ).rejects.toThrow(OUTSIDE_ROOTS);
+  });
+
+  it('P2-CASE: list and direct name probes reject the same physical filename case', async ({
+    skip,
+  }) => {
+    await writeWorkflow(
+      workflows(repo),
+      'Audit',
+      "return 'ANCESTOR_INVALID_CASE';",
+    );
+    const lowercase = path.join(workflows(repo), 'audit.js');
+    if (
+      !(await fs.lstat(lowercase).then(
+        () => true,
+        () => false,
+      ))
+    )
+      skip();
+    const userPath = path.join(Storage.getUserWorkflowsDir(), 'audit.js');
+    await put(userPath, "return 'USER_VALID_CASE';");
+    expect(
+      (await listSavedWorkflows(config())).find(
+        (entry) => entry.name === 'audit',
+      )?.scriptPath,
+    ).toBe(userPath);
+    expect(await resolveSavedWorkflowScript('audit', config())).toMatchObject({
+      scriptPath: userPath,
+      script: "return 'USER_VALID_CASE';",
+      source: 'user',
+    });
+    const readdir = vi.spyOn(fs, 'readdir');
+    await resolveSavedWorkflowScript('audit', config());
+    expect(readdir).not.toHaveBeenCalled();
+  });
+
+  it.each(['project', 'user'])(
+    'P2-IO: an inaccessible unrelated %s root does not block independent explicit or extension admission',
+    async (brokenScope) => {
+      const projectFile = path.join(workflows(target), 'local.js');
+      const userFile = path.join(Storage.getUserWorkflowsDir(), 'user.js');
+      const extensionFile = path.join(base, 'extension', 'check.js');
+      await put(projectFile, 'return 1;');
+      await put(userFile, 'return 2;');
+      await put(extensionFile, 'return 3;');
+      const cfg = {
+        ...config(),
+        getActiveExtensions: () => [
+          {
+            workflows: [
+              {
+                name: 'audit:check',
+                extensionName: 'audit',
+                description: 'Check',
+                scriptPath: extensionFile,
+              },
+            ],
+          },
+        ],
+      } as unknown as Config;
+      const generated = await persistInlineWorkflowScript(
+        cfg,
+        'wf_ab1234',
+        'return 4;',
+      );
+      const unavailable =
+        brokenScope === 'project'
+          ? workflows(target)
+          : Storage.getUserWorkflowsDir();
+      const original = fs.lstat.bind(fs);
+      vi.spyOn(fs, 'lstat').mockImplementation(((file, ...args) =>
+        String(file) === unavailable
+          ? Promise.reject(
+              Object.assign(new Error('root EACCES'), { code: 'EACCES' }),
+            )
+          : original(file, ...args)) as typeof fs.lstat);
+      const independent = brokenScope === 'project' ? userFile : projectFile;
+      expect(
+        (await resolveSavedWorkflowScript({ scriptPath: independent }, cfg))
+          .script,
+      ).toBe(brokenScope === 'project' ? 'return 2;' : 'return 1;');
+      expect(
+        (await resolveSavedWorkflowScript({ scriptPath: generated! }, cfg))
+          .script,
+      ).toBe('return 4;');
+      expect(
+        (await resolveSavedWorkflowScript({ scriptPath: extensionFile }, cfg))
+          .script,
+      ).toBe('return 3;');
+      expect(
+        (await resolveSavedWorkflowScript('audit:check', cfg)).script,
+      ).toBe('return 3;');
+      await expect(listSavedWorkflows(cfg)).rejects.toThrow('root EACCES');
+      await expect(
+        resolveSavedWorkflowScript(
+          brokenScope === 'project' ? 'local' : 'user',
+          cfg,
+        ),
+      ).rejects.toThrow('root EACCES');
+    },
+  );
+
+  it('R1-2: an unverifiable save target is intentionally refused before mkdir', async () => {
+    await fs.rm(target, { recursive: true });
+    const mkdir = vi.spyOn(fs, 'mkdir');
+    await expect(
+      saveWorkflowScript(config(), {
+        name: 'saved',
+        scope: 'project',
+        script: 'return 1;',
+      }),
+    ).rejects.toThrow(
+      `refusing to save into an unverifiable project target: '${target}'`,
+    );
+    expect(mkdir).not.toHaveBeenCalled();
+  });
+
+  it('R1-3: Windows marker matching preserves Unicode owner and filename offsets', async () => {
+    repo = path.join(base, 'İİ', 'repo');
+    target = path.join(repo, 'packages', 'a');
+    await fs.mkdir(target, { recursive: true });
+    await fs.mkdir(path.join(repo, '.git'));
+    const scriptPath = path.join(workflows(repo), 'shared.js');
+    await put(scriptPath, 'return 6;');
+    const cfg = config();
+    vi.stubGlobal('process', { ...process, platform: 'win32' });
+    try {
+      expect(
+        (await resolveSavedWorkflowScript({ scriptPath }, cfg)).script,
+      ).toBe('return 6;');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([false, true])(
+    'R1-11: an ancestor coinciding with user scope keeps user identity with parent alias=%s',
+    async (alias) => {
+      const userRepo = alias ? path.join(base, 'repo-alias') : repo;
+      if (alias) await symlinkDir(repo, userRepo);
+      process.env['QWEN_HOME'] = path.join(userRepo, '.qwen');
+      const scriptPath = path.join(Storage.getUserWorkflowsDir(), 'global.js');
+      await put(scriptPath, 'return 7;');
+      const readdir = vi.spyOn(fs, 'readdir');
+      expect(
+        (await listSavedWorkflows(config())).find(
+          (entry) => entry.name === 'global',
+        ),
+      ).toMatchObject({ scriptPath, source: 'user' });
+      expect(
+        readdir.mock.calls.filter(
+          ([dir]) => String(dir) === Storage.getUserWorkflowsDir(),
+        ),
+      ).toHaveLength(1);
+      expect(
+        await resolveSavedWorkflowScript('global', config()),
+      ).toMatchObject({
+        scriptPath,
+        source: 'user',
+      });
+      expect(
+        await resolveSavedWorkflowScript({ scriptPath }, config()),
+      ).toMatchObject({ scriptPath, source: 'user' });
+    },
+  );
+
+  it('R1-19: an overlapping base file alias retains independent canonical base admission', async () => {
+    target = path.join(workflows(repo), 'editor');
+    const userFile = path.join(Storage.getUserWorkflowsDir(), 'allowed.js');
+    await put(userFile, "return 'AUTHORIZED_USER';");
+    const scriptPath = path.join(workflows(target), 'alias.js');
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.symlink(userFile, scriptPath);
+    const ordinary = {
+      ...config(),
+      getWorkflowAncestorTrustProvider: () => undefined,
+    } as unknown as Config;
+    for (const cfg of [ordinary, config()]) {
+      expect(
+        await resolveSavedWorkflowScript({ scriptPath }, cfg),
+      ).toMatchObject({
+        scriptPath,
+        script: "return 'AUTHORIZED_USER';",
+        source: 'user',
+      });
+    }
+  });
+
+  it('R1-29: a refused project boundary is distinguished from considered and missing roots', async () => {
+    const outside = path.join(base, 'outside', '.qwen');
+    await writeWorkflow(path.join(outside, 'workflows'), 'hidden', 'return 9;');
+    await symlinkDir(outside, path.join(target, '.qwen'));
+    await expect(
+      resolveSavedWorkflowScript(
+        { scriptPath: path.join(workflows(target), 'hidden.js') },
+        config(),
+      ),
+    ).rejects.toThrow(
+      `refused roots: ${workflows(target)} (outside project target)`,
+    );
+    await expect(
+      resolveSavedWorkflowScript(
+        { scriptPath: path.join(workflows(target), 'hidden.js') },
+        config(),
+      ),
+    ).rejects.not.toThrow(`checked: ${workflows(target)}`);
+  });
+
+  it('R1-19: an external file alias into an authorized base subtree retains path admission', async () => {
+    const actual = path.join(workflows(target), 'nested', 'allowed.js');
+    const alias = path.join(base, 'file-alias.js');
+    await put(actual, 'return 11;');
+    await fs.symlink(actual, alias);
+    expect(
+      (await resolveSavedWorkflowScript({ scriptPath: alias }, config()))
+        .script,
+    ).toBe('return 11;');
+  });
+
+  it('R1-19: an explicit base directory is refused before opening it as a script', async () => {
+    const scriptPath = path.join(workflows(target), 'folder.js');
+    await fs.mkdir(scriptPath, { recursive: true });
+    const open = vi.spyOn(fs, 'open');
+    await expect(
+      resolveSavedWorkflowScript({ scriptPath }, config()),
+    ).rejects.toThrow('not an ordinary file');
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('R1-19: a symlink replacing an eligible named file is refused before open', async () => {
+    const near = path.join(workflows(path.dirname(target)), 'shared.js');
+    const other = path.join(path.dirname(near), 'other.js');
+    await put(near, "return 'NEAR';");
+    await put(other, "return 'OTHER';");
+    await writeWorkflow(workflows(repo), 'shared', "return 'FAR';");
+    const original = fs.realpath.bind(fs);
+    let swapped = false;
+    vi.spyOn(fs, 'realpath').mockImplementation((async (file) => {
+      const real = await original(file);
+      if (String(file) === near && !swapped) {
+        swapped = true;
+        await fs.unlink(near);
+        await fs.symlink(other, near);
+      }
+      return real;
+    }) as typeof fs.realpath);
+    await expect(
+      resolveSavedWorkflowScript('shared', config()),
+    ).rejects.toThrow('refusing symlinked workflow file');
+  });
+
+  it('R1-19: replacing a selected file with a different ordinary inode never runs the replacement or farther name', async () => {
+    const near = path.join(workflows(path.dirname(target)), 'shared.js');
+    const replacement = path.join(path.dirname(near), 'replacement.js');
+    await put(near, "return 'NEAR';");
+    await put(replacement, "return 'REPLACEMENT';");
+    await writeWorkflow(workflows(repo), 'shared', "return 'FAR';");
+    const original = fs.open.bind(fs);
+    vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
+      if (String(file) === near) await fs.rename(replacement, near);
+      return original(file, flags, mode);
+    });
+    await expect(
+      resolveSavedWorkflowScript('shared', config()),
+    ).rejects.toThrow('changed while reading');
+  });
+
+  it('R1-28: an existing escaping project alias is rejected before mkdir creates external directories', async () => {
+    const outside = path.join(base, 'outside');
+    await fs.mkdir(outside);
+    await symlinkDir(outside, path.join(target, '.qwen'));
+    const mkdir = vi.spyOn(fs, 'mkdir');
+    await expect(
+      saveWorkflowScript(config(), {
+        name: 'saved',
+        scope: 'project',
+        script: 'return 12;',
+      }),
+    ).rejects.toThrow('outside the project target');
+    expect(mkdir).not.toHaveBeenCalled();
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
+  it('R1-32: a target .qwen ordinary file permits independent user discovery without widening read or write scope', async () => {
+    await put(path.join(target, '.qwen'), 'ordinary file');
+    const userPath = path.join(Storage.getUserWorkflowsDir(), 'user.js');
+    await put(userPath, 'return 13;');
+    expect(await listSavedWorkflows(config())).toEqual([
+      { name: 'user', scriptPath: userPath, source: 'user' },
+    ]);
+    expect((await resolveSavedWorkflowScript('user', config())).script).toBe(
+      'return 13;',
+    );
+    await expect(
+      resolveSavedWorkflowScript(
+        { scriptPath: path.join(workflows(target), 'hidden.js') },
+        config(),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      saveWorkflowScript(config(), {
+        name: 'saved',
+        scope: 'project',
+        script: 'return 14;',
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('R1-35: relinking an ancestor after its ordinary-directory probes cannot admit an external workflow tree', async () => {
+    await fs.mkdir(workflows(repo), { recursive: true });
+    const outside = path.join(base, 'outside');
+    await writeWorkflow(workflows(outside), 'leak', "return 'EXTERNAL';");
+    const original = fs.realpath.bind(fs);
+    let swapped = false;
+    vi.spyOn(fs, 'realpath').mockImplementation((async (file) => {
+      if (String(file) === workflows(repo) && !swapped) {
+        swapped = true;
+        await fs.rename(repo, path.join(base, 'repo-original'));
+        await fs.symlink(outside, repo, 'dir');
+      }
+      return original(file);
+    }) as typeof fs.realpath);
+    expect(await listSavedWorkflows(config())).toEqual([]);
+    expect(swapped).toBe(true);
+    await expect(
+      resolveSavedWorkflowScript(
+        { scriptPath: path.join(workflows(repo), 'leak.js') },
         config(),
       ),
     ).rejects.toThrow(OUTSIDE_ROOTS);

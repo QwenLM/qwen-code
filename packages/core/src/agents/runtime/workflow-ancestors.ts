@@ -32,7 +32,7 @@ export async function getTrustedWorkflowAncestors(
   }
   if (ancestors.length === 0) return [];
   try {
-    const decisions = await provider(ancestors);
+    const decisions = await provider(ancestors, canonicalTarget);
     if (
       !Array.isArray(decisions) ||
       decisions.length !== ancestors.length ||

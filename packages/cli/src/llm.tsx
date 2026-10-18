@@ -62,6 +62,7 @@ import {
   ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
+  getOperatorTrustSettings,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -736,7 +737,9 @@ export async function main() {
         privateAcpParentCapability === undefined
           ? {
               workflowAncestorTrustProvider:
-                createLocalWorkflowAncestorTrustProvider(settings.merged),
+                createLocalWorkflowAncestorTrustProvider(
+                  getOperatorTrustSettings(settings),
+                ),
             }
           : undefined,
         buildEnabledSkillNamesProvider(settings),
@@ -1076,7 +1079,9 @@ export async function main() {
       privateAcpParentCapability === undefined
         ? {
             workflowAncestorTrustProvider:
-              createLocalWorkflowAncestorTrustProvider(settings.merged),
+              createLocalWorkflowAncestorTrustProvider(
+                getOperatorTrustSettings(settings),
+              ),
           }
         : undefined,
       buildEnabledSkillNamesProvider(settings),

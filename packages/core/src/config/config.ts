@@ -1108,6 +1108,7 @@ export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 
 export type WorkflowAncestorTrustProvider = (
   ancestorDirs: readonly string[],
+  canonicalTargetDir: string,
 ) => Promise<readonly boolean[]>;
 
 export interface ConfigParameters {

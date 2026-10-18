@@ -432,15 +432,17 @@ describe('llm.tsx main function', () => {
   });
 
   it.each([
-    [false, undefined],
-    [true, undefined],
-    [false, 'private-parent'],
-    [true, 'private-parent'],
-    [false, ''],
-    [true, ''],
+    [false, undefined, undefined],
+    [true, undefined, undefined],
+    [false, 'private-parent', undefined],
+    [true, 'private-parent', undefined],
+    [false, '', undefined],
+    [true, '', undefined],
+    [false, undefined, false],
+    [false, undefined, true],
   ] as const)(
-    'H01 opts into ancestor trust at sandbox=%s only from captured local provenance=%s',
-    async (sandbox, capability) => {
+    'H01 opts into ancestor trust at sandbox=%s from provenance=%s with workspace override=%s',
+    async (sandbox, capability, workspaceTrustOverride) => {
       const originalArgv = process.argv;
       process.argv = ['node', 'script.js', '--acp'];
       vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', capability);
@@ -466,9 +468,29 @@ describe('llm.tsx main function', () => {
         }
         return {
           errors: [],
-          merged: { advanced: {}, security: { auth: {} }, ui: {} },
+          merged: {
+            advanced: {},
+            security: {
+              auth: {},
+              ...(workspaceTrustOverride !== undefined
+                ? { folderTrust: { enabled: workspaceTrustOverride } }
+                : {}),
+            },
+            ui: {},
+          },
           setValue: vi.fn(),
-          forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+          forScope: (scope: string) => ({
+            settings:
+              workspaceTrustOverride !== undefined && scope === 'User'
+                ? {
+                    security: {
+                      folderTrust: { enabled: !workspaceTrustOverride },
+                    },
+                  }
+                : {},
+            originalSettings: {},
+            path: '',
+          }),
           migrationWarnings: [],
           getSystemHooks: () => undefined,
           getUserHooks: () => undefined,
@@ -485,7 +507,9 @@ describe('llm.tsx main function', () => {
             ?.workflowAncestorTrustProvider;
         if (capability === undefined) {
           expect(provider).toBeTypeOf('function');
-          await expect(provider?.(['/repo'])).resolves.toEqual([true]);
+          await expect(
+            provider?.([llmTestHome], join(llmTestHome, 'project')),
+          ).resolves.toEqual([workspaceTrustOverride !== false]);
         } else {
           expect(provider).toBeUndefined();
         }

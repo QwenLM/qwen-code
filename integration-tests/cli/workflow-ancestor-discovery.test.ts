@@ -92,6 +92,14 @@ describe('headless local workflow ancestor discovery', () => {
       nearerDefinition: true,
       expected: 'packages' as const,
     },
+    {
+      title: 'does not let workspace settings disable operator ancestor trust',
+      folderTrust: true,
+      trustAncestors: false,
+      nearerDefinition: false,
+      workspaceDisablesTrust: true,
+      expected: 'user' as const,
+    },
   ])('$title', async (testCase) => {
     rig = new TestRig();
     restoreNoProxy = applyContainerSandboxNoProxy();
@@ -118,9 +126,19 @@ describe('headless local workflow ancestor discovery', () => {
       }),
     );
     const trustPath = join(home, 'trustedFolders.json');
+    if ('workspaceDisablesTrust' in testCase) {
+      mkdirSync(join(target, '.qwen'), { recursive: true });
+      writeFileSync(
+        join(target, '.qwen', 'settings.json'),
+        JSON.stringify({ security: { folderTrust: { enabled: false } } }),
+      );
+    }
     writeFileSync(
       trustPath,
       JSON.stringify({
+        ...('workspaceDisablesTrust' in testCase
+          ? { [fixtureRoot]: 'DO_NOT_TRUST' }
+          : {}),
         [testCase.trustAncestors ? fixtureRoot : target]: 'TRUST_FOLDER',
       }),
     );

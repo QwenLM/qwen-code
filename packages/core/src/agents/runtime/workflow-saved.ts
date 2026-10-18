@@ -250,7 +250,13 @@ interface WorkflowRoot {
   source?: SavedWorkflowScope;
   ancestor?: boolean;
   targetBoundary?: string | null;
-  checked?: Promise<{ real?: string; symlink?: boolean }>;
+  checked?: Promise<WorkflowRootCheck>;
+}
+
+interface WorkflowRootCheck {
+  real?: string;
+  symlink?: boolean;
+  refused?: string;
 }
 
 interface WorkflowSnapshot {
@@ -267,7 +273,7 @@ function isMissing(error: unknown): boolean {
 async function workflowSnapshot(config: Config): Promise<WorkflowSnapshot> {
   const [projectDir, userDir, generated] = getWorkflowScriptRoots(config);
   const project = { dir: projectDir, source: 'project' as const };
-  const user = { dir: userDir, source: 'user' as const };
+  const user: WorkflowRoot = { dir: userDir, source: 'user' };
   const extensions = getActiveExtensionWorkflows(config);
   const target = path.resolve(project.dir, '..', '..');
   const canonicalTarget = await fs.realpath(target).catch(() => undefined);
@@ -277,13 +283,21 @@ async function workflowSnapshot(config: Config): Promise<WorkflowSnapshot> {
         config.getWorkflowAncestorTrustProvider?.(),
       )
     : [];
+  const userReal = ancestors.length
+    ? (await checkedRoot(user).catch(() => undefined))?.real
+    : undefined;
   const saved: WorkflowRoot[] = [
     { ...project, targetBoundary: canonicalTarget ?? null },
-    ...ancestors.map((dir) => ({
-      dir: path.join(dir, '.qwen', 'workflows'),
-      source: 'project' as const,
-      ancestor: true,
-    })),
+    ...ancestors
+      .map((dir) => path.join(dir, '.qwen', 'workflows'))
+      .filter(
+        (dir) => dir !== project.dir && dir !== user.dir && dir !== userReal,
+      )
+      .map((dir) => ({
+        dir,
+        source: 'project' as const,
+        ancestor: true,
+      })),
     user,
   ];
   return {
@@ -293,22 +307,32 @@ async function workflowSnapshot(config: Config): Promise<WorkflowSnapshot> {
   };
 }
 
-async function checkRoot(
-  root: WorkflowRoot,
-): Promise<{ real?: string; symlink?: boolean }> {
-  if (root.targetBoundary === null) return {};
+async function checkRoot(root: WorkflowRoot): Promise<WorkflowRootCheck> {
+  const refuse = (reason: string, symlink = false): WorkflowRootCheck => {
+    debugLogger.warn(
+      `refusing saved-workflow directory '${root.dir}': ${reason}`,
+    );
+    return { refused: reason, ...(symlink ? { symlink: true } : {}) };
+  };
+  if (root.targetBoundary === null)
+    return refuse('unverifiable project target');
   try {
     if (root.ancestor) {
       const qwen = await fs.lstat(path.dirname(root.dir));
-      if (qwen.isSymbolicLink()) return { symlink: true };
+      if (qwen.isSymbolicLink())
+        return refuse('symlinked .qwen directory', true);
       if (!qwen.isDirectory()) return {};
     }
     const stat = await fs.lstat(root.dir);
-    if (stat.isSymbolicLink()) return { symlink: true };
+    if (stat.isSymbolicLink())
+      return refuse('symlinked workflows directory', true);
     if (!stat.isDirectory()) return {};
     const real = await fs.realpath(root.dir);
-    if (root.targetBoundary && !isSubpath(root.targetBoundary, real)) return {};
-    if (root.ancestor && real !== root.dir) return {};
+    if (root.targetBoundary && !isSubpath(root.targetBoundary, real)) {
+      return refuse('outside project target');
+    }
+    if (root.ancestor && real !== root.dir)
+      return refuse('non-canonical ancestor directory');
     return { real };
   } catch (error) {
     if (isMissing(error)) return {};
@@ -326,13 +350,16 @@ async function savedCandidate(
     return undefined;
   }
   const file = path.join(root.dir, `${name}.js`);
+  let stat;
   try {
-    const stat = await fs.lstat(file);
-    return stat.isFile() && !stat.isSymbolicLink() ? file : undefined;
+    stat = await fs.lstat(file);
   } catch (error) {
     if (isMissing(error)) return undefined;
     throw new Error(`workflow file '${file}': ${String(error)}`);
   }
+  if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+  const real = await fs.realpath(file);
+  return path.basename(real) === `${name}.js` ? file : undefined;
 }
 
 async function listSnapshot(
@@ -384,11 +411,15 @@ async function outsideRoots(
   const checked = await Promise.all(
     snapshot.roots.map(async (root) => ({
       root,
-      ...(await checkedRoot(root)),
+      ...(await checkedRoot(root).catch(
+        (error: unknown): WorkflowRootCheck => ({
+          refused: String(error),
+        }),
+      )),
     })),
   );
-  const dirs = checked.flatMap(({ root, real, symlink }) =>
-    symlink ? [] : [real ?? path.resolve(root.dir)],
+  const dirs = checked.flatMap(({ root, real, refused }) =>
+    refused ? [] : [real ?? path.resolve(root.dir)],
   );
   const refused = checked.flatMap(({ root, symlink }) =>
     symlink ? [root.dir] : [],
@@ -396,11 +427,17 @@ async function outsideRoots(
   const refusedNote = refused.length
     ? `; refused symlinked ${refused.length === 1 ? 'root' : 'roots'}: ${refused.join(', ')}`
     : '';
+  const refusedOther = checked.flatMap(({ root, refused, symlink }) =>
+    refused && !symlink ? [`${root.dir} (${refused})`] : [],
+  );
+  const refusedOtherNote = refusedOther.length
+    ? `; refused roots: ${refusedOther.join(', ')}`
+    : '';
   const extensionNote = snapshot.extensions.length
     ? `; active extension workflow files: ${snapshot.extensions.length}`
     : '';
   return new Error(
-    `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}${extensionNote}): '${file}'.`,
+    `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}${refusedOtherNote}${extensionNote}): '${file}'.`,
   );
 }
 
@@ -421,12 +458,33 @@ async function readWorkflowFile(
   );
   let root = selectedRoot;
   if (!root) {
+    let owningRootError: unknown;
+    const pathRoot = async (
+      candidate: WorkflowRoot,
+    ): Promise<WorkflowRootCheck> => {
+      try {
+        return await checkedRoot(candidate);
+      } catch (error) {
+        if (
+          !extension &&
+          (isSubpath(path.resolve(candidate.dir), lexical) ||
+            isSubpath(candidate.dir, parent))
+        )
+          owningRootError ??= error;
+        return {};
+      }
+    };
     let spelling = lexical;
     if (snapshot.saved.some((candidate) => candidate.ancestor)) {
       const marker = `${path.sep}.qwen${path.sep}workflows${path.sep}`;
-      const index = (
-        process.platform === 'win32' ? lexical.toLowerCase() : lexical
-      ).indexOf(marker);
+      const match =
+        process.platform === 'win32'
+          ? /[\\/]\.qwen[\\/]workflows[\\/]/i.exec(lexical)
+          : undefined;
+      const index =
+        process.platform === 'win32'
+          ? (match?.index ?? -1)
+          : lexical.indexOf(marker);
       if (index !== -1) {
         // Preserve workflow-directory links while resolving aliases of their owner.
         const owner = lexical.slice(0, index + 1);
@@ -434,13 +492,21 @@ async function readWorkflowFile(
           await fs.realpath(owner),
           '.qwen',
           'workflows',
-          lexical.slice(index + marker.length),
+          lexical.slice(index + (match?.[0].length ?? marker.length)),
         );
       }
     }
     const baseRoots = snapshot.roots.filter((candidate) => !candidate.ancestor);
+    let baseOwnsSpelling = false;
     for (const candidate of baseRoots) {
-      const checked = await checkedRoot(candidate);
+      const checked = await pathRoot(candidate);
+      if (
+        checked.real &&
+        isSubpath(checked.real, parent) &&
+        (isSubpath(path.resolve(candidate.dir), spelling) ||
+          isSubpath(checked.real, spelling))
+      )
+        baseOwnsSpelling = true;
       if (
         checked.real &&
         isSubpath(checked.real, real) &&
@@ -457,7 +523,7 @@ async function readWorkflowFile(
       for (const candidate of snapshot.saved.filter(
         (entry) => entry.ancestor,
       )) {
-        const checked = await checkedRoot(candidate);
+        const checked = await pathRoot(candidate);
         if (
           checked.real === parent &&
           path.dirname(real) === parent &&
@@ -475,14 +541,20 @@ async function readWorkflowFile(
         (isSubpath(candidate.dir, spelling) ||
           isSubpath(candidate.dir, parent)),
     );
-    if (!root && !ownsExtension && claimedAncestors.length) {
+    if (!root && !ownsExtension && owningRootError) throw owningRootError;
+    if (
+      !root &&
+      !ownsExtension &&
+      !baseOwnsSpelling &&
+      claimedAncestors.length
+    ) {
       throw await outsideRoots(file, snapshot);
     }
     for (const ancestor of claimedAncestors) {
       const ownsLexicalPath = root
         ? isSubpath(path.resolve(root.dir), spelling) ||
           isSubpath((await checkedRoot(root)).real!, spelling)
-        : spelling === extension?.scriptPath;
+        : baseOwnsSpelling || spelling === extension?.scriptPath;
       if (
         isSubpath(ancestor.dir, spelling) &&
         !ownsLexicalPath &&
@@ -493,7 +565,7 @@ async function readWorkflowFile(
     }
     if (!root && !ownsExtension) {
       for (const candidate of baseRoots) {
-        const checked = await checkedRoot(candidate);
+        const checked = await pathRoot(candidate);
         if (checked.real && isSubpath(checked.real, real)) {
           root = candidate;
           break;
@@ -660,8 +732,8 @@ export async function resolveSavedWorkflowScript(
  * `overwrite` is set (the dialog uses the `exists` result to prompt for
  * confirmation, then retries with `overwrite: true`). Returns a discriminated
  * result rather than throwing on the expected user-facing failures
- * (invalid name, empty script, name collision); only a genuine I/O failure
- * (mkdir / writeFile) rejects.
+ * (invalid name, empty script, name collision). Unverifiable or unsafe roots
+ * and genuine I/O failures reject.
  */
 export async function saveWorkflowScript(
   config: Config,
@@ -687,7 +759,13 @@ export async function saveWorkflowScript(
       : Storage.getUserWorkflowsDir();
   const target = path.resolve(dir, '..', '..');
   const canonicalTarget =
-    scope === 'project' ? await fs.realpath(target) : undefined;
+    scope === 'project'
+      ? await fs.realpath(target).catch(() => {
+          throw new Error(
+            `refusing to save into an unverifiable project target: '${target}'.`,
+          );
+        })
+      : undefined;
   const root: WorkflowRoot = {
     dir,
     source: scope,

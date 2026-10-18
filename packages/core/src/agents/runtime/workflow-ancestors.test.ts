@@ -23,10 +23,16 @@ describe('workflow ancestor Git boundary', () => {
       await fs.mkdtemp(path.join(os.tmpdir(), 'wf-git-')),
     );
     trust.mockClear();
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    vi.stubEnv(
+      'GIT_CONFIG_GLOBAL',
+      process.platform === 'win32' ? 'NUL' : '/dev/null',
+    );
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await fs.rm(base, { recursive: true, force: true });
   });
 
@@ -66,10 +72,10 @@ describe('workflow ancestor Git boundary', () => {
       path.join(worktree, 'packages'),
       worktree,
     ]);
-    expect(trust).toHaveBeenCalledExactlyOnceWith([
-      path.join(worktree, 'packages'),
-      worktree,
-    ]);
+    expect(trust).toHaveBeenCalledExactlyOnceWith(
+      [path.join(worktree, 'packages'), worktree],
+      target,
+    );
   });
 
   it('C03: a submodule-shaped Git file is the nearest boundary', async () => {
@@ -91,11 +97,11 @@ describe('workflow ancestor Git boundary', () => {
   });
 
   it('C04: an unknown .git entry type fails closed', async () => {
-    const target = path.join(base, 'a');
-    await fs.mkdir(target);
+    const target = path.join(base, 'a', 'b');
+    await fs.mkdir(target, { recursive: true });
     const original = fs.lstat.bind(fs);
     vi.spyOn(fs, 'lstat').mockImplementation(((file, ...args) => {
-      if (String(file) === path.join(target, '.git')) {
+      if (String(file) === path.join(path.dirname(target), '.git')) {
         return Promise.resolve({
           isFile: () => false,
           isDirectory: () => false,

@@ -250,6 +250,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  getOperatorTrustSettings,
   loadSettings,
   reloadEnvironment,
   SettingScope,
@@ -4454,7 +4455,9 @@ class QwenAgent implements Agent {
           this.expectedPrivateParentCapability === undefined
             ? {
                 workflowAncestorTrustProvider:
-                  createLocalWorkflowAncestorTrustProvider(settings.merged),
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
               }
             : undefined,
           buildEnabledSkillNamesProvider(settings),
@@ -9112,7 +9115,15 @@ class QwenAgent implements Agent {
       await session.buildAvailableCommandsSnapshot();
     const workflowsEnabled = this.canUseWorkflowControls(config);
     const savedWorkflows = workflowsEnabled
-      ? (await listSavedWorkflows(config)).map(({ name, source }) => ({
+      ? (
+          await listSavedWorkflows(config).catch((error: unknown) => {
+            debugLogger.warn(
+              'Saved workflow discovery failed while listing session commands:',
+              error,
+            );
+            return [];
+          })
+        ).map(({ name, source }) => ({
           name,
           source,
         }))
@@ -13396,9 +13407,15 @@ class QwenAgent implements Agent {
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
             async () => {
-              const savedWorkflow = (await listSavedWorkflows(config)).find(
-                (entry) => entry.name === taskId,
-              );
+              const savedWorkflow = (
+                await listSavedWorkflows(config).catch((error: unknown) => {
+                  debugLogger.warn(
+                    'Saved workflow discovery failed while starting a saved workflow:',
+                    error,
+                  );
+                  return [];
+                })
+              ).find((entry) => entry.name === taskId);
               if (!savedWorkflow) return { changed: false };
               const workflowTool = config
                 .getToolRegistry()
@@ -15497,7 +15514,9 @@ class QwenAgent implements Agent {
 
     const workflowAncestorTrustProvider =
       this.expectedPrivateParentCapability === undefined
-        ? createLocalWorkflowAncestorTrustProvider(mergedSettings)
+        ? createLocalWorkflowAncestorTrustProvider(
+            getOperatorTrustSettings(settings),
+          )
         : undefined;
     const config = await loadCliConfig(
       mergedSettings,
