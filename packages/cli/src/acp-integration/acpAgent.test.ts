@@ -2465,7 +2465,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
-        getRecoveryStatus: ReturnType<typeof vi.fn>;
+        getRecoveryStatusForClient: ReturnType<typeof vi.fn>;
         reloadReasoningSelection: ReturnType<typeof vi.fn>;
         persistReasoningSelection: ReturnType<typeof vi.fn>;
         setSessionReasoningSelection: ReturnType<typeof vi.fn>;
@@ -5946,7 +5946,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ) => {
         const sessionMock = {
           sessionId: createdSessionId,
-          getRecoveryStatus: vi.fn().mockReturnValue({
+          getRecoveryStatusForClient: vi.fn().mockReturnValue({
             kind: 'clean',
             canContinue: false,
           }),
@@ -14324,9 +14324,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    lastSessionMock!.getRecoveryStatus.mockReturnValue({
+    lastSessionMock!.getRecoveryStatusForClient.mockReturnValue({
       kind: 'interrupted_prompt',
       canContinue: true,
+      cancellationConfirmationId: 'record-uuid',
     });
     const context = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContext,
@@ -14358,7 +14359,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       v: 1,
       sessionId,
       workspaceCwd: '/tmp',
-      recovery: { kind: 'interrupted_prompt', canContinue: true },
+      recovery: {
+        kind: 'interrupted_prompt',
+        canContinue: true,
+        cancellationConfirmationId: 'record-uuid',
+      },
       state: {
         models: { currentModelId: 'm(api-key)', availableModels: [] },
         modes: {
@@ -20511,6 +20516,112 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     expect(otherPm.addPersistentRule).not.toHaveBeenCalled();
     expect(otherPm.removePersistentRule).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a workspace change with an invalid revision or kind', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1.5,
+        kind: 'permissions',
+      }),
+    ).rejects.toThrow('Invalid workspace change');
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 42,
+      }),
+    ).rejects.toThrow('Invalid workspace change');
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 'bogus',
+      }),
+    ).rejects.toThrow('Unknown workspace change kind: bogus');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('delivers a user-scope permission change to a worktree session', async () => {
+    let mergedSettings: Record<string, unknown> = {
+      permissions: { allow: [], ask: [], deny: [] },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        mergedSettings = {
+          permissions: { allow: [], ask: [], deny: ['Bash(rm -rf:*)'] },
+        };
+        return true;
+      }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const root = '/work/project';
+    const worktreeRoot = `${root}/.qwen/worktrees/slug-a`;
+    const makeManager = () => ({
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    });
+    const rootManager = makeManager();
+    const worktreeManager = makeManager();
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    const liveSession = (
+      id: string,
+      admissionRoot: string,
+      manager: ReturnType<typeof makeManager>,
+    ) => ({
+      getId: () => id,
+      isIdle: () => true,
+      cancelPendingPrompt: vi.fn(),
+      getConfig: () => ({
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue(admissionRoot),
+        storage: { getProjectRoot: () => admissionRoot },
+        getPermissionManager: () => manager,
+      }),
+    });
+    sessions.set(
+      'root-session',
+      liveSession('root-session', root, rootManager),
+    );
+    sessions.set(
+      'worktree-session',
+      liveSession('worktree-session', worktreeRoot, worktreeManager),
+    );
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+      v: 1,
+      revision: 1,
+      kind: 'permissions',
+      tightening: true,
+      cwd: root,
+      scope: 'user',
+    });
+
+    expect(rootManager.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(rm -rf:*)',
+      'deny',
+    );
+    expect(worktreeManager.addPersistentRule).toHaveBeenCalledWith(
+      'Bash(rm -rf:*)',
+      'deny',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

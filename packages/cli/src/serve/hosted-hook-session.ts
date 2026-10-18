@@ -143,7 +143,7 @@ function semanticInput(value: object): Record<string, unknown> {
   return JSON.parse(JSON.stringify(fields)) as Record<string, unknown>;
 }
 
-function semanticInputDigest(value: object): string {
+export function semanticInputDigest(value: object): string {
   return createHash('sha256')
     .update(
       JSON.stringify(semanticInput(value), (_key, item: unknown) =>
@@ -524,6 +524,41 @@ export class HostedHookSession {
    */
   get mountHeld(): boolean {
     return this.acquired || this.broker.acquired;
+  }
+
+  /**
+   * The recovery-blocked turn's handback of this Session-scoped mount
+   * (#13800), under the claim of the acquire that holds it now. Only Hook
+   * work proven settled or never dispatched lets it go — the Broker cannot
+   * see a Hook run — and the next acquire claims the mount again. The
+   * owner's lease stays booked, so close() still runs the full release.
+   */
+  mountHandback(): (() => Promise<void>) | undefined {
+    const claim = this.broker.mountClaim();
+    if (!this.ownsBroker || claim === undefined) return undefined;
+    return async () => {
+      if (this.mountWorkUnproven())
+        throw new Error('Hook work on the Workspace mount is unproven.');
+      await this.broker.releaseMount(claim);
+      if (this.broker.mountClaim() === claim) this.acquired = false;
+    };
+  }
+
+  /** Whether a Hook run on this owner's mount may still be running. */
+  mountWorkUnproven(): boolean {
+    return (
+      this.acquiring !== undefined ||
+      this.pending.size > 0 ||
+      this.occurrences.size > 0 ||
+      this.executions().some(
+        (record) =>
+          record.runtimeSessionId === this.broker.runtimeSessionId &&
+          record.hookId !== '__plan__' &&
+          !record.resultRef &&
+          record.run.execution !== 'not_started_proven' &&
+          record.run.execution !== 'intent',
+      )
+    );
   }
 
   /**
