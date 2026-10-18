@@ -430,8 +430,19 @@ execution. They use the same transaction connection and named-failure mapping;
 the grant checks and CSI path retain their existing behavior. The witness
 holds placement while calling `verifyDispatch` and producer `finish`, then
 verifies both succeed after release. This closes #14393 A.1. The bound is per
-acquisition statement; the separate retention root/head and earlier lifecycle
-acquisition gaps remain tracked in #14393 A.2/A.3.
+acquisition statement; the earlier lifecycle acquisition gap remains tracked in
+#14393 A.3.
+
+After acquiring the tenant row, `lockSessionHead` also bounds the root UPSERT,
+root locking read and head locking read to five seconds per statement. These
+waits share the `tenant_guard_contended` mapping, including lock-wait timeout
+1205, so one Session's writer cannot hold the publication guard for the database's
+default lock-wait window. Existing shorter statement or transaction timeouts
+remain shorter. The ordinary root-only writer path keeps its existing wait
+settings and deadlock mapping. The witness
+`ManagedSessionGuardConvoyIT#heldSessionRowsBoundRetentionReads` checks held root
+and head rows and successful reads after release. This covers #14393 A.2;
+earlier lifecycle acquisitions remain separate work under #14393 A.3.
 
 ### F3. Writer acquisition keeps placement before the drain fence
 

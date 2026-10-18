@@ -358,8 +358,16 @@ publication 车道在到达 `lockPublicationWriter` 之前就已触租户守卫�
 施加上界，再锁定原 binding 与 execution，复用同一事务连接和命名失败映射；
 grant 检查和 CSI 路径保持既有行为。见证在持有 placement 时调用
 `verifyDispatch` 与 producer `finish`，释放后再验证两者成功，覆盖 #14393 A.1。
-上界按获取锁的每条语句计算；独立的 retention root/head 等待与更早的
-lifecycle 获取缺口仍由 #14393 A.2/A.3 跟踪。
+上界按获取锁的每条语句计算；更早的 lifecycle 获取缺口仍由 #14393 A.3 跟踪。
+
+取得 tenant 行后，`lockSessionHead` 也为 root UPSERT、root 加锁读取与 head
+加锁读取设置每条语句五秒的上界，并共享 `tenant_guard_contended` 映射，
+包括锁等待超时 1205，避免因一个 Session 的 writer 占住 publication 守卫，
+一直等到数据库默认锁等待超时。既有更短的语句或事务超时继续生效；普通
+root-only writer 路径保留原等待设置与死锁映射。见证
+`ManagedSessionGuardConvoyIT#heldSessionRowsBoundRetentionReads` 检查 root 与
+head 被持有时的有界拒绝，以及释放后的成功读取，覆盖 #14393 A.2。
+更早的 lifecycle 获取仍由 #14393 A.3 独立跟踪。
 
 ### F3. writer 获取保持 placement 先于 drain 栅栏
 

@@ -480,6 +480,36 @@ class ManagedSessionGuardConvoyIT {
         assertThat(published.resourceId()).isEqualTo("result-content-1");
     }
 
+    @Test
+    void heldSessionRowsBoundRetentionReads() throws Exception {
+        var journal = PublicationJournalFixture.create(source, false);
+        var retention = new ToolPublicationRetentionStore(journal.jdbc, journal.manager);
+        try (var lease = retention.read("tenant-1", "session-1")) {
+            lease.check();
+        }
+
+        for (String table : List.of("ma_session", "ma_session_head")) {
+            var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
+            try {
+                if ("ma_session".equals(table)) {
+                    journal.sessions.renewWriter("tenant-1", "session-1", PublicationJournalFixture.WRITER_TOKEN,
+                            new RenewWriterRequest("workspace-1", "writer-1", 1, 60_000L));
+                } else {
+                    journal.jdbc.query("SELECT session_id FROM ma_session_head"
+                                    + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+                            (row, index) -> row.getString("session_id"), "tenant-1", "session-1");
+                }
+                assertFastGuardFailure(() -> retention.read("tenant-1", "session-1"));
+            } finally {
+                journal.manager.rollback(hold);
+            }
+            try (var lease = retention.read("tenant-1", "session-1")) {
+                lease.check();
+            }
+            assertThat(journal.jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
+        }
+    }
+
     /**
      * The writer-acquisition lane takes the placement guard before reading
      * the drain fence: begin paths insert drain rows only after locking
@@ -559,19 +589,15 @@ class ManagedSessionGuardConvoyIT {
     }
 
     /**
-     * Writer acquisition must hold the Session root exclusively before any
-     * shared lock on it. Since #13800 ordinary writers lock that root
-     * without a tenant guard, and on MariaDB a shared root lock upgraded
-     * behind one of their queued exclusive requests is an InnoDB 1213
-     * deadlock. The acquisition pauses right after ensureSessionRoot's
-     * INSERT IGNORE while an ordinary blockRecovery of the same Session
-     * queues on the root; both must then complete. (MySQL 8.4 lets the
-     * shared holder upgrade ahead of the queue, so only MariaDB fails
-     * without the exclusive-first order.)
+     * Writer acquisition must hold the Session root exclusively before an
+     * ordinary writer can queue on it. The acquisition pauses after
+     * the acquisition's first root UPSERT, then an ordinary blockRecovery of the
+     * same Session queues on the root; releasing the pause must let both
+     * complete without an InnoDB deadlock.
      */
     @Test
     void writerAcquisitionHoldsTheSessionRootExclusivelyAgainstOrdinaryWriters() throws Exception {
-        assertNoDeadlockAgainstOrdinaryWriter("INSERT IGNORE INTO ma_session (",
+        assertNoDeadlockAgainstOrdinaryWriter("INSERT INTO ma_session (",
                 (store, grant) -> store.acquireWriter(TENANT, "victim", TOKEN,
                         new AcquireWriterRequest(WORKSPACE, "writer-victim", 60_000L)));
     }
