@@ -64,8 +64,13 @@ class HostedMcpRestartFaultGatesIT {
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
     private final String tenant = "mcp-restart-" + UUID.randomUUID();
-    private final List<ProxyCall> proxyCalls =
-            java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private final List<ProxyCall> proxyCalls = new CopyOnWriteArrayList<>();
+    private final java.util.concurrent.atomic.AtomicInteger proxySequence =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger wireSequence =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private int controlBaseline;
+    private int wireBaseline;
     private final List<Map<String, Object>> wire = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     private final ExecutorService caseExecutor =
@@ -183,6 +188,9 @@ class HostedMcpRestartFaultGatesIT {
                     configuration.equals(call.operationId())
                             && call.status() == 0);
         });
+        JsonNode identity = configuration(session.id()).path("run")
+                .path("runtime");
+        assertThat(identity.isObject()).isTrue();
         killHarness();
         releaseControl();
         await().atMost(Duration.ofSeconds(60))
@@ -194,6 +202,37 @@ class HostedMcpRestartFaultGatesIT {
         await().atMost(Duration.ofSeconds(60)).ignoreExceptions()
                 .until(() -> controls("mcp-status").stream().anyMatch(
                         call -> configuration.equals(call.operationId())));
+        Map<String, Object> statusEntry = wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-status".equals(
+                                    request.at("/operation/kind").asText())
+                            && configuration.equals(request.at(
+                                    "/operation/targetOperationId").asText());
+                })
+                .filter(entry -> Integer.valueOf(200)
+                        .equals(entry.get("status")))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "No successful status lookup for " + configuration));
+        JsonNode statusAnswer = (JsonNode) statusEntry.get("answer");
+        String answerState = statusAnswer.path("result").path("state")
+                .asText();
+        assertThat(answerState).isIn("settled", "outcome_unknown");
+        String recordState = configuration(session.id()).path("run")
+                .path("state").asText();
+        if ("settled".equals(answerState)) {
+            assertThat(recordState).isEqualTo("settled");
+        } else {
+            assertThat(recordState).isIn("outcome_unknown",
+                    "recovery_blocked");
+        }
+        assertThat(configuration(session.id()).path("run").path("runtime"))
+                .as("the replacement keeps the original generation")
+                .isEqualTo(identity);
         assertThat(controls("mcp-configure")).hasSize(1);
         assertThat(controls("mcp-status")).anyMatch(call -> configuration
                 .equals(call.operationId()));
@@ -283,7 +322,7 @@ class HostedMcpRestartFaultGatesIT {
         assertThat(harnessRequest("GET", "/session/" + session.id()
                 + "/status", null, session.clientId(), 200)
                 .path("recoveryBlocked").asBoolean()).isFalse();
-        int wireBefore = wire.size();
+        int wireBefore = wireSequence.get();
         HttpResponse<String> recovery = promptRaw(session,
                 "FG12C_RECOVER_IDLE");
         assertThat(recovery.statusCode()).isIn(202, 409, 503);
@@ -291,12 +330,21 @@ class HostedMcpRestartFaultGatesIT {
             assertThat(json.readTree(recovery.body()).path("promptId")
                     .asText()).isNotBlank();
             waitFor(() -> {
-                assertThat(wire.stream().skip(wireBefore)
+                assertThat(wire.stream()
+                        .filter(entry -> ((Number) entry.get("seq"))
+                                .intValue() > wireBefore)
                         .filter(entry -> "POST".equals(entry.get("method")))
                         .filter(entry -> String.valueOf(entry.get("path"))
                                 .endsWith(":acquire"))
-                        .anyMatch(entry -> Integer.valueOf(409)
-                                .equals(entry.get("status"))))
+                        .anyMatch(entry -> {
+                            JsonNode answer = (JsonNode) entry.get("answer");
+                            return Integer.valueOf(409).equals(
+                                    entry.get("status"))
+                                    && answer != null
+                                    && "Runtime generation is no longer live"
+                                            .equals(answer.path("error")
+                                                    .asText());
+                        }))
                         .as("the recovery acquire must be refused by the "
                                 + "dead generation")
                         .isTrue();
@@ -310,9 +358,7 @@ class HostedMcpRestartFaultGatesIT {
                     refused.path("code").asText());
             assertThat(code).as("a refusal must name the recovery failure")
                     .isIn("hosted_mcp_recovery_required",
-                            "hosted_turn_recovery_required",
-                            "managed_mcp_connection_lost",
-                            "hosted_mcp_operation_failed");
+                            "hosted_turn_recovery_required");
         }
         JsonNode after = configuration(session.id());
         assertThat(after.path("run").path("runtime"))
@@ -347,6 +393,8 @@ class HostedMcpRestartFaultGatesIT {
         assertThat(operations(session.id()).getLast().path("run").path("state")
                 .asText()).isEqualTo("recovery_blocked");
         assertThat(effects("resource_read")).doesNotContain("ext://hold");
+        assertThat(controls("mcp-invoke")).hasSize(1);
+        assertThat(fixtureEvents("mcp.start")).hasSize(1);
         pending.cancel(true);
     }
 
@@ -370,6 +418,8 @@ class HostedMcpRestartFaultGatesIT {
         assertThat(operations(session.id()).getLast().path("run").path("state")
                 .asText()).isEqualTo("recovery_blocked");
         assertThat(effects("resource_read")).doesNotContain("ext://hold");
+        assertThat(controls("mcp-invoke")).hasSize(1);
+        assertThat(fixtureEvents("mcp.start")).hasSize(1);
         pending.cancel(true);
     }
 
@@ -445,9 +495,11 @@ class HostedMcpRestartFaultGatesIT {
         waitFor(() -> assertThat(harnessRequest("GET", "/session/"
                 + session.id() + "/status", null, session.clientId(), 200)
                         .path("hasActivePrompt").asBoolean()).isFalse());
-        // The baseline's own configure is not part of the case under test.
-        proxyCalls.clear();
-        wire.clear();
+        // The baseline's own configure is not part of the case under test;
+        // sequence marks avoid clearing a list an in-flight relay is still
+        // completing.
+        controlBaseline = proxySequence.get();
+        wireBaseline = wireSequence.get();
     }
 
     private JsonNode configuration(String session) {
@@ -504,7 +556,7 @@ class HostedMcpRestartFaultGatesIT {
 
     private List<ProxyCall> controls(String kind) {
         return proxyCalls.stream().filter(call -> kind.equals(call.kind()))
-                .toList();
+                .filter(call -> call.seq() > controlBaseline).toList();
     }
 
     private ProxyCall control(String kind) {
@@ -779,7 +831,7 @@ class HostedMcpRestartFaultGatesIT {
                         ? parsed.at("/operation/operationId").asText()
                         : null;
         ProxyCall call = new ProxyCall(exchange.getRequestMethod(), path, kind,
-                0, operationId);
+                0, operationId, proxySequence.incrementAndGet());
         int index;
         synchronized (proxyCalls) {
             index = proxyCalls.size();
@@ -788,6 +840,7 @@ class HostedMcpRestartFaultGatesIT {
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("method", exchange.getRequestMethod());
         entry.put("path", path);
+        entry.put("seq", wireSequence.incrementAndGet());
         if (parsed != null) {
             entry.put("request", parsed);
         }
@@ -997,9 +1050,9 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private record ProxyCall(String method, String path, String kind,
-            int status, String operationId) {
+            int status, String operationId, int seq) {
         ProxyCall complete(int value) {
-            return new ProxyCall(method, path, kind, value, operationId);
+            return new ProxyCall(method, path, kind, value, operationId, seq);
         }
     }
 }
