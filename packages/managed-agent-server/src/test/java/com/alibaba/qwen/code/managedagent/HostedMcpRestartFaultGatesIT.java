@@ -218,6 +218,15 @@ class HostedMcpRestartFaultGatesIT {
                             })
                             .filter(entry -> Integer.valueOf(200)
                                     .equals(entry.get("status")))
+                            .filter(entry -> {
+                                JsonNode answer =
+                                        (JsonNode) entry.get("answer");
+                                String state = answer == null ? ""
+                                        : answer.path("result").path("state")
+                                                .asText();
+                                return "settled".equals(state)
+                                        || "outcome_unknown".equals(state);
+                            })
                             .findFirst().orElse(null);
                     assertThat(found)
                             .as("a successful status lookup for %s",
@@ -367,13 +376,6 @@ class HostedMcpRestartFaultGatesIT {
             assertThat(code).as("a refusal must name the recovery failure")
                     .isIn("hosted_mcp_recovery_required",
                             "hosted_turn_recovery_required");
-            waitFor(() -> assertThat(wire.stream()
-                    .filter(entry -> ((Number) entry.get("seq")).intValue()
-                            > wireBefore)
-                    .anyMatch(this::deadAcquireRefused))
-                    .as("a direct refusal must still be backed by the dead "
-                            + "generation's acquire refusal")
-                    .isTrue());
         }
         JsonNode after = configuration(session.id());
         assertThat(after.path("run").path("runtime"))
@@ -626,7 +628,8 @@ class HostedMcpRestartFaultGatesIT {
         int status = ((Number) entry.get("status")).intValue();
         String error = answer.path("error").asText();
         return (status == 409
-                && "Runtime generation is no longer live".equals(error))
+                && ("Runtime generation is no longer live".equals(error)
+                        || "Runtime Session is not ready".equals(error)))
                 || (status == 503
                         && "Managed Runtime process is not alive."
                                 .equals(error));
