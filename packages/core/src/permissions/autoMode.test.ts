@@ -27,7 +27,11 @@ import {
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
-import { clearSessionCommits } from './destructive-commands.js';
+import {
+  clearSessionCommits,
+  isDestructiveCommand,
+} from './destructive-commands.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
@@ -47,6 +51,16 @@ vi.mock('./classifier.js', async (importOriginal) => ({
     durationMs: 1,
   })),
 }));
+
+// The real guard, observable: which command text it is given.
+vi.mock('./destructive-commands.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./destructive-commands.js')>();
+  return {
+    ...actual,
+    isDestructiveCommand: vi.fn(actual.isDestructiveCommand),
+  };
+});
 
 // ─── SAFE_TOOL_ALLOWLIST contents (frozen) ───────────────────────────────
 
@@ -1337,14 +1351,18 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
   });
 
   it('checks the command a Monitor wrapper runs', async () => {
+    const command = `bash -lc 'git -C /repo reset --hard'`;
     const decision = await evaluate(
-      {
-        toolName: ToolNames.MONITOR,
-        command: `bash -lc 'git -C /repo reset --hard'`,
-      },
+      { toolName: ToolNames.MONITOR, command },
       { messages: [userText('watch the build')] },
     );
     expect(decision.via).toBe('blocked:destructive-command');
+    // The guard reads the command the wrapper runs, not the wrapper.
+    const { safetyCommand } = normalizeMonitorCommand(command);
+    expect(safetyCommand).not.toBe(command);
+    expect(vi.mocked(isDestructiveCommand).mock.calls.at(-1)?.[0]).toBe(
+      safetyCommand,
+    );
   });
 
   it('sends a flagged call matching an ask rule to a human-only confirmation', async () => {
@@ -1353,10 +1371,12 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     const decision = await evaluate(shell('git reset --hard'), {
       pmForcedAsk: true,
     });
+    const reason = 'Blocked destructive git command: "git reset --hard".';
     expect(decision).toEqual({
       via: 'fallback',
       reason: 'ask_rule',
       requiresHumanDecision: true,
+      message: reason,
     });
 
     const { result, setAutoModeDenialState } = apply(
@@ -1367,6 +1387,7 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
       kind: 'fallback',
       reason: 'ask_rule',
       requiresHumanDecision: true,
+      message: reason,
     });
     // Asking is not a denial.
     expect(setAutoModeDenialState).not.toHaveBeenCalled();

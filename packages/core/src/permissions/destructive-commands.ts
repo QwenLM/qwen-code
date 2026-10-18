@@ -25,6 +25,7 @@ import { execSync } from 'node:child_process';
 import path from 'node:path';
 import type Parser from 'web-tree-sitter';
 import { parseShellCommand } from '../utils/shellAstParser.js';
+import { hasShellPatternExpansion } from '../utils/shell-safety-rules.js';
 
 type SyntaxNode = Parser.SyntaxNode;
 
@@ -111,10 +112,18 @@ const SPLIT = '\u0001';
 const words = (list: string) => new Set(list.split(' '));
 
 const IAC_TOOLS = words('terraform pulumi cdk');
-const SHELLS = words('sh bash zsh dash ksh fish');
+const SHELLS = words('sh bash zsh dash ksh fish ash mksh csh tcsh');
 /** Run code in another language, which the guard cannot read. */
-const INTERPRETER = /^(?:python[\d.]*|node|perl|ruby|php|[gmn]?awk)$/;
+const INTERPRETER =
+  /^(?:python[\d.]*|node|perl|ruby|php|[gmn]?awk|lua(?:jit)?|deno|bun|osascript|tclsh|rscript)$/;
 const SHELL_OPTIONS_WITH_VALUE = words('-o +o -O +O --rcfile --init-file');
+/** Shell startup files, which the shell runs before its command. */
+const STARTUP_FILE_OPTIONS = words('--rcfile --init-file');
+const STARTUP_FILE_VARIABLES = words('BASH_ENV ENV');
+/** Constructs whose commands all read the stdin given to the construct. */
+const STDIN_SHARING = words(
+  'subshell compound_statement do_group while_statement for_statement c_style_for_statement if_statement elif_clause else_clause case_statement case_item',
+);
 /** Run the rest of their arguments as one script. */
 const SCRIPT_RUNNERS = words('eval cmd powershell pwsh');
 const DIRECTORY_CHANGES = words('cd pushd popd');
@@ -180,6 +189,22 @@ const GIT_GLOBAL_OPTIONS_WITH_VALUE = words(
   '-C -c --git-dir --work-tree --namespace --super-prefix --config-env --attr-source',
 );
 const GIT_REPOSITORY_VARIABLES = words('GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR');
+/** Environment variables whose value git runs or reads settings from. */
+const GIT_COMMAND_VARIABLE =
+  /^(?:GIT_(?:EDITOR|SEQUENCE_EDITOR|PAGER|EXTERNAL_DIFF|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND|CONFIG|CONFIG_GLOBAL|CONFIG_SYSTEM|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)|EDITOR|VISUAL|PAGER)$/;
+/** Git settings whose value is a command, or that bring in other settings. */
+const GIT_COMMAND_SETTING =
+  /^(?:alias|pager|filter|credential|include|includeif|diff|merge|difftool|mergetool|gpg|ssh)\.|^(?:core\.(?:pager|editor|sshcommand|fsmonitor|hookspath|askpass|gitproxy|alternaterefscommand)|sequence\.editor|uploadpack\.packobjectshook)$|^remote\..*\.(?:uploadpack|receivepack|vcs)$/i;
+/** Git commands that move HEAD, so a later amend rewrites a commit nobody checked. */
+const GIT_HEAD_MOVES = words(
+  'commit merge rebase reset cherry-pick revert pull am checkout switch update-ref',
+);
+/** Git's own commands; any other word may be an alias. */
+const GIT_SUBCOMMANDS = words(
+  'add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore check-mailmap check-ref-format checkout checkout-index cherry cherry-pick citool clean clone column commit commit-graph commit-tree config count-objects credential daemon describe diff diff-files diff-index diff-tree difftool fast-export fast-import fetch fetch-pack filter-branch fmt-merge-msg for-each-ref for-each-repo format-patch fsck gc get-tar-commit-id grep gui hash-object help hook http-backend index-pack init init-db instaweb interpret-trailers lfs log ls-files ls-remote ls-tree mailinfo mailsplit maintenance merge merge-base merge-file merge-index merge-tree mergetool mktag mktree multi-pack-index mv name-rev notes pack-objects pack-refs patch-id prune prune-packed pull push range-diff read-tree rebase reflog remote repack replace request-pull rerere reset restore rev-list rev-parse revert rm send-email send-pack shortlog show show-branch show-index show-ref sparse-checkout stage stash status stripspace submodule switch symbolic-ref tag unpack-file unpack-objects update-index update-ref update-server-info var verify-commit verify-pack verify-tag version whatchanged worktree write-tree',
+);
+/** A path into a repository's `.git`, whose config and hooks git runs. */
+const GIT_METADATA_PATH = /(?:^|\/)\.git(?:\/|$)/;
 /** Same bound as the shell-wrapper unwrapping in `shell-semantics.ts`. */
 const MAX_SCRIPT_DEPTH = 4;
 
@@ -187,14 +212,13 @@ const PROTECTED_OPERATIONS = words('reset checkout clean stash commit destroy');
 const PROTECTED_OPERATION = new RegExp(
   `\\b(?:${[...PROTECTED_OPERATIONS].join('|')})\\b`,
 );
-// Whole words only: `git-clean.sh`, `.git/` and `reset.ts` name files.
-const PROTECTED_PROGRAM = /(?<![\w.-])(?:git|terraform|pulumi|cdk)(?![\w./-])/;
+// Whole words only: `git-clean.sh`, `.git/` and `reset.ts` name files, but
+// `git.exe` and `GIT` are the program, as `programName` reads them.
+const PROTECTED_PROGRAM =
+  /(?<![\w.-])(?:git|terraform|pulumi|cdk)(?:\.exe)?(?![\w./-])/i;
 /** Text that may spell a protected operation; a commit only when amended. */
 const MENTIONED_OPERATION =
   /(?<![\w./-])(?:reset|checkout|clean|stash|destroy|amend)(?![\w./-])|--am/;
-
-/** A pathspec that resolves to the current directory or one of its parents. */
-const WHOLE_TREE_PATHSPEC = /^\.\.?(?:\/+(?:\.\.?)?)*$/;
 
 const AMEND_REASON =
   'Blocked "git commit --amend": the commit it would rewrite could not be verified as one the agent made in this session.';
@@ -256,7 +280,7 @@ export async function isDestructiveCommand(
   cwd?: string,
 ): Promise<DestructiveCommandResult | null> {
   const scan: Scan = {
-    scripts: [{ text: command, cwd, depth: 0, checked: [] }],
+    scripts: [{ text: joinLines(command), cwd, depth: 0, checked: [] }],
     amendTargets: [],
     movesRepository: false,
     unverifiable: false,
@@ -300,16 +324,24 @@ export async function isDestructiveCommand(
   return null;
 }
 
+/** The shell joins a backslash-newline to the next line. */
+function joinLines(text: string): string {
+  return text.replace(/\\\r?\n/g, '');
+}
+
 async function scanScript(script: Script, scan: Scan): Promise<void> {
   if (script.depth > MAX_SCRIPT_DEPTH) {
-    flagIfMayRunProtected(script.text, scan);
+    // Too deep to follow: what it runs is unknown, whoever names it.
+    scan.hiddenCode = true;
+    flagIfMentionsOperation(script.text, scan);
     return;
   }
   let tree: Parser.Tree;
   try {
     tree = await parseShellCommand(script.text);
   } catch {
-    flagIfMayRunProtected(script.text, scan);
+    // The parser read nothing at all (it throws on `case`, for one).
+    flagIfMentionsOperation(script.text, scan);
     return;
   }
   try {
@@ -321,10 +353,16 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
         visitCommand(node, script, scan);
       } else if (node.type === 'comment') {
         script.checked.push([node.startIndex, node.endIndex]);
+      } else if (node.type === 'variable_assignment') {
+        visitAssignment(node, scan);
       } else if (
-        node.type === 'variable_assignment' &&
-        GIT_REPOSITORY_VARIABLES.has(node.childForFieldName('name')?.text ?? '')
+        node.type === 'file_redirect' &&
+        GIT_METADATA_PATH.test(
+          literalOf(wordOf(node.childForFieldName('destination') ?? node)),
+        )
       ) {
+        // Writing a repository's config or hooks changes what git runs.
+        scan.hiddenCode = true;
         scan.movesRepository = true;
       } else if (
         node.type === 'command_substitution' &&
@@ -346,27 +384,50 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
 function visitCommand(node: SyntaxNode, script: Script, scan: Scan): void {
   const name = node.childForFieldName('name');
   if (!name) return;
-  const args = argumentNodes(node);
-  const argv = [wordOf(name), ...args.map(wordOf)];
-  const program = programName(argv[0]!);
-  if (
-    (program === 'git' || IAC_TOOLS.has(program)) &&
-    !argv.some((word) => isDynamic(word))
-  ) {
-    // Checked word for word, so the words naming its operation are no sign
-    // of hidden code. Its other arguments stay: it may print them, as a
-    // commit message or a log format.
-    let i = 1;
-    while (i < argv.length && argv[i]!.startsWith('-')) {
-      if (program === 'git' && GIT_GLOBAL_OPTIONS_WITH_VALUE.has(argv[i]!)) {
-        i++;
-      }
-      i++;
-    }
-    const subcommand = args[Math.min(i, args.length) - 1];
-    script.checked.push([node.startIndex, (subcommand ?? name).endIndex]);
-  }
+  const argv = [wordOf(name), ...argumentNodes(node).map(wordOf)];
   runArgv(argv, { node, script, cwd: script.cwd }, scan);
+}
+
+/** `NAME=value`, alone or in front of a command. */
+function visitAssignment(node: SyntaxNode, scan: Scan): void {
+  const name = node.childForFieldName('name')?.text ?? '';
+  const valueNode = node.childForFieldName('value');
+  const value = valueNode ? wordOf(valueNode) : '';
+  if (GIT_REPOSITORY_VARIABLES.has(name)) {
+    scan.movesRepository = true;
+  } else if (STARTUP_FILE_VARIABLES.has(name)) {
+    // A shell started later runs this file first.
+    scan.hiddenCode = true;
+  } else if (GIT_COMMAND_VARIABLE.test(name)) {
+    // Git runs the value, or reads settings that can run anything.
+    scan.hiddenCode = true;
+    scan.movesRepository = true;
+    if (isDynamic(value) || PROTECTED_OPERATION.test(value)) {
+      scan.unverifiable = true;
+    }
+  }
+}
+
+/**
+ * Leaves the words naming a checked operation (program, global options,
+ * subcommand) out of the evidence for hidden code. Its other arguments stay:
+ * it may print them, as a commit message or a log format.
+ */
+function markChecked(ctx: CommandContext, named: string[]): void {
+  if (named.some((word) => isDynamic(word))) return;
+  const name = ctx.node.childForFieldName('name');
+  if (!name) return;
+  const nodes = [name, ...argumentNodes(ctx.node)];
+  const texts = nodes.map(wordOf);
+  for (let i = 0; i + named.length <= texts.length; i++) {
+    if (named.every((word, j) => texts[i + j] === word)) {
+      ctx.script.checked.push([
+        nodes[i]!.startIndex,
+        nodes[i + named.length - 1]!.endIndex,
+      ]);
+      return;
+    }
+  }
 }
 
 function argumentNodes(node: SyntaxNode): SyntaxNode[] {
@@ -395,6 +456,13 @@ function wordOf(node: SyntaxNode): string {
       return node.firstNamedChild ? wordOf(node.firstNamedChild) : DYNAMIC;
     case 'word':
       if (node.text.startsWith('~')) return DYNAMIC;
+      // Pathname expansion (`*`, `?`, `[`) turns one word into any number.
+      if (
+        node.parent?.type !== 'command_name' &&
+        hasShellPatternExpansion(node.text.replace(/\\./g, ''))
+      ) {
+        return SPLIT;
+      }
       return node.text.replace(/\\(\n|.)/g, (_, c: string) =>
         c === '\n' ? '' : c,
       );
@@ -470,10 +538,21 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
     return;
   }
   const program = programName(head);
-  if (program === 'git') return checkGit(args, ctx, scan);
-  if (IAC_TOOLS.has(program)) return checkIac(program, args, scan);
+  if (program === 'git') return checkGit(head, args, ctx, scan);
+  if (IAC_TOOLS.has(program)) return checkIac(head, program, args, ctx, scan);
+  if (args.some((arg) => GIT_METADATA_PATH.test(literalOf(arg)))) {
+    // A repository's `.git` replaced or rewritten: what a later git command
+    // reaches, and what its config and hooks run, are unknown.
+    scan.hiddenCode = true;
+    scan.movesRepository = true;
+  }
   if (SHELLS.has(program)) return checkShell(args, ctx, scan);
   if (SCRIPT_RUNNERS.has(program)) {
+    // `pwsh -File fix.ps1` runs a script file.
+    if (args.some((arg) => /^[-/]f(?:ile)?$/i.test(arg))) {
+      scan.hiddenCode = true;
+      return;
+    }
     return runScript(args.join(' '), ctx, scan, args);
   }
   if (DIRECTORY_CHANGES.has(program)) {
@@ -499,12 +578,14 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   if (program === 'find') return runFindCommands(args, ctx, scan);
   const wrapper = WRAPPERS[program];
   if (wrapper) return runWrapped(program, wrapper, args, ctx, scan);
-  // An unknown program may still wrap a command the guard interprets.
+  // An unknown program may still wrap a command the guard interprets, or
+  // run code it is handed (`trap 'cmd' EXIT`, `lua -e …`).
   for (let i = 1; i < argv.length; i++) {
     if (isInterpreted(argv[i]!)) {
       runArgv(argv.slice(i), { ...ctx, cwd: undefined }, scan);
     }
   }
+  for (const arg of args) flagIfMayRunProtected(arg, scan);
 }
 
 /** Checks the command a wrapper runs, possibly from another directory. */
@@ -600,7 +681,12 @@ function runFindCommands(
   }
 }
 
-function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
+function checkGit(
+  head: string,
+  args: string[],
+  ctx: CommandContext,
+  scan: Scan,
+): void {
   let dir = ctx.cwd;
   let i = 0;
   for (; i < args.length; i++) {
@@ -615,8 +701,8 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
       continue;
     }
     const value = equals < 0 ? (args[++i] ?? '') : arg.slice(equals + 1);
-    // A split value can push other words in front of the subcommand.
-    if (value.includes(SPLIT)) flagIfMayRunProtected(ctx.script.text, scan);
+    // A split value can push any words in front of the subcommand.
+    if (value.includes(SPLIT)) scan.unverifiable = true;
     if (option === '-C') {
       dir =
         dir === undefined || isDynamic(value)
@@ -625,51 +711,48 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
     } else if (option === '--git-dir' || option === '--work-tree') {
       dir = undefined;
     } else if (option === '-c' || option === '--config-env') {
-      // An alias or a command-valued setting can run other programs.
-      scan.hiddenCode = true;
-      if (PROTECTED_OPERATION.test(value.slice(value.indexOf('=') + 1))) {
-        scan.unverifiable = true;
-      }
+      const key = value.slice(0, Math.max(value.indexOf('='), 0)) || value;
+      const setting = value.slice(value.indexOf('=') + 1);
+      checkGitSetting(key, option === '-c' ? setting : '', scan);
     }
   }
 
   const subcommand = args[i];
+  markChecked(ctx, [head, ...args.slice(0, i + 1)]);
   if (subcommand === undefined) return;
   if (isDynamic(subcommand)) {
     scan.unverifiable = true;
     return;
   }
   const rest = args.slice(i + 1);
+  // A commit created or HEAD moved earlier on the line is not the one a
+  // later amend's check reads.
+  if (GIT_HEAD_MOVES.has(subcommand) && subcommand !== 'commit') {
+    scan.movesRepository = true;
+  }
   if (subcommand === 'config') {
-    // It can define an alias or a command-valued setting.
+    // Setting an alias or a command-valued setting.
+    const operands = rest.filter((word) => !literalOf(word).startsWith('-'));
+    if (operands.length >= 2) checkGitSetting(operands[0]!, operands[1]!, scan);
+  } else if (!GIT_SUBCOMMANDS.has(subcommand)) {
+    // Possibly an alias, which runs whatever it was set to.
     scan.hiddenCode = true;
   } else if (subcommand === 'reset') {
     const parsed = parseOptions(rest);
     const hard = hasLong(parsed, 'hard');
     report(scan, hard, parsed.dynamicOption, 'git reset --hard');
   } else if (subcommand === 'checkout') {
-    const parsed = parseOptions(
-      rest,
-      'bB',
-      words('orphan conflict pathspec-from-file'),
-    );
-    // A ref name cannot start with a dot, so these are pathspecs even
-    // without `--`.
-    const wholeTree = parsed.operands.some((operand) =>
-      WHOLE_TREE_PATHSPEC.test(operand),
-    );
-    const mayBeWholeTree = parsed.dynamicOperands.some((prefix) =>
-      /^[./]*$/.test(prefix),
-    );
-    report(scan, wholeTree, mayBeWholeTree, 'git checkout -- .');
+    checkCheckout(rest, scan);
   } else if (subcommand === 'clean') {
     const parsed = parseOptions(rest, 'e', words('exclude'));
     if (parsed.short.has('n') || hasLong(parsed, 'dry-run')) return;
     const force = parsed.short.has('f') || hasLong(parsed, 'force');
     report(scan, force, parsed.dynamicOption, 'git clean -f');
   } else if (subcommand === 'stash') {
-    const action = rest[0] ?? '';
-    report(scan, action === 'drop', isDynamic(action), 'git stash drop');
+    // Options may come before the action (`git stash -q drop`).
+    const action = rest.find((word) => !literalOf(word).startsWith('-')) ?? '';
+    const dynamic = rest.some((word) => isDynamic(word));
+    report(scan, action === 'drop', dynamic, 'git stash drop');
   } else if (subcommand === 'commit') {
     const parsed = parseOptions(
       rest,
@@ -679,19 +762,125 @@ function checkGit(args: string[], ctx: CommandContext, scan: Scan): void {
       ),
     );
     if (hasLong(parsed, 'amend', 2)) scan.amendTargets.push(dir);
-    else if (parsed.dynamicOption) scan.unverifiable = true;
-  } else if (
-    subcommand === 'rebase' ||
-    subcommand === 'submodule' ||
-    subcommand === 'bisect'
-  ) {
-    // `rebase --exec`, `submodule foreach` and `bisect run` run commands,
-    // in directories of their own.
-    const text = rest.join(' ');
-    if (mayRunProtected(text)) {
-      runScript(text, { ...ctx, cwd: undefined }, scan, rest);
+    else {
+      scan.movesRepository = true;
+      if (parsed.dynamicOption) scan.unverifiable = true;
+    }
+  } else if (subcommand === 'rebase') {
+    runGitCommandOptions(rest, words('-x --exec'), ctx, scan);
+  } else if (subcommand === 'difftool') {
+    runGitCommandOptions(rest, words('-x --extcmd'), ctx, scan);
+  } else if (subcommand === 'submodule') {
+    // `submodule foreach <command>` runs the command in each submodule.
+    let at = rest.indexOf('foreach') + 1;
+    if (at === 0) return;
+    while (at < rest.length && /^-/.test(literalOf(rest[at]!))) at++;
+    const command = rest.slice(at);
+    if (command.length > 0) {
+      runGitCommand(command.join(' '), command, ctx, scan);
+    }
+  } else if (subcommand === 'bisect') {
+    // `bisect run <cmd> [args]` runs the command at each step.
+    const at = rest.indexOf('run');
+    if (at >= 0 && at + 1 < rest.length) {
+      runArgv(rest.slice(at + 1), { ...ctx, cwd: undefined }, scan);
     }
   }
+}
+
+/** `git -c key=value`, `git config key value`, `--config-env`. */
+function checkGitSetting(key: string, value: string, scan: Scan): void {
+  if (!GIT_COMMAND_SETTING.test(literalOf(key)) && !isDynamic(key)) return;
+  // An alias or a command-valued setting can run other programs.
+  scan.hiddenCode = true;
+  if (isDynamic(value) || PROTECTED_OPERATION.test(value)) {
+    scan.unverifiable = true;
+  }
+}
+
+/** `rebase -x <cmd>`, `--exec=<cmd>`, `difftool --extcmd <cmd>`. */
+function runGitCommandOptions(
+  rest: string[],
+  options: ReadonlySet<string>,
+  ctx: CommandContext,
+  scan: Scan,
+): void {
+  for (let i = 0; i < rest.length; i++) {
+    const word = rest[i]!;
+    const literal = literalOf(word);
+    const equals = literal.indexOf('=');
+    const name = equals < 0 ? literal : literal.slice(0, equals);
+    if (options.has(name)) {
+      if (equals >= 0) {
+        runGitCommand(word.slice(equals + 1), [word], ctx, scan);
+      } else if (i + 1 < rest.length) {
+        runGitCommand(rest[i + 1]!, [word, rest[i + 1]!], ctx, scan);
+        i++;
+      }
+    } else if (
+      [...options].some(
+        (option) => option.length === 2 && name.startsWith(option),
+      ) &&
+      name.length > 2 &&
+      !name.startsWith('--')
+    ) {
+      // `-xCMD`.
+      runGitCommand(word.slice(2), [word], ctx, scan);
+    } else if (isDynamic(word) && !literal.startsWith('-') && literal === '') {
+      // A run-time word may be such an option.
+      scan.unverifiable = true;
+    }
+  }
+}
+
+/** A command git runs; one it cannot read is not given the benefit. */
+function runGitCommand(
+  command: string,
+  from: string[],
+  ctx: CommandContext,
+  scan: Scan,
+): void {
+  if (isDynamic(command)) {
+    scan.unverifiable = true;
+    return;
+  }
+  runScript(command, { ...ctx, cwd: undefined }, scan, from);
+}
+
+/** `git checkout` discards work for whole-tree pathspecs and with `-f`. */
+function checkCheckout(rest: string[], scan: Scan): void {
+  const parsed = parseOptions(
+    rest,
+    'bB',
+    words('orphan conflict pathspec-from-file'),
+  );
+  if (parsed.short.has('f') || hasLong(parsed, 'force')) {
+    // Throws away local changes, whatever it checks out.
+    scan.found ??= 'git checkout -f';
+    return;
+  }
+  const wholeTree = parsed.operands.some(isWholeTreePathspec);
+  // A run-time pathspec, a pattern, a magic pathspec or a pathspec file may
+  // name the whole tree.
+  const mayBeWholeTree =
+    parsed.dynamicOption ||
+    parsed.dynamicOperands.length > 0 ||
+    hasLong(parsed, 'pathspec-from-file', 10) ||
+    parsed.operands.some(
+      (operand) => operand.startsWith(':') || /[*?[]/.test(operand),
+    );
+  report(scan, wholeTree, mayBeWholeTree, 'git checkout -- .');
+}
+
+/** A pathspec that resolves to the current directory or one of its parents. */
+function isWholeTreePathspec(pathspec: string): boolean {
+  const normalized = path.posix.normalize(pathspec);
+  return (
+    normalized === '.' ||
+    normalized === './' ||
+    normalized === '..' ||
+    normalized.startsWith('../')
+  );
 }
 
 /** A protected operation ran, or a run-time word could make it run. */
@@ -794,11 +983,18 @@ function hasLong(parsed: ParsedOptions, option: string, minLength = 1) {
   );
 }
 
-function checkIac(program: string, args: string[], scan: Scan): void {
+function checkIac(
+  head: string,
+  program: string,
+  args: string[],
+  ctx: CommandContext,
+  scan: Scan,
+): void {
   // The subcommand is the first operand, or the second when the first may
   // have been the value of a preceding option.
   let mayBeValue = false;
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
     if (arg === '--') return;
     if (arg.startsWith('-')) {
       mayBeValue = !arg.includes('=');
@@ -812,7 +1008,10 @@ function checkIac(program: string, args: string[], scan: Scan): void {
       scan.found ??= `${program} destroy`;
       return;
     }
-    if (!mayBeValue) return;
+    if (!mayBeValue) {
+      markChecked(ctx, [head, ...args.slice(0, i + 1)]);
+      return;
+    }
     mayBeValue = false;
   }
 }
@@ -834,6 +1033,8 @@ function checkShell(args: string[], ctx: CommandContext, scan: Scan): void {
     }
     if (!/^[-+]./.test(arg)) break;
     if (SHELL_OPTIONS_WITH_VALUE.has(arg)) {
+      // A startup file is a script the shell runs first.
+      if (STARTUP_FILE_OPTIONS.has(arg)) scan.hiddenCode = true;
       i++;
       continue;
     }
@@ -854,20 +1055,30 @@ function checkShell(args: string[], ctx: CommandContext, scan: Scan): void {
 
 /** Weighs each program a shell reads on stdin. */
 function readStdin(ctx: CommandContext, scan: Scan): void {
-  const parent = ctx.node.parent;
-  const stage = parent?.type === 'redirected_statement' ? parent : ctx.node;
   const redirects = [...ctx.node.namedChildren];
-  // The parser hangs a trailing redirect on a whole `a && b` list; bash
-  // applies it to the last command.
-  for (
-    let node = ctx.node;
-    node.parent?.type === 'redirected_statement' ||
-    (node.parent?.type === 'list' &&
-      node.parent.lastNamedChild?.startIndex === node.startIndex);
-    node = node.parent
-  ) {
-    if (node.parent.type === 'redirected_statement') {
-      redirects.push(...node.parent.namedChildren);
+  // Stdin comes from the redirects and pipelines around the shell, also
+  // those attached to a group, subshell or loop it sits in. The parser hangs
+  // a trailing redirect on a whole `a && b` list; bash applies it to the
+  // last command.
+  for (let node = ctx.node; node.parent; node = node.parent) {
+    const parent: SyntaxNode = node.parent;
+    if (parent.type === 'redirected_statement') {
+      redirects.push(...parent.namedChildren.filter((child) => child !== node));
+    } else if (parent.type === 'pipeline') {
+      // A program piped in from an earlier stage only exists at run time.
+      if (
+        parent.namedChildren.some((child) => child.startIndex < node.startIndex)
+      ) {
+        scan.hiddenCode = true;
+      }
+    } else if (
+      !(
+        STDIN_SHARING.has(parent.type) ||
+        (parent.type === 'list' &&
+          parent.lastNamedChild?.startIndex === node.startIndex)
+      )
+    ) {
+      break;
     }
   }
   for (const redirect of redirects) {
@@ -898,14 +1109,6 @@ function readStdin(ctx: CommandContext, scan: Scan): void {
       scan,
       body,
     );
-  }
-  // A program piped in from an earlier stage only exists at run time.
-  const pipeline = stage.parent;
-  if (
-    pipeline?.type === 'pipeline' &&
-    pipeline.namedChildren.some((child) => child.startIndex < stage.startIndex)
-  ) {
-    scan.hiddenCode = true;
   }
 }
 
@@ -939,19 +1142,25 @@ function runScript(
 }
 
 function mayRunProtected(text: string): boolean {
-  const plain = text.replace(/["']/g, '');
+  const plain = joinLines(text).replace(/["']/g, '');
   // `g\it` is `git`; printf's `\ngit` starts a new word, and printf,
-  // `echo -e` and `$'…'` read `\x67` as `g`.
+  // `echo -e` and `$'…'` read `\x67`, `g`, `\U00000067` and `\147` as
+  // `g`. A shell later reading `\g` drops the backslash too.
   const decoded = plain.replace(
-    /\\(?:x([\da-fA-F]{1,2})|u([\da-fA-F]{1,4})|0?([0-7]{1,3}))/g,
-    (_, hex?: string, unicode?: string, octal?: string) =>
-      String.fromCharCode(
+    /\\(?:x([\da-fA-F]{1,2})|u([\da-fA-F]{1,4})|U([\da-fA-F]{1,8})|0?([0-7]{1,3}))/g,
+    (_, hex?: string, unicode?: string, wide?: string, octal?: string) => {
+      const code =
         octal === undefined
-          ? parseInt(hex ?? unicode!, 16)
-          : parseInt(octal, 8),
-      ),
+          ? parseInt(hex ?? unicode ?? wide!, 16)
+          : parseInt(octal, 8);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : ' ';
+    },
   );
-  return [plain.replace(/\\/g, ''), decoded.replace(/\\./g, ' ')].some(
+  return [
+    plain.replace(/\\/g, ''),
+    decoded.replace(/\\[ntrvfab]/g, ' ').replace(/\\/g, ''),
+    decoded.replace(/\\./g, ' '),
+  ].some(
     (variant) =>
       PROTECTED_PROGRAM.test(variant) && MENTIONED_OPERATION.test(variant),
   );
@@ -959,4 +1168,11 @@ function mayRunProtected(text: string): boolean {
 
 function flagIfMayRunProtected(text: string, scan: Scan): void {
   if (mayRunProtected(text)) scan.unverifiable = true;
+}
+
+/** For text the guard cannot read at all: an operation's name is enough. */
+function flagIfMentionsOperation(text: string, scan: Scan): void {
+  if (mayRunProtected(text) || MENTIONED_OPERATION.test(joinLines(text))) {
+    scan.unverifiable = true;
+  }
 }

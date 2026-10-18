@@ -513,6 +513,8 @@ export type AutoModeDecision =
       reason: FallbackToAskReason;
       /** An ask rule matched a call the destructive guard flagged. */
       requiresHumanDecision?: true;
+      /** The guard's reason for flagging it. */
+      message?: string;
     };
 
 /**
@@ -704,7 +706,9 @@ export function applyAutoModeDecision(
         reason: decision.reason,
         ...(isDenialFallbackReason(decision.reason)
           ? { message: formatDenialFallbackMessage(decision.reason) }
-          : {}),
+          : decision.message
+            ? { message: decision.message }
+            : {}),
         ...(decision.requiresHumanDecision
           ? { requiresHumanDecision: true }
           : {}),
@@ -753,7 +757,7 @@ export function getAutoModePermissionDeniedReason(
 export const AUTO_MODE_DENIAL_GUIDANCE =
   'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. To request manual approval for this exact action, retry the same tool call without changing its arguments. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
-const AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE =
+export const AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE =
   'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. A reply in chat does not lift this block. If this action is required, stop and tell the user it needs their manual approval: they can run it themselves, approve it outside AUTO mode, or add a matching permissions.ask rule so AUTO mode asks them to confirm it. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
 function formatDenialFallbackMessage(
@@ -904,7 +908,12 @@ export async function evaluateAutoMode(
   // guard flagged; that confirmation must then come from a human.
   if (input.pmForcedAsk) {
     return destructiveResult?.blocked
-      ? { via: 'fallback', reason: 'ask_rule', requiresHumanDecision: true }
+      ? {
+          via: 'fallback',
+          reason: 'ask_rule',
+          requiresHumanDecision: true,
+          message: destructiveResult.reason,
+        }
       : { via: 'fallback', reason: 'ask_rule' };
   }
 

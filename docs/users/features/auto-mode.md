@@ -210,21 +210,34 @@ ask you for explicit approval rather than route around the denial.
 
 Before the classifier runs, a deterministic guard blocks shell commands
 that would discard local work or tear down infrastructure:
-`git reset --hard`, `git checkout -- .`, `git clean -f`, `git stash drop`,
-`terraform destroy`, `pulumi destroy`, `cdk destroy`, and
-`git commit --amend` of a commit the agent did not make in this session.
-It reads the command the way the shell runs it, so printed text, comments
-and quoted data never trigger it, while git global options (`-C`, `-c`),
-option order and wrappers such as `bash -c`, `env` or `sudo` do not hide
-the operation. A command it cannot verify is blocked too when its text
-mentions a protected command: one it cannot parse, or one that runs
-code the guard cannot read — a program or arguments built at run time
-(including arguments `xargs` reads), a script file, a program a shell
-reads from a pipe or file, or code handed to `python`, `node`, `perl`,
-`ruby`, `php` or `awk`. Comments and the git or infrastructure
-operations the guard has already checked do not count as such a
-mention, but their arguments do, since a command such as `git log` can
-print them.
+`git reset --hard`, a `git checkout` that discards the whole working
+tree (`git checkout -- .`, `git checkout -f`), `git clean -f`,
+`git stash drop`, `terraform destroy`, `pulumi destroy`, `cdk destroy`,
+and `git commit --amend` of a commit the agent did not make in this
+session. It reads the command the way the shell runs it, so printed
+text, comments and quoted data never trigger it, while git global
+options (`-C`, `-c`), option order, wrappers such as `bash -c`, `env`,
+`sudo`, `xargs` or `find -exec`, and commands git itself runs
+(`rebase --exec`, `difftool -x`, aliases) do not hide the operation.
+
+When the guard cannot tell what a command does, it blocks it as one it
+could not verify, in three cases:
+
+- A word that decides the operation is only known at run time, such as
+  `git $SUBCOMMAND`, `git checkout "$TARGET"` or a pathname pattern
+  like `git checkout *`. These are blocked whatever else the command
+  says.
+- The command runs code the guard cannot read: a script file, a program
+  a shell reads from a pipe or file, code handed to an interpreter such
+  as `python`, `node` or `awk`, a git alias or command-valued setting,
+  or a program it does not know that is handed text. These are blocked
+  when the command's own text names a protected program and operation —
+  for example a script the same command writes with `git reset --hard`
+  in it. Comments and the words naming git and infrastructure operations
+  the guard already checked do not count, but their other arguments do,
+  since `git log` can print a commit message into a shell.
+- The guard cannot parse the command at all. It is then blocked when its
+  text names a protected operation.
 
 These blocks fail with `Blocked destructive git command: …`,
 `Blocked infrastructure destroy command: …`,
@@ -235,9 +248,14 @@ the guard does not. To run such a command, approve it yourself: run it
 directly, switch out of Auto Mode, or add a `permissions.ask` rule that
 matches it (for example `Bash(git reset *)`) so Auto Mode asks you to
 confirm that call. The confirmation must come from you — a
-`PermissionRequest` hook cannot approve it, and where no prompt can be
-shown (non-interactive runs, SDK hosts, background agents) the call is
-denied.
+`PermissionRequest` hook cannot approve it. Where no prompt can be shown
+(non-interactive runs, SDK hosts, background agents) the call is denied;
+an editor integration over ACP shows the prompt in the editor.
+
+A `permissions.allow` rule that matches a command, such as
+`Bash(git reset *)`, approves it before the guard runs, so the guard
+does not see it. Keep allow rules for destructive commands out of the
+settings you use with Auto Mode.
 
 ### Classifier reason language
 

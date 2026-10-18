@@ -5837,6 +5837,13 @@ describe('CoreToolScheduler', () => {
       );
       expect(denied.status).toBe('error');
       expect(denied.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      // The model learns the guard flagged it and that chat cannot lift it.
+      expect(denied.response.error?.message).toContain(
+        'Blocked destructive git command: "git reset --hard".',
+      );
+      expect(denied.response.error?.message).toContain(
+        'A reply in chat does not lift this block.',
+      );
       expect(
         reportedCalls(harness.onToolCallsUpdate).map((c) => c.status),
       ).not.toContain('awaiting_approval');

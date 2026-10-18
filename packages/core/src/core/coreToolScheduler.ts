@@ -146,6 +146,7 @@ import {
 } from './plan-mode-entry-policy.js';
 import {
   applyAutoModeDecision,
+  AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE,
   decorateAutoModeFallbackConfirmation,
   evaluateAutoMode,
   getAutoModeActionFingerprint,
@@ -3998,6 +3999,8 @@ export class CoreToolScheduler {
           // outcome carries a message, and because its `reason` is shared with
           // the classifier escalation.
           let autoModeFallbackRequiresHuman = false;
+          /** Why the guard wants a human, for a denial where none can answer. */
+          let humanOnlyReason: string | undefined;
           if (
             !requiresUserInteraction &&
             !preToolUseAsk &&
@@ -4113,6 +4116,17 @@ export class CoreToolScheduler {
                 // pmForcedAsk fallback isn't an audit-worthy event.
                 autoModeFallbackRequiresHuman =
                   outcome.requiresHumanDecision === true;
+                humanOnlyReason = outcome.requiresHumanDecision
+                  ? outcome.message
+                  : undefined;
+                if (
+                  outcome.reason === 'ask_rule' &&
+                  outcome.requiresHumanDecision
+                ) {
+                  debugLogger.warn(
+                    `Auto mode ask rule on a destructive-guard call; waiting for a human: ${outcome.message ?? ''}`,
+                  );
+                }
                 if (
                   outcome.message &&
                   (isDenialFallbackReason(outcome.reason) ||
@@ -4321,7 +4335,10 @@ export class CoreToolScheduler {
               const errorMessage =
                 planShellDecision.classification === 'unknown'
                   ? planShellDecision.noApprovalMessage
-                  : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+                  : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).` +
+                    (autoModeFallbackRequiresHuman && humanOnlyReason
+                      ? `\n${humanOnlyReason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`
+                      : '');
               if (planShellDecision.classification === 'unknown') {
                 rejectPlanShell(errorMessage);
                 continue;

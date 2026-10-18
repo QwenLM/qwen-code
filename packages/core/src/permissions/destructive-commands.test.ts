@@ -71,6 +71,15 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     ['git clean --force', 'git clean -f'],
     ['git stash drop', 'git stash drop'],
     ['git stash drop stash@{1}', 'git stash drop'],
+    // Options may come before the action.
+    ['git stash -q drop', 'git stash drop'],
+    ['git stash --quiet drop', 'git stash drop'],
+    // `-f` throws away local changes whatever it checks out.
+    ['git checkout -f', 'git checkout -f'],
+    ['git checkout --force main', 'git checkout -f'],
+    // These resolve to the top of the tree.
+    ['git checkout -- src/..', 'git checkout -- .'],
+    ['git.exe reset --hard', 'git reset --hard'],
     ['/usr/bin/git reset --hard', 'git reset --hard'],
     ['terraform destroy', 'terraform destroy'],
     ['terraform -chdir=infra destroy -auto-approve', 'terraform destroy'],
@@ -123,6 +132,9 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     'cdk deploy',
     'npm install',
     'command -v git',
+    'git.exe status',
+    // `--orphan` takes `.` as the new branch name.
+    'git checkout --orphan .',
   ])('allows %j', async (command) => {
     expect(await reasonFor(command)).toBeNull();
   });
@@ -159,6 +171,25 @@ describe('isDestructiveCommand — wrappers and shell structure', () => {
     `su -c 'git reset --hard' build`,
     `watch -n 5 git reset --hard`,
     `cmd /c "git reset --hard"`,
+    `powershell -Command "git reset --hard"`,
+    `pwsh -Command 'git reset --hard'`,
+    // Every shell the guard knows, so none can drop off the list unnoticed.
+    `zsh -c 'git reset --hard'`,
+    `dash -c 'git reset --hard'`,
+    `ksh -c 'git reset --hard'`,
+    `fish -c 'git reset --hard'`,
+    `ash -c 'git reset --hard'`,
+    `mksh -c 'git reset --hard'`,
+    `csh -c 'git reset --hard'`,
+    `tcsh -c 'git reset --hard'`,
+    // Git runs these option values as commands.
+    `git rebase --exec 'git reset --hard' main`,
+    `git rebase --exec='git reset --hard' main`,
+    `git rebase -i -x 'git reset --hard' main`,
+    `git difftool -y -x 'git reset --hard #' HEAD~1`,
+    `bash -c 'git difftool -y --extcmd="git reset --hard #" HEAD~1'`,
+    // A heredoc attached to the group the shell sits in.
+    `{ bash; } <<'EOF'\ngit reset --hard\nEOF`,
     `g"it" reset --hard`,
     'g\\it reset --hard',
   ])('blocks %j', async (command) => {
@@ -223,8 +254,49 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `echo "import os; os.system('git reset --hard')" | python3`,
     `printf 'import os\\nos.system("git reset --hard")\\n' > f.py && python3 f.py`,
     `awk 'BEGIN { system("git reset --hard") }'`,
+    // Pathname patterns, magic and run-time pathspecs may name the whole
+    // tree; a split global option value can add any subcommand.
+    'git checkout *',
+    'git checkout -- *',
+    `git checkout -- '*'`,
+    'git checkout :/',
+    'git checkout -- "feature/$X"',
+    'git checkout "feature/$X"',
+    'git checkout --pathspec-from-file=paths.txt',
+    'git -C $DIR status',
+    'git -C $(cat .repo-dir) status',
+    // Escapes printf decodes, and ones a shell drops.
+    `printf '\\U00000067it reset --hard\\n' > fixup.sh && bash fixup.sh`,
+    `printf '\\U00000067it reset --hard' | bash`,
+    `printf '\\g\\x69t reset --hard' | bash`,
+    // Code run later or elsewhere: a trap, a startup file, a script file.
+    `trap 'git reset --hard' EXIT`,
+    `printf 'git reset --hard\\n' > f.sh; BASH_ENV=$PWD/f.sh bash -c :`,
+    `printf 'git reset --hard\\n' > f.sh; bash --rcfile ./f.sh -i -c :`,
+    `pwsh -File fix.ps1; echo 'git reset --hard'`,
+    `lua -e 'os.execute("git reset --hard")'`,
+    `osascript -e 'do shell script "git clean -fd"'`,
+    `deno eval 'Deno.run({ cmd: ["git", "reset", "--hard"] })'`,
+    `printf 'git.exe reset --hard\\n' > f.sh && bash f.sh`,
+    // A run-time command for git to run.
+    'git bisect run "$W" reset --hard',
+    'git rebase --exec "$CMD" main',
+    // Aliases and settings that run a protected operation.
+    `git config alias.r 'reset --hard'; git r`,
+    `printf '[alias]\\nnuke = !git reset --hard\\n' >> .git/config && git nuke`,
+    `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0='!git reset --hard' git nuke`,
+    // xargs appends what it reads behind a wrapper too.
+    'sudo xargs git checkout',
+    'env xargs git checkout',
+    'echo . | sudo xargs git checkout',
+    // A shell reading a pipe from inside a group.
+    `echo 'git reset --hard' | (bash)`,
+    `echo 'git reset --hard' | { bash; }`,
+    // Backquotes nested inside backquotes.
+    'echo `echo \\`git reset --hard\\``',
     // The parser cannot read these.
     `case "$1" in x) git reset --hard ;; esac`,
+    `case x in a) eval "$(printf '\\g\\x69t reset --hard')" ;; esac`,
     `echo 'git reset --hard`,
   ])('blocks %j', async (command) => {
     expect(await reasonFor(command)).toContain(UNVERIFIABLE);
@@ -240,12 +312,11 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     'git commit -m "$(cat msg.txt)"',
     'git commit --message="$MSG"',
     'git checkout -b "feature/$NAME"',
-    'git checkout "feature/$X"',
     'git reset --soft "HEAD~$N"',
     // After `--` a run-time word can only be a pathspec.
     'f=app.txt; git reset -q -- "$f"',
     `f=app.txt; git commit -q -m 'update' -- "$f"`,
-    'git -C $DIR status',
+    'git -C "$DIR" status',
     'git ls-files -m | xargs git add',
     `cat > t.sh <<'EOF'\nnpm test\nEOF\nbash t.sh && git commit -m done`,
     'bash scripts/test.sh && git commit -m done',
@@ -263,11 +334,53 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     './scripts/build.sh && git checkout main',
     `timeout 300 bash -c 'npm ci && ./scripts/test.sh && git checkout -- package-lock.json'`,
     './scripts/test.sh # then git reset --hard if it fails',
+    // Settings and commands that cannot run anything.
+    "git -c commit.gpgsign=false commit -m 'docs: explain git reset --hard'",
+    './scripts/build.sh && sudo git checkout main',
+    "trap 'npm test' EXIT",
+    "git config --get-regexp '^alias\\.'",
+    'git nuke',
     // File names are not words.
     `printf 'echo cleaning\\n' > git-clean-branches.sh && bash git-clean-branches.sh`,
     'bash ./scripts/git-reset-hooks.sh .git/hooks',
   ])('allows %j, which cannot reach a protected operation', async (command) => {
     expect(await reasonFor(command)).toBeNull();
+  });
+});
+
+describe('isDestructiveCommand — limits', () => {
+  /** `X=git` outside, `$X reset --hard` inside `depth` nested shells. */
+  function nested(depth: number): string {
+    let script = '$X reset --hard';
+    for (let level = depth; level > 0; level--) {
+      script = `bash <<'E${level}'\n${script}\nE${level}`;
+    }
+    return `export X=git\n${script}`;
+  }
+
+  it.each([2, 4, 5, 7])(
+    'blocks a run-time program %i shells deep',
+    async (depth) => {
+      expect(await reasonFor(nested(depth))).toContain(UNVERIFIABLE);
+    },
+  );
+
+  it('reads a long run of slashes in a pathspec quickly', async () => {
+    await reasonFor('git status');
+    const started = performance.now();
+    expect(await reasonFor(`git checkout .${'/'.repeat(60)}x`)).toBeNull();
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('blocks when the parser rejects the command', async () => {
+    // The parser throws on `case`; the payload's spelling defeats the
+    // program-name test, so only the operation's name is left to go on.
+    expect(
+      await reasonFor(
+        `case x in a) eval "$(printf '\\147\\151\\164 reset --hard')" ;; esac`,
+      ),
+    ).toContain(UNVERIFIABLE);
+    expect(await reasonFor(`case "$1" in x) npm test ;; esac`)).toBeNull();
   });
 });
 
@@ -287,13 +400,19 @@ describe('isDestructiveCommand — git commit --amend', () => {
     const git = (...args: string[]) =>
       execFileSync('git', args, { cwd: dir, encoding: 'utf-8' }).trim();
     git('init', '-q');
+    // Independent of the host's git config: no signing, no hooks.
     git(
       '-c',
       'user.name=Test',
       '-c',
       'user.email=test@example.com',
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'core.hooksPath=/dev/null',
       'commit',
       '-q',
+      '--no-verify',
       '--allow-empty',
       '-m',
       name,
@@ -348,6 +467,19 @@ describe('isDestructiveCommand — git commit --amend', () => {
     ['a wrapper', () => 'env git commit --amend'],
     ['a run-time directory', () => 'git -C "$REPO" commit --amend'],
     ['an option with unknown effect', () => 'git --bare commit --amend'],
+    [
+      'a commit made earlier on the same line',
+      () => 'git commit --allow-empty -m x && git commit --amend --no-edit',
+    ],
+    [
+      'a replaced .git',
+      (dirs: Repos) =>
+        `rm -rf .git && ln -s ${dirs.other}/.git .git && git commit --amend`,
+    ],
+    [
+      'an editor variable',
+      () => "GIT_EDITOR='git reset --hard' git commit --amend",
+    ],
   ])('blocks an amend whose target goes through %s', async (_label, build) => {
     const dirs = makeRepos();
     expect(await reasonFor(build(dirs), dirs.own)).toContain(
@@ -356,12 +488,18 @@ describe('isDestructiveCommand — git commit --amend', () => {
   });
 
   it('never falls back to the process directory', async () => {
-    registerSessionCommit(
-      execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf-8' }),
-    );
-    expect(await reasonFor('git commit --amend')).toContain(
-      'git commit --amend',
-    );
+    // The session commit is the HEAD of the directory the process runs in;
+    // without a cwd the guard must not read it.
+    const { own } = makeRepos();
+    const cwd = process.cwd();
+    process.chdir(own);
+    try {
+      expect(await reasonFor('git commit --amend')).toContain(
+        'git commit --amend',
+      );
+    } finally {
+      process.chdir(cwd);
+    }
   });
 });
 
