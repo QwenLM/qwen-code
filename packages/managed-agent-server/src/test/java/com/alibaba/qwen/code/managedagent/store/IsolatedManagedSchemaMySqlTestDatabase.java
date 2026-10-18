@@ -11,6 +11,7 @@ import java.util.UUID;
 public final class IsolatedManagedSchemaMySqlTestDatabase implements AutoCloseable {
     private final DriverManagerDataSource admin;
     private final String name;
+    private final String url;
     private final DataSource source;
 
     public IsolatedManagedSchemaMySqlTestDatabase() {
@@ -25,8 +26,8 @@ public final class IsolatedManagedSchemaMySqlTestDatabase implements AutoCloseab
         String options = query < 0 ? "" : url.substring(query);
         name = "schema32_case_" + UUID.randomUUID().toString().replace("-", "");
         admin = new DriverManagerDataSource(url, user, password);
-        source = new DriverManagerDataSource(location.substring(0, location.lastIndexOf('/') + 1) + name + options,
-                user, password);
+        this.url = location.substring(0, location.lastIndexOf('/') + 1) + name + options;
+        source = new DriverManagerDataSource(this.url, user, password);
         try (var connection = admin.getConnection(); var statement = connection.createStatement()) {
             statement.execute("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin");
         } catch (SQLException error) {
@@ -36,6 +37,11 @@ public final class IsolatedManagedSchemaMySqlTestDatabase implements AutoCloseab
 
     public DataSource source() {
         return source;
+    }
+
+    /** The JDBC URL of the owned database, for a process that opens its own pool. */
+    public String url() {
+        return url;
     }
 
     @Override
