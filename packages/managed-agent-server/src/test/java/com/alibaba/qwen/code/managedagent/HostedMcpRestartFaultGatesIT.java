@@ -198,47 +198,19 @@ class HostedMcpRestartFaultGatesIT {
                 .until(() -> control("mcp-configure").status() != 0);
         SessionRef reloaded = reload(session);
         pending.cancel(true);
-        triggerTurn(reloaded);
-        java.util.concurrent.atomic.AtomicReference<Map<String, Object>>
-                statusRef = new java.util.concurrent.atomic.AtomicReference<>();
-        await().atMost(Duration.ofSeconds(60)).ignoreExceptions()
-                .untilAsserted(() -> {
-                    Map<String, Object> found = wire.stream()
-                            .filter(entry -> ((Number) entry.get("seq"))
-                                    .intValue() > wireBaseline)
-                            .filter(entry -> {
-                                JsonNode request =
-                                        (JsonNode) entry.get("request");
-                                return request != null
-                                        && "mcp-status".equals(request.at(
-                                                "/operation/kind").asText())
-                                        && configuration.equals(request.at(
-                                                "/operation/targetOperationId")
-                                                .asText());
-                            })
-                            .filter(entry -> Integer.valueOf(200)
-                                    .equals(entry.get("status")))
-                            .filter(entry -> {
-                                JsonNode answer =
-                                        (JsonNode) entry.get("answer");
-                                String state = answer == null ? ""
-                                        : answer.path("result").path("state")
-                                                .asText();
-                                return "settled".equals(state)
-                                        || "outcome_unknown".equals(state);
-                            })
-                            .findFirst().orElse(null);
-                    assertThat(found)
-                            .as("a successful status lookup for %s",
-                                    configuration)
-                            .isNotNull();
-                    JsonNode answer = (JsonNode) found.get("answer");
-                    assertThat(answer.path("result").path("state").asText())
-                            .as("the status answer must be terminal")
-                            .isIn("settled", "outcome_unknown");
-                    statusRef.set(found);
-                });
-        Map<String, Object> statusEntry = statusRef.get();
+        Map<String, Object> statusEntry = null;
+        for (int attempt = 0; attempt < 10 && statusEntry == null; attempt++) {
+            triggerTurn(reloaded);
+            long deadline = System.nanoTime()
+                    + Duration.ofSeconds(5).toNanos();
+            while (System.nanoTime() < deadline && statusEntry == null) {
+                statusEntry = terminalStatus(configuration);
+                if (statusEntry == null) {
+                    Thread.sleep(100);
+                }
+            }
+        }
+        assertThat(statusEntry).as("a terminal status lookup").isNotNull();
         JsonNode statusAnswer = (JsonNode) statusEntry.get("answer");
         String answerState = statusAnswer.path("result").path("state")
                 .asText();
@@ -633,6 +605,30 @@ class HostedMcpRestartFaultGatesIT {
                 || (status == 503
                         && "Managed Runtime process is not alive."
                                 .equals(error));
+    }
+
+    private Map<String, Object> terminalStatus(String configuration) {
+        return wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-status".equals(request.at(
+                                    "/operation/kind").asText())
+                            && configuration.equals(request.at(
+                                    "/operation/targetOperationId").asText());
+                })
+                .filter(entry -> Integer.valueOf(200)
+                        .equals(entry.get("status")))
+                .filter(entry -> {
+                    JsonNode answer = (JsonNode) entry.get("answer");
+                    String state = answer == null ? ""
+                            : answer.path("result").path("state").asText();
+                    return "settled".equals(state)
+                            || "outcome_unknown".equals(state);
+                })
+                .findFirst().orElse(null);
     }
 
     private String uuid() {
