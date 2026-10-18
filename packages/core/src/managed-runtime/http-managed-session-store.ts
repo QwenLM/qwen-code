@@ -13,6 +13,7 @@ import {
   MANAGED_SESSION_EVENT_SUBTYPE,
   MANAGED_SESSION_HEADER_SUBTYPE,
   MANAGED_SESSION_LIMITS,
+  ManagedSessionAppendUnsettledError,
   ManagedSessionRecordError,
   assertManagedSessionKey,
   assertManagedSessionDurableRef,
@@ -143,6 +144,26 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
 }
 
 export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
+
+/**
+ * Failures that leave the commit's outcome unknown: the request may have
+ * reached the store. A retry is safe only against a proved head, which the
+ * writer re-establishes after its lease lapses.
+ */
+function isUncertainStoreFailure(error: unknown): boolean {
+  return (
+    (error instanceof ManagedSessionStoreHttpError &&
+      (error.status === 429 || error.status >= 500)) ||
+    error instanceof ManagedSessionStoreTransportError ||
+    error instanceof TypeError ||
+    (error instanceof DOMException &&
+      ['AbortError', 'TimeoutError'].includes(error.name))
+  );
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
 
 export function createHttpManagedSessionStores(
   options: HttpManagedSessionStoreOptions,
@@ -422,10 +443,17 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     try {
       await this.client.appendTransaction(records);
     } catch (error) {
-      if (!(error instanceof ManagedSessionCommitRejectedError))
+      if (
+        !(error instanceof ManagedSessionCommitRejectedError) &&
+        !(error instanceof ManagedSessionAppendUnsettledError)
+      )
         this.client.stopWriterRenewal();
       throw error;
     }
+  }
+
+  settleAppend(): Promise<'landed' | 'absent'> {
+    return this.client.settleAppend();
   }
 
   blockRecovery(request: {
@@ -630,6 +658,20 @@ class ManagedSessionStoreHttpClient {
   private sealed = false;
   private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
+  /**
+   * The commit whose outcome the store could not observe. Its record digest
+   * and the revision it was submitted against are kept so the next attempt
+   * can ask the durable head whether it landed instead of assuming the log is
+   * dead; a lapsed writer lease is re-acquirable, so the answer is knowable.
+   */
+  private pendingAppend:
+    | {
+        readonly recordDigest: string;
+        readonly baseRevision: number;
+        readonly commitResources?: readonly CommitResource[];
+        readonly descriptor?: TransactionDescriptor;
+      }
+    | undefined;
 
   get writerSealed(): boolean {
     return this.sealed;
@@ -822,7 +864,26 @@ class ManagedSessionStoreHttpClient {
   }
 
   async appendTransaction(records: readonly unknown[]): Promise<void> {
-    await this.ensureWriter();
+    if (this.pendingAppend !== undefined) await this.settleAppend();
+    try {
+      await this.ensureWriter();
+    } catch (error) {
+      const grant = this.grant;
+      if (
+        isUncertainStoreFailure(error) ||
+        (grant !== undefined &&
+          grant.leaseUntil <= Date.now() &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409)
+      ) {
+        this.pendingAppend = {
+          recordDigest: sha256(encodeRecords(records)),
+          baseRevision: grant?.journalRevision ?? 0,
+        };
+        throw new ManagedSessionAppendUnsettledError(asError(error));
+      }
+      throw error;
+    }
     const grant = this.requireGrant();
     const recordBytes = encodeRecords(records);
     const descriptor = describeTransaction(
@@ -968,6 +1029,17 @@ class ManagedSessionStoreHttpClient {
               error.remoteCode === 'tenant_guard_contended' &&
               contentionDeadline - Date.now() <= 250));
         const exhausted = attempt >= 2;
+        // A spent guard budget is a definite non-commit the store rolled back,
+        // so it stays the terminal failure it already was. Everything else
+        // that left the outcome unknown keeps the attempt: the next append
+        // proves from the durable head whether it landed, instead of fencing
+        // a journal whose writer lease only lapsed.
+        const unsettled =
+          !contentionSpent &&
+          (isUncertainStoreFailure(error) ||
+            (grant.leaseUntil <= Date.now() &&
+              error instanceof ManagedSessionStoreHttpError &&
+              error.status === 409));
         if (
           !uncertain ||
           contentionSpent ||
@@ -975,8 +1047,18 @@ class ManagedSessionStoreHttpClient {
             (descriptor.operation !== 'renewActivation' ||
               this.renewalStopped ||
               grant.leaseUntil <= Date.now()))
-        )
+        ) {
+          if (unsettled) {
+            this.pendingAppend = {
+              recordDigest: sha256(recordBytes),
+              baseRevision: grant.journalRevision,
+              commitResources,
+              descriptor,
+            };
+            throw new ManagedSessionAppendUnsettledError(asError(error));
+          }
           throw error;
+        }
         await new Promise((resolve) =>
           setTimeout(
             resolve,
@@ -986,8 +1068,18 @@ class ManagedSessionStoreHttpClient {
         if (
           exhausted &&
           (this.renewalStopped || grant.leaseUntil <= Date.now())
-        )
+        ) {
+          if (unsettled) {
+            this.pendingAppend = {
+              recordDigest: sha256(recordBytes),
+              baseRevision: grant.journalRevision,
+              commitResources,
+              descriptor,
+            };
+            throw new ManagedSessionAppendUnsettledError(asError(error));
+          }
           throw error;
+        }
       }
     }
     const receipt = asRecord(committed, 'commit receipt');
@@ -1029,6 +1121,90 @@ class ManagedSessionStoreHttpClient {
     this.resources.releaseCommitted(commitResources);
     for (const ref of descriptor.refs)
       this.publicationAdmissions.delete(ref.resourceId);
+  }
+
+  /**
+   * Asks the durable head whether the commit whose acknowledgement was lost
+   * landed. A lapsed writer lease is re-acquired first, which is what lets a
+   * Session outlive an outage longer than its lease: the head, not the dead
+   * grant, decides. A head that advanced by someone else is fatal, because
+   * this writer's in-memory position can no longer extend it.
+   */
+  async settleAppend(): Promise<'landed' | 'absent'> {
+    const pending = this.pendingAppend;
+    if (pending === undefined) return 'absent';
+    try {
+      if (this.grant === undefined) {
+        throw new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is not active.',
+        );
+      }
+      if (this.grant.leaseUntil <= Date.now()) await this.reacquireWriter();
+      const head = parseRestoreHead(
+        await this.json(
+          `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
+          'GET',
+        ),
+      );
+      this.requireHeadMatchesGrant(head);
+      if (head.journalRevision === pending.baseRevision) {
+        this.pendingAppend = undefined;
+        this.adoptHead(head);
+        return 'absent';
+      }
+      if (
+        pending.descriptor === undefined ||
+        head.journalRevision !== pending.baseRevision + 1
+      ) {
+        throw new ManagedSessionRecordError(
+          `the journal advanced to revision ${head.journalRevision} past this writer's ${pending.baseRevision} while its append outcome was unknown; the Session needs a takeover.`,
+        );
+      }
+      const page = asRecord(
+        await this.json(
+          `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${pending.baseRevision}&limit=1`,
+          'GET',
+        ),
+        'transaction page',
+      );
+      const rows = asArray(page['transactions'], 'transactions');
+      const stored = parseStoredTransaction(rows[0]);
+      if (
+        stored.journalRevision !== head.journalRevision ||
+        stored.recordDigest !== pending.recordDigest
+      ) {
+        throw new ManagedSessionRecordError(
+          'the journal holds a different transaction at this append position; the Session needs a takeover.',
+        );
+      }
+      this.resources.releaseCommitted(pending.commitResources ?? []);
+      for (const ref of pending.descriptor.refs)
+        this.publicationAdmissions.delete(ref.resourceId);
+      this.pendingAppend = undefined;
+      this.adoptHead(head);
+      return 'landed';
+    } catch (error) {
+      if (error instanceof ManagedSessionAppendUnsettledError) throw error;
+      if (isUncertainStoreFailure(error))
+        throw new ManagedSessionAppendUnsettledError(asError(error));
+      throw error;
+    }
+  }
+
+  /**
+   * Adopts the committed head from a store read. The writer generation must
+   * already match (the caller checked), so only the log position and the
+   * activation epoch move.
+   */
+  private adoptHead(head: RestoreHead): void {
+    this.grant = {
+      ...this.requireGrant(),
+      journalRevision: head.journalRevision,
+      committedSequence: head.committedSequence,
+      lastCommitDigest: head.lastCommitDigest,
+      activationEpoch: head.activationEpoch,
+    };
+    this.scheduleRenewal();
   }
 
   async publicationOwner(): Promise<{
@@ -1301,6 +1477,24 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (grant.leaseUntil - Date.now() <= this.leaseDurationMs / 3) {
       await this.renewWriter();
+    }
+  }
+
+  /**
+   * Replaces a writer lease that lapsed. The expired grant is put back when
+   * the acquisition itself fails, so a later settlement asks the Store again
+   * instead of finding a writer-less client and fencing the log.
+   */
+  private async reacquireWriter(): Promise<void> {
+    const expired = this.grant;
+    this.stopRenewal();
+    await this.renewPromise?.catch(() => undefined);
+    this.grant = undefined;
+    try {
+      await this.acquireWriter();
+    } catch (error) {
+      this.grant = expired;
+      throw error;
     }
   }
 

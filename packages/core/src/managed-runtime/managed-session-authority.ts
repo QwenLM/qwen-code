@@ -53,6 +53,7 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionScheduleSessionModeEnabled,
   assertManagedSessionEventActor,
+  ManagedSessionAppendUnsettledError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   assertManagedSessionTransaction,
@@ -453,6 +454,26 @@ export class LocalManagedSessionAuthority {
   ) {}
 
   private writeFailure: Error | undefined;
+  /**
+   * The transaction whose append outcome the journal has not settled yet.
+   * While it is held the log is not dead: the next append asks the journal
+   * whether these records landed and applies them here if they did, so a
+   * writer lease that lapsed under an outage can re-attest instead of
+   * fencing the Session for good.
+   */
+  private unsettledAppend:
+    | {
+        readonly key: string;
+        readonly marker: ManagedSessionCommitMarker;
+        readonly events: readonly ManagedSessionEvent[];
+        readonly branches: ReadonlySet<string>;
+        readonly lastRecordUuid: string;
+        readonly extension?: {
+          readonly eventId: string;
+          readonly apply: () => void;
+        };
+      }
+    | undefined;
   private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly eventIds = new Set<string>();
@@ -3046,6 +3067,7 @@ export class LocalManagedSessionAuthority {
     actors: readonly ManagedSessionActor[],
     extension?: { readonly eventId: string; readonly apply: () => void },
   ): Promise<ManagedSessionCommitReceipt> {
+    if (this.unsettledAppend !== undefined) await this.settleUnsettledAppend();
     this.assertCommandWritable(command);
     const key = managedSessionCommandKey(command.operation, command.commandId);
     const previous = this.transactions.get(key);
@@ -3194,6 +3216,23 @@ export class LocalManagedSessionAuthority {
       this.lastRecordUuid = final.uuid;
     } catch (cause) {
       if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
+      if (
+        cause instanceof ManagedSessionAppendUnsettledError &&
+        this.journal.settleAppend !== undefined
+      ) {
+        // The store can prove the outcome later from its durable head, so keep
+        // the exact attempt instead of fencing a journal whose writer lease a
+        // recoverable outage lapsed.
+        this.unsettledAppend = {
+          key,
+          marker,
+          events,
+          branches,
+          lastRecordUuid: final.uuid,
+          ...(extension === undefined ? {} : { extension }),
+        };
+        throw cause;
+      }
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
       this.writeFailure =
@@ -3201,6 +3240,30 @@ export class LocalManagedSessionAuthority {
       throw cause;
     }
 
+    return this.applyCommitted(
+      key,
+      marker,
+      events,
+      branches,
+      final.uuid,
+      extension,
+    );
+  }
+
+  /**
+   * Applies one committed transaction to the in-memory authority. The normal
+   * append and the settlement of an append whose acknowledgement was lost both
+   * come through here, so the two advance the log identically.
+   */
+  private applyCommitted(
+    key: string,
+    marker: ManagedSessionCommitMarker,
+    events: readonly ManagedSessionEvent[],
+    branches: ReadonlySet<string>,
+    lastRecordUuid: string,
+    extension?: { readonly eventId: string; readonly apply: () => void },
+  ): ManagedSessionCommitReceipt {
+    this.lastRecordUuid = lastRecordUuid;
     for (const event of events) {
       this.events.push(event);
       this.eventIds.add(event.eventId);
@@ -3228,10 +3291,41 @@ export class LocalManagedSessionAuthority {
     };
     this.transactions.set(key, {
       receipt,
-      contentDigest: command.contentDigest,
+      contentDigest: marker.contentDigest,
     });
     extension?.apply();
     return receipt;
+  }
+
+  /**
+   * Resolves the append the journal could not acknowledge. `landed` applies
+   * those records here, `absent` drops them, and an unsettled answer keeps the
+   * attempt so the next append asks again. Any other failure proves the log
+   * cannot be trusted and fences it for good.
+   */
+  private async settleUnsettledAppend(): Promise<void> {
+    const pending = this.unsettledAppend!;
+    let outcome: 'landed' | 'absent';
+    try {
+      outcome = await this.journal.settleAppend!();
+    } catch (cause) {
+      if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
+      this.unsettledAppend = undefined;
+      this.writeFailure =
+        cause instanceof Error ? cause : new Error(String(cause));
+      throw cause;
+    }
+    this.unsettledAppend = undefined;
+    if (outcome === 'landed') {
+      this.applyCommitted(
+        pending.key,
+        pending.marker,
+        pending.events,
+        pending.branches,
+        pending.lastRecordUuid,
+        pending.extension,
+      );
+    }
   }
 
   /**

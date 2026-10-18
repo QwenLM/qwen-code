@@ -434,6 +434,21 @@ export class ManagedSessionWritesStoppedError extends ManagedSessionRecordError 
   }
 }
 
+/**
+ * An append the journal could not observe: the transaction may or may not have
+ * committed. A journal that can prove the answer from its durable head keeps
+ * the attempt and answers `settleAppend`; until then the authority must not
+ * latch the log dead, because a lapsed writer lease is re-acquirable.
+ */
+export class ManagedSessionAppendUnsettledError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_append_unsettled';
+
+  constructor(readonly failure: Error) {
+    super(`session log append outcome is unknown: ${failure.message}`);
+    this.name = 'ManagedSessionAppendUnsettledError';
+  }
+}
+
 /** A target mode the mode gate has not enabled for submission. */
 export class ManagedSessionModeGateError extends ManagedSessionRecordError {
   override readonly code: string = 'managed_session_mode_disabled';

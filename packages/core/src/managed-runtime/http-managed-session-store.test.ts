@@ -1237,6 +1237,28 @@ describe('HTTP Managed Session store', () => {
             ),
           ).resolves.toBe('completed');
           expect(run).toHaveBeenCalledOnce();
+        } else if (failure === 'exhausted-503') {
+          // An exhausted 503 is an unknown outcome, not a dead journal: the
+          // Store settles it against the durable head, and the retry below
+          // proves the log is still writable.
+          await expect(operation).rejects.toThrow(
+            'session log append outcome is unknown',
+          );
+          expect(run).not.toHaveBeenCalled();
+          expect(requests.length).toBeGreaterThanOrEqual(3);
+          expect(session.authority.writesStopped).toBe(false);
+          armed = false;
+          await expect(
+            controller.runHookOperation(
+              {
+                operationId: 'notification-retry',
+                occurrenceId: 'notification-retry',
+                originTurnId: null,
+              },
+              run,
+            ),
+          ).resolves.toBe('completed');
+          expect(run).toHaveBeenCalledOnce();
         } else {
           await expect(operation).rejects.toThrow('writes stopped');
           expect(run).not.toHaveBeenCalled();
@@ -1248,7 +1270,7 @@ describe('HTTP Managed Session store', () => {
             'current Session activation',
           );
         }
-        if (!refused)
+        if (!refused && failure !== 'exhausted-503')
           expect(requests.every((body) => body === requests[0])).toBe(true);
       } finally {
         await session.close();
@@ -2287,80 +2309,192 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it.each(['grant-expired', 'permanent-fence'])(
-    'stops writer keepalive after activation append fails (%s)',
-    async (failure) => {
-      vi.useFakeTimers({ now: 1_790_000_000_000 });
-      const server = new FakeManagedSessionStore();
-      const originalFetch = server.fetch.getMockImplementation()!;
-      let activationRequests = 0;
-      server.fetch.mockImplementation(async (input, init) => {
-        const url = requestUrl(input);
-        if (/\/transactions:commit(?:-v2)?$/.test(url)) {
-          const body = JSON.parse(String(init?.body)) as Record<
-            string,
-            unknown
-          >;
-          if (body['operation'] === 'renewActivation') {
-            activationRequests++;
-            return jsonResponse(
-              {
-                error: {
-                  code:
-                    failure === 'grant-expired'
-                      ? 'store_unavailable'
-                      : 'managed_session_writer_conflict',
-                  message: failure,
-                },
+  it('stops writer keepalive after a permanent fence', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let activationRequests = 0;
+    server.fetch.mockImplementation(async (input, init) => {
+      const url = requestUrl(input);
+      if (/\/transactions:commit(?:-v2)?$/.test(url)) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (body['operation'] === 'renewActivation') {
+          activationRequests++;
+          return jsonResponse(
+            {
+              error: {
+                code: 'managed_session_writer_conflict',
+                message: 'permanent-fence',
               },
-              failure === 'grant-expired' ? 503 : 409,
-            );
-          }
+            },
+            409,
+          );
         }
-        const response = await originalFetch(input, init);
-        if (url.endsWith('/writers:acquire')) {
-          return jsonResponse({
-            ...(await response.json()),
-            leaseUntil: Date.now() + 50_000,
-          });
-        }
-        return response;
-      });
-      const { stores, session } = await bootStoresAndSession(server);
-      try {
-        await vi.advanceTimersByTimeAsync(21_000);
-        expect(session.authority.writesStopped).toBe(
-          failure === 'permanent-fence',
-        );
-        await vi.advanceTimersByTimeAsync(34_000);
-        expect(session.authority.writesStopped).toBe(true);
-        expect(server.renewCount).toBe(failure === 'grant-expired' ? 1 : 0);
-        expect(activationRequests).toBeGreaterThanOrEqual(
-          failure === 'grant-expired' ? 3 : 1,
-        );
-        const stoppedAt = {
-          renewals: server.renewCount,
-          activationRequests,
-        };
-        await vi.advanceTimersByTimeAsync(90_000);
-        expect(server.renewCount).toBe(stoppedAt.renewals);
-        expect(activationRequests).toBe(stoppedAt.activationRequests);
-        expect(
-          server.fetch.mock.calls.filter(([input]) =>
-            requestUrl(input).endsWith('/writers:acquire'),
-          ),
-        ).toHaveLength(1);
-        expect(server.sealCount).toBe(0);
-        expect(server.state).toBe('ACTIVE');
-      } finally {
-        await stores.close().catch(() => undefined);
-        await vi.advanceTimersByTimeAsync(1000);
-        await session.close().catch(() => undefined);
-        vi.clearAllTimers();
-        vi.useRealTimers();
       }
-    },
-  );
+      const response = await originalFetch(input, init);
+      if (url.endsWith('/writers:acquire')) {
+        return jsonResponse({
+          ...(await response.json()),
+          leaseUntil: Date.now() + 50_000,
+        });
+      }
+      return response;
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      await vi.advanceTimersByTimeAsync(21_000);
+      expect(session.authority.writesStopped).toBe(true);
+      const stoppedAt = {
+        renewals: server.renewCount,
+        activationRequests,
+      };
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(server.renewCount).toBe(stoppedAt.renewals);
+      expect(activationRequests).toBe(stoppedAt.activationRequests);
+      expect(
+        server.fetch.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/writers:acquire'),
+        ),
+      ).toHaveLength(1);
+      expect(server.sealCount).toBe(0);
+      expect(server.state).toBe('ACTIVE');
+    } finally {
+      await stores.close().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1000);
+      await session.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-attests after an outage outlasts the writer lease', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let unavailable = false;
+    server.fetch.mockImplementation(async (input, init) => {
+      const url = requestUrl(input);
+      if (unavailable) {
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'outage' } },
+          503,
+        );
+      }
+      const response = await originalFetch(input, init);
+      if (url.endsWith('/writers:acquire')) {
+        return jsonResponse({
+          ...(await response.json()),
+          leaseUntil: Date.now() + 50_000,
+        });
+      }
+      return response;
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      unavailable = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(session.authority.writesStopped).toBe(false);
+      unavailable = false;
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(session.authority.writesStopped).toBe(false);
+      expect(session.authority.currentActivation?.phase).toBe('active');
+      // The outage's failed re-acquisitions come first; the recovered one is
+      // what moved the writer generation.
+      expect(
+        server.fetch.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/writers:acquire'),
+        ).length,
+      ).toBeGreaterThanOrEqual(2);
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      await appendMessage(
+        session,
+        session.authority.committedSequence + 1,
+        messageRef,
+      );
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'message.commit',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await stores.close().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1000);
+      await session.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles a renewal that landed before its acknowledgement was lost', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let unavailable = false;
+    let loseFirstAck = true;
+    server.fetch.mockImplementation(async (input, init) => {
+      const url = requestUrl(input);
+      if (unavailable) {
+        if (
+          loseFirstAck &&
+          /\/transactions:commit(?:-v2)?$/.test(url) &&
+          (JSON.parse(String(init?.body)) as Record<string, unknown>)[
+            'operation'
+          ] === 'renewActivation'
+        ) {
+          loseFirstAck = false;
+          await originalFetch(input, init);
+        }
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'outage' } },
+          503,
+        );
+      }
+      const response = await originalFetch(input, init);
+      if (url.endsWith('/writers:acquire')) {
+        return jsonResponse({
+          ...(await response.json()),
+          leaseUntil: Date.now() + 50_000,
+        });
+      }
+      return response;
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const committedBefore = session.authority.committedSequence;
+      unavailable = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(session.authority.writesStopped).toBe(false);
+      unavailable = false;
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(session.authority.writesStopped).toBe(false);
+      expect(session.authority.committedSequence).toBe(committedBefore + 1);
+      expect(session.authority.currentActivation?.renewalSeq).toBe(1);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'renewActivation',
+        ),
+      ).toHaveLength(1);
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      await appendMessage(session, committedBefore + 2, messageRef);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'message.commit',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await stores.close().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1000);
+      await session.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
 
   it('keeps writer renewal after a rollbackable append rejection', async () => {
     vi.useFakeTimers({ now: 1_790_000_000_000 });
