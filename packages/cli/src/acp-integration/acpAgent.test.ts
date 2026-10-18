@@ -32616,7 +32616,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       privateParentCapability: capability,
     });
     if (capability !== undefined) {
-      await (agent as AgentLike).initialize({
+      await agent.initialize({
         clientCapabilities: {},
         _meta: {
           'qwen-code/private-parent-capability': capability,
