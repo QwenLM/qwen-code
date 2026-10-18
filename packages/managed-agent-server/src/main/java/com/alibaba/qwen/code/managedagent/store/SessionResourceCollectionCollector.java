@@ -319,10 +319,13 @@ public final class SessionResourceCollectionCollector {
                 (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             return "put_unresolved";
         }
+        // The relay's classifications are all terminal (its discovery page and claim exclude
+        // them): an `unknown` walk is never rewritten, so holding for it would hold forever. A
+        // close still owed rides its own CHILD_SESSION_CLOSE row and reads no parent resource.
         if (!jdbc.query(
                         "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
                             + " operation_kind = 'CHILD_SESSION_START' AND state NOT IN ('done',"
-                            + " 'orphaned') LIMIT 1",
+                            + " 'orphaned', 'unknown') LIMIT 1",
                 (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             return "child_start_unresolved";
         }

@@ -90,7 +90,7 @@ Evidence lands in `target/fg12-cases/fg12a/<tenant>/`; the CI upload carries it.
 - The class green locally on JDK 21 + MariaDB 10.11 (measured 5.1-7.4 s), and
   the mutation witness red before merge.
 - `scripts/tests/hosted-process-ci.test.js` green with the fork budget
-  moved from 4353 s to 4368 s and the healthy sum from 3743 s to 3758 s.
+  moved from 4484 s to 4499 s and the healthy sum from 3874 s to 3889 s.
 - This design ships in both languages with matching structure.
 
 ## Open questions

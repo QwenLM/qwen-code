@@ -77,8 +77,8 @@ managed-session store 描述符在 Harness 上 `POST /session`。一个基线 tu
 - `mvn -DskipTests test-compile checkstyle:check` 干净。
 - 该类在本机 JDK 21 + MariaDB 10.11 上绿（实测 5.1-7.4 s），且变异见证在合入
   前跑红。
-- `scripts/tests/hosted-process-ci.test.js` 绿：fork 预算由 4353 s 移到
-  4368 s，healthy 和由 3743 s 移到 3758 s。
+- `scripts/tests/hosted-process-ci.test.js` 绿：fork 预算由 4484 s 移到
+  4499 s，healthy 和由 3874 s 移到 3889 s。
 - 本设计双语言同构交付。
 
 ## 待决问题
