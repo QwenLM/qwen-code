@@ -10,7 +10,7 @@ owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，
 
 托管命令 Hook 跑在 Runtime worker 的委派 cgroup v2 单元里，命令还可能留下
 后代进程。因此取消或超时必须对整个单元发信号，在后代忽略优雅信号时升级到
-`cgroup.kill`，并且只有单元清空后才报告终态（`hook-command-cgroup.ts:231-248`、
+`cgroup.kill`，并且只有单元清空后才报告终态（`hook-command-cgroup.ts:227-248`、
 `hookRunner.ts:1415-1439`）。
 
 ## 决策

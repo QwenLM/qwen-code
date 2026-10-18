@@ -13,7 +13,7 @@ A managed command Hook runs in the Runtime worker's delegated cgroup v2
 unit, and a command may leave a descendant behind. Cancelling or timing it
 out therefore has to signal the whole unit, escalate to `cgroup.kill` when a
 descendant ignores the graceful signal, and only report a terminal outcome
-once the unit is empty (`hook-command-cgroup.ts:231-248`,
+once the unit is empty (`hook-command-cgroup.ts:227-248`,
 `hookRunner.ts:1415-1439`).
 
 ## Decisions
