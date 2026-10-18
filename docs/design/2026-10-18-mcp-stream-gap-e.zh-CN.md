@@ -4,49 +4,35 @@
 
 ## 问题与范围
 
-issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_configuration` 与 `mcp_operation` 两个域补故障门禁。本切片在长 MCP 工具调用期间与配置替换期间断开公开与 WebShell 事件流，再用 `Last-Event-ID` / `afterSequence` 续传。
+issue #14447 列出公开/WebShell 事件流在长 MCP 工具调用与配置替换期间的断开/续传门禁。本设计核实后确认：MCP 记录不产生 task 事件（issue 自己引用 H1 设计 `:27`）；`ext://hold` fixture 是原始 `resource_read`，不是工具调用；公开/WebShell 流承载的是 Spring event store 的 turn/agent 事件，不是 MCP 记录事件。
 
-门禁要求不重复、不缺失；观察者断开既不会取消、也不会重新调用该操作，fixture 副作用计数保持 1。issue 指出 MCP 记录不产生 task 事件（H1 设计 `:27`），所以这道门禁很薄，可以并入 FG12f。
+独立成一道 MCP 流门禁不会断言任何 MCP 特性。**结论：FG12e 并入 FG12f**；不新增类，也不新增预算账目。
 
 ## 现状
 
-- Harness 从 journal 发布公开与 WebShell 事件流；`Last-Event-ID` / `afterSequence` 从某个 sequence 续传。
-- FG12c/d 的 rig 已有 `ext://hold` 长调用与 Broker 代理控制 hold；本切片复用该 rig。
-- 具体流路由在实现时核实；WebShell 路由是否暴露是待决问题。
+- 公开流是 `GET /v1/agents/sessions/{sessionId}/events`，由 `ManagedEventStreamService` 提供，用 `Last-Event-ID` / `after` 续传。
+- WebShell 流是 `POST /api/agent/web-shell/v1/events/stream`，`afterSequence` 在 body 里，没有 `Last-Event-ID` 头。两条路由不是同一机制。
+- 两条流都从 Spring event store（`ma_public_event` / 事件记录）重放，不是 Harness journal；Harness 的 `/session/:id/events` 是第三条路由。
+- MCP 原始操作 fixture（`ext://hold`）不产生 turn/tool 事件，因此围绕它断开/续传观察不到任何 MCP 事件。真正的长 MCP 工具调用需要真实模型 turn，而 Hosted 故障门禁 lane 没有。
 
-## 门禁账本
+## 账本
 
-| Case                   | 注入                                             | 期望                                                           |
-| ---------------------- | ------------------------------------------------ | -------------------------------------------------------------- |
-| `stream-gap-long-call` | 连接、启动被持有的 `ext://hold` 调用、断开、续传 | 事件连续（无缺口/重复）；副作用计数 1；不取消、不第二次 invoke |
-| `stream-gap-replace`   | 配置替换期间断开，再续传                         | 事件连续；恰好一次 configure；revision 2                       |
-| `web-shell-stream-gap` | WebShell 事件流变体                              | 同上；路由是否可用是待决问题                                   |
+FG12e 不设独立账本。流续传用例属于 FG12f / turn 投递；本切片只记录结论与路由事实，不制造空门禁。
 
 ## 决策
 
-1. **复用 FG12c rig。** 长调用用 `ext://hold`；配置替换用代理控制 hold。
-2. **按最后观察到的 sequence 续传。** 使用 `Last-Event-ID` / `afterSequence`，断言续传序列连续、没有重复 event id。
-3. **断开不得中止 turn。** fixture 副作用计数保持 1，wire 上没有第二次 `mcp-invoke` 或 `mcp-configure`。
-4. **并入还是独立。** issue 认为这道门禁很薄。先核实公开与 WebShell 路由；若打包 Harness 不暴露 WebShell 流，就并入 FG12f 的投递格，而不是为它另搭一套 rig。
-5. **只有路由支持时才独立成类。** `HostedMcpStreamFaultGatesIT` 会重钉六处 fork 账目；并入 FG12f 则不新增类、预算不变。
-
-## 夹具设计
-
-- 复用 FG12c boot；SSE 客户端带最后 event id 重连；hold fixture；代理 wire。
-- 若独立，证据落在 `target/fg12-cases/fg12e/<tenant>/`；workflow 已上传 `target/fg12-cases/`。
-- 在承诺 WebShell 用例之前先核实其路由。
-
-## 预算
-
-独立成类 -> 同一 diff 重钉六处 fork 账目。并入 FG12f -> 预算不变。
+1. **FG12e 并入 FG12f。** 不新增 `HostedMcpStreamFaultGatesIT`、不新增 fork 预算账目、不建 `fg12e` 证据根。
+2. **公开流与 WebShell 流机制不同。** 公开路由用头续传；WebShell 路由用 body 游标。不要写成同一种续传机制。
+3. **流来源是 Spring event store**，不是 Harness journal；见证必须读对的序列。
+4. **未来若要做 turn 级流续传，需要模型/turn 夹具。** Hosted 故障门禁 lane 没有，因此不在本切片范围。
 
 ## 验收
 
-- 续传序列无缺口、无重复；副作用计数为 1；没有第二次 configure/invoke。
-- 两份设计文档保持同构。
-- 若并入，FG12f 设计文档记录该流用例，本文档指向它。
+- FG12f 设计记录该并入；若它要保留流用例，先写清模型/turn 前提。
+- 本文档指向 FG12f，不宣称存在 MCP 流门禁。
+- 不新增类，不改预算。
 
 ## 待决问题
 
-- 打包 Harness 暴露的公开/WebShell 流路由；两者是否都支持 `Last-Event-ID` 与 `afterSequence`。
-- 并入 FG12f 还是独立；issue 自己已注明这道门禁很薄。
+- 通用的 turn 级公开/WebShell 流续传门禁是否值得单独开一个带模型的切片？
+- WebShell 路由是否需要在 FG12f 设计里单独写续传契约？

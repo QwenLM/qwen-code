@@ -4,57 +4,58 @@
 
 ## 问题与范围
 
-issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_configuration` 与 `mcp_operation` 两个域补故障门禁。本切片在真实 MySQL 事务的 store 边界拒绝写，覆盖记录状态机的每一步：配置的 `intent`；配置与原始操作各自的 `dispatch_started`；响应资源发布之后的 settled 提交；以及 `releasing`、`drained` 与 `released`。
+issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_configuration` 与 `mcp_operation` 两个域补故障门禁。本切片在 managed session store 的真实事务边界拒绝写，覆盖记录状态机的每一步：配置的 `intent`；配置与原始操作各自的 `dispatch_started`；响应资源发布之后的 settled 提交；以及 `releasing`、`drained` 与 `released`。
 
-进程崩溃归 FG12c/d，事件流断流归 FG12e/f。本切片不引入进程故障，也不在产品代码里加故障分支。
+进程崩溃归 FG12c/d。事件流归 FG12e/f；FG12e 并入 FG12f，因此本切片不覆盖流。
 
 ## 现状
 
-- 记录是 `ma_extension_record` 里的 extension record（`mcp_configuration` / `mcp_operation`），由 Harness 通过 managed session store 提交。状态序列是 `intent` → `dispatch_started` → `settled`，以及 `releasing` → `drained` → `released`。
-- FG12a/c/d 提供打包 Harness、durable worker、stdio fixture、MySQL、Broker 代理与 lifecycle v2。本切片复用该 rig，只加存储故障注入器，不另搭一套。
-- 具体表列与 JSON 路径在实现时核实；下面的账本以 issue 的验收为准。
+- extension record 实际在 **`ma_session_record`**（`record_kind = 'DOMAIN'`；legacy 名 `qwen_managed_session_extension_record`），不是 `ma_extension_record`。记录正文经 `record_resource_id` 存在 `ma_resource`；`run.execution` 在该 JSON 里。行上的 `runtime_state` 把 `intent` 与 `dispatch_started` 都投影成 `provisioning`；`releasing` / `drained` / `released` 不是列。
+- Harness 通过 HTTP managed session store 提交；Broker 的 `@Transactional` store 写这一行。写被拒时 Harness 看到的是 5xx，HTTP 客户端还会重试 5xx。
+- FG12a/c/d 提供打包 Harness、durable worker、stdio fixture、MySQL、Broker 代理与 lifecycle v2。FG12d 是同一个类里的一个 case，不是第二套 rig。
 
 ## 门禁账本
 
-| Case                              | 拒绝点                             | 期望                                                                                 |
-| --------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------ |
-| `store-reject-intent`             | 配置的 `intent` 提交               | 线上零 `mcp-configure` 控制，fixture 零副作用                                        |
-| `store-reject-configure-dispatch` | 配置的 `dispatch_started` 提交     | 零控制、零副作用；没有第二条记录 revision                                            |
-| `store-reject-operation-dispatch` | 原始操作的 `dispatch_started` 提交 | 零 `mcp-invoke` 控制、零副作用                                                       |
-| `store-reject-settled`            | 响应资源发布之后的 settled 提交    | 一次查询结算原操作；没有第二次 read/get；副作用计数保持 1                            |
-| `store-reject-releasing`          | `releasing` 提交                   | 下一次 detach 用原 id 继续 `${configurationId}:release`；没有第二次 configure/invoke |
-| `store-reject-drained`            | `drained` 提交                     | Broker owner 与 storage holder 都保留；不伪造 drain 回执                             |
-| `store-reject-released`           | `released` 提交                    | 记录保持 `drained`；重载后下一次 detach 只重发 owner release                         |
-| `store-reject-reload-revisions`   | 上述任一拒绝后重载                 | 没有重复的记录 revision                                                              |
+| Case                              | 拒绝点                                               | 期望                                                                                                         |
+| --------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `store-reject-intent`             | 配置的 `intent` 提交                                 | 线上零 `mcp-configure` 控制，fixture 零副作用                                                                |
+| `store-reject-configure-dispatch` | 配置的 `dispatch_started` 提交（owner acquire 之后） | 零控制、零副作用；拒绝前已 acquire 的 owner 记为保留到下一次 detach                                          |
+| `store-reject-operation-dispatch` | 原始操作的 `dispatch_started` 提交                   | 零 `mcp-invoke` 控制、零副作用；owner 记为保留到下一次 detach                                                |
+| `store-reject-settled`            | 响应资源发布之后的 settled 提交                      | 测试驱动一次后续 turn/close；恰好一次查询；没有第二次 read/get；副作用计数 1；孤儿响应资源作为已知副作用记录 |
+| `store-reject-releasing`          | release 派发之前的 `releasing` 提交                  | 下一次 detach 用同一 id **首次派发** `${configurationId}:release`；没有第二次 configure/invoke               |
+| `store-reject-drained`            | `drained` 提交                                       | Broker owner 与 storage holder 都保留；不伪造 drain 回执                                                     |
+| `store-reject-released`           | owner release 之后的 `released` 提交                 | 记录保持 `drained`；下一次 detach 重发 owner release；断言其幂等；该格在 main 上可能红，随修复一起落地       |
+| `store-reject-reload-chain`       | 上述任一拒绝后重试并重载                             | 每个 id 只有一条逻辑记录链；没有重复的 configuration 记录；重试 revision 不是被拒状态的重复                  |
 
 ## 决策
 
-1. **在 MySQL 边界注入，不在产品代码里加故障分支。** test-only `BEFORE INSERT/UPDATE` trigger 读取测试自有的 fault row，命中 phase 时 `SIGNAL 45000`。这样走真实事务回滚；若记录 JSON 路径太脆，回退到 test `@TestConfiguration` 的 store wrapper。
-2. **settled 提交失败走一次查询，不重发。** 代理 wire 是见证：原 id 上一条 `mcp-status`，没有第二次 `mcp-invoke`。
-3. **`dispatch_started` 之前的失败必须零控制、零副作用。** wire 与 fixture 副作用日志都断言。
-4. **owner 与 storage 的保留从对应行读取**，不由 503 推断。
-5. **新增 `HostedMcpStoreFaultGatesIT` 类**隔离 trigger 生命周期；FG12a/c/d 类不动；六处 fork 账目在同一 diff 重钉。
-6. **teardown 删除 trigger 与 fault row。** 删除失败为 best-effort，不得掩盖用例自身失败。
+1. **用测试 store wrapper 在真实事务内注入。** 在 Broker 事务 store 外包一层 `@TestConfiguration` wrapper，按 phase 抛错。MySQL trigger 被否决：行上无法识别 phase，而且已发布的 blob 在事务之外。
+2. **同一 phase 的所有重试都失败。** HTTP 客户端会重试 5xx；wrapper 保持失败直到测试清除 phase，用例记录尝试次数。
+3. **settled 失败要驱动，不会自愈。** 失败从 `install()`/`accept()` 抛出；测试必须驱动一次后续 turn 或 close；代理 wire 必须只有原 id 上一条 `mcp-status`，没有第二次 invoke。
+4. **已发布资源不回滚。** catalog/response/arguments 是独立资源写；settled 提交失败会留下孤儿 blob。门禁记录该副作用，而不是声称零副作用。
+5. **owner/storage 的保留从对应行读取**，不由 5xx 推断。
+6. **新增 `HostedMcpStoreFaultGatesIT` 类**隔离 wrapper；FG12a/c/d 类不动；预算账目与 roster/per-ceiling 元测试在同一 diff 重钉。
+7. **`store-reject-released` 在 main 上可能合法地红。** `markReleased` 在 `broker.release()` 之后提交；若该提交被拒，owner 已释放。该格随修复一起落地（如 FG12d 的 R1-1），而不是断言 main 尚不具备的行为。
 
 ## 夹具设计
 
-- 复用 FG12c boot。新增测试自有的 fault row 命名 phase；trigger 读取它并 signal。trigger 在 schema migration 之后、session open 之前安装。
-- 测试驱动 baseline configure、一次原始操作、close 与 reload；JDBC 读记录；代理 wire 计数；fixture 日志计数副作用。
+- 复用 FG12c boot；测试 `@TestConfiguration` 提供故障 store wrapper。Harness 看到 5xx（普通 wrapper 异常是 500 `internal_error`；契约拒绝是 409）；JDBC 读记录与 owner/storage 行；代理 wire 计数；fixture 日志计数副作用。
+- wrapper 在 teardown 清除 phase；清除失败为 best-effort，不得掩盖用例自身失败。
 - 证据落在 `target/fg12-cases/fg12b/<tenant>/`；workflow 已上传 `target/fg12-cases/`。
 
 ## 预算
 
-新增类要在同一 diff 重钉六处 fork 账目：类 `@Timeout`、`hostedForkHealthySeconds`、CI fork 字面钉点、本地 `hosted-mcp-gates` 家族 profile、workflow 注释与 artifact 根。本地实测，保留 2× 余量。
+新增类要在同一 diff 重钉共享 fork 账目：逐 case `@Timeout` 上限、`hostedForkHealthySeconds`、CI fork 字面钉点、pom CI fork 与本地 `hosted-mcp-gates` 家族 profile、workflow 注释，以及 `hostedTestClasses` roster / per-ceiling `it(...)`。artifact 根已覆盖 `fg12b`。本地实测并保留 2× 余量；当前共享值从 `hosted-process-ci.test.js` 与 `pom.xml` 读取，不抄进本文档。
 
 ## 验收
 
 - `mvn -DskipTests test-compile checkstyle:check` 干净。
-- 类在 JDK 21 + MySQL 8.x 上绿；每格先自证拒绝生效（trigger 已触发），再断言期望。
-- 至少一条变异见证红：让被拒绝的写成功（或移除 store 守卫），跑红后还原复绿。
+- 类在 JDK 21 + MySQL 8.x 上绿；每格先自证拒绝生效（wrapper 已触发、尝试次数已记录），再断言期望。
+- 至少一条变异见证红：让被拒绝的写成功，跑红后还原复绿。
 - `hosted-process-ci.test.js` 绿且预算按实测重钉；双语文档同构。
 
 ## 待决问题
 
-- 当前代码是否真的在 settled 提交之前发布响应资源？钉 `store-reject-settled` 前先核实。
-- 各 phase 对应的表列 / JSON 路径；trigger 与 store wrapper 的取舍。
-- `released` 失败后，下一次 detach 是只重发 owner release，还是也会重复 `${configurationId}:release` 查询？断言前先核实。
+- wrapper 只存在于测试 Spring，还是 Broker 需要提供受支持的故障接缝？wrapper 仅测试用，不写产品故障代码。
+- `store-reject-released` 的 main 红行为与 owner-release 重试幂等性，必须在承诺该格前核实。
+- settled 提交失败后的孤儿 catalog/response/arguments blob：断言其存在还是清理，记录选择。

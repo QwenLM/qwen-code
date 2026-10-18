@@ -4,57 +4,58 @@
 
 ## Problem and scope
 
-Issue #14447 is Stage F round FG12 of #12380: fault gates for the Hosted MCP domains `mcp_configuration` and `mcp_operation`. This slice rejects writes in real MySQL transactions at the store boundary, at each step of the record state machine: the configuration's `intent`; `dispatch_started` for a configuration and for a raw operation; the settled commit after the response resource is published; and `releasing`, `drained` and `released`.
+Issue #14447 is Stage F round FG12 of #12380: fault gates for the Hosted MCP domains `mcp_configuration` and `mcp_operation`. This slice rejects the managed session store's transactional writes at each step of the record state machine: the configuration's `intent`; `dispatch_started` for a configuration and for a raw operation; the settled commit after the response resource is published; and `releasing`, `drained` and `released`.
 
-Process crashes are FG12c/d and stream gaps are FG12e/f. This slice adds no process fault and no product fault code.
+Process crashes are FG12c/d. Stream gaps are FG12e/f; FG12e folds into FG12f, so this slice does not cover streams.
 
 ## Current state
 
-- The records are extension records in `ma_extension_record` (`mcp_configuration` / `mcp_operation`), committed by the Harness through its managed session store. The state sequence is `intent` → `dispatch_started` → `settled`, and `releasing` → `drained` → `released`.
-- FG12a/c/d provide the packaged Harness, durable worker, stdio fixture, MySQL, Broker proxy and lifecycle v2. This slice reuses that rig; it adds a store-failure injector, not a second rig.
-- The exact table columns and JSON paths are verified at implementation; the ledger below is the issue's acceptance.
+- The extension records live in **`ma_session_record`** (`record_kind = 'DOMAIN'`; legacy name `qwen_managed_session_extension_record`), not `ma_extension_record`. The record body is stored in `ma_resource` through `record_resource_id`; `run.execution` is inside that JSON. The row's `runtime_state` projects both `intent` and `dispatch_started` to `provisioning`; `releasing` / `drained` / `released` are not columns.
+- The Harness commits through the HTTP managed session store; the Broker's `@Transactional` store writes the row. A rejected write surfaces to the Harness as a 5xx, and the HTTP client retries 5xx.
+- FG12a/c/d provide the packaged Harness, durable worker, stdio fixture, MySQL, Broker proxy and lifecycle v2. FG12d is a case in the same class, not a second rig.
 
 ## Gate ledger
 
-| Case                              | Rejection                                                   | Expect                                                                                                    |
-| --------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `store-reject-intent`             | the configuration `intent` commit                           | zero `mcp-configure` controls and zero fixture effects                                                    |
-| `store-reject-configure-dispatch` | the configuration `dispatch_started` commit                 | zero controls and zero effects; no second record revision                                                 |
-| `store-reject-operation-dispatch` | the raw operation `dispatch_started` commit                 | zero `mcp-invoke` controls and zero effects                                                               |
-| `store-reject-settled`            | the settled commit after the response resource is published | one lookup settles the original; no second read/get; effect count 1                                       |
-| `store-reject-releasing`          | the `releasing` commit                                      | the next detach resumes `${configurationId}:release` under the original id; no second configure or invoke |
-| `store-reject-drained`            | the `drained` commit                                        | the Broker owner and the storage holder stay; no fabricated drain receipt                                 |
-| `store-reject-released`           | the `released` commit                                       | records stay `drained`; after reload the next detach resends only the owner release                       |
-| `store-reject-reload-revisions`   | any rejection above, then reload                            | no duplicate record revisions                                                                             |
+| Case                              | Rejection                                                        | Expect                                                                                                                                                          |
+| --------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `store-reject-intent`             | the configuration `intent` commit                                | zero `mcp-configure` controls and zero fixture effects                                                                                                          |
+| `store-reject-configure-dispatch` | the configuration `dispatch_started` commit, after owner acquire | zero controls and zero effects; the owner acquired before the rejection is recorded as retained until the next detach                                           |
+| `store-reject-operation-dispatch` | the raw operation `dispatch_started` commit                      | zero `mcp-invoke` controls and zero effects; the owner is recorded as retained until the next detach                                                            |
+| `store-reject-settled`            | the settled commit after the response resource is published      | the test drives a follow-up turn/close; exactly one lookup; no second read/get; effect count 1; the orphan response resource is recorded as a known side effect |
+| `store-reject-releasing`          | the `releasing` commit, before the release dispatch              | the next detach performs the first `${configurationId}:release` dispatch under that id; no second configure or invoke                                           |
+| `store-reject-drained`            | the `drained` commit                                             | the Broker owner and storage holder stay; no fabricated drain receipt                                                                                           |
+| `store-reject-released`           | the `released` commit, after the owner release                   | records stay `drained`; the next detach re-sends the owner release; its idempotency is asserted; the cell may be red on main and lands with the fix             |
+| `store-reject-reload-chain`       | any rejection above, then a retry and reload                     | one logical record chain per id; no duplicate configuration record; the retried revision is not a duplicate of the rejected state                               |
 
 ## Decisions
 
-1. **Inject at the MySQL boundary, not in product code.** A test-only `BEFORE INSERT/UPDATE` trigger on the extension-record table signals `45000` for a phase named in a test-owned fault row. This exercises real transaction rollback. If the record JSON path proves too brittle, a test `@TestConfiguration` store wrapper is the fallback.
-2. **A failed settled commit resolves through a lookup, not a resend.** The proxy wire is the witness: one `mcp-status` on the original id, no second `mcp-invoke`.
-3. **Failures before `dispatch_started` leave zero controls and zero effects.** The proxy wire and the fixture effect log are both asserted.
-4. **Owner and storage retention are read from the owner/storage rows**, not inferred from a 503.
-5. **A new `HostedMcpStoreFaultGatesIT` class** isolates the trigger lifecycle; the FG12a/c/d classes stay unchanged. The six fork accounts are re-pinned in the same diff.
-6. **Teardown drops the trigger and the fault row.** A failed drop is best-effort and must not mask the case.
+1. **Inject through a test store wrapper inside the real transaction.** A `@TestConfiguration` wrapper around the Broker's transactional store delegates to the real store and throws for the named phase. A MySQL trigger is rejected: the row cannot identify the phase, and the published blobs sit outside the transaction.
+2. **Fail every retry for the phase.** The HTTP client retries 5xx; the wrapper keeps failing until the test clears the phase, and the case counts the attempts.
+3. **A failed settled commit is driven, not self-healing.** The failure throws out of `install()`/`accept()`, so the test drives a follow-up turn or close; the proxy wire must show one `mcp-status` on the original id and no second invoke.
+4. **Published resources are not rolled back.** The catalog/response/arguments are separate resource writes; a failed settled commit leaves an orphan blob. The gate records that side effect instead of claiming zero effects.
+5. **Owner and storage retention are read from the owner/storage rows**, not inferred from the 5xx.
+6. **A new `HostedMcpStoreFaultGatesIT` class** isolates the wrapper; the FG12a/c/d classes stay unchanged. The budget accounts and the roster/per-ceiling meta test are re-pinned in the same diff.
+7. **`store-reject-released` may legitimately be red on main.** `markReleased` commits after `broker.release()`; if that commit is rejected, the owner is already released. The cell lands with the fix, as FG12d's R1-1 did, rather than asserting a behavior main does not have.
 
 ## Fixture design
 
-- Reuse the FG12c boot. Add a test-owned fault row naming the phase; the trigger matches it and signals. The trigger is installed after the schema migrations and before the session opens.
-- The test drives the baseline configure, a raw operation, the close and the reload; JDBC reads the records; the proxy wire counts controls; the fixture log counts effects.
+- Reuse the FG12c boot; a test `@TestConfiguration` supplies the faulting store wrapper. The Harness sees a 5xx (a plain wrapper exception is 500 `internal_error`; a contract rejection is 409); JDBC reads the records and the owner/storage rows; the proxy wire counts controls; the fixture log counts effects.
+- The wrapper resets the phase in teardown; a failed reset is best-effort and must not mask the case.
 - Evidence lands in `target/fg12-cases/fg12b/<tenant>/`; the workflow already uploads `target/fg12-cases/`.
 
 ## Budget
 
-A new class re-pins the six fork accounts: the class `@Timeout`, `hostedForkHealthySeconds`, the CI fork literal, the local `hosted-mcp-gates` family profile, the workflow comments and the artifact root. Measure locally and keep the 2× allowance.
+The new class re-pins the shared fork accounts in the same diff: the per-case `@Timeout` ceilings, `hostedForkHealthySeconds`, the CI fork literal, `pom.xml`'s CI fork and the local `hosted-mcp-gates` family profile, the workflow comments, and the `hostedTestClasses` roster / per-ceiling `it(...)`. The artifact root already covers `fg12b`. Measure locally and keep the 2× allowance; the current shared values are read from `hosted-process-ci.test.js` and `pom.xml`, not copied here.
 
 ## Acceptance
 
 - `mvn -DskipTests test-compile checkstyle:check` clean.
-- The class green on JDK 21 + MySQL 8.x; every case self-proves the rejection (the trigger fired) before its expectation.
-- At least one mutation witness red: make the rejected write succeed (or remove the store guard), show the case red, restore green.
+- The class green on JDK 21 + MySQL 8.x; every case self-proves the rejection (the wrapper fired and the attempt count is recorded) before its expectation.
+- At least one mutation witness red: make the rejected write succeed, show the case red, restore green.
 - `hosted-process-ci.test.js` green with the measured budget; both design docs in sync.
 
 ## Open questions
 
-- Does the current code publish the response resource before the settled commit? Verify before pinning `store-reject-settled`.
-- The exact table columns / JSON path for each phase; trigger versus a test store wrapper.
-- For a failed `released`, does the next detach resend only the owner release, or also repeat the `${configurationId}:release` lookup? Verify before asserting.
+- Does the wrapper belong to the test Spring only, or does the Broker expose a supported fault seam? The wrapper is test-only; no product fault code.
+- The `released` cell's red-on-main behavior and the owner-release retry idempotency must be verified before the case is promised.
+- The orphan catalog/response/arguments blobs after a failed record commit: assert their presence or clean them, and record the choice.
