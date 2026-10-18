@@ -1792,7 +1792,14 @@ describe('NativeLspService disk document synchronization', () => {
           ],
         ]);
 
-        await run(service.diagnostics(target));
+        if (extension === 'mm') {
+          // Diagnostic aliases conservatively let Objective-C own .mm, unlike routing.
+          await expect(run(service.diagnostics(target))).rejects.toThrow(
+            'objc became ready during the query and was not asked',
+          );
+        } else {
+          await run(service.diagnostics(target));
+        }
 
         const selected = language === 'objective-c' ? objc : objcpp;
         const rejected = language === 'objective-c' ? objcpp : objc;
@@ -3331,7 +3338,9 @@ describe('NativeLspService disk document synchronization', () => {
             ['bad', bad],
           ];
           useHandles(badFirst ? entries.reverse() : entries);
-          await run(service.diagnostics(uri));
+          await expect(run(service.diagnostics(uri))).rejects.toThrow(
+            'No LSP diagnostics could be retrieved (bad became ready during the query and was not asked)',
+          );
           expect(connection.request).toHaveBeenCalledOnce();
           expect(badConnection.send).not.toHaveBeenCalled();
           expect(badConnection.request).not.toHaveBeenCalled();
@@ -6169,6 +6178,37 @@ describe('NativeLspService disk document synchronization', () => {
       },
     );
 
+    it('lets a ready server veto a clean answer its partial extension mapping hid', async () => {
+      mockDiagnosticsResponses(connection);
+      const excluded = createConnection();
+      withServers([
+        ['test', handle],
+        [
+          'unrouted',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'unrouted',
+              languages: ['typescript'],
+              extensionToLanguage: { '.tsx': 'typescript' },
+            },
+            connection: excluded,
+          },
+        ],
+      ]);
+
+      await expect(run(service.diagnostics(uri))).rejects.toThrow(
+        'No LSP diagnostics could be retrieved (unrouted became ready during the query and was not asked)',
+      );
+      expect(connection.request).toHaveBeenCalledWith(
+        'textDocument/diagnostic',
+        { textDocument: { uri } },
+      );
+      expect(excluded.send).not.toHaveBeenCalled();
+      expect(excluded.request).not.toHaveBeenCalled();
+    });
+
     it('lets a failed server veto a clean answer its partial extension mapping hid', async () => {
       // extensionToLanguage covering only .tsx must not hide the declared
       // `typescript` language, which still owns the queried .ts file.
@@ -6418,8 +6458,7 @@ describe('NativeLspService disk document synchronization', () => {
       expect(tsls.request).not.toHaveBeenCalled();
     });
 
-    it('does not blame a ready server excluded by its explicit mapping', async () => {
-      // An excluded ready server is not an unasked owner; the other answer is unbacked.
+    it('names a ready declared owner excluded by its explicit mapping', async () => {
       const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
       const remote = createConnection();
       mockDiagnosticsResponses(remote);
@@ -6444,8 +6483,10 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.error).toMatchObject({
         type: ToolErrorType.EXECUTION_FAILED,
       });
-      expect(result.error?.message).toContain('could not be attributed');
-      expect(result.error?.message).not.toContain('tsls');
+      expect(result.error?.message).toContain(
+        'tsls became ready during the query and was not asked',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
       expect(failing.request).not.toHaveBeenCalled();
       expect(remote.request).toHaveBeenCalled();
     });

@@ -1231,21 +1231,45 @@ export class NativeLspService {
   ): string[] {
     const extension =
       uri && !serverName ? this.diagnosticFileExtension(uri) : undefined;
-    const routed = new Set(
-      this.getReadyHandles(serverName, uri, false).map(([name]) => name),
-    );
+    const directories =
+      uri && !serverName ? this.workspaceContext.getDirectories() : [];
+    const resolvedFilePath =
+      uri && !serverName
+        ? this.resolveWorkspaceDocument(uri, directories)
+        : undefined;
+    const primaryRoot = resolvedFilePath
+      ? resolveWorkspacePath(this.workspaceRoot)
+      : undefined;
     return Array.from(this.serverManager.getHandles())
-      .filter(
-        ([name, handle]) =>
-          (!serverName || name === serverName) &&
-          !queried.some(([queriedName]) => queriedName === name) &&
-          !(
-            handle.status === 'READY' &&
-            handle.connection &&
-            !routed.has(name)
-          ) &&
-          !this.serverDeclaredIrrelevant(handle, extension),
-      )
+      .filter(([name, handle]) => {
+        if (
+          (serverName && name !== serverName) ||
+          queried.some(([queriedName]) => queriedName === name)
+        ) {
+          return false;
+        }
+        if (
+          handle.status === 'READY' &&
+          handle.connection &&
+          resolvedFilePath &&
+          primaryRoot
+        ) {
+          const roots = getLspWorkspaceRoots(
+            handle.config,
+            primaryRoot,
+            directories,
+          );
+          // Only resolved, disjoint roots prove exclusion; an unusable root does not.
+          if (
+            roots !== directories &&
+            roots.length > 0 &&
+            !isSubpaths(roots, resolvedFilePath)
+          ) {
+            return false;
+          }
+        }
+        return !this.serverDeclaredIrrelevant(handle, extension);
+      })
       .map(([name, handle]) =>
         handle.status === 'READY' && handle.connection !== undefined
           ? `${name} became ready during the query and was not asked`

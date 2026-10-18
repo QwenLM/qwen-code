@@ -145,8 +145,11 @@ the [file routing contract](lsp-file-routing.md).
   Document diagnostics retain the file-only routing gate, authoritative explicit
   extension maps, fresh workspace containment and per-server roots. Explicit
   `serverName` bypasses language/root selection and declaration-based ownership,
-  never workspace containment. READY servers excluded by routing are not counted
-  as newly ready but unasked. Relevant configured servers that are not ready can
+  never workspace containment. A READY server is excused as unasked only when
+  its resolved roots are nonempty and disjoint from the file, or its declared
+  languages prove it irrelevant. Partial extension maps and unusable roots cannot
+  prove exclusion and retain the empty-answer veto. A primary-root server still
+  covers all registered directories. Relevant configured servers that are not ready can
   veto an otherwise unbacked empty answer; live ready handles are refreshed after
   each pull and eligible newly ready servers are queried once.
 
