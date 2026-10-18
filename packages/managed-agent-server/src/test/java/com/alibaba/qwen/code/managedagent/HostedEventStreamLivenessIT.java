@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.management.HotSpotDiagnosticMXBean;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -22,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.management.ManagementFactory;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -35,7 +37,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -136,6 +137,9 @@ class HostedEventStreamLivenessIT {
         start();
         String id = createSession("LIVENESS_HOLD");
         awaitStreamLive();
+        // The release check below proves something only if it sees the
+        // reader while it is parked.
+        await(() -> parkedReaders().size() == 1, 10, "parked reader");
         relay.holdOnUpstreamDeath();
         long killed = System.nanoTime();
         harness.descendants().forEach(ProcessHandle::destroyForcibly);
@@ -302,16 +306,32 @@ class HostedEventStreamLivenessIT {
         return gaps;
     }
 
-    private static List<String> parkedReaders() {
-        List<String> parked = new ArrayList<>();
-        Thread.getAllStackTraces().forEach((thread, stack) -> {
-            if (Arrays.stream(stack).anyMatch(frame -> frame.getClassName()
-                    .endsWith(".HarnessEventStream")
-                    && "next".equals(frame.getMethodName()))) {
-                parked.add(thread.getName());
+    // Turn readers run on virtual threads, which Thread.getAllStackTraces()
+    // leaves out; a JDK thread dump lists them with their stacks.
+    private List<String> parkedReaders() {
+        Path dump = temporary.resolve("threads-" + UUID.randomUUID() + ".txt")
+                .toAbsolutePath();
+        try {
+            ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class)
+                    .dumpThreads(dump.toString(),
+                            HotSpotDiagnosticMXBean.ThreadDumpFormat.TEXT_PLAIN);
+            List<String> parked = new ArrayList<>();
+            // Each thread starts a line with "#<id>", its frames indented.
+            for (String thread : Files.readString(dump).split("\n(?=#)")) {
+                if (thread.contains(".HarnessEventStream.next(")) {
+                    parked.add(thread.lines().findFirst().orElseThrow());
+                }
             }
-        });
-        return parked;
+            return parked;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        } finally {
+            try {
+                Files.deleteIfExists(dump);
+            } catch (IOException ignored) {
+                // The temporary directory goes with the test.
+            }
+        }
     }
 
     private Map<String, Object> turn(String id) {
@@ -558,6 +578,9 @@ class HostedEventStreamLivenessIT {
                 modelExecutor.shutdownNow();
                 if (outputReader != null) {
                     outputReader.join(1000);
+                }
+                if (relay != null) {
+                    assertThat(relay.faults()).as("relay faults").isEmpty();
                 }
             }
         }

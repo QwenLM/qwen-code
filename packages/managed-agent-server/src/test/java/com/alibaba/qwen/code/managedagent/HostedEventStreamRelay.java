@@ -12,6 +12,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -29,17 +30,31 @@ import java.util.regex.Pattern;
  * The relay stamps every keepalive comment it forwards on an events
  * connection, so a gate can measure the cadence that reached Spring. It
  * rewrites the Host header to the Harness's own port, or the Harness's
- * host check refuses every request with 403.
+ * host check refuses every request with 403. TCP may split a request or a
+ * keepalive at any byte, so the relay frames each request by its head and
+ * {@code Content-Length}, and matches keepalives across reads. A request
+ * it cannot frame is recorded in {@link #faults()} and reset.
  */
 final class HostedEventStreamRelay implements AutoCloseable {
     private static final byte[] KEEPALIVE =
             ": keepalive".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HEAD_END =
+            "\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
+    // The SDK's request heads are a few hundred bytes.
+    private static final int MAXIMUM_HEAD_BYTES = 64 * 1024;
+    private static final Pattern EVENTS_REQUEST = Pattern.compile(
+            "GET /session/[^ ]+/events(?:\\?[^ ]*)? HTTP/1\\.1\r\n");
+    private static final Pattern CONTENT_LENGTH = Pattern.compile(
+            "(?im)^content-length:[ \t]*(\\d+)[ \t]*$");
+    private static final Pattern TRANSFER_ENCODING = Pattern.compile(
+            "(?im)^transfer-encoding:");
 
     private final ServerSocket server;
     private final int upstreamPort;
     private final Pattern relayHost;
     private final Set<Connection> open = ConcurrentHashMap.newKeySet();
     private final List<Long> keepalives = new CopyOnWriteArrayList<>();
+    private final List<String> faults = new CopyOnWriteArrayList<>();
     private final AtomicInteger eventStreams = new AtomicInteger();
     private volatile boolean holdOnUpstreamDeath;
     private volatile long lastEventStreamByte;
@@ -86,6 +101,11 @@ final class HostedEventStreamRelay implements AutoCloseable {
     /** nanoTime of the last Harness byte forwarded on an events connection. */
     long lastEventStreamByte() {
         return lastEventStreamByte;
+    }
+
+    /** Requests the relay could not frame, each one reset. */
+    List<String> faults() {
+        return List.copyOf(faults);
     }
 
     @Override
@@ -140,6 +160,18 @@ final class HostedEventStreamRelay implements AutoCloseable {
         return false;
     }
 
+    private static boolean endsWith(byte[] buffer, int length, byte[] token) {
+        if (length < token.length) {
+            return false;
+        }
+        for (int index = 0; index < token.length; index++) {
+            if (buffer[length - token.length + index] != token[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static void reset(Socket socket) {
         try {
             socket.setSoLinger(true, 0);
@@ -162,31 +194,36 @@ final class HostedEventStreamRelay implements AutoCloseable {
 
         void toUpstream() {
             byte[] buffer = new byte[16 * 1024];
+            byte[] head = new byte[MAXIMUM_HEAD_BYTES];
+            int headLength = 0;
+            long body = 0;
             try {
                 InputStream input = client.getInputStream();
                 OutputStream output = upstream.getOutputStream();
                 for (int read; (read = input.read(buffer)) >= 0;) {
-                    // ISO-8859-1 maps every byte to one char, so the
-                    // rewrite leaves any other byte as it was.
-                    String chunk = new String(buffer, 0, read,
-                            StandardCharsets.ISO_8859_1);
-                    if (!events && chunk.startsWith("GET /session/")
-                            && chunk.contains("/events ")) {
-                        events = true;
-                        eventStreams.incrementAndGet();
-                    }
-                    byte[] forwarded = relayHost.matcher(chunk)
-                            .replaceAll("$1:" + upstreamPort)
-                            .getBytes(StandardCharsets.ISO_8859_1);
-                    try {
-                        output.write(forwarded);
-                        output.flush();
-                    } catch (IOException upstreamGone) {
-                        if (!(events && holdOnUpstreamDeath)) {
-                            throw upstreamGone;
+                    int at = 0;
+                    while (at < read) {
+                        if (body > 0) {
+                            int length = (int) Math.min(body, read - at);
+                            forward(output, buffer, at, length);
+                            body -= length;
+                            at += length;
+                        } else if (headLength == head.length) {
+                            fault("a request head over " + head.length
+                                    + " bytes");
+                            return;
+                        } else {
+                            head[headLength++] = buffer[at++];
+                            if (endsWith(head, headLength, HEAD_END)) {
+                                body = forwardHead(output, new String(head, 0,
+                                        headLength,
+                                        StandardCharsets.ISO_8859_1));
+                                headLength = 0;
+                                if (body < 0) {
+                                    return;
+                                }
+                            }
                         }
-                        // Half-open: the Spring side keeps its socket, and
-                        // what it writes lands nowhere.
                     }
                 }
             } catch (IOException broken) {
@@ -197,21 +234,77 @@ final class HostedEventStreamRelay implements AutoCloseable {
             reset();
         }
 
+        // Forwards one complete request head, and returns the length of
+        // the body that follows it, or -1 after a fault.
+        private long forwardHead(OutputStream output, String head)
+                throws IOException {
+            if (TRANSFER_ENCODING.matcher(head).find()) {
+                // The SDK sends every body with a Content-Length.
+                fault("a request with a Transfer-Encoding: "
+                        + head.lines().findFirst().orElse(""));
+                return -1;
+            }
+            // The flag is set before the request reaches the Harness, so
+            // the response side counts the stream's first byte.
+            if (!events && EVENTS_REQUEST.matcher(head).lookingAt()) {
+                events = true;
+                eventStreams.incrementAndGet();
+            }
+            Matcher length = CONTENT_LENGTH.matcher(head);
+            long body = length.find() ? Long.parseLong(length.group(1)) : 0;
+            // ISO-8859-1 maps every byte to one char, so the rewrite leaves
+            // any other byte as it was.
+            byte[] forwarded = relayHost.matcher(head)
+                    .replaceAll("$1:" + upstreamPort)
+                    .getBytes(StandardCharsets.ISO_8859_1);
+            forward(output, forwarded, 0, forwarded.length);
+            return body;
+        }
+
+        private void forward(OutputStream output, byte[] bytes, int offset,
+                int length) throws IOException {
+            try {
+                output.write(bytes, offset, length);
+                output.flush();
+            } catch (IOException upstreamGone) {
+                if (!(events && holdOnUpstreamDeath)) {
+                    throw upstreamGone;
+                }
+                // Half-open: the Spring side keeps its socket, and what it
+                // writes lands nowhere.
+            }
+        }
+
+        private void fault(String fault) {
+            faults.add(fault);
+            reset();
+        }
+
         void toClient() {
             byte[] buffer = new byte[16 * 1024];
+            // The tail of the earlier reads ahead of each new one, so a
+            // keepalive split across reads still counts, once.
+            byte[] window = new byte[KEEPALIVE.length - 1 + buffer.length];
+            int carried = 0;
             try {
                 InputStream input = upstream.getInputStream();
                 OutputStream output = client.getOutputStream();
                 for (int read; (read = input.read(buffer)) >= 0;) {
                     if (events) {
                         if (stalled) {
+                            carried = 0;
                             continue;
                         }
                         long now = System.nanoTime();
                         lastEventStreamByte = now;
-                        if (contains(buffer, read, KEEPALIVE)) {
+                        System.arraycopy(buffer, 0, window, carried, read);
+                        int length = carried + read;
+                        if (contains(window, length, KEEPALIVE)) {
                             keepalives.add(now);
                         }
+                        carried = Math.min(KEEPALIVE.length - 1, length);
+                        System.arraycopy(window, length - carried, window, 0,
+                                carried);
                     }
                     output.write(buffer, 0, read);
                     output.flush();
