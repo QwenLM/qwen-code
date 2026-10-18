@@ -1,10 +1,10 @@
-import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 /**
  * @license
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
   useRef,

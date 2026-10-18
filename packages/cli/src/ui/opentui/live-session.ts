@@ -1,8 +1,3 @@
-import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
-import {
-  InteractiveModToolScheduler,
-  type InteractiveCompletedToolCall,
-} from '../../services/interactive-mod-tool-scheduler.js';
 /** @jsxImportSource @opentui/react */
 /**
  * @license
@@ -25,6 +20,11 @@ import {
  * feature parity + regression are complete.
  */
 
+import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import {
+  InteractiveModToolScheduler,
+  type InteractiveCompletedToolCall,
+} from '../../services/interactive-mod-tool-scheduler.js';
 import { appendFileSync } from 'node:fs';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
