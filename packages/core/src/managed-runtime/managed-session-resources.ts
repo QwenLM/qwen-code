@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { open, mkdir, rename, readFile, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
@@ -19,6 +19,15 @@ import {
   type ManagedSessionKey,
 } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
+
+export const MANAGED_SESSION_RESOURCE_LIMITS = Object.freeze({
+  /**
+   * A runaway guard rather than a retention policy: retention is the
+   * checkpoint/compaction work, but no single publish may fill the disk on
+   * its own.
+   */
+  maxResourceBytes: 64 * 1024 * 1024,
+} as const);
 
 /**
  * Session-owned resource storage. Event payloads carry a `DurableRef` rather
@@ -70,12 +79,18 @@ export class LocalManagedSessionResourceStore
     bytes: Buffer,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertPathSegment(kind, 'kind');
+    if (bytes.byteLength > MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes) {
+      throw new ManagedSessionRecordError(
+        `${safeKind} is ${bytes.byteLength} bytes where ${MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes} is the maximum.`,
+      );
+    }
     const resourceId = randomUUID();
     const directory = path.join(this.root, safeKind);
     const pending = path.join(directory, `.${resourceId}.pending`);
 
     const target = path.join(directory, resourceId);
-    await mkdir(directory, { recursive: true });
+    await ensurePrivateDirectory(this.root);
+    await ensurePrivateDirectory(directory);
 
     const digest = createHash('sha256');
     const handle = await open(pending, 'wx', 0o600);
@@ -118,6 +133,31 @@ export class LocalManagedSessionResourceStore
       assertPathSegment(ref.resourceId, 'resourceId'),
     );
     let bytes: Buffer;
+    let size: number;
+    try {
+      // A symlink here redirects the read outside the session's tree, so the
+      // leaf must be a regular file before its bytes are trusted.
+      const stat = await lstat(target);
+      if (!stat.isFile()) {
+        throw new ManagedSessionRecordError(
+          `resource ${ref.resourceId} is not a regular file.`,
+        );
+      }
+      size = stat.size;
+    } catch (cause) {
+      if (cause instanceof ManagedSessionRecordError) throw cause;
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ManagedSessionRecordError(
+          `resource ${ref.resourceId} is not present for session ${this.sessionKey.sessionId}.`,
+        );
+      }
+      throw cause;
+    }
+    if (size !== ref.byteLength) {
+      throw new ManagedSessionRecordError(
+        `resource ${ref.resourceId} is ${size} bytes where ${ref.byteLength} was recorded.`,
+      );
+    }
     try {
       bytes = await readFile(target);
     } catch (cause) {
@@ -218,6 +258,21 @@ function assertPathSegment(value: string, label: string): string {
     );
   }
   return value;
+}
+
+/**
+ * Creates a directory the session owns with private permissions, then refuses
+ * anything that is not the real directory it just made. Without the check a
+ * pre-existing symlink redirects every resource written through it.
+ */
+async function ensurePrivateDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const stat = await lstat(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new ManagedSessionRecordError(
+      'session resource directory is not private.',
+    );
+  }
 }
 
 async function syncDirectory(directory: string): Promise<void> {

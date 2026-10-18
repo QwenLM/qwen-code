@@ -11,7 +11,10 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
-import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
+import {
+  LocalManagedSessionResourceStore,
+  MANAGED_SESSION_RESOURCE_LIMITS,
+} from './managed-session-resources.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
 type DirectorySyncFault = (Error & NodeJS.ErrnoException) | null;
@@ -181,6 +184,71 @@ describe('managed session resource store', () => {
         digest: 'a'.repeat(64),
       }),
     ).rejects.toThrow(/resourceId must be a single path segment/);
+  });
+
+  it('creates the session and kind directories privately', async () => {
+    const { store } = await createStore();
+    const ref = await store.publish('managed-input', Buffer.from('x', 'utf8'));
+
+    for (const directory of [
+      store.sessionRoot,
+      path.join(store.sessionRoot, ref.kind),
+    ]) {
+      const stat = await fs.stat(directory);
+      expect(stat.mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it('refuses to publish through a symlinked session directory', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    await fs.mkdir(path.dirname(store.sessionRoot), { recursive: true });
+    await fs.symlink(outside, store.sessionRoot);
+
+    await expect(
+      store.publish('managed-input', Buffer.from('x', 'utf8')),
+    ).rejects.toThrow(/resource directory is not private/);
+  });
+
+  it('refuses to publish through a symlinked kind directory', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    await fs.mkdir(store.sessionRoot, { recursive: true });
+    await fs.symlink(outside, path.join(store.sessionRoot, 'managed-input'));
+
+    await expect(
+      store.publish('managed-input', Buffer.from('x', 'utf8')),
+    ).rejects.toThrow(/resource directory is not private/);
+  });
+
+  it('refuses to read a resource replaced by a symlink', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const ref = await store.publish(
+      'managed-input',
+      Buffer.from('original', 'utf8'),
+    );
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.writeFile(outside, 'original', 'utf8');
+    await fs.unlink(path.join(store.sessionRoot, ref.kind, ref.resourceId));
+    await fs.symlink(
+      outside,
+      path.join(store.sessionRoot, ref.kind, ref.resourceId),
+    );
+
+    await expect(store.read(ref)).rejects.toThrow(/is not a regular file/);
+  });
+
+  it('refuses a publish above the byte limit', async () => {
+    const { store } = await createStore();
+    const bytes = Buffer.alloc(
+      MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes + 1,
+    );
+
+    await expect(store.publish('managed-tool-outcome', bytes)).rejects.toThrow(
+      /is the maximum/,
+    );
   });
 });
 
