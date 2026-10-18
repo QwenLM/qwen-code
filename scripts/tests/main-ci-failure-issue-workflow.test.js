@@ -305,6 +305,11 @@ describe('main CI failure issue workflow', () => {
       expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
         'lost communication with the server',
       );
+      // A per-host lock starvation (#14550) is the same class: the annotation
+      // names a lock budget, not an assertion.
+      expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
+        'lock not acquired within',
+      );
     });
 
     it('classifies per failed job and only when EVERY one is infrastructure', () => {
