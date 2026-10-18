@@ -30,8 +30,14 @@ const CLI_BIN =
 const TOKEN = 'multi-workspace-channel-test-token';
 // The 10s production handshake budget is a desktop budget, not a shared-runner
 // one: macOS E2E shards died on it in #11030 and reddened again in #11034.
-// Match qwen-serve-routes.test.ts.
-const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
+// Match qwen-serve-routes.test.ts. This fixture also starts the nested
+// Docker-sandbox ACP session that loads the linked channel extension (#10318),
+// and that start is what stretches: #14584's run 39121969242 burned 139.9s
+// across three attempts of the channel-less-boot scenario below, whose healthy
+// sandbox:docker cost is 16.3s, while the same job's sandboxed CLI starts took
+// 22-26s each. That scenario's per-test ceiling is 240s so a slow start on
+// either side of the daemon restart still leaves room for the rest of it.
+const ACP_INITIALIZE_TIMEOUT_MS = 120_000;
 
 let daemon: ChildProcess | undefined;
 let primaryServer: MockServerHandle | undefined;
@@ -421,7 +427,7 @@ describe('qwen serve multi-workspace channel workers', () => {
     await expect(
       primaryServer.sendMessage('/session use review', bobTarget),
     ).resolves.toContain('Selected task "review"');
-  }, 60_000);
+  }, 240_000);
 
   it('returns partial startup failures from control and daemon status', async () => {
     testRoot = realpathSync(
