@@ -12,6 +12,8 @@ import {
 } from '@qwen-code/sdk/daemon';
 import {
   clickSidebarElement,
+  createSidebarMocks,
+  DAEMON_APPROVAL_MODES,
   installSidebarDomShims,
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
@@ -20,199 +22,135 @@ import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
+// This suite keeps the module-scoped fixtures (instead of vi.hoisted) because
+// its catalog mock also carries the custom client and listener registry; the
+// vi.mock factories are only reached through the static import above, so every
+// fixture read in a factory body must be deferred to render time.
+const mocks = createSidebarMocks({
+  workspaceBaseUrl: '',
+  includePageData: false,
+  connection: {
+    capabilities: undefined,
+    sessionContext: undefined,
+    supportedCommands: undefined,
+  },
+});
 const {
   connection,
-  workspace,
-  workspaceActions,
   active,
   archived,
-  useSessions,
-  useChannels,
-  listWorkspaceSessions,
-  archiveSessionsData,
-  unarchiveSessionsData,
-  deleteSessionsData,
-  updateSessionOrganization,
-  updateSessionMetadata,
-  exportSession,
-  exportArchivedSession,
-  sessionActions,
-  channelState,
-  invalidateSessionCatalog,
-  refreshWorkspaceSessionCatalog,
-  renameSessionCatalog,
+  actions: sessionActions,
   refreshSessionCatalogQueries,
-  useSessionCatalogPollingSpy,
-  listStandaloneSessionsPage,
-} = vi.hoisted(() => {
-  const makeSessions = () => ({
-    sessions: [] as DaemonSessionSummary[],
-    loading: false,
-    error: null as Error | null,
-    reload: vi.fn().mockResolvedValue(undefined),
-    deleteSession: vi.fn().mockResolvedValue(true),
-    archiveSession: vi.fn().mockResolvedValue(true),
-    unarchiveSession: vi.fn().mockResolvedValue(true),
-    exportSession: vi.fn(),
-  });
-  const listWorkspaceSessions = vi.fn().mockResolvedValue([]);
-  const archiveSessionsData = vi.fn().mockResolvedValue({
-    archived: [],
-    alreadyArchived: [],
-    notFound: [],
-    errors: [],
-  });
-  const unarchiveSessionsData = vi.fn().mockResolvedValue({
-    unarchived: [],
-    alreadyActive: [],
-    notFound: [],
-    errors: [],
-  });
-  const deleteSessionsData = vi.fn().mockResolvedValue({
-    removed: [],
-    notFound: [],
-    errors: [],
-  });
-  const updateSessionOrganization = vi.fn().mockResolvedValue({});
-  const updateSessionMetadata = vi.fn().mockResolvedValue({});
-  const exportSession = vi.fn();
-  const active = makeSessions();
-  const archived = makeSessions();
-  const useSessions = vi.fn(
-    (options?: {
-      archiveState?: string;
-      sourceType?: string;
-      group?: string;
-    }) => (options?.archiveState === 'archived' ? archived : active),
-  );
-  const exportArchivedSession = vi.fn();
-  const sessionActions = { renameSession: vi.fn() };
-  const channelState = {
-    error: undefined as Error | undefined,
-    data: undefined as
-      | {
-          catalog: Array<{
-            type: string;
-            displayName: string;
-            manageable: boolean;
-            fields: [];
-          }>;
-          snapshot: { revision: string; instances: Record<string, unknown> };
-        }
-      | undefined,
-    catalog: [] as Array<{
-      type: string;
-      displayName: string;
-      manageable: boolean;
-      fields: [];
-    }>,
-    channels: {} as Record<string, unknown>,
-    reload: vi.fn().mockResolvedValue(undefined),
-  };
-  const useChannels = vi.fn(() => channelState);
-  const invalidateSessionCatalog = vi.fn();
-  const refreshWorkspaceSessionCatalog = vi.fn();
-  const renameSessionCatalog = vi.fn();
-  const refreshSessionCatalogQueries = vi.fn();
-  const useSessionCatalogPollingSpy = vi.fn();
-  const listStandaloneSessionsPage = vi
-    .fn()
-    .mockResolvedValue({ sessions: [] });
-  return {
-    connection: {
-      status: 'connected',
-      sessionId: null as string | null,
-      sessionContext: undefined as
-        | { kind: 'workspace'; cwd: string }
-        | { kind: 'standalone' }
-        | { kind: 'live' }
-        | undefined,
-      workspaceCwd: '/tmp/project',
-      supportedCommands: undefined as
-        | { workflowsEnabled?: boolean }
-        | undefined,
-      capabilities: undefined as
-        | {
-            qwenCodeVersion: string;
-            features: string[];
-            workspaceCwd?: string;
-            workspaces?: DaemonWorkspaceCapability[];
-          }
-        | undefined,
-    },
-    workspace: {
-      baseUrl: '',
-      capabilities: undefined as
-        | {
-            qwenCodeVersion: string;
-            features: string[];
-            workspaceCwd?: string;
-            workspaces?: DaemonWorkspaceCapability[];
-          }
-        | undefined,
-      client: {
-        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
-        listStandaloneSessionsPage,
-        archiveStandaloneSessions: archiveSessionsData,
-        unarchiveStandaloneSessions: unarchiveSessionsData,
-        workspaceByCwd: vi.fn(() => ({
-          listWorkspaceSessions,
-          // The header actions poll git; answer as a non-git workspace.
-          workspaceGit: vi
-            .fn()
-            .mockResolvedValue({ v: 2, workspaceCwd: '', branch: null }),
-          listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
-          workspaceChannelTypes: vi.fn().mockResolvedValue([]),
-          workspaceChannels: vi
-            .fn()
-            .mockResolvedValue({ revision: '0', instances: {} }),
-          archiveSessionsData,
-          unarchiveSessionsData,
-          exportArchivedSession,
-          updateSessionMetadata,
-        })),
-      },
-      refreshCapabilities: vi.fn(),
-    },
-    workspaceActions: {
-      addWorkspace: vi.fn(),
-      updateWorkspace: vi.fn(),
-      removeWorkspace: vi.fn(),
-      listSessionGroups: vi.fn(),
-      createSessionGroup: vi.fn(),
-    },
-    active,
-    archived,
-    useSessions,
-    useChannels,
-    listWorkspaceSessions,
-    archiveSessionsData,
-    unarchiveSessionsData,
-    deleteSessionsData,
-    updateSessionOrganization,
-    updateSessionMetadata,
-    exportSession,
-    exportArchivedSession,
-    sessionActions,
-    channelState,
-    invalidateSessionCatalog,
-    refreshWorkspaceSessionCatalog,
-    renameSessionCatalog,
-    refreshSessionCatalogQueries,
-    useSessionCatalogPollingSpy,
-    listStandaloneSessionsPage,
-  };
+} = mocks;
+
+const listWorkspaceSessions = vi.fn().mockResolvedValue([]);
+const archiveSessionsData = vi.fn().mockResolvedValue({
+  archived: [],
+  alreadyArchived: [],
+  notFound: [],
+  errors: [],
 });
+const unarchiveSessionsData = vi.fn().mockResolvedValue({
+  unarchived: [],
+  alreadyActive: [],
+  notFound: [],
+  errors: [],
+});
+const deleteSessionsData = vi.fn().mockResolvedValue({
+  removed: [],
+  notFound: [],
+  errors: [],
+});
+const updateSessionOrganization = vi.fn().mockResolvedValue({});
+const updateSessionMetadata = vi.fn().mockResolvedValue({});
+const exportSession = vi.fn();
+const exportArchivedSession = vi.fn();
+const useSessions = vi.fn(
+  (options?: { archiveState?: string; sourceType?: string; group?: string }) =>
+    options?.archiveState === 'archived' ? archived : active,
+);
+const channelState = {
+  error: undefined as Error | undefined,
+  data: undefined as
+    | {
+        catalog: Array<{
+          type: string;
+          displayName: string;
+          manageable: boolean;
+          fields: [];
+        }>;
+        snapshot: { revision: string; instances: Record<string, unknown> };
+      }
+    | undefined,
+  catalog: [] as Array<{
+    type: string;
+    displayName: string;
+    manageable: boolean;
+    fields: [];
+  }>,
+  channels: {} as Record<string, unknown>,
+  reload: vi.fn().mockResolvedValue(undefined),
+};
+const useChannels = vi.fn((_options?: unknown) => channelState);
+const invalidateSessionCatalog = vi.fn();
+const refreshWorkspaceSessionCatalog = vi.fn();
+const renameSessionCatalog = vi.fn();
+const useSessionCatalogPollingSpy = vi.fn();
+const listStandaloneSessionsPage = vi.fn().mockResolvedValue({ sessions: [] });
+
+const workspace = {
+  baseUrl: '',
+  capabilities: undefined as
+    | {
+        qwenCodeVersion: string;
+        features: string[];
+        workspaceCwd?: string;
+        workspaces?: DaemonWorkspaceCapability[];
+      }
+    | undefined,
+  client: {
+    listStandaloneSessionsPage,
+    archiveStandaloneSessions: archiveSessionsData,
+    unarchiveStandaloneSessions: unarchiveSessionsData,
+    workspaceByCwd: vi.fn(() => ({
+      listWorkspaceSessions,
+      // The header actions poll git; answer as a non-git workspace.
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ v: 2, workspaceCwd: '', branch: null }),
+      listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      workspaceChannelTypes: vi.fn().mockResolvedValue([]),
+      workspaceChannels: vi
+        .fn()
+        .mockResolvedValue({ revision: '0', instances: {} }),
+      archiveSessionsData,
+      unarchiveSessionsData,
+      exportArchivedSession,
+      updateSessionMetadata,
+    })),
+  },
+  refreshCapabilities: vi.fn(),
+};
+const workspaceActions = {
+  addWorkspace: vi.fn(),
+  updateWorkspace: vi.fn(),
+  removeWorkspace: vi.fn(),
+  listSessionGroups: vi.fn(),
+};
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+  DAEMON_APPROVAL_MODES,
   useConnection: () => connection,
   useActions: () => sessionActions,
   useStreamingState: () => 'idle',
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
-  useSessions,
-  useChannels,
+  useSessions: (options?: {
+    archiveState?: string;
+    sourceType?: string;
+    group?: string;
+  }) => useSessions(options),
+  useChannels: (...args: unknown[]) => useChannels(...args),
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => {
@@ -257,7 +195,8 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
       // store-owned pin toggle has no loaded catalog pages to patch.
       toggleSessionPinned: vi.fn(),
     }),
-    useSessionCatalogPolling: useSessionCatalogPollingSpy,
+    useSessionCatalogPolling: (...args: unknown[]) =>
+      useSessionCatalogPollingSpy(...args),
     useSessionCatalogQuery: (
       client: typeof workspace.client,
       query: { workspaceCwd: string; options?: Record<string, unknown> },
