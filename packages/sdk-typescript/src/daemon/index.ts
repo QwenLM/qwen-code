@@ -142,7 +142,6 @@ export {
   extractServerTimestamp,
   extractTranscriptTiming,
   formatBlockTimestamp,
-  findDaemonRewindUserBlock,
   getOutputText as getDaemonUiOutputText,
   getSessionUpdatePayload,
   isDaemonUiSensitiveKey,

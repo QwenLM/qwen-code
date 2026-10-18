@@ -5018,13 +5018,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current = undefined;
         },
         onPromptAdmitted: (owner, admission) => {
-          if (sessionRef.current === owner && admission.blockId) {
-            store.dispatch({
-              type: 'user.prompt.bound',
-              blockId: admission.blockId,
-              promptId: admission.promptId,
-            });
-          }
           bindPrompt(
             locallyBoundPromptIdsRef.current,
             owner.sessionId,

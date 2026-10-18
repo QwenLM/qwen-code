@@ -1369,7 +1369,6 @@ describe('DaemonSessionProvider', () => {
         block.kind === 'user' && block.text === 'Exact optimistic prompt',
     );
     expect(optimistic).toBeDefined();
-    expect(optimistic?.promptId).toBe('prompt-1');
     expect(navigation?.provisionalTurns).toMatchObject([
       { promptId: 'prompt-1', blockId: optimistic!.id },
     ]);
@@ -22513,7 +22512,7 @@ describe('DaemonSessionProvider', () => {
       expect(
         store?.getSnapshot().blocks.find((block) => block.kind === 'user')
           ?.promptId,
-      ).toBe('live');
+      ).toBeUndefined();
       await act(async () => {
         go.resolve();
         await flushPromises();

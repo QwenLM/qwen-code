@@ -3,7 +3,6 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import { findDaemonRewindUserBlock } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -18,6 +17,19 @@ interface RewindDialogProps {
   rewind: (promptId: string) => Promise<void>;
   onError: (error: unknown) => void;
   onClose: () => void;
+}
+
+function promptTextForTurn(
+  blocks: readonly DaemonTranscriptBlock[],
+  turnIndex: number,
+): string {
+  let userIndex = 0;
+  for (const block of blocks) {
+    if (block.kind !== 'user') continue;
+    if (userIndex === turnIndex) return block.text.trim();
+    userIndex += 1;
+  }
+  return '';
 }
 
 function formatSnapshotTime(timestamp: string): string {
@@ -70,33 +82,10 @@ export function RewindDialog({
   const items = useMemo(
     () =>
       snapshots
-        .map((snapshot) => {
-          const block =
-            snapshot.daemonPromptId &&
-            snapshots.filter(
-              (entry) => entry.daemonPromptId === snapshot.daemonPromptId,
-            ).length === 1
-              ? findDaemonRewindUserBlock(blocks, snapshot.daemonPromptId)
-              : undefined;
-          // The ordinal has to match what the chat numbers, so it skips the
-          // same rows `findDaemonRewindUserBlock` above skips.
-          const turnIndex = block
-            ? blocks
-                .filter(
-                  (entry) =>
-                    entry.kind === 'user' &&
-                    entry.meta?.['source'] !== 'background_notification' &&
-                    entry.meta?.['source'] !== 'mid_turn_message_injected',
-                )
-                .indexOf(block)
-            : undefined;
-          return {
-            snapshot,
-            promptText: block?.text.trim() ?? '',
-            turnIndex,
-            available: block !== undefined,
-          };
-        })
+        .map((snapshot) => ({
+          snapshot,
+          promptText: promptTextForTurn(blocks, snapshot.turnIndex),
+        }))
         .sort((a, b) => a.snapshot.turnIndex - b.snapshot.turnIndex),
     [blocks, snapshots],
   );
@@ -113,12 +102,6 @@ export function RewindDialog({
 
   const handleRewind = (promptId: string | null) => {
     if (!promptId || rewindingPromptId) return;
-    if (
-      !items.some(
-        (item) => item.snapshot.promptId === promptId && item.available,
-      )
-    )
-      return;
     setRewindingPromptId(promptId);
     setMessage(null);
     rewind(promptId)
@@ -141,7 +124,7 @@ export function RewindDialog({
   // button, consistent with the other destructive dialogs (delete / release).
   const commitRow = (index: number) => {
     const item = items[index];
-    if (item?.available) {
+    if (item) {
       setCursorIdx(index);
       setSelectedPromptId(item.snapshot.promptId);
     }
@@ -192,7 +175,7 @@ export function RewindDialog({
           items.length > 0 ? optionId(cursorIdx) : undefined
         }
       >
-        {items.map(({ snapshot, promptText, turnIndex, available }, index) => {
+        {items.map(({ snapshot, promptText }, index) => {
           const isCursor = index === cursorIdx;
           const isSelected = selectedPromptId === snapshot.promptId;
           const label =
@@ -206,19 +189,17 @@ export function RewindDialog({
               id={optionId(index)}
               role="option"
               aria-selected={isSelected}
-              aria-disabled={isRewinding || !available || undefined}
+              aria-disabled={isRewinding || undefined}
               className={`${styles.item} ${isCursor ? styles.itemCursor : ''} ${
                 isSelected ? styles.itemSelected : ''
-              } ${isRewinding || !available ? styles.itemDisabled : ''}`}
+              } ${isRewinding ? styles.itemDisabled : ''}`}
               onClick={() => {
                 if (!isRewinding) commitRow(index);
               }}
               onMouseMove={() => setCursorIdx(index)}
             >
               <div className={styles.prompt} title={label}>
-                {turnIndex !== undefined && (
-                  <span className={styles.turn}>#{turnIndex + 1}</span>
-                )}{' '}
+                <span className={styles.turn}>#{snapshot.turnIndex + 1}</span>{' '}
                 {label}
               </div>
               <div className={styles.time}>
@@ -246,12 +227,7 @@ export function RewindDialog({
           type="button"
           className={`${dp('dialog-danger-button')} ${styles.dangerButton}`}
           onClick={() => handleRewind(selectedPromptId)}
-          disabled={
-            !items.some(
-              (item) =>
-                item.snapshot.promptId === selectedPromptId && item.available,
-            ) || rewindingPromptId !== null
-          }
+          disabled={!selectedPromptId || rewindingPromptId !== null}
         >
           {rewindingPromptId ? t('rewind.rewinding') : t('rewind.confirm')}
         </button>

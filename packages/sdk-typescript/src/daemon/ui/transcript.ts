@@ -144,9 +144,6 @@ const RESYNC_PASSTHROUGH_TYPES: ReadonlySet<string> = new Set([
   'status',
   'debug',
   'error',
-  // Synthesized once at admission and never replayed, so a dropped bind would
-  // leave that block without the promptId rewind resolution keys on.
-  'user.prompt.bound',
 ]);
 
 export function appendLocalUserTranscriptMessage(
@@ -336,18 +333,6 @@ function applyDaemonTranscriptEvent(
   }
 
   switch (event.type) {
-    case 'user.prompt.bound': {
-      const block = getWritableBlockById(next, event.blockId);
-      if (
-        block?.kind === 'user' &&
-        (block.promptId === undefined || block.promptId === event.promptId)
-      ) {
-        const bytesBefore = estimateBlockBytes(block);
-        block.promptId = event.promptId;
-        next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
-      }
-      break;
-    }
     case 'user.shell.command':
       next.pendingUserShellCommand = {
         command: event.command,
@@ -568,16 +553,7 @@ function applyDaemonTranscriptEvent(
       // transcript mutation.
       break;
     case 'session.rewound':
-      if (event.daemonPromptId) {
-        const block = findDaemonRewindUserBlock(
-          next.blocks,
-          event.daemonPromptId,
-        );
-        if (block)
-          truncateTranscriptBeforeBlock(next, next.blocks.indexOf(block));
-      } else {
-        rewindTranscriptToUserTurn(next, event.targetTurnIndex);
-      }
+      rewindTranscriptToUserTurn(next, event.targetTurnIndex);
       break;
     case 'session.branched':
       appendStatusBlock(
@@ -2158,22 +2134,9 @@ function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
   ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
-export function findDaemonRewindUserBlock(
-  blocks: readonly DaemonTranscriptBlock[],
-  promptId: string,
-): DaemonTextTranscriptBlock | undefined {
-  // Injected mid-turn rows may share their owner's prompt ID.
-  const matches = blocks.filter(
-    (block): block is DaemonTextTranscriptBlock =>
-      block.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification' &&
-      block.meta?.['source'] !== 'mid_turn_message_injected' &&
-      block.promptId === promptId,
-  );
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-// Applies a legacy daemon rewind event to this in-memory transcript only.
+// Applies a daemon rewind event to this in-memory transcript only. The target
+// user turn and everything after it are removed so the rendered session view
+// matches the already-rewound backend state.
 function rewindTranscriptToUserTurn(
   state: DaemonTranscriptState,
   targetTurnIndex: number,

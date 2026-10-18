@@ -94,8 +94,6 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.promptId} → turn ${event.targetTurnIndex}`,
         '2',
       );
-    case 'user.prompt.bound':
-      return '';
     case 'session.branched':
       return terminalLine(
         'branched',

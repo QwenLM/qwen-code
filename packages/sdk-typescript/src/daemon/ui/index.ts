@@ -18,7 +18,6 @@ export {
   createDaemonTranscriptState,
   estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
-  findDaemonRewindUserBlock,
   isSubagentChildBlock,
   isTaskExecutionMode,
   isTrimmedPermissionBlockId,

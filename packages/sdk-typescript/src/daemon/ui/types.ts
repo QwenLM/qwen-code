@@ -21,7 +21,6 @@ export const DAEMON_PLAN_TOOL_CALL_ID = 'daemon-plan';
 export type DaemonUiEventType =
   // Chat-stream events (Stage 1)
   | 'user.text.delta'
-  | 'user.prompt.bound'
   | 'user.image.delta'
   | 'user.file.delta'
   | 'user.resource_link.delta'
@@ -605,14 +604,7 @@ export interface DaemonUiSessionRewoundEvent extends DaemonUiEventBase {
   type: 'session.rewound';
   sessionId?: string;
   promptId: string;
-  daemonPromptId?: string;
   targetTurnIndex: number;
-}
-
-export interface DaemonUiUserPromptBoundEvent extends DaemonUiEventBase {
-  type: 'user.prompt.bound';
-  blockId: string;
-  promptId: string;
 }
 
 export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
@@ -798,7 +790,6 @@ export type DaemonUiAuthDeviceFlowEvent =
   | DaemonUiAuthDeviceFlowCancelledEvent;
 
 export type DaemonUiEvent =
-  | DaemonUiUserPromptBoundEvent
   // Chat-stream events
   | DaemonUiTextEvent
   | DaemonUiUserImageEvent
