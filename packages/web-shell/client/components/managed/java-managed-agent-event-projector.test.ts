@@ -13,6 +13,59 @@ import type {
 } from './java-managed-agent-client';
 
 describe('java managed agent event projector', () => {
+  it('rebuilds attachment-only history from materialized and snapshot attributes without losing bytes', () => {
+    const prompt = [
+      {
+        type: 'resource',
+        resource: {
+          uri: 'managed-input:///notes%201.md',
+          mimeType: 'text/markdown',
+          text: '你好\ncontents',
+        },
+      },
+      { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' },
+    ];
+    const item: JavaAgentItem = {
+      itemId: 'user-file',
+      sessionId: 's',
+      turnId: 't',
+      type: 'message',
+      role: 'user',
+      status: 'completed',
+      content: [],
+      attributes: { inputAttachments: prompt },
+      firstSequence: 2,
+      lastSequence: 2,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const snapshot = managedEventsToMessages(projectJavaAgentItem(item), '');
+    const live = projectJavaAgentEvent({
+      schemaVersion: 1,
+      projectionVersion: 1,
+      sequence: 2,
+      eventId: 'accepted',
+      sessionId: 's',
+      turnId: 't',
+      type: 'turn.accepted',
+      createdAt: 1,
+      terminal: false,
+      data: { input: prompt },
+    });
+    expect(snapshot).toEqual(managedEventsToMessages([live!], ''));
+    expect(snapshot[0]).toMatchObject({
+      role: 'user',
+      content: '',
+      files: [
+        {
+          name: 'notes 1.md',
+          mimeType: 'text/markdown',
+          text: '你好\ncontents',
+        },
+      ],
+      images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }],
+    });
+  });
   it.each(['session.context.changed', 'session.approval.changed'])(
     'projects %s without creating or settling a chat message',
     (type) => {

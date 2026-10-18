@@ -76,6 +76,8 @@ export function createHostedHarnessContract(
       'model-selection/1',
       'approval-selection/1',
       'agent-definition-approval-selection/1',
+      'plan-mode/1',
+      'input-attachments/1',
     ]),
   });
 }
