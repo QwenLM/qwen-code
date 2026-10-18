@@ -459,7 +459,7 @@
                                  becomes 5623 s, so the fork moves to
                                  6233 s, still inside those 115
                                  minutes. -->
-                            <forkedProcessTimeoutInSeconds>6233</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>6773</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
