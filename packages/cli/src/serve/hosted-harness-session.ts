@@ -199,6 +199,7 @@ import {
 } from './hosted-automation-session.js';
 import {
   AUTOMATION_INPUT_SOURCE,
+  automationInputId,
   MANAGED_AUTOMATION_LIMITS,
   automationRunId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
@@ -4918,6 +4919,9 @@ export function registerHostedHarnessSessionRoutes(
                 ),
               busy: wakeBusy,
               held: (turn) => stoppedMessage(turn.source),
+              cancelled: (turn) =>
+                turn.source === AUTOMATION_INPUT_SOURCE &&
+                session.automations?.cancelRequested(turn.turnId) === true,
               needsRecovery: monitorWakeNeedsRecovery,
               // F5/direction (a): channel turns interrupted mid-flight get
               // terminal settlement from their own funnel; monitor turns
@@ -10393,6 +10397,29 @@ export function registerHostedHarnessSessionRoutes(
             inputId: fired.inputId,
             replayed: fired.replayed,
           };
+          break;
+        }
+        case 'cancel_run': {
+          const occurrenceKey = body?.['occurrenceKey'];
+          if (
+            typeof occurrenceKey !== 'string' ||
+            occurrenceKey.length < 1 ||
+            occurrenceKey.length > 512 ||
+            body?.['automationRunId'] !==
+              automationRunId(scheduleId, occurrenceKey)
+          ) {
+            return error(res, 400, 'invalid_automation_operation');
+          }
+          const runId = automationRunId(scheduleId, occurrenceKey);
+          const run = await automations.requestCancel(runId);
+          const turnId = automationInputId(runId);
+          if (
+            automations.cancelRequested(turnId) &&
+            session.active?.promptId === turnId
+          ) {
+            session.active.abort.abort();
+          }
+          result = { run: runSummary(run) };
           break;
         }
         case 'reconcile_run': {
