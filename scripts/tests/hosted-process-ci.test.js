@@ -583,13 +583,15 @@ describe('Hosted real-process gates', () => {
       // workflow relay letters add ~82 s, so the fork moves to 4155 and
       // the Verify step to 85 minutes; their slice 2 (FG10c/FG10e) brings
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
-      // to 90 minutes; the event-stream liveness gates add ~440 s, so the
-      // fork moves to 4793 and the Verify step to 95 minutes):
+      // to 90 minutes; slice 3 (FG10d) brings it to ~247 s, so the fork
+      // moves to 4484, still inside those 90 minutes; the event-stream
+      // liveness gates add ~440 s, so the fork moves to 4924 and the
+      // Verify step to 95 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4793);
+        expect(forkSeconds).toBe(4924);
       }
     },
   );
@@ -611,19 +613,19 @@ describe('Hosted real-process gates', () => {
   // MySQL 8.4.6 (~290s budgeted at 2x), and the FG10a workflow digest
   // letter — four cases since #14390 — measures 15.9–16.2s for the letter
   // locally on macOS JDK 26 + MySQL 8.4.6 across four acceptance runs
-  // (~33s budgeted at 2x), and the FG10b/c/e/f workflow relay letters
-  // (HostedWorkflowRelayFaultGatesIT, four letters since slice 2) measure
-  // 181.2–181.6s for the class locally on JDK 21 + MySQL 8.4.6 across
-  // three acceptance runs (~363s budgeted at 2x, as FG10a, up from slice
-  // 1's ~165s); with the fork itself ~14s, 3743s (3545s after slice 1,
-  // plus slice 2's ~198s) covered them. The event-stream liveness gates
-  // (HostedEventStreamLivenessIT, four cases on the shipped 15s keepalive
-  // and 45s bound) measure 214.4–215.0s for the class locally on JDK 21
-  // and 25 + MySQL 8.4.6 across four acceptance runs (~440s budgeted at
-  // 2x), so 4183s covers them all.
+  // (~33s budgeted at 2x), and the FG10b–f workflow relay letters
+  // (HostedWorkflowRelayFaultGatesIT, five letters since slice 3's FG10d)
+  // measure 246.1–246.8s for the class locally on JDK 21 + MySQL 8.4.6
+  // across three acceptance runs (~494s budgeted at 2x, as FG10a, up from
+  // slice 2's ~363s); with the fork itself ~14s, 3874s (3545s after slice
+  // 1, plus slice 2's ~198s and slice 3's ~131s) covered them. The
+  // event-stream liveness gates (HostedEventStreamLivenessIT, four cases
+  // on the shipped 15s keepalive and 45s bound) measure 214.4–215.0s for
+  // the class locally on JDK 21 and 25 + MySQL 8.4.6 across four
+  // acceptance runs (~440s budgeted at 2x), so 4314s covers them all.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4183;
+  const hostedForkHealthySeconds = 4314;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

@@ -1507,9 +1507,11 @@ export class HostedChildAgentSession {
       const previous = this.parseSessionRun(existing.record, childRunId);
       const next = childRecoveryBlockedBody(previous, params);
       if (isDeepStrictEqual(previous, next)) return;
+      // The line renders the blocked revision this commit lands, never
+      // the running one it replaces (#14165 FG10d).
       const notification =
         previous.completion === 'sent'
-          ? await this.buildBlockedNotification(childRunId, previous)
+          ? await this.buildBlockedNotification(childRunId, next)
           : undefined;
       await this.store.authority.commitExtensionRecord(
         {
