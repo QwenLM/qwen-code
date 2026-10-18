@@ -3366,10 +3366,11 @@ export class DaemonClient {
         }
         return session;
       },
-      // Creating a session waits for the ACP child handshake, exactly like a
-      // restore: charging it to the generic request deadline abandons a spawn
-      // the daemon still completes.
-      this.resolveSessionOperationTimeoutMs(),
+      // Creating a session waits for the ACP child handshake: charging it to
+      // the generic request deadline abandons a spawn the daemon still
+      // completes. Floored, unlike a restore, whose budget an operator may
+      // deliberately pin below the spawn cost.
+      this.resolveSessionSpawnTimeoutMs(),
     );
   }
 
@@ -3735,7 +3736,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSession;
       },
-      this.resolveSessionOperationTimeoutMs(),
+      this.resolveSessionSpawnTimeoutMs(),
     );
   }
 
@@ -4249,6 +4250,21 @@ export class DaemonClient {
       ? this.cachedSessionRestoreTimeoutMs + SESSION_RESTORE_TIMEOUT_HEADROOM_MS
       : DEFAULT_SESSION_RESTORE_TIMEOUT_MS;
     return derived > MAX_TIMER_DELAY_MS ? 0 : derived;
+  }
+
+  /**
+   * Deadline for the two routes that spawn an ACP child: create and worktree
+   * reset. An operator may pin `--session-restore-timeout-ms` well below the
+   * spawn cost `--initialize-timeout-ms` allows, and that restore knob measures
+   * different work, so floor the derived budget at the generic request deadline
+   * these routes used before: a short restore budget must not shorten a create.
+   * Restore keeps the unfloored budget, where pinning it low is deliberate.
+   */
+  private resolveSessionSpawnTimeoutMs(): number {
+    const timeoutMs = this.resolveSessionOperationTimeoutMs();
+    return timeoutMs === 0 || this.hasExplicitFetchTimeout
+      ? timeoutMs
+      : Math.max(timeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
   }
 
   /**

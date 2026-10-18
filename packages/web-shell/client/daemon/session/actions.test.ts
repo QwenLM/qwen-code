@@ -1035,6 +1035,14 @@ describe('resolveCreateWatchdogTimeoutMs', () => {
     ).toBe(145_000);
   });
 
+  it('does not let a short restore budget shrink the create half', () => {
+    // The SDK floors a spawn deadline at its generic request budget, so a 5s
+    // restore pin still yields a 30s create: 30s preflight + 30s + 15s.
+    expect(
+      resolveCreateWatchdogTimeoutMs(advertisingRestoreBudget(5_000)),
+    ).toBe(75_000);
+  });
+
   it('clamps to the JavaScript timer ceiling instead of firing at once', () => {
     expect(
       resolveCreateWatchdogTimeoutMs(advertisingRestoreBudget(2_147_483_647)),

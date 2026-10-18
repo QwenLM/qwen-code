@@ -198,11 +198,14 @@ export function resolveSessionRestoreTimeouts(
 export function resolveCreateWatchdogTimeoutMs(
   capabilities: DaemonCapabilities | undefined,
 ): number {
+  // The SDK floors a spawn deadline at its generic request budget, so a restore
+  // budget pinned below that must not shrink the create half of this chain.
+  const createRequestMs = Math.max(
+    resolveAdvertisedServerTimeoutMs(capabilities) + REQUEST_HEADROOM_MS,
+    CAPABILITY_PREFLIGHT_BUDGET_MS,
+  );
   const watchdogTimeoutMs =
-    CAPABILITY_PREFLIGHT_BUDGET_MS +
-    resolveAdvertisedServerTimeoutMs(capabilities) +
-    REQUEST_HEADROOM_MS +
-    WATCHDOG_HEADROOM_MS;
+    CAPABILITY_PREFLIGHT_BUDGET_MS + createRequestMs + WATCHDOG_HEADROOM_MS;
   // setTimeout treats a delay above the 32-bit ceiling as 1ms and fires at once,
   // which would report a timeout on a create that had barely started.
   return Math.min(watchdogTimeoutMs, MAX_TIMER_DELAY_MS);
