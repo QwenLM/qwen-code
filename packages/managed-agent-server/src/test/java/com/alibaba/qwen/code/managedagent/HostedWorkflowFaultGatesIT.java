@@ -35,11 +35,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 // launch envelope's digest integrity — a tampered script is refused by the
 // child Turn's re-verification before any model spend, and fractional
 // launch args cross the daemon/SDK admission digest byte-identically.
-// FG10d gates process crashes — a SIGKILLed Harness leaves the record
-// unsettled and honestly blocked, never failed or cancelled, and a cold
-// load refuses the unsettled run. Real packaged Harness, real MySQL, JDBC
-// ground truth; no production code changes. This slice lands a and d; the
-// kind-agnostic b/c/e/f letters remain on the issue as a later slice.
+// Real packaged Harness, real MySQL, JDBC ground truth. The other letters,
+// FG10d's process crash among them, assert the record's relay-driven
+// settlement, which this driver-held parent cannot run; they live on the
+// coordinator-owned lead in HostedWorkflowRelayFaultGatesIT.
 class HostedWorkflowFaultGatesIT {
     private final ObjectMapper json = new ObjectMapper();
 
