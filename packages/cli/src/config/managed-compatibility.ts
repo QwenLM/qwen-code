@@ -45,6 +45,15 @@ export interface ManagedCompatibilityRuntime {
   /** Arguments the daemon forwards to every session host. */
   readonly forwardedArgs: readonly string[];
   /**
+   * Whether this runtime's sessions resolve LSP on, from the flag, the
+   * user/system-scope setting or the env pair — the same resolution the session
+   * itself makes. `forwardedArgs` cannot carry it: a host that builds its own
+   * argv (the Desktop client) never passes the flag, and a child inherits the
+   * daemon's environment, so the language servers spawn under the user's
+   * permissions either way.
+   */
+  readonly lspEnabledForSessions: boolean;
+  /**
    * Whether the running workspace holds MCP servers outside its files: added
    * at runtime or registered by a client.
    */
@@ -86,7 +95,10 @@ export async function evaluateManagedCompatibility(
   if (!sameWorkspace) {
     return deferredResult('the session directory is not the runtime workspace');
   }
-  if (runtime.forwardedArgs.includes('--experimental-lsp')) {
+  if (
+    runtime.lspEnabledForSessions ||
+    runtime.forwardedArgs.includes('--experimental-lsp')
+  ) {
     return deferredResult('the daemon enables LSP for its sessions');
   }
   if (runtime.forwardedArgs.includes('--restore-ask-user-question')) {

@@ -45,6 +45,7 @@ describe('evaluateManagedCompatibility', () => {
     workspaceCwd: string;
     workspaceTrusted: boolean;
     forwardedArgs: string[];
+    lspEnabledForSessions: boolean;
     liveMcpServers: boolean;
   };
 
@@ -76,6 +77,7 @@ describe('evaluateManagedCompatibility', () => {
         ),
       },
       forwardedArgs: [],
+      lspEnabledForSessions: false,
       liveMcpServers: false,
       hasLiveMcpServers() {
         return this.liveMcpServers;
@@ -151,6 +153,13 @@ describe('evaluateManagedCompatibility', () => {
       'forwarded LSP',
       () => {
         runtime.forwardedArgs = ['--experimental-lsp'];
+      },
+      'the daemon enables LSP for its sessions',
+    ],
+    [
+      'LSP enabled from the user-scoped setting',
+      () => {
+        runtime.lspEnabledForSessions = true;
       },
       'the daemon enables LSP for its sessions',
     ],

@@ -81,6 +81,7 @@ import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
 import { createBundledMem0Server } from './mem0-settings.js';
 import { prepareBundledGeneratedUi } from './generated-ui-settings.js';
+import { isLspOptedIn } from './lsp-opt-in.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -1746,6 +1747,13 @@ export async function loadCliConfig(
     provisionalWorkspace?: true;
     /** Daemon-owned remote-runtime session with no ambient executable inputs. */
     agentHostReadOnly?: true;
+    /**
+     * A host-owned Config that must never start language servers, whatever the
+     * user's setting or the environment says. `experimentalLsp: false` in argv
+     * cannot express this: the flag parser defaults it to `false`, so the two
+     * are indistinguishable there.
+     */
+    lspDisabled?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -1780,6 +1788,20 @@ export async function loadCliConfig(
       'Choose operator settings or a programmatic execution sandbox policy, not both.',
     );
   }
+  // Resolve LSP enablement once, here, because the execution-sandbox guard
+  // below has to see the same answer the session gets: the flag, the
+  // user/system-scope setting and the env pair all start the same subsystem,
+  // and a sandboxed tool runner must refuse every entrance, not just the one
+  // it happens to read. The host-mode terms are the entrances a mode still
+  // refuses, so the guard asks the question the session will actually answer
+  // rather than one it would decline anyway.
+  const lspEnabled =
+    !hostPolicy?.lspDisabled &&
+    !agentHostReadOnly &&
+    !sshWorkspace &&
+    !provisionalWorkspace &&
+    !bareMode &&
+    isLspOptedIn(argv.experimentalLsp, settings);
   if (
     sandboxEnabled &&
     (argv.promptInteractive !== undefined ||
@@ -1787,7 +1809,7 @@ export async function loadCliConfig(
       argv.acp ||
       argv.experimentalAcp ||
       argv.worktree !== undefined ||
-      argv.experimentalLsp ||
+      lspEnabled ||
       argv.mcpConfig ||
       argv.extensions?.length ||
       argv.includeDirectories?.length ||
@@ -1907,13 +1929,9 @@ export async function loadCliConfig(
           .map(resolvePath)
           .concat((argv.includeDirectories || []).map(resolvePath));
 
-  // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled =
-    !agentHostReadOnly &&
-    !sshWorkspace &&
-    !provisionalWorkspace &&
-    !bareMode &&
-    argv.experimentalLsp === true;
+  // LSP configuration: `lspEnabled` above already carries the
+  // `--experimental-lsp` flag, the tools.lspEnabled setting,
+  // QWEN_CODE_ENABLE_LSP and the host modes that refuse it.
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =

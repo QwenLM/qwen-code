@@ -77,6 +77,11 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // LSP is the same class of opt-in with a larger blast radius: it spawns
+  // language servers that run with the user's permissions. A cloned repository
+  // must not be able to turn them on, nor to unset an operator's kill switch.
+  'QWEN_CODE_ENABLE_LSP',
+  'QWEN_CODE_DISABLE_LSP',
   // The name-only lock is a deployment policy. A project that wants it sets
   // tools.workflowNameOnly, which a workspace may only turn on; a project
   // .env must not be able to unset the operator's exported value.

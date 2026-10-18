@@ -15,11 +15,17 @@ LSP support in Qwen Code works by connecting to language servers that understand
 
 ## Quick Start
 
-LSP is an experimental feature in Qwen Code. To enable it, use the `--experimental-lsp` command line flag:
+LSP is an experimental feature in Qwen Code. To enable it, set `tools.lspEnabled` in your user `settings.json`:
 
-```bash
-qwen --experimental-lsp
+```json
+{
+  "tools": {
+    "lspEnabled": true
+  }
+}
 ```
+
+Hosts that take command line flags can use `--experimental-lsp` instead — the two are equivalent, and `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override both (disable wins). The setting is read at startup only, so changing it needs a restart; it is honored from the user, system and system-defaults scopes, never from a workspace `.qwen/settings.json`, because enabling it lets a session spawn language servers with your own permissions. Declaring servers stays a workspace/extension decision.
 
 LSP servers are configuration-driven. You must define them in `.lsp.json` (or via extensions) for Qwen Code to start them.
 

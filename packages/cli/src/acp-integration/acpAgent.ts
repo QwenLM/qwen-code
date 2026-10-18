@@ -4478,14 +4478,17 @@ class QwenAgent implements Agent {
           undefined,
           undefined,
           undefined,
-          this.expectedPrivateParentCapability === undefined
-            ? {
-                workflowAncestorTrustProvider:
-                  createLocalWorkflowAncestorTrustProvider(
-                    getOperatorTrustSettings(settings),
-                  ),
-              }
-            : undefined,
+          {
+            lspDisabled: true,
+            ...(this.expectedPrivateParentCapability === undefined
+              ? {
+                  workflowAncestorTrustProvider:
+                    createLocalWorkflowAncestorTrustProvider(
+                      getOperatorTrustSettings(settings),
+                    ),
+                }
+              : {}),
+          },
           buildEnabledSkillNamesProvider(settings),
         ),
       );

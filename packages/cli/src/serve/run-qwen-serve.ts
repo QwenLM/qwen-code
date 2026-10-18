@@ -129,6 +129,7 @@ import {
   tokenQrNoEffectReason,
 } from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
+import { isLspOptedIn } from '../config/lsp-opt-in.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -6342,6 +6343,11 @@ async function runQwenServeImpl(
                     workspaceTrusted: trustedWorkspace,
                     environment: runtimeEffectiveEnv,
                     forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    lspEnabledForSessions: isLspOptedIn(
+                      opts.experimentalLsp,
+                      runtimeBootSettings?.merged,
+                      runtimeEffectiveEnv,
+                    ),
                     hasLiveMcpServers: () =>
                       bridgeRef?.hasRuntimeMcpServers() === true,
                   },
@@ -6984,6 +6990,11 @@ async function runQwenServeImpl(
                     workspaceTrusted: secondaryTrusted,
                     environment: secondaryEnv.effectiveEnv,
                     forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    lspEnabledForSessions: isLspOptedIn(
+                      opts.experimentalLsp,
+                      secondarySettings?.merged,
+                      secondaryEnv.effectiveEnv,
+                    ),
                     hasLiveMcpServers: () =>
                       secondaryBridgeRef?.hasRuntimeMcpServers() === true,
                   },
@@ -7733,6 +7744,11 @@ async function runQwenServeImpl(
                       workspaceTrusted: trusted,
                       environment: wsEnv.effectiveEnv,
                       forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                      lspEnabledForSessions: isLspOptedIn(
+                        opts.experimentalLsp,
+                        wsSettings?.merged,
+                        wsEnv.effectiveEnv,
+                      ),
                       hasLiveMcpServers: () =>
                         wsBridgeRef?.hasRuntimeMcpServers() === true,
                     },

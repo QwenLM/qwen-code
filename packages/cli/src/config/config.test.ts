@@ -3762,6 +3762,93 @@ describe('loadCliConfig', () => {
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
   });
 
+  it('should initialize native LSP service from tools.lspEnabled alone', async () => {
+    // The Desktop client cannot pass `--experimental-lsp` (its daemon argv is
+    // pinned in Rust), so the setting must be a complete entrance on its own.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(true);
+    expect(nativeLspServiceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should keep LSP off when QWEN_CODE_DISABLE_LSP overrides the setting', async () => {
+    // Mirrors QWEN_CODE_DISABLE_WORKFLOWS: an operator off-switch must win over
+    // every other entrance, since LSP servers run with the user's permissions.
+    vi.stubEnv('QWEN_CODE_DISABLE_LSP', '1');
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should refuse an execution sandbox when only the LSP setting opts in', async () => {
+    // The guard has to see the same answer the session gets: the setting starts
+    // the same subsystem as the flag, so a sandboxed tool runner must refuse it
+    // even when no flag was passed.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+
+    await expect(
+      loadCliConfig(
+        settings,
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow(/does not yet support/);
+  });
+
+  it('should keep LSP off when the embedding host refuses it outright', async () => {
+    // `experimentalLsp: false` cannot express a refusal because the flag parser
+    // defaults it to false, so a host-owned helper Config needs its own
+    // off-switch that outranks the user's setting.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
   it('should collect LSP status snapshots during debug-mode startup', async () => {
     process.argv = ['node', 'script.js', '--experimental-lsp', '--debug'];
     const argv = await parseArguments();
