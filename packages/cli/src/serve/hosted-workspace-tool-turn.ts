@@ -2789,6 +2789,7 @@ export class HostedWorkspaceToolTurn {
           throw new Error('Hosted Workspace profile refused a tool call.');
         ids.add(call.callId);
         let validationError: string | undefined;
+        let inlineLimitRefusal: string | undefined;
         let input: Record<string, unknown>;
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
@@ -2998,6 +2999,7 @@ export class HostedWorkspaceToolTurn {
           input = { ...args, is_monitor: true };
         } else if (call.name === 'agent') {
           const args = call.args;
+          inlineLimitRefusal = `Hosted child agent prompt and arguments exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
           // The deliberate refusals below keep their texts whenever the
           // Agent call is not admitted.
           agentAdmitted = this.agentsAdmitted();
@@ -3091,6 +3093,7 @@ export class HostedWorkspaceToolTurn {
           input = { ...args };
         } else if (call.name === 'workflow') {
           const args = call.args;
+          inlineLimitRefusal = `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
           // #13803: the Workflow call answers the same admission shape as
           // the Agent call, behind its own kind reader.
           workflowAdmitted =
@@ -3183,6 +3186,7 @@ export class HostedWorkspaceToolTurn {
           input = { ...args };
         } else if (call.name === 'send_message') {
           const args = call.args;
+          inlineLimitRefusal = `Hosted send_message exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten the message and retry.`;
           const role = this.sendMessageRole();
           // b3c: a member message is a command to the leader, never
           // H4d-b's plain message.
@@ -3346,8 +3350,8 @@ export class HostedWorkspaceToolTurn {
         }
         // The inline Session Store limit keeps rejecting exactly as main
         // does for the ordinary tools. A call that already carries its own
-        // refusal never reads its encoding. Workflow launches and messages
-        // are this profile's own surfaces: the limit becomes the call's
+        // refusal never reads its encoding. Owned profile surfaces declare
+        // their refusal in their validation arm: the limit becomes the call's
         // refusal, never a failure of the whole Turn (review D1/R2-12).
         let encoded: HostedEncodedToolInput;
         try {
@@ -3357,15 +3361,10 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           if (
             !(cause instanceof HostedToolInputInlineLimitError) ||
-            (validationError === undefined &&
-              call.name !== 'workflow' &&
-              call.name !== 'send_message')
+            (validationError === undefined && inlineLimitRefusal === undefined)
           )
             throw cause;
-          validationError ??=
-            call.name === 'send_message'
-              ? `Hosted send_message exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten the message and retry.`
-              : `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
+          validationError ??= inlineLimitRefusal;
           encoded = UNENCODED_TOOL_INPUT;
         }
         // H3: the publication evidence chain pins the canonical input

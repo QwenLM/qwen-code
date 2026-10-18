@@ -657,6 +657,22 @@ it('answers an over-size prompt with the byte_limit refusal, not recovery', asyn
   );
 });
 
+it('answers an encoded-overflow prompt with the byte_limit refusal', async () => {
+  const turn = createTurn();
+  const responses = await executeAgent(
+    turn,
+    call({
+      description: 'audit',
+      prompt: '"'.repeat(20_000),
+      run_in_background: true,
+    }),
+  );
+  expect(JSON.stringify(responses)).toContain('byte_limit');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 it('commits the launch intent on the sent arm and answers with the task id', async () => {
   const turn = createTurn();
   const responses = await executeAgent(
