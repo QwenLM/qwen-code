@@ -36,9 +36,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * matches its method+path+body; a
  * matched rule then drops the reply after the upstream already committed
  * (the lose-once shape fault rounds live on), or holds it until the IT
- * releases the named latch (the controlled-ambiguity shape). The armed
- * occurrence N means a DROP rule fires on the first N matching requests
- * while a HOLD rule fires only on the Nth matching one; everything else
+ * releases the named latch (the controlled-ambiguity shape), or swallows
+ * the request without ever forwarding it (a writer that dies before its
+ * commit leaves the wire). The armed occurrence N means a DROP rule fires
+ * on the first N matching requests while a HOLD or SWALLOW rule fires
+ * only on the Nth matching one; everything else
  * passes through and is logged. Every observation lands in the per-case
  * proxy log; those lines are the fault-fired witness the gate asserts on.
  */
@@ -56,6 +58,8 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         DROP,
         /** Forward, consume, then answer only once released by name. */
         HOLD,
+        /** Never forward; once released by name, answer 503. */
+        SWALLOW,
     }
 
     /** One arming rule with its firing counter. */
@@ -82,13 +86,17 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             return new Rule(matcher, Disposition.HOLD, name, occurrence);
         }
 
+        static Rule swallow(Matcher matcher, String name) {
+            return new Rule(matcher, Disposition.SWALLOW, name, 1);
+        }
+
         /** Whether this request takes the armed disposition. */
         boolean fires(String method, String path, String body) {
             if (!matcher.test(method, path, body)) {
                 return false;
             }
             int index = seen.incrementAndGet();
-            if (disposition == Disposition.HOLD) {
+            if (disposition != Disposition.DROP) {
                 return index == occurrences;
             }
             return index <= occurrences;
@@ -183,11 +191,15 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             }
         }
         CompletableFuture<Void> holdLatch = null;
-        if (armed != null && armed.disposition == Disposition.HOLD) {
+        if (armed != null && armed.disposition != Disposition.DROP) {
             holdLatch = new CompletableFuture<>();
             latches.put(armed.name, holdLatch);
         }
         String tag = method + " " + path + kind;
+        if (armed != null && armed.disposition == Disposition.SWALLOW) {
+            swallow(exchange, armed.name, tag, holdLatch);
+            return;
+        }
         try {
             HttpRequest.Builder forward = HttpRequest.newBuilder(upstream
                             .resolve(exchange.getRequestURI().toString()))
@@ -242,16 +254,43 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         }
     }
 
-    /** The relay verb (`kind`) and journal commit (`operation`) a body
-     * names, so the log tells one commit from another. */
+    /** The SWALLOW disposition: the request never reaches the upstream.
+     * Its sender is meant to die while it waits, so the 503 it gets on
+     * release normally meets a closed connection. */
+    private void swallow(HttpExchange exchange, String name, String tag,
+            CompletableFuture<Void> latch) throws IOException {
+        record("PROXY swallowing " + name + " " + tag);
+        try {
+            latch.get(90, TimeUnit.SECONDS);
+        } catch (Exception interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        record("PROXY swallowed " + name + " " + tag);
+        try {
+            byte[] message = "swallowed".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(503, message.length);
+            exchange.getResponseBody().write(message);
+        } catch (IOException gone) {
+            // the sender is gone, as intended
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /** The relay verb (`kind`), journal commit (`operation`) and its
+     * command id a body names, so the log tells one commit from another
+     * and a replay from a new step. */
     private String tagOf(String text) {
         try {
             JsonNode parsed = json.readTree(text);
             JsonNode kind = parsed.path("kind");
             JsonNode operation = parsed.path("operation");
+            JsonNode command = parsed.path("commandId");
             return (kind.isTextual() ? " kind=" + kind.asText() : "")
                     + (operation.isTextual() ? " op=" + operation.asText()
-                            : "");
+                            : "")
+                    + (operation.isTextual() && command.isTextual()
+                            ? " cmd=" + command.asText() : "");
         } catch (IOException ignored) {
             return "";
         }
