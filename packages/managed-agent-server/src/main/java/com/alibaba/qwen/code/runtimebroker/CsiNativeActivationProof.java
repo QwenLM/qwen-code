@@ -1344,7 +1344,14 @@ public final class CsiNativeActivationProof {
                 && usage.path("attempts").isArray()
                 && usage.path("attempts").size() == ("output_committed".equals(stage) ? 1 : 0));
         for (JsonNode value : usage.path("attempts")) {
-            metrics(value, Set.of("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount",
+            ObjectNode counters = object(value).deepCopy();
+            JsonNode contextWindowSize = counters.remove("contextWindowSize");
+            if (contextWindowSize != null) {
+                finite(contextWindowSize);
+                double size = contextWindowSize.doubleValue();
+                require(size > 0 && size <= MAX_SAFE + 1 && size == Math.rint(size));
+            }
+            metrics(counters, Set.of("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount",
                     "totalTokenCount", "cachedContentTokenCount"));
         }
         JsonNode models = object(usage.path("models"));

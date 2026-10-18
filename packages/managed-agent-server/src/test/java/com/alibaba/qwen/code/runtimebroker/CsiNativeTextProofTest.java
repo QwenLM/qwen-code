@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -15,7 +16,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class CsiNativeTextProofTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -153,6 +157,39 @@ class CsiNativeTextProofTest {
         mutatedBody(8, "stateRef", state -> ((ObjectNode) state.path("resume").path("recording"))
                 .put("lastCompletedUuid", "invented"));
         mutatedBody(8, "stateRef", state -> ((ObjectNode) state.path("resume")).put("initialTurn", 0.0));
+    }
+
+    @Test
+    void acceptsLegacyUsageWithoutContextWindowMetadata() throws IOException {
+        JsonNode usageRef = transaction(6).events().getFirst().path("payload").path("usageRef");
+        JsonNode usage = JSON.readTree(reader.apply(usageRef));
+        assertNull(usage.path("attempts").get(0).get("contextWindowSize"));
+        assertEquals("output_committed", advance(6, prefix(6), reader).attempt().stage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "200000", "9007199254740991", "200000.0", "8.192e3"})
+    void acceptsCurrentProducerUsageWithPositiveSafeIntegerContextWindow(String encoded) throws IOException {
+        JsonNode contextWindowSize = JSON.readTree(encoded);
+        var legacy = advance(6, prefix(6), reader);
+        var current = assertDoesNotThrow(() -> changedBody(6, "usageRef", usage ->
+                ((ObjectNode) usage.path("attempts").get(0)).set("contextWindowSize", contextWindowSize)).get());
+        assertEquals(legacy, current);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "0", "-1", "1.5", "200000.5", "\"200000\"", "9007199254740992"})
+    void refusesInvalidContextWindowMetadata(String encoded) throws IOException {
+        JsonNode invalid = JSON.readTree(encoded);
+        mutatedBody(6, "usageRef", usage ->
+                ((ObjectNode) usage.path("attempts").get(0)).set("contextWindowSize", invalid));
+    }
+
+    @Test
+    void refusesUnknownUsageFieldsWithAndWithoutContextWindowMetadata() throws IOException {
+        mutatedBody(6, "usageRef", usage -> ((ObjectNode) usage.path("attempts").get(0)).put("unknown", 1));
+        mutatedBody(6, "usageRef", usage -> ((ObjectNode) usage.path("attempts").get(0))
+                .put("contextWindowSize", 200000).put("unknown", 1));
     }
 
     @Test
@@ -381,6 +418,11 @@ class CsiNativeTextProofTest {
     }
 
     private void mutatedBody(int index, String field, java.util.function.Consumer<ObjectNode> change) throws IOException {
+        rejected(changedBody(index, field, change)::get);
+    }
+
+    private Supplier<CsiNativeActivationProof.Prefix> changedBody(int index, String field,
+            java.util.function.Consumer<ObjectNode> change) throws IOException {
         var tx = transaction(index);
         JsonNode event = tx.events().get(field.equals("stateRef") ? 1 : 0);
         ObjectNode ref = (ObjectNode) event.path("payload").path(field);
@@ -393,10 +435,10 @@ class CsiNativeTextProofTest {
             metadata.put("contentDigest", ref.path("digest").textValue());
         }
         String changedId = ref.path("resourceId").textValue();
-        // Derived semantic negative: original transaction framing was parsed before changing its body/ref.
-        rejected(() -> CsiNativeActivationProof.advance(tx, metadata, original, writer, genesis, activation, metadata.path("expectedJournalRevision").longValue(),
+        // Original transaction framing is parsed before rebinding the derived semantic body/ref.
+        return () -> CsiNativeActivationProof.advance(tx, metadata, original, writer, genesis, activation, metadata.path("expectedJournalRevision").longValue(),
                 metadata.path("expectedCommittedSequence").longValue(), prefix(index),
-                candidate -> changedId.equals(candidate.path("resourceId").textValue()) ? bytes : reader.apply(candidate)));
+                candidate -> changedId.equals(candidate.path("resourceId").textValue()) ? bytes : reader.apply(candidate));
     }
 
     private CsiNativeActivationProof.Prefix prefix(int exclusive) {

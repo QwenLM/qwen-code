@@ -355,20 +355,6 @@ const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
 const HOSTED_WAKE_PASS_WAIT_MS = 10_000;
 
 /**
- * The terminal classification of a turn whose runner threw. A deadline
- * expiry is an attributable failure, never a cancellation.
- */
-function settledTurnOutcome(abort: AbortController): {
-  state: 'cancelled' | 'error';
-  stopReason: string;
-} {
-  if (!abort.signal.aborted) return { state: 'error', stopReason: 'error' };
-  return abort.signal.reason === HOSTED_TURN_DEADLINE
-    ? { state: 'error', stopReason: 'deadline_exceeded' }
-    : { state: 'cancelled', stopReason: 'cancelled' };
-}
-
-/**
  * The wedge family #13800 names: a turn that dies against its Session store
  * ends with a named, caller-visible reason, never a silent freeze. Only
  * transport and server-5xx failures reclassify: per-Session refusals

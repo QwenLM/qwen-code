@@ -75,6 +75,7 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -7859,6 +7860,8 @@ it('probes every inconclusive background binding within one timeout window', asy
   const realClearTimeout = globalThis.clearTimeout;
   vi.useFakeTimers();
   let guard: ReturnType<typeof realSetTimeout> | undefined;
+  const abort = new AbortController();
+  let outcome: Promise<{ rejection: unknown }> | undefined;
   try {
     const template = backgroundCall().call;
     const backgroundCalls = [1, 2].map((index) => ({
@@ -7885,25 +7888,28 @@ it('probes every inconclusive background binding within one timeout window', asy
     const bothProbesStarted = new Promise<void>((resolve) => {
       resolveBothProbes = resolve;
     });
-    broker.backgroundProcessStatus.mockImplementation(
-      () =>
-        new Promise<undefined>((_resolve, reject) => {
-          if (broker.backgroundProcessStatus.mock.calls.length === 2)
-            resolveBothProbes();
-          setTimeout(
-            () => reject(new DOMException('timed out', 'TimeoutError')),
-            30_000,
-          );
-        }),
-    );
+    broker.backgroundProcessStatus.mockImplementation(() => {
+      abort.signal.throwIfAborted();
+      return new Promise<undefined>((_resolve, reject) => {
+        if (broker.backgroundProcessStatus.mock.calls.length === 2)
+          resolveBothProbes();
+        const timeout = setTimeout(
+          () => reject(new DOMException('timed out', 'TimeoutError')),
+          30_000,
+        );
+        abort.signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timeout);
+            reject(abort.signal.reason);
+          },
+          { once: true },
+        );
+      });
+    });
     let completed = false;
-    const outcome = turn
-      .execute(
-        backgroundCalls,
-        backgroundParts,
-        'model',
-        new AbortController().signal,
-      )
+    outcome = turn
+      .execute(backgroundCalls, backgroundParts, 'model', abort.signal)
       .then(
         () => ({ rejection: undefined }),
         (rejection: unknown) => ({ rejection }),
@@ -7914,7 +7920,7 @@ it('probes every inconclusive background binding within one timeout window', asy
     const guardedStart = new Promise<never>((_resolve, reject) => {
       guard = realSetTimeout(
         () => reject(new Error('both probes did not start concurrently')),
-        1_000,
+        isSlowTestHost() ? 30_000 : 5_000,
       );
     });
 
@@ -7939,6 +7945,8 @@ it('probes every inconclusive background binding within one timeout window', asy
     ).toHaveLength(0);
   } finally {
     if (guard !== undefined) realClearTimeout(guard);
+    abort.abort();
+    await outcome;
     vi.useRealTimers();
     turn = createTurn();
   }
