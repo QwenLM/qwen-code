@@ -10,6 +10,13 @@ import type { ManagedSessionKey } from './managed-session-records.js';
 export type ManagedRuntimeDispatchState = 'dispatch' | 'handed_off' | 'settled';
 
 /**
+ * Settled entries only refuse a repeat dispatch inside this process; a
+ * restart already relies on the durable checkpoint for the same guarantee.
+ * Keep a recent window and drop the oldest settled entries beyond it.
+ */
+export const MANAGED_RUNTIME_DISPATCH_SETTLED_LIMIT = 1024;
+
+/**
  * Process-local coordinator gate: one executionCallId is dispatched at most
  * once. Handoff keeps the original invocation after Harness detach; settle
  * is the only legal end. Worker loss across process restart is recovery
@@ -44,6 +51,20 @@ export class ManagedRuntimeDispatchGate {
     const current = this.states.get(executionCallId);
     if (current === 'settled') return;
     this.states.set(executionCallId, 'settled');
+    this.pruneSettled();
+  }
+
+  /**
+   * In-flight and handed-off entries are never dropped: they are what refuses
+   * a second dispatch before the durable checkpoint records the call. Only
+   * settled ones are pruned, oldest first.
+   */
+  private pruneSettled(): void {
+    if (this.states.size <= MANAGED_RUNTIME_DISPATCH_SETTLED_LIMIT) return;
+    for (const [executionCallId, state] of this.states) {
+      if (this.states.size <= MANAGED_RUNTIME_DISPATCH_SETTLED_LIMIT) return;
+      if (state === 'settled') this.states.delete(executionCallId);
+    }
   }
 
   state(executionCallId: string): ManagedRuntimeDispatchState | undefined {
