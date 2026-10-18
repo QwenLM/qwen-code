@@ -599,12 +599,13 @@ describe('Hosted real-process gates', () => {
       // Verify step stays at 95 minutes; the FG13d cancel/timeout cells add
       // two cases budgeted at 200 s, so the fork moves to 5048; the FG11a
       // automation lost-reply letter adds ~170 s, so the fork moves to 5218
-      // and the Verify step to 100 minutes):
+      // and the Verify step to 100 minutes; the FG13d worker-stop cancel
+      // cell adds 150 s, so the fork moves to 5368):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(5218);
+        expect(forkSeconds).toBe(5368);
       }
     },
   );
@@ -643,10 +644,11 @@ describe('Hosted real-process gates', () => {
   // automation lost-reply letter (HostedAutomationFaultGatesIT, eight cases
   // sharing one minute boundary) measures 46.3-85.0s locally on JDK 21 +
   // MySQL 8.4.6 across four acceptance runs (~170s budgeted at 2x), so it
-  // becomes 4608s.
+  // becomes 4608s; the FG13d worker-stop cancel cell adds 150s, so it
+  // becomes 4758s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4608;
+  const hostedForkHealthySeconds = 4758;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

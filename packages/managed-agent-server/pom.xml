@@ -427,8 +427,11 @@
                                  + MySQL 8.4.6 (~170 s budgeted at 2x):
                                  the healthy sum becomes 4608 s, so the
                                  fork moves to 5218 s and the Verify
-                                 step to 100 minutes. -->
-                            <forkedProcessTimeoutInSeconds>5218</forkedProcessTimeoutInSeconds>
+                                 step to 100 minutes. The FG13d
+                                 worker-stop cancel cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 4758 s, so the fork moves to 5368 s. -->
+                            <forkedProcessTimeoutInSeconds>5368</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
