@@ -19,19 +19,20 @@ owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，
    打包 Harness、durable worker 与委派 cgroup 根，测的是同一条 owner 路径。
 2. **夹具增加忽略 TERM 的后代。** 只发 SIGTERM 无法清空仍被后代占据的单元；
    夹具子进程在 `hook-ignore-term` 模式下安装 `SIGTERM` handler。
-3. **两个独立用例，各自一套夹具。** 取消与超时分别启动自己的 Spring、Harness
-   与 worker，一格的停顿不会掩盖另一格。两格均保留 `@Timeout(300)`，该类按
-   200 s 计入预算。
+3. **三个独立用例，各自一套夹具。** 取消、超时与 worker 停止时取消分别启动自己的
+   Spring、Harness 与 worker，一格的停顿不会掩盖另一格。三格均保留
+   `@Timeout(300)`，该类按 350 s 计入预算。
 4. **取消与状态探针都走 Harness 路由。** 两者都通过认证的
    `/session/:id/hooks/operations/:operationId` 路由并携带契约头，与 FG13c 的
    状态探针同一入口。
 
 ## 用例
 
-| 用例                   | 注入                                                                                    | 期望                                                                                                                                                                                                      |
-| ---------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cancel-held-command`  | `PreToolUse` 命令 Hook 带一个忽略 SIGTERM 的后代保持运行；通过 Harness 路由取消该操作。 | 命令收到 SIGTERM；后代存活，因此只有宽限期后的 `cgroup.kill` 能清空单元。记录结算为 `cancelled` 且只在那之后报告；单元到达 `populated 0`；恰好一次物理调用；`failClosed` 把取消结果变成阻断，工具不运行。 |
-| `timeout-held-command` | 同样的保持型命令，Hook 超时 2 s，后代忽略 SIGTERM。                                     | 命令超时，输出不被采用，记录结算为 `outcome=timeout`，单元被杀并到达 `populated 0`，模型看到阻断而不是文件正文。                                                                                          |
+| 用例                         | 注入                                                                                    | 期望                                                                                                                                                                                                      |
+| ---------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-held-command`        | `PreToolUse` 命令 Hook 带一个忽略 SIGTERM 的后代保持运行；通过 Harness 路由取消该操作。 | 命令收到 SIGTERM；后代存活，因此只有宽限期后的 `cgroup.kill` 能清空单元。记录结算为 `cancelled` 且只在那之后报告；单元到达 `populated 0`；恰好一次物理调用；`failClosed` 把取消结果变成阻断，工具不运行。 |
+| `timeout-held-command`       | 同样的保持型命令，Hook 超时 2 s，后代忽略 SIGTERM。                                     | 命令超时，输出不被采用，记录结算为 `outcome=timeout`，单元被杀并到达 `populated 0`，模型看到阻断而不是文件正文。                                                                                          |
+| `cancel-with-stopped-worker` | 同样的保持型命令；对 durable worker 发 SIGSTOP，再通过 Harness 路由取消。               | 取消被记录，但 owner 无法应答：记录停在 `recovery_blocked` / `outcome_unknown`，命令与后代继续占据单元，且不会发生第二次调用。                                                                            |
 
 ## 变异见证
 
@@ -45,11 +46,14 @@ owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，
 - `early-terminal`（两格）：在 `processUnit.terminate` 返回前先发布结果，使
   记录在单元仍被占据时就进入终态。`awaitTerminalDrained` 检查首次终态观测，
   两格都会因单元非空而失败。
+- `cancel-with-stopped-worker`：去掉 `status()` 里如实记录 unknown 的提交分支
+  （owner 无法应答时写 `recovery_blocked` / `outcome_unknown` 的那一支）。
+  记录会停在 `running`，状态断言失败。
 
 ## 非目标
 
-FG13d 其余部分——派发前取消、`hook-cancel` 回复丢失、worker 停止时取消、以及
-带 `SessionEnd`/`SessionDelete` 的 DELETE 异步 drain——仍留在 #14449。同样不
+FG13d 其余部分——派发前取消、`hook-cancel` 回复丢失、以及带
+`SessionEnd`/`SessionDelete` 的 DELETE 异步 drain——仍留在 #14449。同样不
 在范围：FG13a、FG13b、FG13e、FG13f、本地非托管 Hook、Windows/macOS，以及
 #13133 的设计项。
 
