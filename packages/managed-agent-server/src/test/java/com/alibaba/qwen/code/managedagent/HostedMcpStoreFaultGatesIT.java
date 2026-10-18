@@ -63,8 +63,8 @@ import static org.awaitility.Awaitility.await;
 // wrapper around the Session record store rejects one step of the MCP record
 // state machine inside the real commit transaction, so each case observes
 // what a rejected durable write really leaves behind. The Harness, durable
-// worker, stdio fixture and MySQL are the FG12c boot; FG12c's own cases stay
-// in their class.
+// worker, stdio fixture and MariaDB 10.11 (the CI lane's MySQL 8.4.6) are the
+// FG12c boot; FG12c's own cases stay in their class.
 class HostedMcpStoreFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
     private static final String CASE_LETTER = "fg12b";
@@ -113,7 +113,7 @@ class HostedMcpStoreFaultGatesIT {
     void boot() throws Exception {
         StoreFaultGate.INSTANCE.clear();
         assertThat(System.getProperty("mysql.url"))
-                .as("FG12c requires a disposable MySQL")
+                .as("FG12c requires a disposable MySQL/MariaDB")
                 .startsWith("jdbc:mysql:");
         node = System.getProperty("node.executable");
         assertThat(node).isNotBlank();
@@ -212,6 +212,8 @@ class HostedMcpStoreFaultGatesIT {
             throws Exception {
         SessionRef session = createSession();
         baseline(session);
+        String owner = ownerIdentity(session);
+        String holder = holderIdentity();
         String configuration = uuid();
         storeFault().arm(StoreFaultGate.Phase.CONFIGURE_DISPATCH,
                 configuration);
@@ -223,10 +225,14 @@ class HostedMcpStoreFaultGatesIT {
                 .as("a dispatch commit refused before the control")
                 .isEmpty();
         assertThat(fixtureEvents("mcp.start")).hasSize(1);
-        assertThat(liveOwners(session)).as("owner acquired before the refusal")
-                .isPositive();
-        assertThat(storageHolds()).as("the detach has not run yet")
-                .isPositive();
+        assertThat(owner).isNotBlank();
+        assertThat(holder).isNotBlank();
+        assertThat(ownerIdentity(session))
+                .as("the refused dispatch keeps the exact owner generation")
+                .isEqualTo(owner);
+        assertThat(holderIdentity())
+                .as("the detach has not run, so the same holder stays")
+                .isEqualTo(holder);
         storeFault().clear();
     }
 
@@ -236,6 +242,8 @@ class HostedMcpStoreFaultGatesIT {
             throws Exception {
         SessionRef session = createSession();
         baseline(session);
+        String owner = ownerIdentity(session);
+        String holder = holderIdentity();
         String operation = uuid();
         storeFault().arm(StoreFaultGate.Phase.OPERATION_DISPATCH, operation);
         HttpResponse<String> refused = rawRequest("POST", "/session/"
@@ -245,11 +253,15 @@ class HostedMcpStoreFaultGatesIT {
         waitForRejection();
         Thread.sleep(1_000);
         assertThat(controls("mcp-invoke")).isEmpty();
-        assertThat(effects("resource_read")).doesNotContain("ext://proof");
-        assertThat(liveOwners(session))
-                .as("owner acquired before the operation dispatch refusal")
-                .isPositive();
-        assertThat(storageHolds()).isPositive();
+        assertThat(effects("resource_read")).isEmpty();
+        assertThat(owner).isNotBlank();
+        assertThat(holder).isNotBlank();
+        assertThat(ownerIdentity(session))
+                .as("the refused dispatch keeps the exact owner generation")
+                .isEqualTo(owner);
+        assertThat(holderIdentity())
+                .as("the detach has not run, so the same holder stays")
+                .isEqualTo(holder);
         storeFault().clear();
     }
 
@@ -259,6 +271,9 @@ class HostedMcpStoreFaultGatesIT {
             throws Exception {
         SessionRef session = createSession();
         baseline(session);
+        JsonNode configuration = configuration(session.id());
+        String runtimeSessionId = configuration.path("runtimeSessionId").asText();
+        JsonNode configurationPin = configuration.path("run").path("runtime");
         String operation = uuid();
         storeFault().arm(StoreFaultGate.Phase.SETTLED, operation);
         Future<HttpResponse<String>> pending = caseExecutor.submit(
@@ -273,18 +288,46 @@ class HostedMcpStoreFaultGatesIT {
         writeRelease();
         waitFor(() -> assertThat(effects("resource_read"))
                 .containsExactly("ext://hold"));
-        waitForRejection();
         HttpResponse<String> refused = pending.get(30, TimeUnit.SECONDS);
         assertThat(refused.statusCode()).isIn(202, 409, 503);
-        assertThat(operations(session.id()).getLast().path("resultRef").isNull())
+        JsonNode held = operations(session.id()).getLast();
+        JsonNode operationPin = held.path("run").path("runtime");
+        assertThat(held.path("run").path("execution").asText())
+                .as("the failed commit leaves the record at dispatch_started")
+                .isEqualTo("dispatch_started");
+        assertThat(held.path("run").path("state").asText())
+                .isNotEqualTo("settled");
+        assertThat(held.path("resultRef").isNull())
                 .as("the rejected settled commit has no result ref")
                 .isTrue();
+        // HttpManagedSessionResourceStore.publish only stages bytes; the
+        // resource rows are inserted by commitResources inside the rejected
+        // transaction, so the response is rolled back. The arguments
+        // resource committed at intent survives.
+        assertThat(publishedResponses(session.id()))
+                .as("the staged response rows roll back with the commit")
+                .isZero();
+        assertThat(published(session.id(), held.path("argsRef")))
+                .as("the arguments committed at intent survive")
+                .isNotNull();
+        waitForRejection();
         // A persistent 500 latches ManagedSessionAuthority's write failure;
-        // a fresh Harness reopens it from the durable store with the same
-        // operation and runtime pins before the recovery lookup.
+        // a fresh Harness reopens it from the durable store and carries the
+        // original operation/runtime pins into the recovery lookup.
         storeFault().clear();
         killHarness();
-        SessionRef reopened = reload(session);
+        SessionRef reopened = reloadPinned(session, runtimeSessionId,
+                operation);
+        assertThat(configuration(session.id()).path("runtimeSessionId").asText())
+                .as("the reopened configuration keeps its runtime session pin")
+                .isEqualTo(runtimeSessionId);
+        assertThat(configuration(session.id()).path("run").path("runtime"))
+                .as("the reopened configuration keeps its runtime generation")
+                .isEqualTo(configurationPin);
+        assertThat(operations(session.id()).getLast().path("run")
+                .path("runtime"))
+                .as("the reopened operation keeps its runtime generation")
+                .isEqualTo(operationPin);
         long wireBefore = wireSequence.get();
         HttpResponse<String> status = rawStatus(reopened, operation);
         assertThat(status.statusCode()).isIn(200, 503);
@@ -354,6 +397,8 @@ class HostedMcpStoreFaultGatesIT {
             throws Exception {
         SessionRef session = createSession();
         baseline(session);
+        String owner = ownerIdentity(session);
+        String holder = holderIdentity();
         String configurationId = configuration(session.id())
                 .path("configurationId").asText();
         CloseRef close = prepareClose(session);
@@ -365,12 +410,14 @@ class HostedMcpStoreFaultGatesIT {
         waitForRejection();
         assertThat(configuration(session.id()).path("releaseState").asText())
                 .isEqualTo("releasing");
-        assertThat(liveOwners(session))
+        assertThat(owner).isNotBlank();
+        assertThat(holder).isNotBlank();
+        assertThat(ownerIdentity(session))
                 .as("the broker owner stays after a rejected drain")
-                .isPositive();
-        assertThat(storageHolds())
+                .isEqualTo(owner);
+        assertThat(holderIdentity())
                 .as("the storage holder stays after a rejected drain")
-                .isPositive();
+                .isEqualTo(holder);
         assertThat(drainReceipts(session))
                 .as("no drain receipt is fabricated")
                 .isZero();
@@ -394,8 +441,11 @@ class HostedMcpStoreFaultGatesIT {
     void storeRejectReleasedResendsTheOwnerReleaseOnMySql() throws Exception {
         SessionRef session = createSession();
         baseline(session);
-        String configurationId = configuration(session.id())
-                .path("configurationId").asText();
+        JsonNode configuration = configuration(session.id());
+        String configurationId = configuration.path("configurationId").asText();
+        String runtimeSessionId = configuration.path("runtimeSessionId").asText();
+        String ownerReleasePath = "/internal/runtime-broker/v1/tool-sessions/"
+                + runtimeSessionId + ":release";
         CloseRef close = prepareClose(session);
         storeFault().arm(StoreFaultGate.Phase.RELEASED, configurationId);
         HttpResponse<String> refused = null;
@@ -425,14 +475,31 @@ class HostedMcpStoreFaultGatesIT {
                 .isEqualTo(200);
         assertThat(configuration(session.id()).path("releaseState").asText())
                 .isEqualTo("released");
-        assertThat(wire.stream().filter(entry -> ((Number) entry.get("seq"))
-                .intValue() > wireBefore).filter(entry -> {
-                    String path = String.valueOf(entry.get("path"));
-                    return path.contains("release") || path.endsWith(
-                            "/runtime-sessions");
-                }).count())
-                .as("the next detach re-sends the owner release")
-                .isPositive();
+        List<Map<String, Object>> ownerReleases = wire.stream()
+                .filter(entry -> "POST".equals(entry.get("method")))
+                .filter(entry -> ownerReleasePath.equals(entry.get("path")))
+                .toList();
+        assertThat(ownerReleases).as("the first detach released the owner")
+                .hasSize(2);
+        assertThat(ownerReleases).allSatisfy(entry -> {
+            assertThat(entry.get("status")).isEqualTo(200);
+            JsonNode answer = (JsonNode) entry.get("answer");
+            assertThat(answer.path("released").asBoolean())
+                    .as("the owner release is confirmed and idempotent")
+                    .isTrue();
+        });
+        List<Map<String, Object>> resends = ownerReleases.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBefore)
+                .toList();
+        assertThat(resends)
+                .as("the next detach re-sends the same owner release once")
+                .hasSize(1);
+        assertThat(resends.getFirst().get("status"))
+                .as("a 409 or a lost resend must fail")
+                .isEqualTo(200);
+        assertThat(((JsonNode) resends.getFirst().get("answer")).path(
+                "released").asBoolean()).isTrue();
     }
 
     @Test
@@ -455,19 +522,33 @@ class HostedMcpStoreFaultGatesIT {
                 .isEqualTo(202);
         waitFor(() -> assertThat(configuration(session.id())
                 .path("run").path("state").asText()).isEqualTo("settled"));
+        JsonNode retriedRecord = configuration(session.id());
+        assertThat(retriedRecord.path("configurationId").asText())
+                .isEqualTo(configuration);
+        assertThat(retriedRecord.path("configRevision").asInt())
+                .as("the retried revision is the settled rev 2, not the"
+                        + " rejected intent")
+                .isEqualTo(2);
+        assertThat(retriedRecord.path("run").path("state").asText())
+                .isEqualTo("settled");
+        assertThat(retriedRecord.path("run").path("execution").asText())
+                .isEqualTo("settled");
         List<JsonNode> records = configurationRecords(session.id());
         assertThat(records).hasSize(2);
         assertThat(records).extracting(record -> record.path(
-                "configurationId").asText()).contains(configuration);
-        assertThat(records).allSatisfy(record -> assertThat(
-                record.path("run").path("state").asText())
-                .isEqualTo("settled"));
+                "configurationId").asText()).doesNotHaveDuplicates();
         Integer rows = jdbc.queryForObject("SELECT COUNT(*) FROM"
                 + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                 + " tenant_id = ? AND session_id = ? AND"
                 + " domain = 'mcp_configuration' AND record_id = ?",
                 Integer.class, tenant, session.id(), configuration);
         assertThat(rows).as("one logical chain per id").isEqualTo(1);
+        Integer keys = jdbc.queryForObject("SELECT COUNT(DISTINCT"
+                + " record_key) FROM ma_session_record WHERE record_kind ="
+                + " 'DOMAIN' AND tenant_id = ? AND session_id = ? AND"
+                + " domain = 'mcp_configuration'", Integer.class, tenant,
+                session.id());
+        assertThat(keys).as("no duplicate configuration chain").isEqualTo(2);
     }
 
     private HttpResponse<String> configure(SessionRef session,
@@ -507,6 +588,27 @@ class HostedMcpStoreFaultGatesIT {
                 + " ('ACQUIRING', 'READY')", Integer.class, tenant,
                 session.id());
         return count == null ? 0 : count;
+    }
+
+    /**
+     * The exact owner the baseline acquired: a positive count alone would
+     * accept a fresh generation the refused commit could have minted.
+     */
+    private String ownerIdentity(SessionRef session) {
+        List<String> rows = jdbc.query("SELECT CONCAT(CONVERT("
+                + "runtime_session_id USING utf8mb4), ':', runtime_generation)"
+                + " FROM ma_runtime_session WHERE tenant_id = ? AND"
+                + " harness_session_id = ? AND session_state IN"
+                + " ('ACQUIRING', 'READY') ORDER BY runtime_generation DESC",
+                (row, index) -> row.getString(1), tenant, session.id());
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    private String holderIdentity() {
+        List<String> rows = jdbc.queryForList("SELECT CONVERT(holder_key"
+                + " USING utf8mb4) FROM ma_storage_owner WHERE tenant_id = ?"
+                + " AND holder_key IS NOT NULL", String.class, tenant);
+        return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private int storageHolds() {
@@ -961,11 +1063,29 @@ class HostedMcpStoreFaultGatesIT {
     }
 
     private SessionRef reload(SessionRef session) throws Exception {
-        return reload(session, null, 0);
+        return reload(session, null, 0, null, null);
     }
 
     private SessionRef reload(SessionRef session, String lifecycleOperation,
             long claimGeneration) throws Exception {
+        return reload(session, lifecycleOperation, claimGeneration, null,
+                null);
+    }
+
+    /**
+     * FG12b: reopen the stopped authority with the original operation and
+     * runtime pins. The durable record is the authority; the body carries the
+     * same pins a takeover-shaped load presents, so the reopened Session can
+     * never drift to a fresh Runtime generation.
+     */
+    private SessionRef reloadPinned(SessionRef session, String runtimeSessionId,
+            String operationId) throws Exception {
+        return reload(session, null, 0, runtimeSessionId, operationId);
+    }
+
+    private SessionRef reload(SessionRef session, String lifecycleOperation,
+            long claimGeneration, String runtimeSessionId,
+            String operationId) throws Exception {
         startHarness();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sessionScope", "thread");
@@ -973,6 +1093,12 @@ class HostedMcpStoreFaultGatesIT {
         body.put("approvalMode", "yolo");
         body.put("mcpServers", List.of(mcpPin(1)));
         body.put("managedSessionStore", storeDescriptor());
+        if (runtimeSessionId != null) {
+            body.put("runtimeSessionId", runtimeSessionId);
+        }
+        if (operationId != null) {
+            body.put("operationId", operationId);
+        }
         if (lifecycleOperation != null) {
             body.put("lifecycleProtocolVersion", 2);
             body.put("lifecycleAuthority", Map.of("operationId",
@@ -1320,6 +1446,7 @@ class HostedMcpStoreFaultGatesIT {
 
     @AfterEach
     void stop() {
+        StoreFaultGate.INSTANCE.clear();
         try {
             caseExecutor.close();
         } catch (Exception ignored) {

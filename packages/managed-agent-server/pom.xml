@@ -433,11 +433,11 @@
                                  4758 s, so the fork moves to 5368 s.
                                  The FG12b store-failure class
                                  (HostedMcpStoreFaultGatesIT, eight
-                                 cases) measures 49.0 s locally on JDK 21
-                                 + MariaDB (~100 s budgeted at 2x): the
-                                 healthy sum becomes 4858 s, so the fork
-                                 moves to 5468 s. -->
-                            <forkedProcessTimeoutInSeconds>5468</forkedProcessTimeoutInSeconds>
+                                 cases) measures 50.3 s locally on JDK 21
+                                 + MariaDB (~120 s budgeted at 2x): the
+                                 healthy sum becomes 4878 s, so the fork
+                                 moves to 5488 s. -->
+                            <forkedProcessTimeoutInSeconds>5488</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -591,9 +591,9 @@
                     <includes><include>**/HostedMcp*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
-                         per-ceiling rule for this class: one @Timeout
-                         ceiling (600 s) plus the healthy runtime must
-                         fit 1200 s. -->
+                         per-class rule for the three MCP classes: the
+                         largest @Timeout ceiling (600 s) plus the
+                         classes' healthy runtime must fit 1200 s. -->
                     <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
