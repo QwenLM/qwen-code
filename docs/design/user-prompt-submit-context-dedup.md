@@ -98,13 +98,16 @@ The interactive site and the ACP/IDE site both consult session history before
 appending, so a block delivered by either path suppresses a repeat from either
 path.
 
-The receipt survives in-memory history churn (spread-based container copies
-preserve symbol keys), but not serialization. On resume, transcript records
-are rebuilt into API history without the symbol; the rebuild re-stamps it from
-the recorded per-turn `hookContext` provenance, which only the injector
-writes. The ACP/IDE site does not record that provenance for its turns, so a
-session resumed after an ACP-delivered block conservatively re-injects rather
-than suppressing on unprovable origin.
+The receipt survives spread-based container copies, which preserve symbol
+keys, but not `structuredClone` or serialization; both drop symbol-keyed
+properties. On resume, transcript records are rebuilt into API history without
+the symbol; the rebuild re-stamps it from the recorded per-turn `hookContext`
+provenance, which only the injector writes. The ACP/IDE site does not record
+that provenance for its turns, so a session resumed after an ACP-delivered
+block conservatively re-injects rather than suppressing on unprovable origin.
+A prepared-request replay installs history with `structuredClone`
+(`llm-chat.ts`), so it drops the receipts too and re-injects once, then
+re-arms.
 
 When a match is found the turn proceeds without the appended part and without
 recording hook-context provenance for that turn, which keeps the displayed
@@ -154,9 +157,10 @@ accepted and documented as a limitation rather than solved here.
 - **History replacement re-injects once, then re-arms.** Suppression is
   receipt-gated, and the receipt is re-stamped only where per-turn `hookContext`
   provenance exists — the interactive resume path. Compaction, a client-driven
-  ACP rollback, and any restore that crosses serialization rebuild history
-  without that provenance, so the next identical block is injected once and
-  suppression re-arms from the fresh part.
+  ACP rollback, a `structuredClone` history install such as the
+  prepared-request replay, and any restore that crosses serialization rebuild
+  history without that provenance, so the next identical block is injected
+  once and suppression re-arms from the fresh part.
 
 ## Validation plan
 
