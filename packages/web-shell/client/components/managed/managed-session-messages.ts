@@ -107,6 +107,31 @@ export function managedEventsToMessages(
           ? [{ data: block['data'], mimeType: block['mimeType'] }]
           : [];
       });
+      const files = prompt.flatMap((value: unknown) => {
+        const block = record(value);
+        const resource = record(block['resource']);
+        if (
+          block['type'] !== 'resource' ||
+          typeof resource['uri'] !== 'string' ||
+          !resource['uri'].startsWith('managed-input:///') ||
+          typeof resource['text'] !== 'string' ||
+          typeof resource['mimeType'] !== 'string'
+        )
+          return [];
+        try {
+          return [
+            {
+              name: decodeURIComponent(
+                resource['uri'].slice('managed-input:///'.length),
+              ),
+              text: resource['text'],
+              mimeType: resource['mimeType'],
+            },
+          ];
+        } catch {
+          return [];
+        }
+      });
       messages.push({
         id,
         role: 'user',
@@ -116,6 +141,7 @@ export function managedEventsToMessages(
           .join('\n'),
         timestamp: event.at,
         ...(images.length ? { images } : {}),
+        ...(files.length ? { files } : {}),
       });
       settle();
     } else if (
