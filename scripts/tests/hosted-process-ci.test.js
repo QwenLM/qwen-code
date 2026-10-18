@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (105 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (115 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 190, 205],
+    ['hosted-harness-mysql', 195, 210],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -602,15 +602,17 @@ describe('Hosted real-process gates', () => {
       // and the Verify step to 100 minutes; the FG13d worker-stop cancel
       // cell adds 150 s, so the fork moves to 5368; FG11b's store faults add
       // ~130 s, so the fork moves to 5498 and the Verify step to 105
-      // minutes; the FG13d dropped-reply cancel cell adds 150 s, so the fork
-      // moves to 5648; the FG13a execute lost-reply cell adds 150 s, so the
-      // fork moves to 5798; the FG13a status lost-reply cell adds 150 s, so
-      // the fork moves to 5948 and the Verify step to 110 minutes):
+      // minutes; FG11b slice 2's Harness-side store faults add ~145 s, so
+      // the fork moves to 5643; the FG13d dropped-reply cancel cell adds
+      // 150 s, so the fork moves to 5793; the FG13a execute lost-reply cell
+      // adds 150 s, so the fork moves to 5943; the FG13a status lost-reply
+      // cell adds 150 s, so the fork moves to 6093 and the Verify step to
+      // 115 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(5948);
+        expect(forkSeconds).toBe(6093);
       }
     },
   );
@@ -653,13 +655,15 @@ describe('Hosted real-process gates', () => {
   // becomes 4758s. FG11b's Spring-side store faults, a second method of the
   // automation class (six cases sharing one minute boundary), measure
   // 30.8-64.5s across three acceptance runs (~130s budgeted at 2x), so it
-  // becomes 4888s; the FG13d dropped-reply cancel cell adds 150s, so it
-  // becomes 5038s; the FG13a execute lost-reply cell adds 150s, so it
-  // becomes 5188s; the FG13a status lost-reply cell adds 150s, so it
-  // becomes 5338s.
+  // becomes 4888s. FG11b slice 2's Harness-side store faults, a third method
+  // of the class (four cases, three cold restarts), measure 62.1-72.4s across
+  // three acceptance runs (~145s budgeted at 2x), so it becomes 5033s; the
+  // FG13d dropped-reply cancel cell adds 150s, so it becomes 5183s; the
+  // FG13a execute lost-reply cell adds 150s, so it becomes 5333s; the FG13a
+  // status lost-reply cell adds 150s, so it becomes 5483s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 5338;
+  const hostedForkHealthySeconds = 5483;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

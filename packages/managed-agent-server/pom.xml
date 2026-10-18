@@ -438,18 +438,26 @@
                                  at 2x): the healthy sum becomes
                                  4888 s, so the fork moves to 5498 s
                                  and the Verify step to 105 minutes.
-                                 The FG13d dropped-reply cancel cell
+                                 FG11b slice 2's Harness-side store
+                                 faults, a third method of the class
+                                 (four cases, three cold restarts),
+                                 measure 62.1-72.4 s (~145 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 5033 s, so the fork moves to 5643 s,
+                                 which the Verify step's 105 minutes
+                                 still wrap. The FG13d dropped-reply
+                                 cancel cell (issue #14449) adds 150
+                                 s: the healthy sum becomes 5183 s, so
+                                 the fork moves to 5793 s. The FG13a
+                                 execute lost-reply cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 5333 s, so the fork moves to 5943 s.
+                                 The FG13a status lost-reply cell
                                  (issue #14449) adds 150 s: the healthy
-                                 sum becomes 5038 s, so the fork moves
-                                 to 5648 s. The FG13a execute lost-reply
-                                 cell (issue #14449) adds 150 s: the
-                                 healthy sum becomes 5188 s, so the fork
-                                 moves to 5798 s. The FG13a status
-                                 lost-reply cell (issue #14449) adds
-                                 150 s: the healthy sum becomes 5338 s,
-                                 so the fork moves to 5948 s and the
-                                 Verify step to 110 minutes. -->
-                            <forkedProcessTimeoutInSeconds>5948</forkedProcessTimeoutInSeconds>
+                                 sum becomes 5483 s, so the fork moves
+                                 to 6093 s and the Verify step to 115
+                                 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6093</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
