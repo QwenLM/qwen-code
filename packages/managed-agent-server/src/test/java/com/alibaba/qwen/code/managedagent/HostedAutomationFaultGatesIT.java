@@ -541,6 +541,9 @@ class HostedAutomationFaultGatesIT {
     private void dropRefusals() {
         if (jdbc != null) {
             refusals.values().forEach(trigger -> jdbc.execute("DROP TRIGGER IF EXISTS " + trigger));
+            // The fixture table lives in the shared schema; leaving it behind
+            // makes ManagedSchema reject every later Spring context.
+            jdbc.execute("DROP TABLE IF EXISTS fg11b_fire");
         }
         refusals.clear();
     }
