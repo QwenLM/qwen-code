@@ -2972,9 +2972,222 @@ describe('Hosted Harness no-tool session', () => {
     expect(settled[0]!.payload['outcome']).toBe('completed');
   });
 
+  it('cancels only the active automation occurrence and preserves later runs', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const operations = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({ operationId: randomUUID(), ...body });
+    const cancel = (occurrenceKey = AUTOMATION_SLOT) =>
+      operations({
+        kind: 'cancel_run',
+        scheduleId: AUTOMATION_ID,
+        occurrenceKey,
+        automationRunId: automationRunId(AUTOMATION_ID, occurrenceKey),
+      });
+    expect(
+      (
+        await operations({
+          kind: 'cancel_run',
+          scheduleId: AUTOMATION_ID,
+          occurrenceKey: '',
+          automationRunId: automationRunId(AUTOMATION_ID, AUTOMATION_SLOT),
+        })
+      ).status,
+    ).toBe(400);
+    expect((await cancel('manual:missing')).status).toBe(404);
+    let signal!: AbortSignal;
+    let finish!: () => void;
+    state.model.mockImplementationOnce(
+      (input) =>
+        new Promise((_resolve, reject) => {
+          signal = input.signal;
+          finish = () => reject(new DOMException('Cancelled', 'AbortError'));
+          signal.addEventListener('abort', finish, { once: true });
+        }),
+    );
+    try {
+      expect(
+        (
+          await operations({
+            kind: 'define_schedule',
+            scheduleId: AUTOMATION_ID,
+            definition: automationDefinition,
+          })
+        ).status,
+      ).toBe(202);
+      expect((await operations(fireBody())).status).toBe(202);
+      await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
+        timeout: 10_000,
+      });
+      expect(signal.aborted).toBe(false);
+      expect(
+        (
+          await operations({
+            kind: 'cancel_run',
+            scheduleId: AUTOMATION_ID,
+            occurrenceKey: AUTOMATION_SLOT,
+            automationRunId: automationRunId(AUTOMATION_ID, 'manual:other'),
+          })
+        ).status,
+      ).toBe(400);
+      expect(signal.aborted).toBe(false);
+      expect((await cancel()).status).toBe(202);
+      expect(signal.aborted).toBe(true);
+      await vi.waitFor(
+        async () =>
+          expect((await operations(fireBody())).body.run.state).toBe(
+            'cancelled',
+          ),
+        { timeout: 10_000 },
+      );
+      expect((await cancel()).body.run.state).toBe('cancelled');
+      expect(
+        (
+          await operations({
+            kind: 'define_schedule',
+            scheduleId: AUTOMATION_ID,
+            definition: automationDefinition,
+          })
+        ).body.schedule,
+      ).toMatchObject({ enabled: true, revision: 1 });
+      expect(
+        (await operations(fireBody(1, 'manual:later', 'manual'))).status,
+      ).toBe(202);
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await operations(fireBody(1, 'manual:later', 'manual'))).body.run
+              .state,
+          ).toBe('settled'),
+        { timeout: 10_000 },
+      );
+      expect((await cancel('manual:later')).body.run.state).toBe('settled');
+      expect(state.model).toHaveBeenCalledTimes(2);
+    } finally {
+      finish?.();
+    }
+  });
+
+  it('cancels one queued automation without aborting foreground or sibling work', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId as string);
+    const operations = (body: Record<string, unknown>) =>
+      authorize(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      ).send({ operationId: randomUUID(), ...body });
+    let signal!: AbortSignal;
+    let finish!: () => void;
+    state.model.mockImplementationOnce(
+      (input) =>
+        new Promise((resolve) => {
+          signal = input.signal;
+          finish = () =>
+            resolve({ text: 'foreground done', model: 'test-model' });
+        }),
+    );
+    const prompt = [{ type: 'text', text: 'foreground held' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    try {
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1), {
+        timeout: 10_000,
+      });
+      expect(
+        (
+          await operations({
+            kind: 'define_schedule',
+            scheduleId: AUTOMATION_ID,
+            definition: automationDefinition,
+          })
+        ).status,
+      ).toBe(202);
+      expect((await operations(fireBody())).status).toBe(202);
+      expect(
+        (await operations(fireBody(1, 'manual:sibling', 'manual'))).status,
+      ).toBe(202);
+      expect(
+        (
+          await operations({
+            kind: 'cancel_run',
+            scheduleId: AUTOMATION_ID,
+            occurrenceKey: AUTOMATION_SLOT,
+            automationRunId: automationRunId(AUTOMATION_ID, AUTOMATION_SLOT),
+          })
+        ).status,
+      ).toBe(202);
+      expect(signal.aborted).toBe(false);
+      expect(state.model).toHaveBeenCalledTimes(1);
+      finish();
+      await vi.waitFor(
+        async () => {
+          expect((await operations(fireBody())).body.run).toMatchObject({
+            state: 'cancelled',
+            execution: 'not_started_proven',
+          });
+          expect(
+            (await operations(fireBody(1, 'manual:sibling', 'manual'))).body.run
+              .state,
+          ).toBe('settled');
+        },
+        { timeout: 10_000 },
+      );
+      expect(state.model).toHaveBeenCalledTimes(2);
+      expect(signal.aborted).toBe(false);
+    } finally {
+      finish?.();
+    }
+  });
+
+  it('consumes a durable queued automation cancel on load without a model call', async () => {
+    await prewriteAutomationSession(undefined, undefined, true);
+    const server = await app();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+    });
+    expect(loaded.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const replay = await headers(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+          .send({ operationId: randomUUID(), ...fireBody() });
+        expect(replay.body.run).toMatchObject({
+          state: 'cancelled',
+          execution: 'not_started_proven',
+        });
+      },
+      { timeout: 10_000 },
+    );
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   async function prewriteAutomationSession(
     toolProfile?: string,
     captureBytes?: number,
+    cancel = false,
   ): Promise<string> {
     const key = {
       tenantId: 'tenant',
@@ -3041,6 +3254,7 @@ describe('Hosted Harness no-tool session', () => {
         trigger: 'scheduled',
         firedAt: Date.parse('2026-03-08T07:00:05Z'),
       });
+      if (cancel) await automations.requestCancel(fired.run.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -3051,7 +3265,9 @@ describe('Hosted Harness no-tool session', () => {
   // the journal carries the committed input, the transcript carries the
   // turn attempt, and the hook pin keeps a bare load from refusing the
   // crash the way a parked prompt would refuse it without one.
-  async function prewriteAutomationCrashedTurnSession(): Promise<string> {
+  async function prewriteAutomationCrashedTurnSession(
+    cancel = false,
+  ): Promise<string> {
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -3129,6 +3345,7 @@ describe('Hosted Harness no-tool session', () => {
         daemonPromptId: fired.inputId,
         message: { role: 'user', parts: [{ text: 'queued' }] },
       } as never);
+      if (cancel) await automations.requestCancel(fired.run.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -6150,31 +6367,55 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }, 45_000);
 
-  it('settles an automation run as failed/unknown when its turn went recovery-blocked', async () => {
-    await prewriteAutomationCrashedTurnSession();
-    mockBrokerBroker();
-    const server = await app(true);
-    const loaded = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store() });
-    expect(loaded.status).toBe(200);
-    const authorize = (request: supertest.Test) =>
-      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-    await vi.waitFor(
-      async () => {
-        const replayed = await authorize(
-          supertest(server).post(
-            `/session/${SESSION_ID}/automations/operations`,
-          ),
-        ).send({ operationId: randomUUID(), ...fireBody() });
-        expect(replayed.status).toBe(202);
-        expect(replayed.body.run.state).toBe('failed');
-        expect(replayed.body.run.execution).toBe('outcome_unknown');
-      },
-      { timeout: 10_000, interval: 50 },
-    );
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
-  });
+  it.each([false, true])(
+    'settles a crashed automation as failed/unknown with durable cancel=%s',
+    async (cancel) => {
+      const inputId = await prewriteAutomationCrashedTurnSession(cancel);
+      mockBrokerBroker();
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      const authorize = (request: supertest.Test) =>
+        headers(request).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        );
+      await vi.waitFor(
+        async () => {
+          const replayed = await authorize(
+            supertest(server).post(
+              `/session/${SESSION_ID}/automations/operations`,
+            ),
+          ).send({ operationId: randomUUID(), ...fireBody() });
+          expect(replayed.status).toBe(202);
+          expect(replayed.body.run.state).toBe('failed');
+          expect(replayed.body.run.execution).toBe('outcome_unknown');
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      await vi.waitFor(async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        const settled = journal.events.filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === inputId,
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0]!.payload['outcome']).toBe('error');
+      });
+      expect(state.model).not.toHaveBeenCalled();
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    },
+  );
 
   it('settles, consumes and unblocks on a crash, and later fires run once', async () => {
     await prewriteAutomationCrashedTurnSession();
