@@ -147,7 +147,8 @@ final class HostedEventStreamRelay implements AutoCloseable {
         thread.start();
     }
 
-    private static boolean contains(byte[] buffer, int length, byte[] token) {
+    private static int occurrences(byte[] buffer, int length, byte[] token) {
+        int found = 0;
         outer:
         for (int start = 0; start + token.length <= length; start++) {
             for (int index = 0; index < token.length; index++) {
@@ -155,9 +156,10 @@ final class HostedEventStreamRelay implements AutoCloseable {
                     continue outer;
                 }
             }
-            return true;
+            found++;
+            start += token.length - 1;
         }
-        return false;
+        return found;
     }
 
     private static boolean endsWith(byte[] buffer, int length, byte[] token) {
@@ -283,7 +285,9 @@ final class HostedEventStreamRelay implements AutoCloseable {
         void toClient() {
             byte[] buffer = new byte[16 * 1024];
             // The tail of the earlier reads ahead of each new one, so a
-            // keepalive split across reads still counts, once.
+            // keepalive split across reads still counts. The tail is a byte
+            // shorter than a keepalive, so none counts twice, and each of
+            // the keepalives one read carries counts on its own.
             byte[] window = new byte[KEEPALIVE.length - 1 + buffer.length];
             int carried = 0;
             try {
@@ -299,7 +303,8 @@ final class HostedEventStreamRelay implements AutoCloseable {
                         lastEventStreamByte = now;
                         System.arraycopy(buffer, 0, window, carried, read);
                         int length = carried + read;
-                        if (contains(window, length, KEEPALIVE)) {
+                        for (int found = occurrences(window, length,
+                                KEEPALIVE); found > 0; found--) {
                             keepalives.add(now);
                         }
                         carried = Math.min(KEEPALIVE.length - 1, length);

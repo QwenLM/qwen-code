@@ -15,8 +15,9 @@ import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-// TCP may split a request or a keepalive at any byte. Each write below is
-// its own segment, so the relay reads the pieces apart.
+// TCP may split a request or a keepalive at any byte, or join pieces into
+// one read. Each send below goes out on its own, so the relay mostly reads
+// the pieces apart, and every assertion holds however the reads fall.
 class HostedEventStreamRelayTest {
     @Test
     @Timeout(15)
@@ -61,6 +62,27 @@ class HostedEventStreamRelayTest {
                 assertThat(relay.keepalives()).hasSize(2);
             }
             assertThat(relay.faults()).isEmpty();
+        }
+    }
+
+    @Test
+    @Timeout(15)
+    void countsEachKeepaliveOneReadCarries() throws Exception {
+        try (ServerSocket harness = new ServerSocket(0, 50,
+                InetAddress.getLoopbackAddress());
+                HostedEventStreamRelay relay =
+                        new HostedEventStreamRelay(harness.getLocalPort());
+                Socket client = connect(relay);
+                Socket upstream = harness.accept()) {
+            send(client, "GET /session/demo/events HTTP/1.1\r\n"
+                    + "Host: 127.0.0.1:" + relay.port() + "\r\n\r\n");
+            receive(upstream, "\r\n\r\n");
+            // One write, so both keepalives reach the relay in one read.
+            send(upstream, "HTTP/1.1 200 OK\r\n\r\n"
+                    + ": keepalive\n\n: keepalive\n\n");
+            receive(client, ": keepalive\n\n: keepalive\n\n");
+            await(() -> relay.keepalives().size() == 2);
+            assertThat(relay.keepalives()).hasSize(2);
         }
     }
 
