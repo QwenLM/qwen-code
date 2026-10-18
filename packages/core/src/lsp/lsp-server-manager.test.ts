@@ -427,6 +427,7 @@ describe('LspServerManager', () => {
       true,
       false,
     ],
+    [{ interFileDependencies: true }, true, false],
     [{ interFileDependencies: true, workspaceDiagnostics: true }, true, true],
   ])(
     'captures diagnosticProvider %j as document=%s workspace=%s',

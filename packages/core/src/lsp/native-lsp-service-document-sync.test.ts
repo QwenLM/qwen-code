@@ -2244,7 +2244,7 @@ describe('NativeLspService disk document synchronization', () => {
         });
         connection.request.mockClear();
         await expect(workspaceDiagnostics()).rejects.toThrow(
-          'No configured LSP server supports workspace pull diagnostics',
+          'No selected LSP server supports workspace pull diagnostics',
         );
         expect(connection.request).not.toHaveBeenCalled();
       },
@@ -2299,11 +2299,33 @@ describe('NativeLspService disk document synchronization', () => {
           operation === 'diagnostics'
             ? run(service.diagnostics(uri))
             : run(service.workspaceDiagnostics()),
-        ).rejects.toThrow(/support/i);
+        ).rejects.toThrow(
+          operation === 'diagnostics'
+            ? 'does not support document pull diagnostics'
+            : 'does not support workspace pull diagnostics',
+        );
         expect(connection.request).not.toHaveBeenCalled();
         expect(connection.send).not.toHaveBeenCalled();
       },
     );
+
+    it('keeps unsupported workspace reporting inside the requested server scope', async () => {
+      const supported = {
+        ...handle,
+        config: { ...handle.config, name: 'supported' },
+        connection: createConnection(),
+      };
+      setDiagnosticPull(handle, true, false);
+      setDiagnosticPull(supported, true, true);
+      withServers([
+        ['gopls', handle],
+        ['supported', supported],
+      ]);
+
+      await expect(run(service.workspaceDiagnostics('gopls'))).rejects.toThrow(
+        /^No selected LSP server supports workspace pull diagnostics \(gopls: does not support workspace pull diagnostics\)$/,
+      );
+    });
 
     it('uses document support without treating it as workspace support', async () => {
       setDiagnosticPull(handle, true, false);

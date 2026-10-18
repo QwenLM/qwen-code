@@ -776,7 +776,8 @@ export class NativeLspService {
   /**
    * Ready handles for a diagnostics query. Rejects outright when nothing is
    * ready — no matching server, a server that failed or never started, a
-   * server still starting up — because an empty ready set would otherwise be
+   * server still starting up, or every candidate being known not to support
+   * the requested pull — because an empty ready set would otherwise be
    * reported as a clean result. For a document query (`uri` given) the
    * rejection names only servers the queried file does not provably exclude;
    * when every configured server is irrelevant for the file the rejection
@@ -809,8 +810,12 @@ export class NativeLspService {
       ([, handle]) => this.diagnosticPullSupport(handle, uri) !== false,
     );
     if (candidates.length > 0 && eligible.length === 0) {
+      const unsupported = candidates.map(
+        ([name]) =>
+          `${name}: does not support ${uri ? 'document' : 'workspace'} pull diagnostics`,
+      );
       throw new Error(
-        `No configured LSP server supports ${uri ? 'document' : 'workspace'} pull diagnostics`,
+        `No selected LSP server supports ${uri ? 'document' : 'workspace'} pull diagnostics (${boundedRejectionDetail(unsupported)})`,
       );
     }
     const skipped = eligible.map(([name, handle]) =>
@@ -836,9 +841,10 @@ export class NativeLspService {
   /**
    * Ready handles a diagnostics query has not asked yet, read from live state
    * so a server that finished starting while the query was in flight is asked
-   * rather than reported as unreachable. Uses the same relevance test as
-   * `unreachableDiagnosticServers`, so a server the queried file provably
-   * excludes is neither asked nor named.
+   * rather than reported as unreachable. Uses the same relevance and
+   * capability tests as `unreachableDiagnosticServers`, so a server the
+   * queried file provably excludes or that is known not to support the pull
+   * is neither asked nor named.
    */
   private newlyReadyDiagnosticHandles(
     asked: ReadonlyArray<readonly [string, unknown]>,
@@ -1008,9 +1014,9 @@ export class NativeLspService {
    * mistaken for an answer. For a document query (`uri` given), only servers
    * the file does not provably exclude can veto — a server that could never
    * own the file must not discard another server's authoritative empty
-   * report. For a workspace query every unreachable server vetoes, since the
-   * report would otherwise certify that server's slice of the workspace as
-   * clean.
+   * report. For a workspace query every unreachable server not known to lack
+   * workspace-pull support vetoes, since the report would otherwise certify
+   * that server's slice of the workspace as clean.
    */
   private unreachableDiagnosticServers(
     queried: ReadonlyArray<readonly [string, unknown]>,
