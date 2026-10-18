@@ -20521,6 +20521,29 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects a workspace change with an invalid revision or kind', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1.5,
+        kind: 'permissions',
+      }),
+    ).rejects.toThrow();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 'bogus',
+      }),
+    ).rejects.toThrow();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('fans out a workspace-scoped grant across a different path spelling of the same directory', async () => {
     // The admission root and the request's cwd can name one directory through
     // a symlink (macOS /tmp vs /private/tmp) or case; a string compare would
