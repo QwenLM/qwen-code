@@ -185,7 +185,8 @@ public final class SessionResourceCollectionCollector {
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
             Claim claim =
-                    transactions.execute(
+                    ManagedSessionStore.skipContended(
+                            transactions,
                             status -> {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");

@@ -59,9 +59,10 @@ final class ManagedProjectionResourceCollector {
                         "SELECT resource_key, tenant_id, session_id FROM ma_resource WHERE retention_until <= " + ManagedSchemaTime.SQL_NOW + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_resource.tenant_id AND s.session_id = ma_resource.session_id AND s.csi_guard = TRUE) ORDER BY retention_until, resource_key LIMIT "
                                 + BATCH);
         for (var candidate : candidates) {
-            changed |= Boolean.TRUE.equals(transactions.execute(status -> collect(
-                    (String) candidate.get("tenant_id"), (String) candidate.get("session_id"),
-                    (String) candidate.get("resource_key"))));
+            changed |= Boolean.TRUE.equals(ManagedSessionStore.skipContended(transactions,
+                    status -> collect((String) candidate.get("tenant_id"),
+                            (String) candidate.get("session_id"),
+                            (String) candidate.get("resource_key"))));
         }
         return changed;
     }
@@ -79,7 +80,8 @@ final class ManagedProjectionResourceCollector {
         for (var candidate : candidates) {
             changed |=
                     Boolean.TRUE.equals(
-                            transactions.execute(
+                            ManagedSessionStore.skipContended(
+                                    transactions,
                                     status -> {
                                         String tenant = (String) candidate.get("tenant_id");
                                         String session = (String) candidate.get("session_id");
