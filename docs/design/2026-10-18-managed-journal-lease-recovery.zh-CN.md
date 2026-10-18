@@ -31,6 +31,17 @@ Hosted Session 通过 Session Store 为日志激活续租。控制面停机超�
     头部被任何其他事务推进都属致命：本写者已失去日志，该 Session 需要 takeover。
 - **先重取授权，再读头部。** 过期授权先以同一写者身份重新 acquire；若 acquire
   本身失败，则恢复过期授权，使后续结算仍可重试，而不会落成「无写者」状态。
+- **读取 replay 状态前先结算。** 串行队列在下一次操作体读取 replay 状态或发布
+  即将重建的 body 之前完成结算，因此重试的 domain/extension 记录返回实际已提交
+  的引用且只应用一次。
+- **结算的确定性失败会停止保活。** 位置被 fence、头部回退或回执畸形都会停止写者
+  的租约续期；只有 `ManagedSessionAppendUnsettledError` 保持可恢复。
+- **读取期间租约过期时重取一次授权。** 若租约过期后 Store 以 writer conflict
+  拒绝结算读取，客户端重新 acquire 并再读一次；第二次拒绝，或租约仍有效时的
+  拒绝，都属被其他写者 fence。
+- **Hosted 路由把未结算追加当作存储故障。** automation、message、command、
+  child、channel 路由都返回与存储故障相同的可重试 503，绝不返回 4xx 记录拒绝；
+  `send_message` 调用把它当作故障而不是拒绝。
 - **确定性失败仍然封闭日志。** 可回滚的提交拒绝保持可重试且不锁定；租户守卫
   预算耗尽、回执形状错误、头部回退、被其他写者 fence 仍然终止。
 - **续租不堆积。** 上一次续租仍在途时，激活续租定时器跳过本次 tick，避免停机
@@ -51,9 +62,14 @@ Hosted Session 通过 Session Store 为日志激活续租。控制面停机超�
 - `packages/core/src/managed-runtime/http-managed-session-store.test.ts`
   - 停机超过写者租约后重新取证，并接受用户 Turn；
   - 回复丢失但已落地的续租只应用一次；
-  - 日志的追加位置被其他写者的事务占据时由结算封闭；
+  - 日志的追加位置被其他写者的事务占据时由结算封闭，并停止保活；
+  - 已落地的 domain 记录以实际提交的引用重放，不重复发布；
+  - 已落地的 extension 记录重放，而不是因缺少 body 失败；
+  - 结算读取期间租约过期时重新 acquire 并重读头部；
   - 租约逾期叠加租户守卫预算耗尽时仍然封闭；
   - 永久 fence 仍然停止保活。
+- `packages/cli/src/serve/hosted-harness-session.test.ts`
+  - 未结算的消息追加返回 503 `session_message_failed`，而不是 409 记录拒绝。
 - `packages/core/src/managed-runtime/managed-session-assembly.test.ts`
   - 激活续租不会在慢请求后堆叠。
 

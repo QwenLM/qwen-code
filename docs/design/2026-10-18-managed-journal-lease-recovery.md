@@ -39,6 +39,21 @@ not, and keeps its existing fence.
   acquisition before the head is read. If the acquisition fails, the expired
   grant is restored so a later settlement can retry instead of finding a
   writer-less handle.
+- **Settle before replay state is read.** Every serialized operation settles
+  the pending attempt before it reads replay state or publishes the body it
+  would rebuild, so a retried domain or extension record returns the reference
+  actually committed and applies once.
+- **A permanent settlement failure stops keepalive.** A fenced position, a
+  regressed head, or a malformed answer stops the writer's lease renewal;
+  only `ManagedSessionAppendUnsettledError` stays recoverable.
+- **A read grant that lapses mid-read is re-acquired once.** If the Store
+  refuses the settlement read with a writer conflict after the lease expired,
+  the client re-acquires and reads again; a second refusal, or one with a
+  live lease, is a fence by another writer.
+- **Hosted routes treat an unsettled append as a store fault.** Automation,
+  message, command, child, and channel routes answer it with the retryable
+  503 they use for a store outage, never a 4xx record refusal. A `send_message`
+  call treats it as a fault, not a refusal.
 - **Definite failures still fence the log.** A rejected commit stays
   retriable without latching. A spent tenant-guard budget, a malformed receipt,
   a regressed head, and a fence by another writer remain terminal.
@@ -65,9 +80,17 @@ not, and keeps its existing fence.
   - outage longer than the writer lease re-attests and accepts a user Turn;
   - a renewal that landed before its acknowledgement was lost is applied once;
   - a journal whose append position holds another writer's transaction is
-    fenced by the settlement;
+    fenced by the settlement, and its keepalive stops;
+  - a landed domain record replays with the committed reference, not a second
+    publication;
+  - a landed extension record replays instead of failing for a missing body;
+  - a read grant that lapses during settlement is re-acquired and the head
+    re-read;
   - a lapsed lease with a spent guard budget still fences the log;
   - a permanent fence still stops keepalive.
+- `packages/cli/src/serve/hosted-harness-session.test.ts`
+  - an unsettled message append answers 503 `session_message_failed`, not a
+    409 record refusal.
 - `packages/core/src/managed-runtime/managed-session-assembly.test.ts`
   - activation renewals do not stack behind one in flight.
 

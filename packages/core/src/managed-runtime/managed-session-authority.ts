@@ -3024,7 +3024,16 @@ export class LocalManagedSessionAuthority {
    * records around each other's commit markers.
    */
   private runSerial<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.queue.then(operation, operation);
+    const run = async () => {
+      // Settle before the operation reads replay state or publishes the body
+      // it would rebuild: a landed-but-unacknowledged attempt must be applied
+      // first, or the retry answers with the wrong record reference (or no
+      // extension record) while the commit itself replays.
+      if (this.unsettledAppend !== undefined)
+        await this.settleUnsettledAppend();
+      return operation();
+    };
+    const pending = this.queue.then(run, run);
     this.queue = pending.then(
       () => undefined,
       () => undefined,

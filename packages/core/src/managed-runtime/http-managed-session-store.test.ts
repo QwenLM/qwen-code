@@ -2541,6 +2541,201 @@ describe('HTTP Managed Session store', () => {
       });
       await vi.advanceTimersByTimeAsync(25_000);
       expect(session.authority.writesStopped).toBe(true);
+      // A fenced log must not keep extending the lease it just acquired:
+      // the takeover this error asks for can only start once it lapses.
+      const renewalsAtFence = server.renewCount;
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(server.renewCount).toBe(renewalsAtFence);
+    } finally {
+      await stores.close().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1000);
+      await session.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays a landed domain record before publishing a second body', async () => {
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let failing = true;
+    let landedOnce = false;
+    server.fetch.mockImplementation(async (input, init) => {
+      if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (failing && body['operation'] === 'recordGoalState') {
+          if (!landedOnce) {
+            landedOnce = true;
+            await originalFetch(input, init);
+          }
+          return jsonResponse(
+            { error: { code: 'store_unavailable', message: 'ack lost' } },
+            503,
+          );
+        }
+      }
+      return originalFetch(input, init);
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const command = {
+        operation: 'recordGoalState',
+        commandId: 'goal-lost-ack',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'c'.repeat(64),
+      };
+      const request = {
+        domain: 'goal_state' as const,
+        content: { record: JSON.parse(MESSAGE_BODY.toString('utf8')) },
+      };
+      await expect(
+        session.authority.commitDomainRecord(command, request, {
+          class: 'trusted_entry',
+        }),
+      ).rejects.toThrow('append outcome is unknown');
+      failing = false;
+      const replayed = await session.authority.commitDomainRecord(
+        command,
+        request,
+        { class: 'trusted_entry' },
+      );
+      const committed = server.commits.find(
+        (commit) => commit['operation'] === 'recordGoalState',
+      );
+      const record = (
+        committed?.['resources'] as Array<Record<string, unknown>>
+      ).find((resource) => resource['kind'] === 'managed-goal_state');
+      expect(replayed.recordRef.resourceId).toBe(record?.['resourceId']);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'recordGoalState',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await session.close().catch(() => undefined);
+      await stores.close().catch(() => undefined);
+    }
+  });
+
+  it('replays a landed extension record before rebuilding its body', async () => {
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let failing = true;
+    let landedOnce = false;
+    server.fetch.mockImplementation(async (input, init) => {
+      if (/\/transactions:commit(?:-v2)?$/.test(requestUrl(input))) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (failing && body['operation'] === 'commitMcpConfiguration') {
+          if (!landedOnce) {
+            landedOnce = true;
+            await originalFetch(input, init);
+          }
+          return jsonResponse(
+            { error: { code: 'store_unavailable', message: 'ack lost' } },
+            503,
+          );
+        }
+      }
+      return originalFetch(input, init);
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const template = JSON.parse(
+        readFileSync(
+          new URL(
+            './contracts/managed-mcp-record-v1.fixtures.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ).templates.mcp_configuration;
+      const command = {
+        operation: 'commitMcpConfiguration',
+        commandId: 'configure-lost-ack',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'a'.repeat(64),
+      };
+      await expect(
+        session.authority.commitExtensionRecord(
+          command,
+          { domain: 'mcp_configuration', record: template },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow('append outcome is unknown');
+      failing = false;
+      await expect(
+        session.authority.commitExtensionRecord(
+          command,
+          { domain: 'mcp_configuration', record: template },
+          { class: 'trusted_entry' },
+        ),
+      ).resolves.toMatchObject({ receipt: { replayed: true } });
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'commitMcpConfiguration',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await session.close().catch(() => undefined);
+      await stores.close().catch(() => undefined);
+    }
+  });
+
+  it('re-acquires when the read grant lapses during settlement', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let unavailable = false;
+    let duringSettlement = false;
+    let lapsedRead = false;
+    server.fetch.mockImplementation(async (input, init) => {
+      const url = requestUrl(input);
+      if (duringSettlement && !lapsedRead && url.includes('/restore')) {
+        lapsedRead = true;
+        vi.setSystemTime(Date.now() + 60_000);
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'lease lapsed during the read',
+            },
+          },
+          409,
+        );
+      }
+      if (unavailable) {
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'outage' } },
+          503,
+        );
+      }
+      const response = await originalFetch(input, init);
+      if (url.endsWith('/writers:acquire')) {
+        return jsonResponse({
+          ...(await response.json()),
+          leaseUntil: Date.now() + 50_000,
+        });
+      }
+      return response;
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      unavailable = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      unavailable = false;
+      duringSettlement = true;
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(lapsedRead).toBe(true);
+      expect(session.authority.writesStopped).toBe(false);
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      await appendMessage(
+        session,
+        session.authority.committedSequence + 1,
+        messageRef,
+      );
     } finally {
       await stores.close().catch(() => undefined);
       await vi.advanceTimersByTimeAsync(1000);

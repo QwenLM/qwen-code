@@ -452,8 +452,18 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     }
   }
 
-  settleAppend(): Promise<'landed' | 'absent'> {
-    return this.client.settleAppend();
+  async settleAppend(): Promise<'landed' | 'absent'> {
+    try {
+      return await this.client.settleAppend();
+    } catch (error) {
+      // A permanent settlement failure (another writer owns the position, a
+      // malformed head) fences the log exactly like a failed append, so the
+      // keepalive must stop instead of extending a lease this writer can no
+      // longer use. An unsettled answer stays recoverable.
+      if (!(error instanceof ManagedSessionAppendUnsettledError))
+        this.client.stopWriterRenewal();
+      throw error;
+    }
   }
 
   blockRecovery(request: {
@@ -1133,61 +1143,80 @@ class ManagedSessionStoreHttpClient {
   async settleAppend(): Promise<'landed' | 'absent'> {
     const pending = this.pendingAppend;
     if (pending === undefined) return 'absent';
-    try {
-      if (this.grant === undefined) {
-        throw new ManagedSessionRecordError(
-          'the HTTP Managed Session writer is not active.',
+    let reacquired = false;
+    for (;;) {
+      try {
+        if (this.grant === undefined) {
+          throw new ManagedSessionRecordError(
+            'the HTTP Managed Session writer is not active.',
+          );
+        }
+        if (this.grant.leaseUntil <= Date.now()) await this.reacquireWriter();
+        const head = parseRestoreHead(
+          await this.json(
+            `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
+            'GET',
+          ),
         );
-      }
-      if (this.grant.leaseUntil <= Date.now()) await this.reacquireWriter();
-      const head = parseRestoreHead(
-        await this.json(
-          `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
-          'GET',
-        ),
-      );
-      this.requireHeadMatchesGrant(head);
-      if (head.journalRevision === pending.baseRevision) {
+        this.requireHeadMatchesGrant(head);
+        if (head.journalRevision === pending.baseRevision) {
+          this.pendingAppend = undefined;
+          this.adoptHead(head);
+          return 'absent';
+        }
+        if (
+          pending.descriptor === undefined ||
+          head.journalRevision !== pending.baseRevision + 1
+        ) {
+          throw new ManagedSessionRecordError(
+            `the journal advanced to revision ${head.journalRevision} past this writer's ${pending.baseRevision} while its append outcome was unknown; the Session needs a takeover.`,
+          );
+        }
+        const page = asRecord(
+          await this.json(
+            `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${pending.baseRevision}&limit=1`,
+            'GET',
+          ),
+          'transaction page',
+        );
+        const rows = asArray(page['transactions'], 'transactions');
+        const stored = parseStoredTransaction(rows[0]);
+        if (
+          stored.journalRevision !== head.journalRevision ||
+          stored.recordDigest !== pending.recordDigest
+        ) {
+          throw new ManagedSessionRecordError(
+            'the journal holds a different transaction at this append position; the Session needs a takeover.',
+          );
+        }
+        this.resources.releaseCommitted(pending.commitResources ?? []);
+        for (const ref of pending.descriptor.refs)
+          this.publicationAdmissions.delete(ref.resourceId);
         this.pendingAppend = undefined;
         this.adoptHead(head);
-        return 'absent';
+        return 'landed';
+      } catch (error) {
+        if (error instanceof ManagedSessionAppendUnsettledError) throw error;
+        // The read grant can lapse after the check above but before the Store
+        // answers, and a real backend then refuses with a writer conflict.
+        // That is recoverable once by re-acquiring and re-reading; a conflict
+        // with a lease that is still live, or a second one, means another
+        // writer holds the log and stays permanent.
+        const lapsed =
+          this.grant !== undefined && this.grant.leaseUntil <= Date.now();
+        if (
+          !reacquired &&
+          lapsed &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409
+        ) {
+          reacquired = true;
+          continue;
+        }
+        if (isUncertainStoreFailure(error))
+          throw new ManagedSessionAppendUnsettledError(asError(error));
+        throw error;
       }
-      if (
-        pending.descriptor === undefined ||
-        head.journalRevision !== pending.baseRevision + 1
-      ) {
-        throw new ManagedSessionRecordError(
-          `the journal advanced to revision ${head.journalRevision} past this writer's ${pending.baseRevision} while its append outcome was unknown; the Session needs a takeover.`,
-        );
-      }
-      const page = asRecord(
-        await this.json(
-          `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${pending.baseRevision}&limit=1`,
-          'GET',
-        ),
-        'transaction page',
-      );
-      const rows = asArray(page['transactions'], 'transactions');
-      const stored = parseStoredTransaction(rows[0]);
-      if (
-        stored.journalRevision !== head.journalRevision ||
-        stored.recordDigest !== pending.recordDigest
-      ) {
-        throw new ManagedSessionRecordError(
-          'the journal holds a different transaction at this append position; the Session needs a takeover.',
-        );
-      }
-      this.resources.releaseCommitted(pending.commitResources ?? []);
-      for (const ref of pending.descriptor.refs)
-        this.publicationAdmissions.delete(ref.resourceId);
-      this.pendingAppend = undefined;
-      this.adoptHead(head);
-      return 'landed';
-    } catch (error) {
-      if (error instanceof ManagedSessionAppendUnsettledError) throw error;
-      if (isUncertainStoreFailure(error))
-        throw new ManagedSessionAppendUnsettledError(asError(error));
-      throw error;
     }
   }
 
