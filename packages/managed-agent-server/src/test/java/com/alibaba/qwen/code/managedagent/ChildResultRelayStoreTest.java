@@ -435,6 +435,55 @@ class ChildResultRelayStoreTest {
                 .isEmpty();
     }
 
+    // #14165 FG10d: a close debt never rewrites the walk's classification.
+    // A run whose outcome no witness survived (a recovery-blocked workflow,
+    // a give-up) retires `unknown` on its walk and its delivery row even
+    // where the host cannot close the child, exactly as when the close is
+    // admitted at once; a proven result retires `done`/`delivered`. Either
+    // way the owed close parks, discoverable, on its own row.
+    @Test
+    void retainsACloseDebtUnderTheWalksOwnClassification() {
+        long now = 450_000L;
+        String session = UUID.randomUUID().toString();
+        for (String classification : List.of("unknown", "done")) {
+            String run = "run-debt-" + classification;
+            insertRecordRow("scope-g", session, run, "workflow", "planned",
+                    "running");
+            RelayRow row = relayStore.claim(TENANT, session, run,
+                    "key-" + classification, "owner", now + 30_000, now);
+            relayStore.retainCloseDebt(row, "owner", classification,
+                    "child-g", now + 1_000, "close debt retained",
+                    now + 30_000, now);
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_operation"
+                    + " WHERE tenant_id = ? AND operation_id = ? AND"
+                    + " operation_kind = 'CHILD_SESSION_START'", String.class,
+                    TENANT, run)).isEqualTo(classification);
+            assertThat(jdbc.queryForObject("SELECT CONCAT(transport_state,"
+                    + " '/', reception_state, '/', consumption_state) FROM"
+                    + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
+                    + " 'CHILD_RESULT' AND delivery_id = ?", String.class,
+                    TENANT, run)).isEqualTo(("done".equals(classification)
+                            ? "delivered" : classification)
+                            + "/pending/pending");
+            RelayRow debt = relayStore.find(TENANT, session, run);
+            assertThat(debt.operationKind()).isEqualTo("CHILD_SESSION_CLOSE");
+            assertThat(debt.state()).isEqualTo("close_debt");
+            assertThat(debt.childSessionId()).isEqualTo("child-g");
+        }
+        assertThat(relayStore.findPendingChildren("owner", now + 1_000, 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactlyInAnyOrder("run-debt-unknown", "run-debt-done");
+        RelayRow other = relayStore.claim(TENANT, session, "run-debt-orphan",
+                "key-orphan", "owner", now + 30_000, now);
+        assertThatThrownBy(() -> relayStore.retainCloseDebt(other, "owner",
+                "orphaned", "child-g", now + 1_000, null, now + 30_000, now))
+                .isInstanceOf(IllegalArgumentException.class);
+        RelayRow owed = relayStore.find(TENANT, session, "run-debt-done");
+        assertThatThrownBy(() -> relayStore.retainCloseDebt(owed, "owner",
+                "done", "child-g", now + 1_000, null, now + 30_000, now))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     // A give-up whose settle committed and whose close_debt write then
     // failed leaves delivery `cancelled` against a ledger still walking
     // the earliest arms (`binding`): narrower arm-2 state lists made

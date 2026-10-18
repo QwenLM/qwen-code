@@ -138,6 +138,8 @@ public final class SubmitHarnessTurn {
 
     Map<String, Object> getApprovalSelection() { return approvalSelection; }
 
+    List<Map<String, Object>> getPromptContent() { return promptContent; }
+
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("prompt", wirePromptContent);
@@ -216,12 +218,19 @@ public final class SubmitHarnessTurn {
         }
 
         public Builder approvalSelection(String mode, long revision) {
+            return approvalSelection(mode, revision, false);
+        }
+
+        public Builder approvalSelection(String mode, long revision, boolean planMode) {
             if (mode == null || !List.of("default", "auto-edit", "yolo").contains(mode)
-                    || revision < 0 || revision > 9_007_199_254_740_991L) {
+                    || revision < 0 || revision > 9_007_199_254_740_991L || planMode && revision == 0) {
                 throw new IllegalArgumentException("Invalid Hosted approval selection");
             }
-            approvalSelection = Collections.unmodifiableMap(new LinkedHashMap<>(
-                    Map.of("mode", mode, "revision", revision)));
+            Map<String, Object> fields = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision));
+            if (planMode) {
+                fields.put("planMode", true);
+            }
+            approvalSelection = Collections.unmodifiableMap(fields);
             return this;
         }
 
