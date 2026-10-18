@@ -98,6 +98,82 @@ class ManagedApprovalChangeTest {
                 .satisfies(row -> assertThat(row.approvalRevision()).isEqualTo(3));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+    void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
+        when(harness.supportsPlanMode()).thenReturn(true);
+        session = customSession(profile, "default");
+        var initial = store.requireSession(tenant, session);
+        var enabled = transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "enable-plan", "default", 0, true));
+        assertThat(enabled.planMode()).isTrue();
+        assertThat(enabled.approvalRevision()).isEqualTo(1);
+        assertThat(service.getWebShellSession(tenant, "actor", session).planMode()).isTrue();
+        assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).planModeSupported()).isTrue();
+        assertThat(service.queryWebShellSessionOptions(tenant, "actor", initial.agentId()).planModeSupported()).isTrue();
+        assertThat(change("actor", "permission-only", "yolo", 1).planMode()).isTrue();
+        assertThat(transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "enable-plan", "default", 0, true)).replayed()).isTrue();
+        assertCode(() -> transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "stale", "default", 0, false)), "approval_selection_conflict");
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "make a plan"));
+        var turn = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "plan-turn", "plan-digest",
+                session, input, SubmitHarnessTurn.computePayloadDigest(input)));
+        var prompt = store.findTurn(tenant, session, turn.turnId()).orElseThrow().promptId();
+        assertThat(store.findTurnApprovalSelection(tenant, session, prompt)).isEqualTo(new WebShellApprovalSelection("yolo", 2, true));
+        assertCode(() -> transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "active", "yolo", 2, false)), "turn_active");
+        when(harness.supportsPlanMode()).thenReturn(false);
+        assertThat(service.getWebShellSession(tenant, "actor", session).capabilities().workspaceTurns()).isFalse();
+        when(harness.supportsPlanMode()).thenReturn(true);
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED' WHERE tenant_id=? AND turn_id=?", tenant, turn.turnId());
+        assertThat(transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "manual-off", "yolo", 2, false)).planMode()).isFalse();
+        assertThat(store.findTurnApprovalSelection(tenant, session, prompt).planMode()).isTrue();
+        assertThat(store.requireSession(tenant, session).agentDefinitionDigest()).isEqualTo(initial.agentDefinitionDigest());
+        assertThat(store.requireSession(tenant, session).approvalMode()).isEqualTo("default");
+    }
+
+    @Test
+    void initializesPlanBeforeTheFirstTurnAndReservesARevisionForItsApprovalExit() {
+        when(harness.supportsPlanMode()).thenReturn(true);
+        var created = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "initial-plan",
+                "qwen-code", null, null, null, List.of(new ApiModels.InputBlock("input_text", "plan this")),
+                new WorkspaceSelection("ws", "."), "yolo", true));
+        var turn = store.findTurn(tenant, created.sessionId(), created.turnId()).orElseThrow();
+        assertThat(store.findTurnApprovalSelection(tenant, created.sessionId(), turn.promptId()))
+                .isEqualTo(new WebShellApprovalSelection("yolo", 1, true));
+        assertThat(service.getWebShellSession(tenant, "actor", created.sessionId()).planMode()).isTrue();
+        jdbc.update("UPDATE ma_session SET selected_approval_mode='default',approval_revision=9007199254740990 WHERE tenant_id=? AND session_id=?", tenant, session);
+        assertCode(() -> transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "overflow-plan", "default", 9_007_199_254_740_990L, true)), "approval_selection_conflict");
+        when(harness.supportsPlanMode()).thenReturn(false);
+        assertCode(() -> transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "unsupported-plan", "default", 9_007_199_254_740_990L, true)), "unsupported_feature");
+    }
+
+    @Test
+    void keepsHookDefinitionsOutsidePublicPlanWhilePreservingApprovalChanges() throws Exception {
+        when(harness.supportsPlanMode()).thenReturn(true);
+        var definition = define("hosted-workspace-files/1", "default");
+        Map<String, Object> content = json.readValue(definition.definitionJson(),
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { });
+        content.put("hook_catalog", Map.of("catalog_id", "review", "catalog_revision", 1,
+                "definition_digest", "a".repeat(64)));
+        var digest = new RequestDigests().digest(content);
+        definitions.update(tenant, "hook-definition", digest, definition.agentId(), digest.substring(7), json.writeValueAsString(content), 2);
+        session = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "hook-session",
+                definition.agentId(), null, null, null, List.of(), new WorkspaceSelection("ws", "."))).sessionId();
+        assertThat(service.queryWebShellSessionOptions(tenant, "actor", definition.agentId()).planModeSupported()).isFalse();
+        assertThat(service.getWebShellSession(tenant, "actor", session).planModeSupported()).isFalse();
+        assertCode(() -> transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "hook-plan", "default", 0, true)), "unsupported_feature");
+        assertThat(change("actor", "hook-permission", "auto-edit", 0).approvalRevision()).isEqualTo(1);
+        assertCode(() -> transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "hook-create-plan",
+                definition.agentId(), null, null, null, List.of(), new WorkspaceSelection("ws", "."), "default", true)),
+                "unsupported_feature");
+    }
+
     @Test
     void explicitlyCreatesFullAccessAndCanReturnToAskingWithoutChangingInitialPolicy() {
         var created = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "full-access",
@@ -291,10 +367,10 @@ class ManagedApprovalChangeTest {
         var created = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
                 definition.agentId(), null, null, null, input, new WorkspaceSelection("ws", ".")));
         session = created.sessionId();
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         var submitted = transaction().execute(status -> service.submitTurn(tenant, "actor", "legacy-submit", session, input));
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         change("actor", "new-policy", "yolo", 0);
         assertThat(transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
@@ -316,7 +392,7 @@ class ManagedApprovalChangeTest {
         var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "legacy", "legacy-digest",
                 session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
-        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, status='COMPLETED'"
+        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, plan_enabled=NULL, status='COMPLETED'"
                 + " WHERE tenant_id=? AND turn_id=?", tenant, admitted.turnId());
         assertThat(store.findTurnApprovalSelection(tenant, session, turn.promptId()))
                 .isNull();
