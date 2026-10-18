@@ -424,6 +424,15 @@ acquisitions on the apply/admission/receipt lanes and the lease opener
 `tenant_guard_contended` mapping. Witness:
 `ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`.
 
+Native producer and dispatch entries also bound their first placement
+acquisition in `lockOriginal`, before locking the original binding and
+execution. They use the same transaction connection and named-failure mapping;
+the grant checks and CSI path retain their existing behavior. The witness
+holds placement while calling `verifyDispatch` and producer `finish`, then
+verifies both succeed after release. This closes #14393 A.1. The bound is per
+acquisition statement; the separate retention root/head and earlier lifecycle
+acquisition gaps remain tracked in #14393 A.2/A.3.
+
 ### F3. Writer acquisition keeps placement before the drain fence
 
 With the ordinary branch of `checkLifecycleWriter` early-returned,

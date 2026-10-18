@@ -339,8 +339,8 @@ class ManagedSessionGuardConvoyIT {
     /**
      * Publication lanes take their first tenant-wide acquisition with the
      * hot-path bound: reserve (apply lane), prepareAdmission (admission
-     * lane), commitReceipt (receipt lane's placement-first entry) and
-     * publishToolResult (tool-result lane) all answer tenant_guard_contended
+     * lane), producer/dispatch, commitReceipt (receipt lane's placement-first
+     * entry) and publishToolResult (tool-result lane) all answer tenant_guard_contended
      * within the bound while a guard row is externally held, and complete
      * after the hold lifts (#13800 R1).
      */
@@ -388,6 +388,21 @@ class ManagedSessionGuardConvoyIT {
         envelope.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
                 .put("captureReason", "storage_failed").put("previewTruncated", false)
                 .put("deliveryStatus", "pending").putNull("manifest"));
+        var execution = journal.executions.findByExecutionCallId("execution-1");
+        hold = manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+            assertFastGuardFailure(() -> journal.store.verifyDispatch(execution, "pub-1",
+                    PublicationJournalFixture.PUBLICATION_TOKEN));
+            assertFastGuardFailure(() -> data.finish(key, "pub-1",
+                    PublicationJournalFixture.PUBLICATION_TOKEN, "finish",
+                    envelope.toString().getBytes(StandardCharsets.UTF_8)));
+        } finally {
+            manager.rollback(hold);
+        }
+        assertThat(journal.store.verifyDispatch(execution, "pub-1",
+                PublicationJournalFixture.PUBLICATION_TOKEN).path("publicationId").asText())
+                .isEqualTo("pub-1");
         data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN, "finish",
                 envelope.toString().getBytes(StandardCharsets.UTF_8));
         var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked")
