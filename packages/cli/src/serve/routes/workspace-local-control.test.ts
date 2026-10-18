@@ -5,6 +5,7 @@
  */
 
 import { createServer } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import type { RequestHandler } from 'express';
@@ -53,6 +54,7 @@ const asAuthenticated: RequestHandler = (req, _res, next) => {
 describe('Local Control routes', () => {
   beforeEach(() => {
     vi.mocked(listLanCandidates).mockReturnValue([]);
+    vi.mocked(findExplicitCandidate).mockClear();
     vi.mocked(findExplicitCandidate).mockReturnValue(undefined);
   });
 
@@ -421,6 +423,34 @@ describe('Local Control routes', () => {
     expect(response.body.error).toContain('--local-control-address');
     expect(response.body.interfaces).toEqual([]);
     expect(enable).not.toHaveBeenCalled();
+    // The gate's held/absent classification must consult the live interface
+    // table — a substituted one would mis-classify the refusal.
+    expect(findExplicitCandidate).toHaveBeenCalledWith(
+      '10.8.0.2',
+      networkInterfaces(),
+    );
+  });
+
+  it('classifies a reserved address shape as never acceptable, not absent (#14136)', async () => {
+    // Every host holds 127.0.0.1, yet no host can expose it; the refusal must
+    // name the shape rule rather than claim the address is missing.
+    const app = express();
+    const enable = vi.fn(async () => ({ active: true }));
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable,
+        status: vi.fn(() => ({ active: false })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({ address: '127.0.0.1' }),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('reserved_lan_address');
+    expect(response.body.error).toContain('reserved address shape');
+    expect(enable).not.toHaveBeenCalled();
   });
 
   it('still refuses a different non-candidate address while a grant is recorded', async () => {
@@ -535,7 +565,7 @@ describe('Local Control routes', () => {
     // has no default for it, so dropping the argument throws inside the GET.
     expect(findExplicitCandidate).toHaveBeenCalledWith(
       '10.8.0.2',
-      expect.any(Object),
+      networkInterfaces(),
     );
 
     vi.mocked(findExplicitCandidate).mockClear();
@@ -545,7 +575,7 @@ describe('Local Control routes', () => {
     expect(gone.body.explicitCandidate).toBeUndefined();
     expect(findExplicitCandidate).toHaveBeenCalledWith(
       '10.8.0.2',
-      expect.any(Object),
+      networkInterfaces(),
     );
   });
 

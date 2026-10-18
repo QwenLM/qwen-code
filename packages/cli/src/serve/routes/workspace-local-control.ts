@@ -9,8 +9,10 @@ import type { Application, Request, Response, RequestHandler } from 'express';
 import {
   AmbiguousLanInterfaceError,
   findExplicitCandidate,
+  isRefusedExplicitAddress,
   listLanCandidates,
   NoLanInterfaceError,
+  ReservedLanAddressError,
   UnknownLanInterfaceError,
 } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
@@ -197,9 +199,11 @@ export function registerWorkspaceLocalControlRoutes(
           ) {
             sendEnableError(
               res,
-              findExplicitCandidate(body.address, networkInterfaces())
-                ? new LocalControlAddressNotGrantedError(body.address)
-                : new UnknownLanInterfaceError(body.address),
+              isRefusedExplicitAddress(body.address)
+                ? new ReservedLanAddressError(body.address)
+                : findExplicitCandidate(body.address, networkInterfaces())
+                  ? new LocalControlAddressNotGrantedError(body.address)
+                  : new UnknownLanInterfaceError(body.address),
             );
             return;
           }
@@ -295,6 +299,14 @@ function sendEnableError(res: Response, error: unknown): void {
     return;
   }
   if (error instanceof UnknownLanInterfaceError) {
+    res.status(409).json({
+      error: error.message,
+      code: error.code,
+      interfaces: listLanCandidates(),
+    });
+    return;
+  }
+  if (error instanceof ReservedLanAddressError) {
     res.status(409).json({
       error: error.message,
       code: error.code,

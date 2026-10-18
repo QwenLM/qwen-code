@@ -5,7 +5,7 @@
  */
 
 import { parseJoinLink } from '../serve/agent-host-join.js';
-import { listLanCandidates } from '../serve/local-control/lan-interfaces.js';
+import { listExplicitCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -110,7 +110,10 @@ async function startLocalControl(
       err instanceof Error &&
       (err as { code?: string }).code === 'unknown_lan_interface'
     ) {
-      const candidates = listLanCandidates();
+      // Enumerate the acceptance space, not the automatic-candidate list:
+      // the operator reaches this failure precisely on hosts whose usable
+      // address is one listLanCandidates would never offer (#14136).
+      const candidates = listExplicitCandidates();
       throw new Error(
         `${err.message}${candidates.length ? ` This host currently has: ${candidates.map((c) => `${c.interfaceName} (${c.address})`).join(', ')}.` : ''}`,
       );

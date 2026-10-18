@@ -138,6 +138,11 @@ export class ReservedLanAddressError extends Error {
 // catch these: it comes from the interface's loopback flag, not the address.
 const REFUSED_EXPLICIT = /^(0|127|22[4-9]|2[3-5]\d)\./;
 
+/** True for the reserved address shapes an explicit pick may never name. */
+export function isRefusedExplicitAddress(address: string): boolean {
+  return REFUSED_EXPLICIT.test(address);
+}
+
 /**
  * An explicit operator opt-in for addresses `isLanIpv4` refuses (#14136):
  * some enterprise intranets number their LANs from public ranges they
@@ -174,6 +179,28 @@ export function findExplicitCandidate(
     matches.find((match) => !isSoftwareNetwork(match.interfaceName)) ??
     matches[0]
   );
+}
+
+/**
+ * Every address an explicit pick could name right now: the acceptance space
+ * of findExplicitCandidate, not the automatic-candidate list. Operator-facing
+ * remedy hints enumerate this so a host whose usable address sits outside
+ * RFC 1918/3927 space or on a VPN/tunnel interface still hears what it holds.
+ * Reserved shapes stay excluded because selectLanAddress refuses them even
+ * when named.
+ */
+export function listExplicitCandidates(
+  interfaces = networkInterfaces(),
+): LanCandidate[] {
+  const candidates: LanCandidate[] = [];
+  for (const [interfaceName, addresses] of Object.entries(interfaces).sort()) {
+    for (const info of addresses ?? []) {
+      if (info.family !== 'IPv4' || info.internal) continue;
+      if (REFUSED_EXPLICIT.test(info.address)) continue;
+      candidates.push({ interfaceName, address: info.address });
+    }
+  }
+  return candidates;
 }
 
 /**

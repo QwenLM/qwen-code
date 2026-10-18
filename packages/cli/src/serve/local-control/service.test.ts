@@ -323,6 +323,9 @@ describe('LocalControlService', () => {
     expect(service.active).toBe(true);
     expect(status.sleepInhibited).toBe(true);
     expect(sleepInhibitorMock.acquire).toHaveBeenCalledOnce();
+    // The tolerance is only witnessed if the warning actually fired: the
+    // throwing stub must have been reached, not skipped by a condition change.
+    expect(vi.mocked(writeStderrLine)).toHaveBeenCalledOnce();
     await service.disable();
   });
 
@@ -424,7 +427,8 @@ describe('LocalControlService', () => {
     // one by construction. A successful enable on another address is the
     // operator's later choice and must revoke that standing admission.
     // 0.0.0.0 stands in for the move-to candidate so the second bind succeeds
-    // on any host (the candidate list is stubbed, so its shape is moot).
+    // on any host; the try/finally below contains the wildcard listener it
+    // opens.
     const port = await unusedPort();
     const service = new LocalControlService({
       app: express(),
@@ -438,27 +442,32 @@ describe('LocalControlService', () => {
       getPort: () => port,
     });
 
-    await service.enable({
-      address: '127.0.0.1',
-      allowExplicitAddress: true,
-    });
-    expect(service.grantedExplicitCandidate).toEqual({
-      interfaceName: 'en0',
-      address: '127.0.0.1',
-    });
-    await service.disable();
+    try {
+      await service.enable({
+        address: '127.0.0.1',
+        allowExplicitAddress: true,
+      });
+      expect(service.grantedExplicitCandidate).toEqual({
+        interfaceName: 'en0',
+        address: '127.0.0.1',
+      });
+      await service.disable();
 
-    vi.mocked(selectLanAddress).mockReturnValue({
-      interfaceName: 'en0',
-      address: '0.0.0.0',
-    });
-    vi.mocked(listLanCandidates).mockReturnValue([
-      { interfaceName: 'en0', address: '0.0.0.0' },
-    ]);
-    await service.enable({ address: '0.0.0.0' });
+      vi.mocked(selectLanAddress).mockReturnValue({
+        interfaceName: 'en0',
+        address: '0.0.0.0',
+      });
+      vi.mocked(listLanCandidates).mockReturnValue([
+        { interfaceName: 'en0', address: '0.0.0.0' },
+      ]);
+      await service.enable({ address: '0.0.0.0' });
 
-    expect(service.grantedExplicitCandidate).toBeUndefined();
-    await service.disable();
+      expect(service.grantedExplicitCandidate).toBeUndefined();
+    } finally {
+      // 0.0.0.0 binds INADDR_ANY for real; the listener must not outlive a
+      // failing assertion on a shared runner.
+      await service.disable();
+    }
   });
 
   it('keeps the standing grant when a re-enable posts the granted address', async () => {
