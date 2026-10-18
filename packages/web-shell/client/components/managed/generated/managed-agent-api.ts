@@ -508,7 +508,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the next-Turn policy of an idle built-in Workspace Session. Requires its recorded owner and current OPERATOR access. Changes are revision-checked and actor/session-scoped idempotent. */
+        /** @description Change the next-user-Turn policy of an idle eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -684,6 +684,12 @@ export interface components {
             /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
+            /**
+             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
+             * @default harness_confirmed
+             * @enum {string}
+             */
+            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         WebShellCancelRequest: {
             /** @description Trace correlation only. */
@@ -692,18 +698,29 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
             turnId: string;
+            /**
+             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
+             * @default harness_confirmed
+             * @enum {string}
+             */
+            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         /** @description Arbitrary caller metadata, as a JSON object (or null). Accepted and ignored in Phase 1: nothing from it is persisted. On WebShellCreateRequest the Session title travels in that request's own `title` field; WebShellSubmitRequest has no title surface. Any keys are valid. */
         WebShellMetadata: {
             [key: string]: unknown;
         } | null;
-        /** @description With durable_operations enabled, all three target fields are returned. accepted means Java durable delivery responsibility, not model execution. Missing fields retain the deployed legacy response semantics. */
+        /** @description accepted means Java durable delivery responsibility, not model execution. The three operation fields come together, and only on a Turn input or cancel admission that asked for admissionProfile java_durable on a deployment advertising durableOperations (D7-3): operationId names the command's original submit_input or cancel operation, readable through the operation query, and admissionStage and deliveryState are that operation's latest durable values. A fresh input reads java_durable and pending; a cancel of a Turn that already ended reads its settled values. A retry under the same key answers the same operation with replayed true. Missing fields keep the legacy harness_confirmed response semantics, also for Session creation and for a replayed command recorded before v1.58. */
         WebShellAdmission: {
             /** Format: uuid */
             sessionId: string;
             turnId?: string | null;
             status: string;
             replayed: boolean;
+            operationId?: string;
+            /** @enum {string} */
+            admissionStage?: "java_durable" | "harness_confirmed";
+            /** @enum {string} */
+            deliveryState?: "pending" | "leased" | "confirmed" | "blocked";
         };
         WebShellTurn: {
             turnId: string;
@@ -755,6 +772,11 @@ export interface components {
              * @default false
              */
             cwdChange?: boolean;
+            /**
+             * @description D7-3. Present only on a deployment that enables the java_durable admission profile, where it is true while the Session is readable: a Turn input or cancel may then ask for admissionProfile java_durable. Omitted elsewhere, where asking for it answers 400 unsupported_feature.
+             * @default false
+             */
+            durableOperations?: boolean;
             /** @default false */
             actions: boolean;
             /**
@@ -788,7 +810,7 @@ export interface components {
             foregroundShell?: boolean;
             /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
             modelChange?: boolean;
-            /** @description The caller owns this built-in Workspace Session with OPERATOR access and the Harness supports approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
         };
         WebShellSessionPage: {

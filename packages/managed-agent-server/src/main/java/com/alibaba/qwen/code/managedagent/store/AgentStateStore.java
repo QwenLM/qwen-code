@@ -41,6 +41,18 @@ import java.util.Optional;
 import java.util.Set;
 
 public interface AgentStateStore {
+    /**
+     * #14387: the durable error code a workflow Turn carries once its
+     * recovery was refused — the Harness generation running it was lost
+     * and its deterministic in-process work must never be re-executed
+     * while the first run's outcome stays unwitnessed. The Turn is never
+     * settled: the code stays on the active row for the child result
+     * relay to classify the record blocked from, and the dispatch sweep
+     * parks the row (a cancel still scans it — settling the Turn
+     * cancelled is the cancel's own act).
+     */
+    String WORKFLOW_RECOVERY_BLOCKED = "hosted_workflow_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional
@@ -436,6 +448,29 @@ public interface AgentStateStore {
         return AcceptanceVerdict.unknown();
     }
 
+    /**
+     * D7-2: what the Session journal proves about a parked Session title, or
+     * empty when its delivery is no longer parked: committed once the journal
+     * holds its revision's title, not committed once no writer can still
+     * commit it.
+     */
+    default Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
+        return Optional.of(AcceptanceVerdict.unknown());
+    }
+
+    /**
+     * D7-2: settles a parked Session title, only while it is still parked.
+     * Committed completes its command and shows the title; not committed
+     * fails it; unknown parks it again until {@code retryAt}.
+     *
+     * @return false when the title is no longer parked
+     */
+    default boolean settleParkedRename(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        throw new UnsupportedOperationException(
+                "Operation reconciliation is unavailable");
+    }
+
     /** A task cancel's recorded outcome: its public status and code. */
     record TaskCancelOutcome(String status, String failureCode) {
         public static TaskCancelOutcome completed() {
@@ -564,7 +599,7 @@ public interface AgentStateStore {
 
     default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
-            boolean supported) {
+            boolean supported, boolean agentDefinitionSupported) {
         throw new UnsupportedOperationException("Approval selection is unavailable");
     }
 
@@ -644,6 +679,17 @@ public interface AgentStateStore {
 
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
+
+    /**
+     * #14387: durably marks an active Turn whose recovery was refused —
+     * the error code stays on the still-active row for the child result
+     * relay to classify from, and the dispatch lease is released so the
+     * drive ends without settling the Turn. Never a terminal status: the
+     * unwitnessed execution's outcome was never observed.
+     */
+    boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
+            String turnId, String owner, String errorCode,
+            String errorMessage);
 
     void deferTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
