@@ -65,7 +65,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <li>a planned channel delivery takes its cancel through the Hosted
  * Harness's channel operation route, whose {@code cancelRequested} flag is
  * the request: a planned one settles cancelled with it, and one an adapter
- * claimed meanwhile keeps sending with the flag recorded.</li>
+ * claimed meanwhile keeps sending with the flag recorded;</li>
+ * <li>an Automation run takes a turn-scoped request through the Hosted
+ * Harness; its cancelled terminal record proves the stop, so its receipt
+ * waits for settlement rather than trusting the request acknowledgment.</li>
  * </ul>
  * A delivery whose outcome stays unproven retries with the dispatch
  * backoff, bounded at {@link #ATTEMPT_BUDGET} claims; past it the
@@ -239,6 +242,10 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
             return new Verdict(TaskCancelOutcome.failed(
                     "task_action_unavailable"), target);
         }
+        if ("automation_run".equals(target.kind())
+                && "cancelled".equals(target.state())) {
+            return new Verdict(TaskCancelOutcome.completed(), target);
+        }
         // The stopReason clause only adds a Monitor's settlement: for a
         // child_run (child_agent, workflow, background_shell) the record
         // invariant "childRun stop_requested needs its stop request"
@@ -406,9 +413,20 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
     /**
      * A child Session run's stop request onto the parent's journal, a
      * background process's stop through the Broker, or a delivery's cancel
-     * onto its route Session's journal; all replay-safe.
+     * onto its route Session's journal, or a stop of one Automation wake
+     * Turn; all replay-safe.
      */
     private void send(OperationRecord operation, TaskTarget target) {
+        if ("automation_run".equals(target.kind())) {
+            harness.runAutomationOperation(operation.tenantId(),
+                    operation.sessionId(), Map.of(
+                            "operationId", attemptId(operation),
+                            "kind", "cancel_run",
+                            "automationRunId", target.recordId(),
+                            "scheduleId", target.body().path("scheduleId").asText(),
+                            "occurrenceKey", target.body().path("occurrenceKey").asText()));
+            return;
+        }
         if ("channel_delivery".equals(target.kind())) {
             harness.runChannelOperation(operation.tenantId(),
                     operation.sessionId(), Map.of(
