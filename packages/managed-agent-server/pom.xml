@@ -461,12 +461,12 @@
                                  JDK 21 + MySQL 8.0.46, ~120 s
                                  budgeted). The FG12f stream-gap class
                                  (HostedMcpStreamGapIT, three cases,
-                                 three cold boots) measures 104.6 s
-                                 locally on the same stack (~210 s
+                                 three cold boots) measures 121.1 s
+                                 locally on the merged base (~242 s
                                  budgeted): the healthy sum becomes
-                                 5953 s, so the fork moves to 6563 s
+                                 5985 s, so the fork moves to 6585 s
                                  and the Verify step to 120 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6563</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>6585</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
