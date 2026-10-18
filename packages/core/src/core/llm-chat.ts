@@ -5513,25 +5513,33 @@ export class LlmChat {
           groups.set(provenance, parts);
         }
       for (const [provenance, parts] of groups) {
+        // Observation only: mark first so a measurement or logging throw
+        // neither fails the model request nor re-emits on the retry.
         this.injectedToolResults.add(provenance);
-        const injected = measureToolOutput(parts, this.config);
-        logToolResultSize(
-          this.config,
-          new ToolResultSizeEvent(
-            provenance.toolName,
-            provenance.toolType,
-            'injection',
-            provenance.rawSize?.chars,
-            injected.chars,
-            provenance.rawSize?.estimatedTokens,
-            injected.estimatedTokens,
-            provenance.truncated,
-            Number.isFinite(provenance.budget) ? provenance.budget : undefined,
-            provenance.budgetSource,
-            provenance.callId,
-            provenance.promptId || prompt_id,
-          ),
-        );
+        try {
+          const injected = measureToolOutput(parts, this.config);
+          logToolResultSize(
+            this.config,
+            new ToolResultSizeEvent(
+              provenance.toolName,
+              provenance.toolType,
+              'injection',
+              provenance.rawSize?.chars,
+              injected.chars,
+              provenance.rawSize?.estimatedTokens,
+              injected.estimatedTokens,
+              provenance.truncated,
+              Number.isFinite(provenance.budget)
+                ? provenance.budget
+                : undefined,
+              provenance.budgetSource,
+              provenance.callId,
+              provenance.promptId || prompt_id,
+            ),
+          );
+        } catch {
+          /* Telemetry is observational. */
+        }
       }
       return generator.generateContentStream(request, prompt_id);
     };

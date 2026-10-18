@@ -308,9 +308,11 @@ export async function truncateToolOutput(
     outputDirectory !== undefined,
   );
 
-  const inputSize = measureToolOutput(content, config);
-  const outputSize = measureToolOutput(result.content, config);
   try {
+    // Measurement is part of the observation: an estimator throw must not
+    // fail the truncation pass it only observes.
+    const inputSize = measureToolOutput(content, config);
+    const outputSize = measureToolOutput(result.content, config);
     logToolResultSize(
       config,
       new ToolResultSizeEvent(

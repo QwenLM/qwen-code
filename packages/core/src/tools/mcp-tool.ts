@@ -1047,10 +1047,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     rawResponseParts: Part[],
     functionCall: FunctionCall,
   ): Promise<ToolResult> {
-    const rawOutputSize = measureToolOutput(
-      transformMcpContentToParts(rawResponseParts),
-      this.cliConfig,
-    );
+    // The body is replaced by `error` below and observeProducerOutput
+    // short-circuits on error results, so no raw size is declared here
+    // (#13652 R4-1).
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
@@ -1077,7 +1076,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
-      rawOutputSize,
       returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
       error: {
         message: errorMessage,

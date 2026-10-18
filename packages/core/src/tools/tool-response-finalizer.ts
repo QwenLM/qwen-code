@@ -501,8 +501,6 @@ export async function finalizeToolResponses(
   for (let index = 0; index < finalized.length; index++) {
     if (!entriesToPersist.has(index)) continue;
     const entry = finalized[index];
-    const before = measureToolOutput(entries[index].responseParts, config);
-    const after = measureToolOutput(entry.responseParts, config);
     for (
       let partIndex = 0;
       partIndex < entry.responseParts.length;
@@ -512,10 +510,14 @@ export async function finalizeToolResponses(
       if (part !== entries[index].responseParts[partIndex])
         updateToolOutputBudget([part], budget, 'batch');
     }
-    const provenance = entry.responseParts
-      .map(getToolOutputProvenance)
-      .find(Boolean);
     try {
+      // Measurement is part of the observation: an estimator throw must not
+      // fail the finalizer it only observes.
+      const before = measureToolOutput(entries[index].responseParts, config);
+      const after = measureToolOutput(entry.responseParts, config);
+      const provenance = entry.responseParts
+        .map(getToolOutputProvenance)
+        .find(Boolean);
       logToolResultSize(
         config,
         new ToolResultSizeEvent(

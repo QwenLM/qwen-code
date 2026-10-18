@@ -6,10 +6,10 @@
 
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   estimatePartChars,
+  resolveSlimmingConfig,
   TOKEN_TO_CHAR_RATIO,
 } from '../services/compactionInputSlimming.js';
 
