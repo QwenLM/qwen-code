@@ -17,8 +17,9 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
    durable worker 与转发代理；只丢弃 `hook-execute` 控制调用的回复，其余请求直通。
 2. **重试走状态轮询，而不是第二次 execute。** 派发回复丢失时，Harness 会按记录
    自身的 `runtimeSessionId` 回落到 `hook-status`，这正是物理调用保持一次的原因。
-3. **一格、一套夹具。** 该格让 solo 命令保持 1 秒后放行；丢回复不得改变结果或
-   调用次数。
+3. **两格、各自一套夹具。** 两格都让 solo 命令保持 1 秒后放行；派发回复丢失必须
+   通过 status 解析，status 回复丢失必须先保持未知，直到同一 owner 的后续轮询
+   把它结算。两者都不得增加第二次物理调用。
 
 ## 用例
 

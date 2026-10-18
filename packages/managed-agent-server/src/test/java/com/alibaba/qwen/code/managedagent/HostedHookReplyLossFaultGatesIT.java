@@ -122,10 +122,6 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
-    // The record may report a terminal state only once the unit is empty:
-    // inspect the first observation, not a later poll, so a regression that
-    // settles early while the drain continues still fails the cell.
-
     private void boot(String timeoutMs, String holdMs, String signalMode) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("Hook fault gates require disposable MySQL 8.4")
                 .startsWith("jdbc:mysql:");
