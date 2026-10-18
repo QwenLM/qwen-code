@@ -15392,7 +15392,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 });
 
 describe('persistence size attribution', () => {
-  it('counts retained media with the configured estimate', async () => {
+  it('counts retained media with the configured estimate and bounds nested web_fetch envelopes', async () => {
     const cfg = {
       getTruncateToolOutputThreshold: () => 25000,
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
@@ -15439,13 +15439,22 @@ describe('persistence size attribution', () => {
       expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
       expect(event.prompt_id).toBe('p');
       await owner.maybePersistLargeToolResult(
+        'page',
+        'web_fetch',
+        'header\n... [CONTENT TRUNCATED] ...\n' + 'x'.repeat(98000),
+        false,
+        'page-prompt',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls[1][1].prompt_id).toBe('page-prompt');
+      await owner.maybePersistLargeToolResult(
         'already',
         'shell',
         '<persisted-output>' + 'x'.repeat(60000),
         false,
         'p',
       );
-      expect(persist).toHaveBeenCalledTimes(1);
+      expect(persist).toHaveBeenCalledTimes(2);
     } finally {
       persist.mockRestore();
       log.mockRestore();
