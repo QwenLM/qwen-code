@@ -112,6 +112,12 @@ class WorkspaceStorageGuardTest {
         String operation = UUID.randomUUID().toString();
         first.register("tenant", "storage", operation);
         var restarted = new WorkspaceStorageGuard(jdbc, manager, properties);
+        if ("Linux".equals(System.getProperty("os.name"))) {
+            FileTime birth = Files.readAttributes(root, BasicFileAttributes.class).creationTime();
+            Files.setLastModifiedTime(root, birth);
+            BasicFileAttributes ambiguous = Files.readAttributes(root, BasicFileAttributes.class);
+            assertThat(ambiguous.lastModifiedTime()).isEqualTo(ambiguous.creationTime());
+        }
         restarted.verify(binding);
         Files.createDirectory(root.resolve("another-child"));
         restarted.verify(binding);
@@ -482,6 +488,25 @@ class WorkspaceStorageGuardTest {
         Files.delete(marker);
         Files.move(saved, marker);
         guard().verify(binding);
+    }
+
+    @Test
+    void nativeBirthEvidenceRequiresTheSameRootAndFullNanosecondBirthTime() throws Exception {
+        FileTime birth = FileTime.from(Instant.parse("2026-09-30T00:00:00.123456789Z"));
+        String evidence = "7|42|2026-09-30 00:00:00.123456789 +0000";
+        assertThat(WorkspaceStorageGuard.verifiedNativeBirthTime(evidence, "7", "42", birth))
+                .isEqualTo(birth.toInstant().toString());
+        for (String invalid : List.of(
+                "8|42|2026-09-30 00:00:00.123456789 +0000",
+                "7|43|2026-09-30 00:00:00.123456789 +0000",
+                "7|42|2026-09-30 00:00:00.987654321 +0000",
+                "7|42|-",
+                "7|42|1970-01-01 00:00:00.000000000 +0000",
+                "7|42|2026-02-30 00:00:00.123456789 +0000",
+                evidence + "|extra")) {
+            assertThatThrownBy(() -> WorkspaceStorageGuard.verifiedNativeBirthTime(invalid, "7", "42", birth))
+                    .isInstanceOf(IOException.class);
+        }
     }
 
     @Test
