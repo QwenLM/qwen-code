@@ -433,8 +433,11 @@
                                  cell (issue #14449) adds 150 s: the
                                  healthy sum becomes 4908 s, so the fork
                                  moves to 5518 s and the Verify step to
-                                 105 minutes. -->
-                            <forkedProcessTimeoutInSeconds>5518</forkedProcessTimeoutInSeconds>
+                                 105 minutes. The FG13a execute lost-reply
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 5058 s, so the fork
+                                 moves to 5668 s. -->
+                            <forkedProcessTimeoutInSeconds>5668</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
