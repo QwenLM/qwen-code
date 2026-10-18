@@ -108,6 +108,16 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(events("hook.allow")).hasSize(1);
         assertThat(hookResult(session).path("outcome").asText()).isEqualTo("success");
         waitFor(() -> assertThat(modelRequests.toString()).contains(PROOF));
+        // The completion request must carry exactly one result for the call
+        // the fixture emitted; a duplicate delivery would otherwise pass.
+        long results = 0;
+        for (JsonNode message : modelRequests.getLast().path("messages")) {
+            if ("tool".equals(message.path("role").asText())
+                    && "call_FG13_EXECUTE_LOSS".equals(message.path("tool_call_id").asText())) {
+                results++;
+            }
+        }
+        assertThat(results).as("tool results for the emitted call").isEqualTo(1);
         assertThat(Files.readString(temporary.resolve("proxy.log"))).contains("PROXY dropped hook-execute-reply");
         assertThat(modelFailure.get()).isNull();
     }
@@ -271,7 +281,6 @@ class HostedHookReplyLossFaultGatesIT {
             assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
         });
         assertThat(events("hook.call")).hasSize(1);
-        assertThat(events("hook.allow")).hasSize(1);
         // A later poll of the same owner resolves the receipt the worker
         // still holds, without a second physical call.
         String executionId = hookExecution(session).path("hookExecutionId").asText();
@@ -284,6 +293,9 @@ class HostedHookReplyLossFaultGatesIT {
         });
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         assertThat(hookResult(session).path("outcome").asText()).isEqualTo("success");
+        // The allow lands when the one-second hold ends, after the first
+        // unknown observation, so it is asserted only past the settlement.
+        waitFor(() -> assertThat(events("hook.allow")).hasSize(1));
         assertThat(events("hook.call")).hasSize(1);
         assertThat(Files.readString(temporary.resolve("proxy.log"))).contains("PROXY dropped hook-status-reply");
         assertThat(modelFailure.get()).isNull();

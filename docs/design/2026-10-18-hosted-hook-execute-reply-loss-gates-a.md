@@ -40,9 +40,12 @@ second command.
 
 Each witness must turn the cell red before the slice merges.
 
-- `execute-reply-lost`: break the operation-id idempotency of the dispatch
-  so the retried request starts a second command. The fixture then reports
-  two `hook.call` events and the one-call assertion fails.
+- `execute-reply-lost`: break the exercised fallback — make the dropped
+  dispatch reply answer `outcome_unknown` instead of looking up the receipt
+  (for example, remove the `hook-status` fallback in `fire`). The record
+  then never settles and the `settled` assertion fails. The execute
+  operation-id deduplication is a separate witness: explicitly replay the
+  `hook-execute` operation.
 - `status-reply-lost`: drop the honest unknown commit in the `fire` loop
   (the branch that records `recovery_blocked` / `outcome_unknown` when the
   poll cannot prove the end). The record stays `running`, so the state

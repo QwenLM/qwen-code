@@ -31,8 +31,10 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
 
 每个见证必须在合入前让自己的用例变红。
 
-- `execute-reply-lost`：破坏派发的 operation-id 幂等，使重试请求启动第二条命令。
-  夹具随后报告两次 `hook.call`，一次调用断言失败。
+- `execute-reply-lost`：改破坏这条格真正走到的兜底——让丢失的派发回复直接得到
+  `outcome_unknown`，而不是回落到回执查询（例如去掉 `fire` 里的 `hook-status`
+  兜底）。记录因此永不结算，`settled` 断言失败。execute 的 operation-id 幂等
+  是另一个见证：显式重放 `hook-execute`。
 - `status-reply-lost`：去掉 `fire` 循环里如实记录 unknown 的提交分支（轮询无法
   证明结束时写 `recovery_blocked` / `outcome_unknown` 的那一支）。记录会停在
   `running`，状态断言失败。
