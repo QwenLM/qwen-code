@@ -20,7 +20,7 @@
   flex-direction: column;
   max-height: min(360px, 55vh);
   margin: 0 auto;
-  overflow-y: auto;
+  overflow-y: hidden;
   padding: 16px;
   border-radius: 12px;
   background: var(--background);
@@ -38,6 +38,21 @@
 .floating > .explainRow,
 .floating > .options {
   flex-shrink: 0;
+}
+
+/* The sheet itself never scrolls (same pattern as .floatingWorkflow/.workflow):
+   the command/content region is the sheet's single scroll container, so the
+   300px caps on .content/.codeBlock apply to the inline variant only and the
+   decision buttons stay pinned at the bottom of the sheet. */
+.floating > .content:not(.planContent),
+.floating > .code {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.floating .codeBlock {
+  max-height: none;
 }
 
 .floatingWorkflow {

@@ -26,6 +26,13 @@
   overflow-y: auto;
 }
 
+/* The surrounding region scrolls instead (floating approval card): the line
+   list fills it with its full height instead of adding a nested scrollbar. */
+.linesFill {
+  max-height: none;
+  overflow-y: visible;
+}
+
 .lines:focus-visible {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: 2px;
