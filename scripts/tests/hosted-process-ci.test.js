@@ -360,6 +360,10 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg10-cases/',
     );
+    // FG12a's MCP reply-loss evidence lives in target/fg12-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg12-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag. The arms
     // that write it run in the failover job, so the upload lives there.
@@ -584,12 +588,13 @@ describe('Hosted real-process gates', () => {
       // the Verify step to 85 minutes; their slice 2 (FG10c/FG10e) brings
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
       // to 90 minutes; slice 3 (FG10d) brings it to ~247 s, so the fork
-      // moves to 4484, still inside those 90 minutes):
+      // moves to 4484, still inside those 90 minutes; the FG12a MCP
+      // reply-loss letter adds ~15 s, so the fork moves to 4499):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4484);
+        expect(forkSeconds).toBe(4499);
       }
     },
   );
@@ -616,12 +621,14 @@ describe('Hosted real-process gates', () => {
   // measure 246.1–246.8s for the class locally on JDK 21 + MySQL 8.4.6
   // across three acceptance runs (~494s budgeted at 2x, as FG10a, up from
   // slice 2's ~363s); with the fork itself ~14s, 3874s (3545s after slice
-  // 1, plus slice 2's ~198s and slice 3's ~131s) covers them. On the lane
-  // (run 39087108383 at a029896eff, FG10d's head) the nineteen classes ran
-  // 3085s from the first class's start to the last class's end.
+  // 1, plus slice 2's ~198s and slice 3's ~131s) covers them; FG12a's
+  // ~15s budgeted at 2x raises it to 3889s. On the lane (run 39087108383
+  // at a029896eff, FG10d's head, before FG12a) the nineteen classes then
+  // in the fork ran 3085s from the first class's start to the last
+  // class's end.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 3874;
+  const hostedForkHealthySeconds = 3889;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -686,6 +693,7 @@ describe('Hosted real-process gates', () => {
       'HostedConcurrentTurnBurstMySqlIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedMcpReplyLossIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',

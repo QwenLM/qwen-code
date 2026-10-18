@@ -402,8 +402,14 @@
                                  budgeted at 2×): the healthy sum
                                  becomes 3874 s and the fork 4484 s,
                                  which the Verify step's 90 minutes
-                                 still wrap. -->
-                            <forkedProcessTimeoutInSeconds>4484</forkedProcessTimeoutInSeconds>
+                                 still wrap. The FG12a MCP reply-loss
+                                 letter (HostedMcpReplyLossIT, three
+                                 cases) measures 5.1-7.4 s healthy
+                                 locally on macOS JDK 21 + MariaDB
+                                 10.11 (~15 s budgeted at 2x): the
+                                 healthy sum becomes 3889 s, so the
+                                 fork moves to 4499 s. -->
+                            <forkedProcessTimeoutInSeconds>4499</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -543,6 +549,24 @@
                          healthy runtime must fit, the per-ceiling
                          relation the CI profile pins. -->
                     <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-mcp-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedMcp*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Mirrors the hosted-harness-mysql lane's
+                         per-ceiling rule for this class: one @Timeout
+                         ceiling (600 s) plus the healthy runtime must
+                         fit 1200 s. -->
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

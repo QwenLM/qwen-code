@@ -4250,6 +4250,7 @@ describe('workspace change propagation', () => {
       revision: 1,
       kind: 'permissions',
       tightening: true,
+      scope: 'workspace',
       cwd: WS_A,
     });
     await p.bridge.sendPrompt(
