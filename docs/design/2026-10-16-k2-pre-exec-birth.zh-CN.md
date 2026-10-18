@@ -123,9 +123,9 @@ runtime 身份协议升级为第2版。gateway 字节观察包含完整原 insta
 
 ## 来源与释放依赖
 
-离线策略阶段消费准确的第2版工件清单、两份镜像目录及 shim 配置，以及已审目标事实、原私有 Runtime 请求和两份实际服务配置。生成器输出单一五角色策略源码及服务 unit，unit 的 argv 使用同一配置路径。权限语法由生成器拥有，不接受调用者规则、include 或 AppArmor 模式。配置及密钥路径不能落入可写的 inputs、journal、socket 或 worker 根，不同角色私钥不能别名；宿主 peer 哈希必须与实际 source/gateway 配置一致。
+离线策略阶段消费准确的第2版工件清单、两份镜像目录及 shim 配置，以及已审目标事实、原私有 Runtime 请求和两份实际服务配置。生成器输出单一策略源码及服务 unit，unit 的 argv 使用同一配置路径。五个 Qwen profile 由生成器拥有；[完整宿主策略集](2026-10-18-k2-host-policy-set.zh-CN.md) 增加六个固定宿主角色的独立已审、整字节固定、已展开基础正文，header、attachment 和 K2 配对权限仍由代码拥有。不接受任意权限数组、include 或 target 事实中的调用者模式。配置及密钥路径不能落入可写的 inputs、journal、socket 或 worker 根，不同角色私钥不能别名；宿主 peer 哈希必须与实际 source/gateway 配置一致。
 
-策略源码仍是候选。AppArmor 能限定挂载类型、flags、source 和 destination，不能比较任意 mount data、设备编号或 DBus 消息正文；完整原契约继续由可信创建者及消费端比较。数字 proc 名还依赖实际内核只允许修改自身属性的语义，UID 相同不代表进程相同。SDK 子进程 OOM 调整及 disconnected namespace/root 命名需要明确的安装资格。生成五个命名 profile 不能补出既存宿主主体的反向权限，也不代表安装合格。
+策略源码仍是候选。AppArmor 能限定挂载类型、flags、source 和 destination，不能比较任意 mount data、设备编号或 DBus 消息正文；完整原契约继续由可信创建者及消费端比较。数字 proc 名还依赖实际内核只允许修改自身属性的语义，UID 相同不代表进程相同。SDK 子进程 OOM 调整及 disconnected namespace/root 命名需要明确的安装资格。仅生成五个命名 profile 不能补出既存宿主主体的完整策略；合成已审宿主基础正文同样不代表安装合格。pathname Unix socket 使用字面路径文件规则，不由仅覆盖 abstract/anonymous socket 的 Unix peer-label 规则强制。可信程序仍保留实际 credentials、executable/process/namespace 及原持有 peer 检查；actor/admission 排除仍需原生资格化。
 
 外层 snapshot 挂载输入与内层 OCI mount 分开；规则拆分正常挂载阶段，将原数据保留在已审目标及契约中。实际 source 类型、VFS flags 和 disconnected 别名仍需原生资格化。后续编译阶段消费完整 pinned 候选，以准确 parser/features、空配置、无 kernel load/cache 的方式执行，并保留失败记录。普通测试仅准备数据及检查 argv，绝不执行 parser；两个阶段均不授予释放权限。
 

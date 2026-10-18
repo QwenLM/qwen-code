@@ -21,6 +21,8 @@ const Directory = "/etc/qwen-k2/artifacts"
 const MaxTotal = 64 << 20
 const snapshotRoot = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots"
 
+var hostRoles = []string{"runtime", "kubelet", "registrar", "plugin", "systemd", "system-bus"}
+
 type pin struct {
 	Bytes int    `json:"bytes"`
 	SHA   string `json:"sha256"`
@@ -127,6 +129,10 @@ func Limits() map[string]int {
 	}
 	r["creation-contract.json"] = birth.MaxContract
 	r["packed.bin"] = 8 << 20
+	r["host-policies.json"] = 64 << 10
+	for _, role := range hostRoles {
+		r["host-"+role+".rules"] = 1 << 20
+	}
 	return r
 }
 
@@ -161,12 +167,20 @@ type Snapshot struct {
 	paths           map[string]string
 	inputs          map[string][]byte
 	hosts           map[string]HostExecutable
+	hostLabels      []string
 }
 
 func (s *Snapshot) PackedSHA256() string { return s.packedSHA }
 func (s *Snapshot) PackedBytes() int     { return s.packedBytes }
 func (s *Snapshot) Architecture() string { return s.architecture }
 func (s *Snapshot) SnapshotRoot() string { return s.snapshotRoot }
+
+func (s *Snapshot) HostPolicyLabels() []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string(nil), s.hostLabels...)
+}
 
 func (s *Snapshot) Host(name string) (HostExecutable, error) {
 	if s != nil {
@@ -177,10 +191,14 @@ func (s *Snapshot) Host(name string) (HostExecutable, error) {
 	return HostExecutable{}, errors.New("original installed host role is unavailable")
 }
 
-var hostLabel = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,253}$`)
+var hostLabel = regexp.MustCompile(`^[A-Za-z0-9/][A-Za-z0-9._/-]{0,252}$`)
+
+func validHostLabel(v string) bool {
+	return hostLabel.MatchString(v) && !strings.Contains(v, "//") && !strings.HasSuffix(v, "/") && v != "unconfined" && !strings.HasPrefix(v, "qwen-k2-")
+}
 
 func validHost(v HostExecutable) bool {
-	return path.IsAbs(v.Path) && path.Clean(v.Path) == v.Path && v.Path != "/" && len(v.Path) <= 2048 && !strings.ContainsAny(v.Path, "\x00\r\n") && birth.Hash(v.SHA) && hostLabel.MatchString(v.Label) && v.Label != "unconfined" && !strings.HasPrefix(v.Label, "qwen-k2-")
+	return path.IsAbs(v.Path) && path.Clean(v.Path) == v.Path && v.Path != "/" && len(v.Path) <= 2048 && !strings.ContainsAny(v.Path, "\x00\r\n") && birth.Hash(v.SHA) && validHostLabel(v.Label)
 }
 
 func (s *Snapshot) Match(role, configurationPath string, configuration, shim, unit []byte) error {
@@ -209,7 +227,7 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 		}
 	}
 	var m manifest
-	if decode(files["installation.json"], &m) != nil || m.Format != "qwen-k2-installed-artifacts/1" || len(m.Files) != len(limits)-1 {
+	if decode(files["installation.json"], &m) != nil || m.Format != "qwen-k2-installed-artifacts/2" || len(m.Files) != len(limits)-1 {
 		return nil, errors.New("invalid installed artifact manifest")
 	}
 	for name := range limits {
@@ -225,16 +243,30 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 	if decode(files["profile-candidate.json"], &p) != nil || decode(files["profile-compile.json"], &c) != nil || decode(files["artifact-manifest.json"], &a) != nil || decode(files["shim.json"], &sh) != nil || decode(files["target.json"], &t) != nil {
 		return nil, errors.New("invalid artifact dependency metadata")
 	}
-	if p.Format != "qwen-k2-profile-candidate/1" || a.Format != "qwen-k2-pre-exec-artifacts/2" || c.Format != "qwen-k2-profile-compile/2" || c.ExitCode != 0 || p.ArtifactSHA != birth.SHA256(files["artifact-manifest.json"]) || p.ShimSHA != birth.SHA256(files["shim.json"]) || c.CandidateSHA != birth.SHA256(files["profile-candidate.json"]) || c.SourceSHA != birth.SHA256(files["qwen-k2-profiles"]) || c.FeaturesSHA != birth.SHA256(files["features"]) || c.ConfigSHA != birth.SHA256(nil) || !matches(files, "packed.bin", pin{c.PackedBytes, c.PackedSHA}) || !birth.Hash(c.ParserSHA) || !birth.Hash(c.GeneratorSHA) || !compileCommand(c.Command) {
+	if p.Format != "qwen-k2-profile-candidate/2" || a.Format != "qwen-k2-pre-exec-artifacts/2" || c.Format != "qwen-k2-profile-compile/2" || c.ExitCode != 0 || p.ArtifactSHA != birth.SHA256(files["artifact-manifest.json"]) || p.ShimSHA != birth.SHA256(files["shim.json"]) || c.CandidateSHA != birth.SHA256(files["profile-candidate.json"]) || c.SourceSHA != birth.SHA256(files["qwen-k2-profiles"]) || c.FeaturesSHA != birth.SHA256(files["features"]) || c.ConfigSHA != birth.SHA256(nil) || !matches(files, "packed.bin", pin{c.PackedBytes, c.PackedSHA}) || !birth.Hash(c.ParserSHA) || !birth.Hash(c.GeneratorSHA) || !compileCommand(c.Command) {
 		return nil, errors.New("artifact compilation dependency differs")
 	}
 	profileNames := strings.Fields("qwen-k2-profiles source-config.json gateway-config.json target.json runtime.json creation-contract.json qwen-k2-node-source.service qwen-k2-runtime-gateway.service")
+	profileNames = append(profileNames, "host-policies.json")
+	for _, role := range hostRoles {
+		profileNames = append(profileNames, "host-"+role+".rules")
+	}
 	if len(p.Files) != len(profileNames) || len(a.Catalogues) != 2 || len(a.Artifacts) != 3 || len(a.Generators) != 2 || len(p.Generators) != 3 || len(p.Paths) != 2 || len(p.Boundaries) == 0 {
 		return nil, errors.New("incomplete artifact dependency set")
 	}
 	for _, name := range profileNames {
 		if !matches(files, name, p.Files[name]) {
 			return nil, errors.New("original profile candidate bytes differ")
+		}
+	}
+	var bases manifest
+	if decode(files["host-policies.json"], &bases) != nil || bases.Format != "qwen-k2-host-policies/1" || len(bases.Files) != len(hostRoles) {
+		return nil, errors.New("complete fixed host policy manifest is required")
+	}
+	for _, role := range hostRoles {
+		name := "host-" + role + ".rules"
+		if !matches(files, name, bases.Files[name]) {
+			return nil, errors.New("complete host base pin differs")
 		}
 	}
 	for _, name := range []string{"worker-catalog.json", "sandbox-catalog.json"} {
@@ -271,12 +303,29 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 		return nil, errors.New("original target and artifact identities differ")
 	}
 	labels := make(map[string]bool)
+	var hostLabels []string
 	for _, name := range []string{"runtime", "kubelet", "registrar", "plugin", "systemd"} {
 		v := t.Hosts[name]
 		if !validHost(v) || labels[v.Label] || name != "systemd" && source[name+"Digest"] != v.SHA {
 			return nil, errors.New("original target and role executable digests differ")
 		}
 		labels[v.Label] = true
+		hostLabels = append(hostLabels, v.Label)
+	}
+	if !validHostLabel(t.SystemBus.Label) || t.SystemBus.Socket != "/run/dbus/system_bus_socket" && t.SystemBus.Socket != "/var/run/dbus/system_bus_socket" || t.SystemBus.PrivateSocket != "/run/systemd/private" {
+		return nil, errors.New("original system bus target differs")
+	}
+	if !labels[t.SystemBus.Label] {
+		if strings.HasPrefix(t.SystemBus.Label, "/") {
+			return nil, errors.New("distinct system bus label cannot imply an executable attachment")
+		}
+		hostLabels = append(hostLabels, t.SystemBus.Label)
+	} else {
+		for name, host := range t.Hosts {
+			if host.Label == t.SystemBus.Label && !bytes.Equal(files["host-"+name+".rules"], files["host-system-bus.rules"]) {
+				return nil, errors.New("host roles sharing a label require identical complete bases")
+			}
+		}
 	}
 	for _, role := range []string{"source", "gateway"} {
 		if !configurationPath(p.Paths[role]) {
@@ -306,7 +355,7 @@ func Validate(files map[string][]byte) (*Snapshot, error) {
 			return nil, errors.New("original service argv and configuration paths differ")
 		}
 	}
-	s := &Snapshot{installationSHA: birth.SHA256(files["installation.json"]), packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, snapshotRoot: t.SnapshotRoot, paths: p.Paths, inputs: make(map[string][]byte), hosts: t.Hosts}
+	s := &Snapshot{installationSHA: birth.SHA256(files["installation.json"]), packedSHA: c.PackedSHA, packedBytes: c.PackedBytes, architecture: architecture, snapshotRoot: t.SnapshotRoot, paths: p.Paths, inputs: make(map[string][]byte), hosts: t.Hosts, hostLabels: hostLabels}
 	for _, name := range []string{"source-config.installed.json", "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service"} {
 		s.inputs[name] = bytes.Clone(files[name])
 	}
@@ -473,7 +522,7 @@ func Assemble(pre, profiles, compiled fs.FS, profileSHA, compileSHA string) (map
 	if err != nil {
 		return nil, err
 	}
-	m := manifest{Format: "qwen-k2-installed-artifacts/1", Files: make(map[string]pin)}
+	m := manifest{Format: "qwen-k2-installed-artifacts/2", Files: make(map[string]pin)}
 	for name, raw := range files {
 		m.Files[name] = pin{len(raw), birth.SHA256(raw)}
 	}

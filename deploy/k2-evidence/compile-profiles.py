@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Compile a reviewed five-role candidate with explicit features, without loading it."""
+"""Compile a reviewed complete policy candidate without loading it."""
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,10 @@ import subprocess
 
 
 ROLES = ("source", "gateway", "shim", "worker", "sandbox")
-FILES = {"qwen-k2-profiles", "source-config.json", "gateway-config.json", "target.json", "runtime.json", "creation-contract.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service"}
+spec = importlib.util.spec_from_file_location("k2_profiles", Path(__file__).with_name("render-profiles.py"))
+POLICY = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(POLICY)
+FILES = {"qwen-k2-profiles", "source-config.json", "gateway-config.json", "target.json", "runtime.json", "creation-contract.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "host-policies.json"} | POLICY.HOST_FILES
 
 
 def digest(raw):
@@ -80,19 +84,25 @@ def prepare(candidate, candidate_sha, parser, parser_sha, features, features_sha
     raw = read(candidate / "profile-candidate.json", candidate_sha, 64 * 1024)
     manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=closed, parse_constant=nonfinite)
     fields = {"format", "artifactManifestSha256", "shimConfigurationSha256", "roleConfigPaths", "boundaries", "generators", "files"}
-    if not isinstance(manifest, dict) or set(manifest) != fields or manifest["format"] != "qwen-k2-profile-candidate/1" or set(manifest["files"]) != FILES:
+    if not isinstance(manifest, dict) or set(manifest) != fields or manifest["format"] != "qwen-k2-profile-candidate/2" or not isinstance(manifest["files"], dict) or set(manifest["files"]) != FILES:
         raise ValueError("the complete generated profile candidate is required")
     if manifest["generators"] != {name: digest(Path(__file__).with_name(name).read_bytes()) for name in ("render-profiles.py", "render-pre-exec.py", "image-catalog.py")}:
         raise ValueError("profile candidate generator versions differ")
     copied = {}
     for name, pin in manifest["files"].items():
-        limit = 16 * 1024 * 1024 if name == "qwen-k2-profiles" else 64 * 1024
+        limit = 16 * 1024 * 1024 if name == "qwen-k2-profiles" else 1024 * 1024 if name in POLICY.HOST_FILES else 64 * 1024
         if not isinstance(pin, dict) or set(pin) != {"bytes", "sha256"} or type(pin["bytes"]) is not int or not 0 < pin["bytes"] <= limit:
             raise ValueError("bounded candidate file pins are required")
         copied[name] = read(candidate / name, pin["sha256"], limit)
         if len(copied[name]) != pin["bytes"]:
             raise ValueError("profile candidate file length differs")
-    profile = source(copied["qwen-k2-profiles"])
+    values = {name: json.loads(copied[name + ".json"].decode("utf-8"), object_pairs_hook=closed, parse_constant=nonfinite) for name in ("target", "source-config", "gateway-config")}
+    bases = POLICY.host_inputs(copied["host-policies.json"], copied)
+    suffix = POLICY.host_profiles(values["target"], bases, values["source-config"], values["gateway-config"])
+    profile = copied["qwen-k2-profiles"]
+    if not profile.endswith(suffix):
+        raise ValueError("complete generated host policy source differs")
+    source(profile[:-len(suffix)])
     executable = read(parser, parser_sha, 128 * 1024 * 1024)
     if executable[:6] != b"\x7fELF\x02\x01" or len(executable) < 64:
         raise ValueError("the reviewed 64-bit target parser ELF is required")

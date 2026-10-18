@@ -69,6 +69,15 @@ class RenderProfilesTest(unittest.TestCase):
         self.runtime = {"command": ["/usr/local/bin/node", "/worker.mjs"], "image": "registry.example/inert@sha256:" + self.worker_sha,
                         "registration": {"mountRoot": "/workspace"}}
         self.inputs = {name: self.root / (name + ".json") for name in ("target", "runtime", "source-config", "gateway-config")}
+        self.host_policy = self.root / "host-policy"
+        self.host_policy.mkdir()
+        for name in POLICY.HOST_FILES:
+            (self.host_policy / name).write_bytes(b'  "/explicit-inert-base-only" r,\n  deny "/explicit-inert-deny" w,\n')
+        self.write_host_manifest()
+
+    def write_host_manifest(self):
+        manifest = {"format": "qwen-k2-host-policies/1", "files": {name: {"bytes": len((self.host_policy / name).read_bytes()), "sha256": digest(self.host_policy / name)} for name in POLICY.HOST_FILES}}
+        (self.host_policy / "host-policies.json").write_bytes(POLICY.encoded(manifest))
 
     def prepare_candidate(self):
         POLICY.PRE.render(*self.binaries, self.worker, self.worker_sha, self.sandbox, self.sandbox_sha, self.contract, self.candidate)
@@ -82,7 +91,7 @@ class RenderProfilesTest(unittest.TestCase):
         args = [self.candidate, digest(self.candidate / "artifact-manifest.json")]
         for name in ("target", "runtime", "source-config", "gateway-config"):
             args += [self.inputs[name], digest(self.inputs[name])]
-        POLICY.render(*args, self.worker, self.sandbox, self.output)
+        POLICY.render(*args, self.worker, self.sandbox, self.host_policy, digest(self.host_policy / "host-policies.json"), self.output)
 
     def role(self, name):
         text = (self.output / "qwen-k2-profiles").read_text()
@@ -96,7 +105,7 @@ class RenderProfilesTest(unittest.TestCase):
     def test_real_pipeline_pins_configs_units_and_all_five_roles(self):
         self.render()
         text = (self.output / "qwen-k2-profiles").read_text()
-        self.assertEqual(5, sum(line.startswith("profile ") for line in text.splitlines()))
+        self.assertEqual(11, sum(line.startswith("profile ") for line in text.splitlines()))
         manifest = json.loads((self.output / "profile-candidate.json").read_text())
         self.assertEqual(digest(self.candidate / "artifact-manifest.json"), manifest["artifactManifestSha256"])
         self.assertEqual(digest(self.candidate / "shim.json"), manifest["shimConfigurationSha256"])
@@ -116,6 +125,96 @@ class RenderProfilesTest(unittest.TestCase):
         self.assertNotIn("/var/lib/qwen-k2", self.role("gateway"))
         self.assertEqual(self.source, json.loads((self.output / "source-config.json").read_bytes()))
         self.assertTrue(any("not parser" in item for item in manifest["boundaries"]))
+
+    def test_complete_host_bases_and_owned_reciprocal_permissions(self):
+        self.render()
+        text = (self.output / "qwen-k2-profiles").read_text()
+        for role, host in self.target["hostExecutables"].items():
+            header = 'profile "' + host["label"] + '" "' + host["path"] + '" flags=(enforce,mediate_deleted) {'
+            body = text.split(header + "\n", 1)[1].split("\n}\n", 1)[0]
+            self.assertTrue(body.startswith((self.host_policy / ("host-" + role + ".rules")).read_text()))
+            self.assertIn('deny "/explicit-inert-deny" w,', body)
+        self.assertIn('mrPx -> qwen-k2-shim-v1,', text)
+        for name in POLICY.HOST_FILES | {"host-policies.json"}:
+            self.assertEqual((self.host_policy / name).read_bytes(), (self.output / name).read_bytes())
+            for role in ("source", "gateway"):
+                self.assertIn(name, self.role(role))
+        self.assertIn('dbus receive bus=system', text.split('profile "host-dbus"', 1)[1])
+
+    def test_pathname_sockets_use_literal_file_leaves_without_unix_addr(self):
+        self.render()
+        text = (self.output / "qwen-k2-profiles").read_text()
+        self.assertNotIn('addr="/', text)
+        for label, path in (("host-runtime", self.gateway["runtimeSocket"]), ("host-plugin", self.source["pluginSocket"]),
+                            ("host-systemd", self.target["systemBus"]["privateSocket"]), ("host-dbus", self.target["systemBus"]["socket"])):
+            body = text.split('profile "' + label + '"', 1)[1].split("\n}\n", 1)[0]
+            self.assertIn(POLICY.file_literal(path) + " rw,", body)
+        manifest = json.loads((self.output / "profile-candidate.json").read_bytes())
+        self.assertTrue(any("not pathname peer enforcement" in item for item in manifest["boundaries"]))
+
+    def test_distinct_bus_label_cannot_create_implicit_exec_attachment(self):
+        self.target["systemBus"]["label"] = "/usr/bin/other-daemon"
+        self.refuses("distinct bus label cannot imply")
+        self.target["hostExecutables"]["systemd"]["label"] = "/usr/bin/explicit-host-label"
+        self.target["systemBus"]["label"] = "/usr/bin/explicit-host-label"
+        self.render()
+        text = (self.output / "qwen-k2-profiles").read_text()
+        self.assertEqual(1, text.count('profile "/usr/bin/explicit-host-label" "/usr/bin/systemd"'))
+        self.assertEqual(10, sum(line.startswith("profile ") for line in text.splitlines()))
+
+    def test_bus_shared_host_label_requires_identical_complete_base(self):
+        self.target["systemBus"]["label"] = self.target["hostExecutables"]["systemd"]["label"]
+        self.render()
+        text = (self.output / "qwen-k2-profiles").read_text()
+        self.assertEqual(10, sum(line.startswith("profile ") for line in text.splitlines()))
+        body = text.split('profile "host-systemd"', 1)[1]
+        self.assertIn('change_profile -> qwen-k2-source-v1,', body)
+        self.assertIn('dbus receive bus=system', body)
+
+    def test_shared_label_with_different_base_refuses(self):
+        self.target["systemBus"]["label"] = self.target["hostExecutables"]["systemd"]["label"]
+        (self.host_policy / "host-system-bus.rules").write_bytes(b'  "/different-base" r,\n')
+        self.write_host_manifest()
+        self.refuses("identical complete bases")
+
+    def test_changed_or_missing_host_base_refuses_without_output(self):
+        path = self.host_policy / "host-runtime.rules"
+        path.write_bytes(path.read_bytes() + b'  "/changed" r,\n')
+        self.refuses("complete host base bytes differ")
+        path.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.render()
+        self.assertFalse(self.output.exists())
+
+    def test_fixed_host_manifest_rejects_extra_or_caller_paths(self):
+        path = self.host_policy / "host-policies.json"
+        value = json.loads(path.read_bytes())
+        value["files"]["../host-runtime.rules"] = value["files"].pop("host-runtime.rules")
+        path.write_bytes(POLICY.encoded(value))
+        self.refuses("complete fixed host policy")
+
+    def test_flat_base_accepts_quoted_escaped_aare_and_preserves_denials(self):
+        raw = b'  "/var/lib/{one,two}/\\{literal\\}\\\"quote" rw,\n  deny "/bin/{a,b}" x,\n  "/bin/helper" mrix,\n  mount options=(bind) "/a/{b,c}" -> "/d/",\n'
+        self.assertEqual(raw, POLICY.host_body(raw))
+
+    def test_flat_base_refuses_structural_ambient_and_transition_inputs(self):
+        bad = [b'  } profile injected { "/a" r,\n', b'  profile nested {\n', b'  #include <abstractions/base>\n',
+               b'  include "/tmp/rules",\n', b'  abi <abi/4.0>,\n', b'  alias /a -> /b,\n',
+               b'  "@{HOME}/a" r,\n', b'  audit { "/a" r,\n', b'  ^hat {\n', b'  change_profile -> unconfined,\n',
+               b'  pivot_root "/new" -> unconfined,\n', b'  "/bin/a" ux,\n', b'  "/bin/a" Ux,\n',
+               b'  "/bin/a" pix,\n', b'  "/bin/a" PUx,\n', b'  "/bin/a" cx,\n', b'  "/bin/a" Px -> unconfined,\n',
+               b'  file,\n', b'  all,\n', b'  "/unterminated r,\n', b'  /unquoted/{a,b} r,\n', b'  "/a" r,\\\n', b'  "/a" r,\r\n',
+               b'  network, "/bin/a" ux,\n', b'  unix (send), change_profile -> unconfined,\n',
+               b'  capability sys_admin, "/bin/a" px,\n', b'  deny "/bin/a" ix,\n', b'  unix (send)),\n']
+        for raw in bad:
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    POLICY.host_body(raw)
+
+    def test_host_labels_cannot_name_namespaces_or_subprofiles(self):
+        for label in (":child://host", "host//child", "host/", ".host", "unconfined", "qwen-k2-source-v1"):
+            with self.subTest(label=label):
+                self.assertFalse(POLICY.host_label(label))
 
     def test_actual_changed_config_paths_change_only_owned_rules_and_unit(self):
         self.target["roleConfigPaths"]["source"] = "/etc/qwen-k2/renamed-source.json"
@@ -189,7 +288,7 @@ class RenderProfilesTest(unittest.TestCase):
         self.refuses("executable digests differ")
         self.source["kubeletDigest"] = self.target["hostExecutables"]["kubelet"]["sha256"]
         self.target["hostExecutables"]["runtime"]["label"] = "unconfined"
-        self.refuses("confined host labels")
+        self.refuses("confined root host labels")
 
     def test_host_executable_path_cannot_grant_another_roles_key(self):
         for peer, path in (("plugin", self.gateway["key"]), ("runtime", self.source["key"]),
@@ -356,6 +455,7 @@ class RenderProfilesTest(unittest.TestCase):
         for name, path in self.inputs.items():
             argv += ["--" + name, str(path), "--" + name + "-sha256", digest(path)]
         argv += ["--worker-layout", str(self.worker), "--sandbox-layout", str(self.sandbox), "--output", str(self.output)]
+        argv += ["--host-policy", str(self.host_policy), "--host-policy-sha256", digest(self.host_policy / "host-policies.json")]
         with patch.object(sys, "argv", argv):
             runpy.run_path(str(Path(__file__).with_name("render-profiles.py")), run_name="__main__")
         self.assertTrue((self.output / "profile-candidate.json").is_file())

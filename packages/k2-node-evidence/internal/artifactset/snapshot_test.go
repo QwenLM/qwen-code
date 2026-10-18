@@ -60,10 +60,19 @@ func fixture(t *testing.T) (fstest.MapFS, fstest.MapFS, fstest.MapFS) {
 		}
 		target.Hosts[name] = HostExecutable{Path: "/usr/bin/" + name, SHA: sha, Label: "host-" + name}
 	}
+	target.SystemBus.Socket, target.SystemBus.PrivateSocket, target.SystemBus.Label = "/run/dbus/system_bus_socket", "/run/systemd/private", "host-dbus"
 	// The map is initialized by decoding inert metadata, without mounting anything.
 	_ = json.Unmarshal([]byte(`{"worker":[],"sandbox":[]}`), &target.RootfsMounts)
 	profiles := fstest.MapFS{"source-config.json": file(encode(source)), "gateway-config.json": file(encode(gateway)), "target.json": file(encode(target)), "runtime.json": file([]byte(`{"inert":"runtime"}`)), "creation-contract.json": file(contract), "qwen-k2-node-source.service": file([]byte("ExecStart=/opt/qwen-k2/bin/k2-node-evidence source /etc/qwen-k2/source.json\n")), "qwen-k2-runtime-gateway.service": file([]byte("ExecStart=/opt/qwen-k2/bin/k2-node-evidence gateway /etc/qwen-k2/gateway.json\n")), "qwen-k2-profiles": file([]byte("inert policy data, not compiled or loaded"))}
-	p := profile{Format: "qwen-k2-profile-candidate/1", ArtifactSHA: birth.SHA256(pre["artifact-manifest.json"].Data), ShimSHA: birth.SHA256(pre["shim.json"].Data), Paths: map[string]string{"source": "/etc/qwen-k2/source.json", "gateway": "/etc/qwen-k2/gateway.json"}, Boundaries: []string{"inert data, never qualification"}, Generators: map[string]string{"image-catalog.py": a.Generators["image-catalog.py"], "render-pre-exec.py": a.Generators["render-pre-exec.py"], "render-profiles.py": strings.Repeat("6", 64)}, Files: map[string]pin{}}
+	bases := manifest{Format: "qwen-k2-host-policies/1", Files: map[string]pin{}}
+	for _, role := range hostRoles {
+		name := "host-" + role + ".rules"
+		raw := []byte("  \"/explicit-inert-base-only\" r,\n")
+		profiles[name] = file(raw)
+		bases.Files[name] = pin{len(raw), birth.SHA256(raw)}
+	}
+	profiles["host-policies.json"] = file(encode(bases))
+	p := profile{Format: "qwen-k2-profile-candidate/2", ArtifactSHA: birth.SHA256(pre["artifact-manifest.json"].Data), ShimSHA: birth.SHA256(pre["shim.json"].Data), Paths: map[string]string{"source": "/etc/qwen-k2/source.json", "gateway": "/etc/qwen-k2/gateway.json"}, Boundaries: []string{"inert data, never qualification"}, Generators: map[string]string{"image-catalog.py": a.Generators["image-catalog.py"], "render-pre-exec.py": a.Generators["render-pre-exec.py"], "render-profiles.py": strings.Repeat("6", 64)}, Files: map[string]pin{}}
 	for name, f := range profiles {
 		p.Files[name] = pin{len(f.Data), birth.SHA256(f.Data)}
 	}
@@ -86,7 +95,7 @@ func assemble(t *testing.T, pre, p, c fstest.MapFS) map[string][]byte {
 
 func repin(t *testing.T, files map[string][]byte) {
 	t.Helper()
-	m := manifest{Format: "qwen-k2-installed-artifacts/1", Files: map[string]pin{}}
+	m := manifest{Format: "qwen-k2-installed-artifacts/2", Files: map[string]pin{}}
 	for name, raw := range files {
 		if name != "installation.json" {
 			m.Files[name] = pin{len(raw), birth.SHA256(raw)}
@@ -99,7 +108,7 @@ func TestAssemblePreservesOriginalCompilationAndDerivesOnlySourceDigest(t *testi
 	pre, p, c := fixture(t)
 	before := bytes.Clone(p["source-config.json"].Data)
 	files := assemble(t, pre, p, c)
-	if len(files) != 18 || !bytes.Equal(files["profile-candidate.json"], c["profile-candidate.json"].Data) || !bytes.Equal(files["source-config.json"], before) || !bytes.Equal(files["gateway-config.json"], p["gateway-config.json"].Data) {
+	if len(files) != 25 || !bytes.Equal(files["profile-candidate.json"], c["profile-candidate.json"].Data) || !bytes.Equal(files["source-config.json"], before) || !bytes.Equal(files["gateway-config.json"], p["gateway-config.json"].Data) {
 		t.Fatal("original compilation bytes changed")
 	}
 	old := []byte(`"workerPolicySha256":"` + strings.Repeat("1", 64) + `"`)
@@ -259,6 +268,15 @@ func TestHostRolesAreExplicitIndependentValuesFromValidatedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	want := []string{"host-runtime", "host-kubelet", "host-registrar", "host-plugin", "host-systemd", "host-dbus"}
+	labels := snapshot.HostPolicyLabels()
+	if strings.Join(labels, ",") != strings.Join(want, ",") || new(Snapshot).HostPolicyLabels() != nil || (*Snapshot)(nil).HostPolicyLabels() != nil {
+		t.Fatal("complete host label set did not come from the validated target", labels)
+	}
+	labels[0] = "caller-change"
+	if snapshot.HostPolicyLabels()[0] != want[0] {
+		t.Fatal("caller replaced the retained host label set")
+	}
 	for _, name := range []string{"runtime", "kubelet", "registrar", "plugin", "systemd"} {
 		actual, err := snapshot.Host(name)
 		if err != nil || actual.Path != "/usr/bin/"+name || actual.Label != "host-"+name {
@@ -289,6 +307,77 @@ func TestHostRolesAreExplicitIndependentValuesFromValidatedBytes(t *testing.T) {
 	}
 	if _, err := new(Snapshot).Host("runtime"); err == nil {
 		t.Fatal("empty snapshot supplied a host role")
+	}
+}
+
+func TestCompleteHostSetCannotBeRepairedByOuterPins(t *testing.T) {
+	for _, fault := range []string{"busAlias", "busAbsoluteAlias", "differentAliasBase", "implicitBusAttachment", "namespaceHost", "childHost", "namespaceBus", "missingBus", "hostVersion", "extraBase", "nestedPin", "oldCandidate", "oldInstallation", "oversizedBase"} {
+		t.Run(fault, func(t *testing.T) {
+			pre, p, c := fixture(t)
+			files := assemble(t, pre, p, c)
+			var target target
+			var bases manifest
+			_ = json.Unmarshal(files["target.json"], &target)
+			_ = json.Unmarshal(files["host-policies.json"], &bases)
+			switch fault {
+			case "busAlias", "busAbsoluteAlias", "differentAliasBase":
+				if fault == "busAbsoluteAlias" {
+					host := target.Hosts["systemd"]
+					host.Label = "/usr/bin/explicit-host-label"
+					target.Hosts["systemd"] = host
+				}
+				target.SystemBus.Label = target.Hosts["systemd"].Label
+				if fault == "differentAliasBase" {
+					files["host-system-bus.rules"] = []byte("  \"/different-inert-base\" r,\n")
+					bases.Files["host-system-bus.rules"] = pin{len(files["host-system-bus.rules"]), birth.SHA256(files["host-system-bus.rules"])}
+				}
+			case "namespaceHost", "childHost":
+				host := target.Hosts["runtime"]
+				host.Label = map[string]string{"namespaceHost": ":child://host", "childHost": "host//child"}[fault]
+				target.Hosts["runtime"] = host
+			case "namespaceBus":
+				target.SystemBus.Label = ":child://bus"
+			case "implicitBusAttachment":
+				target.SystemBus.Label = "/usr/bin/other-daemon"
+			case "missingBus":
+				target.SystemBus.Label = ""
+			case "hostVersion":
+				bases.Format = "qwen-k2-host-policies/0"
+			case "extraBase":
+				bases.Files["../foreign.rules"] = bases.Files["host-runtime.rules"]
+			case "nestedPin":
+				bases.Files["host-runtime.rules"] = pin{1, strings.Repeat("0", 64)}
+			case "oversizedBase":
+				files["host-runtime.rules"] = bytes.Repeat([]byte("a"), (1<<20)+1)
+			}
+			files["target.json"], _ = json.Marshal(target)
+			files["host-policies.json"], _ = json.Marshal(bases)
+			var candidate profile
+			_ = json.Unmarshal(files["profile-candidate.json"], &candidate)
+			for _, name := range []string{"target.json", "host-policies.json", "host-system-bus.rules", "host-runtime.rules"} {
+				candidate.Files[name] = pin{len(files[name]), birth.SHA256(files[name])}
+			}
+			if fault == "oldCandidate" {
+				candidate.Format = "qwen-k2-profile-candidate/1"
+			}
+			files["profile-candidate.json"], _ = json.Marshal(candidate)
+			var compiled compilation
+			_ = json.Unmarshal(files["profile-compile.json"], &compiled)
+			compiled.CandidateSHA = birth.SHA256(files["profile-candidate.json"])
+			files["profile-compile.json"], _ = json.Marshal(compiled)
+			repin(t, files)
+			if fault == "oldInstallation" {
+				files["installation.json"] = bytes.Replace(files["installation.json"], []byte("qwen-k2-installed-artifacts/2"), []byte("qwen-k2-installed-artifacts/1"), 1)
+			}
+			snapshot, err := Validate(files)
+			if fault == "busAlias" || fault == "busAbsoluteAlias" {
+				if err != nil || len(snapshot.HostPolicyLabels()) != 5 {
+					t.Fatal("identical complete base alias did not retain the fixed unique set", err)
+				}
+			} else if err == nil {
+				t.Fatal("outer pins repaired an invalid complete host set", fault)
+			}
+		})
 	}
 }
 
@@ -359,6 +448,11 @@ func TestOriginalJSONTokenReplacementPreservesWhitespaceAndEscapedKey(t *testing
 func TestArtifactLimitsDoNotWidenBirthInputs(t *testing.T) {
 	if birth.MaxInputs != 32<<10 || Limits()["packed.bin"] != 8<<20 || Limits()["qwen-k2-profiles"] != 16<<20 || Limits()["worker-catalog.json"] != 16<<20 {
 		t.Fatal("unrelated input bounds changed")
+	}
+	for _, role := range hostRoles {
+		if Limits()["host-"+role+".rules"] != 1<<20 {
+			t.Fatal("complete host base bound changed")
+		}
 	}
 	pre, p, c := fixture(t)
 	files := assemble(t, pre, p, c)

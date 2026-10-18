@@ -23,7 +23,10 @@ final class WorkspaceCsiInstalledBytes {
             "profile-compile.json", "source-config.json", "source-config.installed.json", "gateway-config.json",
             "target.json", "runtime.json", "creation-contract.json", "qwen-k2-node-source.service",
             "qwen-k2-runtime-gateway.service", "features", "qwen-k2-profiles", "worker-catalog.json",
-            "sandbox-catalog.json", "packed.bin");
+            "sandbox-catalog.json", "packed.bin", "host-policies.json", "host-runtime.rules", "host-kubelet.rules",
+            "host-registrar.rules", "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules");
+    private static final Set<String> HOST_BASES = Set.of("host-runtime.rules", "host-kubelet.rules",
+            "host-registrar.rules", "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules");
 
     private WorkspaceCsiInstalledBytes() { }
 
@@ -32,7 +35,7 @@ final class WorkspaceCsiInstalledBytes {
         byte[] manifestRaw = read(directory.resolve("installation.json"), 64 * 1024);
         JsonNode manifest = object(manifestRaw, 64 * 1024);
         closed(manifest, Set.of("format", "files"));
-        require("qwen-k2-installed-artifacts/1".equals(text(manifest, "format")));
+        require("qwen-k2-installed-artifacts/2".equals(text(manifest, "format")));
         JsonNode pins = manifest.path("files");
         closed(pins, FILES);
         long total = manifestRaw.length;
@@ -45,7 +48,7 @@ final class WorkspaceCsiInstalledBytes {
                 case "shim.json", "source-config.json", "source-config.installed.json", "gateway-config.json", "target.json",
                         "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service" -> 32 * 1024;
                 case "creation-contract.json" -> CsiCreationContract.LIMIT;
-                default -> 64 * 1024;
+                default -> HOST_BASES.contains(name) ? 1024 * 1024 : 64 * 1024;
             };
             total += positive(pin, "bytes", limit);
             require(text(pin, "sha256").matches("[0-9a-f]{64}"));
@@ -59,16 +62,27 @@ final class WorkspaceCsiInstalledBytes {
         JsonNode profile = object(profileRaw, 64 * 1024);
         closed(profile, Set.of("format", "artifactManifestSha256", "shimConfigurationSha256", "roleConfigPaths",
                 "boundaries", "generators", "files"));
-        require("qwen-k2-profile-candidate/1".equals(text(profile, "format"))
+        require("qwen-k2-profile-candidate/2".equals(text(profile, "format"))
                 && DigestUtils.sha256Hex(shim).equals(text(profile, "shimConfigurationSha256")));
         JsonNode paths = profile.path("roleConfigPaths");
         closed(paths, Set.of("source", "gateway"));
         JsonNode profileFiles = profile.path("files");
         Set<String> profileNames = Set.of("source-config.json", "gateway-config.json", "target.json", "runtime.json",
-                "creation-contract.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "qwen-k2-profiles");
+                "creation-contract.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "qwen-k2-profiles",
+                "host-policies.json", "host-runtime.rules", "host-kubelet.rules", "host-registrar.rules",
+                "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules");
         closed(profileFiles, profileNames);
         for (String name : profileNames) {
             require(profileFiles.path(name).equals(pins.path(name)));
+        }
+        JsonNode hostPolicies = object(pinned(directory, pins, "host-policies.json", 64 * 1024), 64 * 1024);
+        closed(hostPolicies, Set.of("format", "files"));
+        require("qwen-k2-host-policies/1".equals(text(hostPolicies, "format")));
+        JsonNode hostPins = hostPolicies.path("files");
+        closed(hostPins, HOST_BASES);
+        for (String name : HOST_BASES) {
+            require(hostPins.path(name).equals(pins.path(name)));
+            pinned(directory, pins, name, 1024 * 1024);
         }
         byte[] artifactsRaw = pinned(directory, pins, "artifact-manifest.json", 64 * 1024);
         require(DigestUtils.sha256Hex(artifactsRaw).equals(text(profile, "artifactManifestSha256")));

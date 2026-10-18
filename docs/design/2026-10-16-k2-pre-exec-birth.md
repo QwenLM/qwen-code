@@ -217,9 +217,13 @@ this does not qualify every effective setting or the installation.
 The offline profile stage consumes the exact version-2 artifact manifest, both
 catalogues and shim configuration, plus reviewed target facts, the original
 private Runtime request and both actual service configurations. It generates
-one five-profile source and service units whose argv names the same configuration
-paths. The generator owns all permission syntax; caller rules, includes and
-AppArmor patterns are not accepted. Configuration/key paths must stay outside
+one policy source and service units whose argv names the same configuration
+paths. The generator owns the five Qwen profiles. The
+[complete host policy set](2026-10-18-k2-host-policy-set.md) adds separately
+reviewed, whole-byte-pinned expanded base bodies for six fixed host roles;
+headers, attachments and K2 reciprocal permissions remain code-owned. Arbitrary
+permission arrays, includes and caller patterns in target facts are not accepted.
+Configuration/key paths must stay outside
 writable input, journal, socket and worker roots. Different role keys must not
 alias. Host peer hashes must agree with the actual source/gateway configuration.
 
@@ -230,8 +234,12 @@ for the trusted creator/consumer to compare. Numeric proc names also require
 the actual kernel's self-only attribute-write semantics; UID ownership does
 not establish process ownership. SDK child OOM adjustment and disconnected
 namespace/root naming require explicit installation qualification. Generating
-five named profiles does not supply the reciprocal profiles of existing host
-actors or qualify an installation.
+five named profiles alone does not supply the complete profiles of existing host
+actors. Composing reviewed host bases also does not qualify an installation.
+Pathname Unix sockets are mediated by literal file rules, not Unix peer-label
+rules, which cover abstract/anonymous sockets. The trusted programs retain
+actual credentials, executable/process/namespace and original held-peer checks;
+actor/admission exclusion still requires native qualification.
 
 Outer snapshot mount inputs are separate from inner OCI mounts. Rules split
 normal mount stages and preserve the original data in the reviewed target and

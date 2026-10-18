@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render an offline five-role policy candidate from pinned pre-exec inputs."""
+"""Render a complete offline policy candidate from pinned pre-exec inputs."""
 
 import argparse
 import base64
@@ -18,6 +18,8 @@ PRE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(PRE)
 IMAGE = PRE.IMAGE
 ROLES = ("source", "gateway", "shim", "worker", "sandbox")
+HOST_ROLES = ("runtime", "kubelet", "registrar", "plugin", "systemd", "system-bus")
+HOST_FILES = {"host-" + role + ".rules" for role in HOST_ROLES}
 CID = "[0-9a-f]" * 64
 UUID = "-".join("[0-9a-f]" * count for count in (8, 4, 4, 4, 12))
 INPUT = "/var/lib/qwen-k2/inputs/" + CID
@@ -25,6 +27,7 @@ PROC = "/proc/{self,thread-self,[0-9]*,[0-9]*/task/[0-9]*}"
 FLAGS = {"ro", "rw", "nosuid", "nodev", "noexec", "sync", "dirsync", "noatime", "nodiratime", "bind", "rbind", "relatime", "strictatime", "private", "rprivate", "slave", "rslave", "shared", "rshared", "remount"}
 BOUNDARIES = [
     "Mount data, device numbers and DBus message bodies require the pinned creator/consumer; LSM rules do not compare them.",
+    "Pathname Unix sockets use file rules; Unix peer-label rules cover abstract/anonymous sockets, not pathname peer enforcement.",
     "Numeric proc attr writes require the actual kernel self-only write check; UID ownership is not process ownership.",
     "SDK parent/child OOM targets require the pinned manager call and original runtime actor; proc path rules do not prove that relationship.",
     "Disconnected object naming, reciprocal host profiles and exclusive actor/CSI wiring require actual installation qualification.",
@@ -73,6 +76,104 @@ def under(path, parent):
     return path == parent or path.startswith(parent + "/")
 
 
+def host_body(raw):
+    require(0 < len(raw) <= 1024 * 1024 and raw.endswith(b"\n"), "a complete bounded host base ending in newline is required")
+    text = raw.decode("utf-8", "strict")
+    require(not any(ord(char) < 32 and char != "\n" for char in text) and "@{" not in text, "host bases cannot contain controls or variables")
+    rules = 0
+    for line in text.splitlines():
+        if not line:
+            continue
+        require(line.startswith("  ") and line.endswith(","), "host bases require flat comma-terminated rule lines")
+        masked, inside, escaped, depth = [], False, False, 0
+        for index, char in enumerate(line):
+            if inside:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    inside = False
+                    masked.append('""')
+            elif char == '"':
+                inside = True
+            else:
+                require(char not in "{}#\\", "host bases cannot contain structures, comments or continuations")
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                require(0 <= depth <= 32, "host base parentheses are invalid")
+                require(char != "," or depth != 0 or index == len(line) - 1, "exactly one host base rule per line is required")
+                masked.append(char)
+        require(not inside and not escaped and depth == 0, "host base quoting or parentheses are incomplete")
+        rule = "".join(masked).strip()
+        denied = False
+        while re.match(r"^(?:audit|deny|owner|allow) ", rule):
+            qualifier, rule = rule.split(" ", 1)
+            denied |= qualifier == "deny"
+            rule = rule.lstrip()
+        file_rule = re.fullmatch(r'(?:file )?"" +([A-Za-z]+),', rule)
+        if file_rule:
+            mode = file_rule[1] if denied else file_rule[1].replace("ix", "")
+            require(mode or "ix" in file_rule[1], "host file permissions are required")
+            require(all(char in ("rwalmkx" if denied else "rwalmk") for char in mode), "host base execution must inherit confinement")
+        else:
+            kind = rule.split(" ", 1)[0].rstrip(",")
+            require(kind in {"capability", "network", "unix", "ptrace", "signal", "dbus", "mount", "remount", "umount", "pivot_root", "link", "set", "mqueue", "io_uring", "userns"}, "unsupported host base rule or profile transition")
+            require("->" not in rule or kind in {"mount", "remount", "link"}, "host base profile transitions are code-owned")
+        rules += 1
+    require(rules > 0, "a nonempty complete host base is required")
+    return raw
+
+
+def host_inputs(raw, files):
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=IMAGE.closed, parse_constant=IMAGE.nonfinite)
+    require(isinstance(value, dict) and set(value) == {"format", "files"} and value["format"] == "qwen-k2-host-policies/1" and isinstance(value["files"], dict) and set(value["files"]) == HOST_FILES, "the complete fixed host policy manifest is required")
+    bases = {}
+    for role in HOST_ROLES:
+        name = "host-" + role + ".rules"
+        pin = value["files"][name]
+        require(isinstance(pin, dict) and set(pin) == {"bytes", "sha256"} and type(pin["bytes"]) is int and 0 < pin["bytes"] <= 1024 * 1024, "bounded complete host base pins are required")
+        content = files[name]
+        require(len(content) == pin["bytes"] and sha(content) == pin["sha256"], "complete host base bytes differ")
+        bases[role] = host_body(content)
+    return bases
+
+
+def host_profiles(facts, bases, source, gateway):
+    target(facts)
+    hosts, bus = facts["hostExecutables"], facts["systemBus"]
+    label = lambda role: quoted(bus["label"] if role == "system-bus" else hosts[role]["label"])
+    additions = {role: [] for role in HOST_ROLES}
+    for role in ("runtime", "kubelet", "registrar", "plugin", "systemd"):
+        readers = ("source", "gateway") if role == "systemd" else ("gateway",) if role == "runtime" else ("source",)
+        additions[role] += ["ptrace (readby) peer=qwen-k2-" + reader + "-v1," for reader in readers]
+    for role in ("kubelet", "registrar"):
+        additions[role] += [file_literal(source["frontendSocket"]) + " rw,", "unix (connect,send,receive) type=stream peer=(label=qwen-k2-source-v1),"]
+    additions["plugin"] += [file_literal(source["pluginSocket"]) + " rw,", "unix (accept,send,receive) type=stream peer=(label=qwen-k2-source-v1),"]
+    additions["runtime"] += [file_literal(gateway["runtimeSocket"]) + " rw,", '"/run/containerd/containerd.sock.ttrpc" rw,', "unix (accept,send,receive) type=stream peer=(label=qwen-k2-gateway-v1),", "unix (accept,send,receive) type=stream peer=(label=qwen-k2-shim-v1),", '"/opt/qwen-k2/bin/containerd-shim-qwen-k2-v1" mrPx -> qwen-k2-shim-v1,']
+    for role in ("source", "gateway"):
+        additions["systemd"] += ["unix (accept,send,receive) type=stream peer=(label=qwen-k2-" + role + "-v1),", "signal (send) set=(term,int,kill) peer=qwen-k2-" + role + "-v1,", "change_profile -> qwen-k2-" + role + "-v1,"]
+    additions["systemd"] += [file_literal(bus["privateSocket"]) + " rw,", "unix (accept,send,receive) type=stream peer=(label=qwen-k2-shim-v1),", 'dbus (send,receive) bus=system path="/org/freedesktop/systemd1{,/**}" interface="org.freedesktop.systemd1.{Manager,Unit,Scope}" peer=(label=qwen-k2-shim-v1),']
+    additions["system-bus"] += [file_literal(bus["socket"]) + " rw,", "unix (accept,send,receive) type=stream peer=(label=qwen-k2-shim-v1),", 'dbus receive bus=system path=/org/freedesktop/DBus interface=org.freedesktop.DBus member="{Hello,AddMatch,RemoveMatch}" peer=(label=qwen-k2-shim-v1),']
+    groups = {}
+    for role in HOST_ROLES:
+        key = label(role)
+        if key in groups:
+            require(groups[key][0] == bases[role], "host roles sharing a label require identical complete bases")
+            groups[key][2].extend(additions[role])
+        else:
+            attachment = " " + file_literal(hosts[role]["path"]) if role != "system-bus" else ""
+            groups[key] = (bases[role], attachment, list(additions[role]))
+    result = bytearray()
+    for name, (base, attachment, rules) in groups.items():
+        result += ("profile " + name + attachment + " flags=(enforce,mediate_deleted) {\n").encode()
+        result += base
+        result += ("\n".join("  " + rule for rule in sorted(set(rules))) + "\n}\n\n").encode()
+    return bytes(result)
+
+
 def target(value):
     fields = {"format", "architecture", "hostExecutables", "snapshotRoot", "podSlicePrefix", "apparmorExportRoot", "systemBus", "volumeSerialPath", "roleConfigPaths", "sandboxNetworkNamespaceSource", "rootfsMounts", "oldRootPath", "hugepageSizes"}
     require(set(value) == fields and value["format"] == "qwen-k2-profile-target/2" and value["architecture"] in ("amd64", "arm64"), "complete closed profile target facts are required")
@@ -84,7 +185,7 @@ def target(value):
         literal(item["path"])
         IMAGE.digest("sha256:" + item["sha256"])
         label = item["label"]
-        require(isinstance(label, str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,253}", label) and label != "unconfined" and not label.startswith("qwen-k2-"), "distinct confined host labels are required")
+        require(host_label(label), "distinct confined root host labels are required")
         labels.append(label)
     require(len(set(labels)) == len(labels), "host peer labels must be distinct")
     for key in ("snapshotRoot", "podSlicePrefix", "apparmorExportRoot", "volumeSerialPath"):
@@ -101,7 +202,8 @@ def target(value):
     bus = value["systemBus"]
     require(isinstance(bus, dict) and set(bus) == {"socket", "privateSocket", "label"}, "closed system bus facts are required")
     require(bus["socket"] in ("/run/dbus/system_bus_socket", "/var/run/dbus/system_bus_socket") and bus["privateSocket"] == "/run/systemd/private", "fixed system bus sockets are required")
-    require(isinstance(bus["label"], str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,253}", bus["label"]) and bus["label"] != "unconfined" and not bus["label"].startswith("qwen-k2-"), "a confined bus label is required")
+    require(host_label(bus["label"]), "a confined root bus label is required")
+    require(not bus["label"].startswith("/") or bus["label"] in labels, "a distinct bus label cannot imply an executable attachment")
     namespace = value["sandboxNetworkNamespaceSource"]
     require(isinstance(namespace, str) and re.fullmatch(r"/run/netns/[A-Za-z0-9._-]*\$\{(?:SANDBOX_ID|NETWORK_NAMESPACE_ID)\}[A-Za-z0-9._-]*", namespace), "the fixed identity network namespace template is required")
     require(under(literal(value["oldRootPath"]), "/qwen-k2-disconnected/shim") and value["oldRootPath"] != "/qwen-k2-disconnected/shim", "a specific old-root disconnected path is required")
@@ -109,6 +211,10 @@ def target(value):
     require(isinstance(sizes, list) and len(sizes) <= 128 and all(isinstance(size, str) and re.fullmatch(r"[1-9][0-9]{0,9}(?:KB|MB|GB)", size) for size in sizes) and len(set(sizes)) == len(sizes), "bounded semantic hugepage sizes are required")
     require(isinstance(value["rootfsMounts"], dict) and set(value["rootfsMounts"]) == {"worker", "sandbox"}, "both actual outer rootfs mount contracts are required")
     return value
+
+
+def host_label(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9/][A-Za-z0-9._/-]{0,252}", value) and "//" not in value and not value.endswith("/") and value != "unconfined" and not value.startswith("qwen-k2-")
 
 
 def role_configs(facts, source, gateway, manifest):
@@ -287,11 +393,11 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
     entries = {role: [] for role in ROLES}
     for role in ("source", "gateway"):
         entries[role] = service + [file_literal(path) + " r," for path in role_files[role]] + ["signal (send,receive) peer=qwen-k2-" + role + "-v1,", "signal (receive) set=(term,int,kill) peer=" + peer("systemd") + ","]
-        artifact_names = "installation.json,artifact-manifest.json,shim.json,profile-candidate.json,profile-compile.json,source-config.json,source-config.installed.json,gateway-config.json,target.json,runtime.json,creation-contract.json,qwen-k2-node-source.service,qwen-k2-runtime-gateway.service,features,qwen-k2-profiles,worker-catalog.json,sandbox-catalog.json,packed.bin"
+        artifact_names = "installation.json,artifact-manifest.json,shim.json,profile-candidate.json,profile-compile.json,source-config.json,source-config.installed.json,gateway-config.json,target.json,runtime.json,creation-contract.json,qwen-k2-node-source.service,qwen-k2-runtime-gateway.service,features,qwen-k2-profiles,worker-catalog.json,sandbox-catalog.json,packed.bin,host-policies.json," + ",".join(sorted(HOST_FILES))
         entries[role] += ['"/etc/" r,', '"/etc/qwen-k2/{,artifacts/}" r,', '"/etc/qwen-k2/artifacts/{' + artifact_names + '}" r,']
         unit = "qwen-k2-node-source.service" if role == "source" else "qwen-k2-runtime-gateway.service"
         entries[role] += ['"/etc/systemd/system/' + unit + '" r,']
-        entries[role] += ['"/run/systemd/private" rw,', file_literal(hosts["systemd"]["path"]) + " r,", "ptrace (read) peer=" + peer("systemd") + ",", "unix (connect,send,receive) type=stream peer=(addr=\"/run/systemd/private\" label=" + peer("systemd") + "),"]
+        entries[role] += ['"/run/systemd/private" rw,', file_literal(hosts["systemd"]["path"]) + " r,", "ptrace (read) peer=" + peer("systemd") + ",", "unix (connect,send,receive) type=stream peer=(label=" + peer("systemd") + "),"]
     src = entries["source"]
     for root in ("/sys/kernel/security/apparmor/policy", facts["apparmorExportRoot"]):
         src += [quoted(root + suffix) + " r," for suffix in ("/", "/revision", "/profiles/", "/profiles/*/", "/profiles/*/{name,mode,raw_data,raw_abi,raw_sha256}", "/raw_data/", "/raw_data/[0-9]*/", "/raw_data/[0-9]*/{raw_data,abi,revision,sha256}")]
@@ -299,11 +405,11 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
     for name in ("kubelet", "registrar", "plugin"):
         src += [file_literal(hosts[name]["path"]) + " r,", "ptrace (read) peer=" + peer(name) + ","]
     src += ["ptrace (read) peer=qwen-k2-" + role + "-v1," for role in ("shim", "worker", "sandbox")]
-    src += ["ptrace (readby) peer=qwen-k2-shim-v1,", 'unix (create,bind,listen,getattr,setattr,getopt,setopt,shutdown) type=seqpacket,', 'unix (accept,send,receive) type=seqpacket addr="/run/qwen-k2/source/birth.sock" peer=(label=qwen-k2-shim-v1),', 'unix (create,bind,listen,getattr,setattr,getopt,setopt,shutdown) type=stream,']
+    src += ["ptrace (readby) peer=qwen-k2-shim-v1,", 'unix (create,bind,listen,getattr,setattr,getopt,setopt,shutdown) type=seqpacket,', 'unix (accept,send,receive) type=seqpacket peer=(label=qwen-k2-shim-v1),', 'unix (create,bind,listen,getattr,setattr,getopt,setopt,shutdown) type=stream,']
     for name in ("kubelet", "registrar"):
-        src += ["unix (accept,send,receive) type=stream addr=" + file_literal(source["frontendSocket"]) + " peer=(label=" + peer(name) + "),"]
-    src += ["unix (connect,send,receive) type=stream peer=(addr=" + file_literal(source["pluginSocket"]) + " label=" + peer("plugin") + "),"]
-    entries["gateway"] += [quoted(PROC + "/ns/{user,mnt}") + " r,", file_literal(gateway["runtimeSocket"]) + " rw,", file_literal(hosts["runtime"]["path"]) + " r,", "ptrace (read) peer=" + peer("runtime") + ",", "unix (create,getattr,getopt,setopt,shutdown) type=stream,", "unix (connect,send,receive) type=stream peer=(addr=" + file_literal(gateway["runtimeSocket"]) + " label=" + peer("runtime") + "),"]
+        src += ["unix (accept,send,receive) type=stream peer=(label=" + peer(name) + "),"]
+    src += ["unix (connect,send,receive) type=stream peer=(label=" + peer("plugin") + "),"]
+    entries["gateway"] += [quoted(PROC + "/ns/{user,mnt}") + " r,", file_literal(gateway["runtimeSocket"]) + " rw,", file_literal(hosts["runtime"]["path"]) + " r,", "ptrace (read) peer=" + peer("runtime") + ",", "unix (create,getattr,getopt,setopt,shutdown) type=stream,", "unix (connect,send,receive) type=stream peer=(label=" + peer("runtime") + "),"]
     shim = entries["shim"]
     shim += basic + own + ['"/etc/qwen-k2/shim.json" r,', '"/opt/qwen-k2/bin/{containerd-shim-qwen-k2-v1,runc}" mrix,', '"/opt/qwen-k2/bin/k2-node-evidence" r,', '"/run/containerd/containerd.sock.ttrpc" rw,', '"/run/qwen-k2/source/birth.sock" rw,', quoted("/run/qwen-k2/shims/{," + CID + "}") + " rw,", '"/var/lib/qwen-k2/inputs/" rw,', quoted(INPUT + "/") + " rw,", quoted(INPUT + "/{config.json,original.create.pb,consumed.create.pb,original.config.json,options.json,runtime,log.json,.init.pid,init.pid}") + " rw,", quoted(INPUT + "/{rootfs,work}/") + " rw,", '"/run/qwen-k2/runc/{,k8s.io/}" rw,', quoted("/run/qwen-k2/runc/k8s.io/" + CID + "/{,state.json,state-*,exec.fifo}") + " rw,", quoted("/run/containerd/io.containerd.runtime.v2.task/k8s.io/" + CID + "/") + " r,", quoted("/run/containerd/io.containerd.runtime.v2.task/k8s.io/" + CID + "/{config.json,address}") + " r,", quoted("/run/containerd/io.containerd.runtime.v2.task/k8s.io/" + CID + "/s") + " rw,", quoted(PROC + "/{oom_score_adj,mountinfo,fd/,fd/*,ns/{user,mnt,cgroup,pid,net,ipc,uts}}") + " r,", '"/proc/[0-9]*/oom_score_adj" w,', quoted(PROC + "/attr/{exec,apparmor/exec}") + " w,", "ptrace (read,readby) peer=qwen-k2-shim-v1,", "ptrace (read) peer=qwen-k2-source-v1,", "ptrace (readby) peer=qwen-k2-source-v1,", "signal (send,receive) peer=qwen-k2-shim-v1,"]
     shim += ["capability " + name + "," for name in ("sys_admin", "linux_immutable", "chown", "dac_override", "setuid", "setgid", "setpcap", "sys_chroot", "mknod", "kill")]
@@ -317,7 +423,7 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
     shim += ['"/sys/fs/cgroup/cgroup.controllers" r,', '"/sys/kernel/mm/hugepages/" r,']
     shim += [quoted(leaf + "hugetlb." + size + ".{max,current,events}") + " r," for size in facts["hugepageSizes"]]
     bus = facts["systemBus"]
-    shim += [file_literal(bus["socket"]) + " rw,", file_literal(bus["privateSocket"]) + " rw,", "unix (create,bind,listen,getattr,setattr,getopt,setopt,shutdown) type=stream,", "unix (connect,accept,send,receive) type=stream peer=(label=qwen-k2-shim-v1),", "unix (connect,send,receive) type=stream peer=(label=" + peer("runtime") + "),", "unix (connect,send,receive) type=stream peer=(label=" + quoted(bus["label"]) + "),", "unix (connect,send,receive) type=stream peer=(label=" + peer("systemd") + "),", "unix (create,getattr,getopt,setopt,shutdown) type=seqpacket,", 'unix (connect,send,receive) type=seqpacket peer=(addr="/run/qwen-k2/source/birth.sock" label=qwen-k2-source-v1),', "dbus (send,receive) bus=system path=/org/freedesktop/systemd1{,/**} interface=org.freedesktop.systemd1.{Manager,Unit,Scope} peer=(name=org.freedesktop.systemd1 label=" + peer("systemd") + "),", "dbus send bus=system path=/org/freedesktop/DBus interface=org.freedesktop.DBus member={Hello,AddMatch,RemoveMatch} peer=(name=org.freedesktop.DBus label=" + quoted(bus["label"]) + "),"]
+    shim += [file_literal(bus["socket"]) + " rw,", file_literal(bus["privateSocket"]) + " rw,", "unix (create,bind,listen,getattr,setattr,getopt,setopt,shutdown) type=stream,", "unix (connect,accept,send,receive) type=stream peer=(label=qwen-k2-shim-v1),", "unix (connect,send,receive) type=stream peer=(label=" + peer("runtime") + "),", "unix (connect,send,receive) type=stream peer=(label=" + quoted(bus["label"]) + "),", "unix (connect,send,receive) type=stream peer=(label=" + peer("systemd") + "),", "unix (create,getattr,getopt,setopt,shutdown) type=seqpacket,", 'unix (connect,send,receive) type=seqpacket peer=(label=qwen-k2-source-v1),', "dbus (send,receive) bus=system path=/org/freedesktop/systemd1{,/**} interface=org.freedesktop.systemd1.{Manager,Unit,Scope} peer=(name=org.freedesktop.systemd1 label=" + peer("systemd") + "),", "dbus send bus=system path=/org/freedesktop/DBus interface=org.freedesktop.DBus member={Hello,AddMatch,RemoveMatch} peer=(name=org.freedesktop.DBus label=" + quoted(bus["label"]) + "),"]
     shim += mount_rules(contract, facts, catalogs)
     for role in ("worker", "sandbox"):
         shim += image_rules(catalogs[role]) + image_rules(catalogs[role], INPUT + "/rootfs")
@@ -337,7 +443,7 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
     return raw
 
 
-def render(candidate, candidate_sha, target_file, target_sha, runtime_file, runtime_sha, source_file, source_sha, gateway_file, gateway_sha, worker_layout, sandbox_layout, output):
+def render(candidate, candidate_sha, target_file, target_sha, runtime_file, runtime_sha, source_file, source_sha, gateway_file, gateway_sha, worker_layout, sandbox_layout, host_policy, host_policy_sha, output):
     manifest_raw, manifest = read_json(candidate / "artifact-manifest.json", candidate_sha, 64 * 1024)
     require(set(manifest) == {"format", "artifacts", "creationContractSha256", "sandboxImageSha256", "workerImageSha256", "catalogues", "generators"} and manifest["format"] == "qwen-k2-pre-exec-artifacts/2", "exact version-2 artifacts are required")
     for role in ("source", "shim", "runc"):
@@ -372,13 +478,22 @@ def render(candidate, candidate_sha, target_file, target_sha, runtime_file, runt
     gateway_raw, gateway = read_json(gateway_file, gateway_sha, 32 * 1024)
     require(facts["architecture"] == manifest["artifacts"]["source"]["architecture"], "target and host architecture differ")
     profile = profiles(facts, contract, catalogs, runtime, source, gateway, manifest)
-    files = {"qwen-k2-profiles": profile, "source-config.json": source_raw, "gateway-config.json": gateway_raw, "target.json": target_raw, "runtime.json": runtime_raw, "creation-contract.json": contract_raw}
+    host_raw, host_manifest = read_json(host_policy / "host-policies.json", host_policy_sha, 64 * 1024)
+    require(set(host_manifest.get("files", {})) == HOST_FILES, "the complete fixed host policy manifest is required")
+    files = {"host-policies.json": host_raw}
+    for name in sorted(HOST_FILES):
+        with (host_policy / name).open("rb") as stream:
+            files[name] = stream.read(1024 * 1024 + 1)
+    bases = host_inputs(host_raw, files)
+    profile += host_profiles(facts, bases, source, gateway)
+    require(len(profile) <= 16 * 1024 * 1024, "complete profile source exceeds its byte bound")
+    files.update({"qwen-k2-profiles": profile, "source-config.json": source_raw, "gateway-config.json": gateway_raw, "target.json": target_raw, "runtime.json": runtime_raw, "creation-contract.json": contract_raw})
     for role, template_name in (("source", "qwen-k2-node-source.service"), ("gateway", "qwen-k2-runtime-gateway.service")):
         template = (Path(__file__).parent / "host-services" / template_name).read_bytes()
         old = ("ExecStart=/opt/qwen-k2/bin/k2-node-evidence " + role + " /etc/qwen-k2/" + role + ".json").encode()
         require(template.count(old) == 1, "the service template argv differs")
         files[template_name] = template.replace(old, ("ExecStart=/opt/qwen-k2/bin/k2-node-evidence " + role + " " + facts["roleConfigPaths"][role]).encode())
-    document = {"format": "qwen-k2-profile-candidate/1", "artifactManifestSha256": sha(manifest_raw), "shimConfigurationSha256": sha(shim_raw), "roleConfigPaths": facts["roleConfigPaths"], "boundaries": BOUNDARIES, "generators": {name: sha(Path(__file__).with_name(name).read_bytes()) for name in ("render-profiles.py", "render-pre-exec.py", "image-catalog.py")}, "files": {name: {"bytes": len(raw), "sha256": sha(raw)} for name, raw in files.items()}}
+    document = {"format": "qwen-k2-profile-candidate/2", "artifactManifestSha256": sha(manifest_raw), "shimConfigurationSha256": sha(shim_raw), "roleConfigPaths": facts["roleConfigPaths"], "boundaries": BOUNDARIES, "generators": {name: sha(Path(__file__).with_name(name).read_bytes()) for name in ("render-profiles.py", "render-pre-exec.py", "image-catalog.py")}, "files": {name: {"bytes": len(raw), "sha256": sha(raw)} for name, raw in files.items()}}
     files["profile-candidate.json"] = encoded(document)
     output.mkdir(mode=0o700, exist_ok=False)
     for name, raw in files.items():
@@ -396,9 +511,11 @@ def main():
         parser.add_argument("--" + name + "-sha256", required=True)
     for name in ("worker-layout", "sandbox-layout", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--host-policy", type=Path, required=True)
+    parser.add_argument("--host-policy-sha256", required=True)
     args = parser.parse_args()
     try:
-        render(args.candidate, args.artifact_manifest_sha256, args.target, args.target_sha256, args.runtime, args.runtime_sha256, args.source_config, args.source_config_sha256, args.gateway_config, args.gateway_config_sha256, args.worker_layout, args.sandbox_layout, args.output)
+        render(args.candidate, args.artifact_manifest_sha256, args.target, args.target_sha256, args.runtime, args.runtime_sha256, args.source_config, args.source_config_sha256, args.gateway_config, args.gateway_config_sha256, args.worker_layout, args.sandbox_layout, args.host_policy, args.host_policy_sha256, args.output)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, EOFError, IMAGE.tarfile.TarError, IMAGE.struct.error) as failure:
         parser.exit(1, "Profile candidate rendering refused: " + str(failure) + "\n")
 

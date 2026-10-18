@@ -31,7 +31,14 @@ type fixedWorkerPolicy struct {
 	procFS   policyFilesystem
 	sysFS    policyFilesystem
 	value    workerPolicy
+	profiles map[string]retainedPolicyProfile
 	closed   bool
+}
+
+type retainedPolicyProfile struct {
+	fd        int
+	directory string
+	object    kernelObject
 }
 
 func policyOpen(root int, path string, directory bool) (int, error) {
@@ -174,13 +181,14 @@ func (p *fixedWorkerPolicy) namespace(name string, namespaceType int) (int, erro
 	return fd, nil
 }
 
-func openFixedWorkerPolicy(expected string) (_ *fixedWorkerPolicy, err error) {
+func openFixedWorkerPolicy(expected string, hostLabels []string) (_ *fixedWorkerPolicy, err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if !hashString(expected) {
+	if !hashString(expected) || len(hostLabels) < 5 || len(hostLabels) > 6 {
 		return nil, errors.New("reviewed worker policy digest is required")
 	}
 	p := &fixedWorkerPolicy{proc: -1, sys: -1, security: -1, apparmor: -1, root: -1, revision: -1, raw: -1, userNS: -1, mountNS: -1, worker: -1, source: -1, rawDir: -1}
+	p.profiles = make(map[string]retainedPolicyProfile)
 	defer func() {
 		if err != nil {
 			p.close()
@@ -283,6 +291,21 @@ func openFixedWorkerPolicy(expected string) (_ *fixedWorkerPolicy, err error) {
 	p.value.SourceProfileObject, err = policyObject(p.source)
 	if err != nil {
 		return nil, err
+	}
+	for _, name := range append([]string{"qwen-k2-sandbox-v1", "qwen-k2-shim-v1", "qwen-k2-gateway-v1"}, hostLabels...) {
+		if _, exists := p.profiles[name]; exists || name == sourceProfile || name == workerProfile || name == "" {
+			return nil, errors.New("complete original profile set is ambiguous")
+		}
+		directory, fd, link, profileErr := p.profile(name)
+		if profileErr != nil {
+			return nil, profileErr
+		}
+		p.profiles[name] = retainedPolicyProfile{fd: fd, directory: directory}
+		object, objectErr := policyObject(fd)
+		if objectErr != nil || link != p.value.RawLink {
+			return nil, errors.New("all original profiles must share the reviewed policy bundle")
+		}
+		p.profiles[name] = retainedPolicyProfile{fd: fd, directory: directory, object: object}
 	}
 	path, err := policyRawPath(p.value.RawLink)
 	if err != nil {
@@ -448,14 +471,16 @@ func (p *fixedWorkerPolicy) verify() error {
 			return errors.New("current original policy profile differs")
 		}
 	}
-	for _, name := range []string{"qwen-k2-sandbox-v1", "qwen-k2-shim-v1", "qwen-k2-gateway-v1"} {
-		_, fd, link, err := p.profile(name)
+	for name, original := range p.profiles {
+		retained, retainedErr := policyObject(original.fd)
+		directory, fd, link, err := p.profile(name)
 		if err != nil {
 			return errors.New("original birth actor profile is unavailable")
 		}
+		current, currentErr := policyObject(fd)
 		closeErr := unix.Close(fd)
-		if closeErr != nil || link != p.value.RawLink {
-			return errors.New("birth actors must share the reviewed locked policy bundle")
+		if retainedErr != nil || currentErr != nil || closeErr != nil || retained != original.object || current != original.object || directory != original.directory || link != p.value.RawLink {
+			return errors.New("complete original profile set differs from the reviewed locked bundle")
 		}
 	}
 	path, err := policyRawPath(p.value.RawLink)
@@ -496,6 +521,9 @@ func (p *fixedWorkerPolicy) close() error {
 	}
 	p.closed = true
 	var err error
+	for _, profile := range p.profiles {
+		err = errors.Join(err, unix.Close(profile.fd))
+	}
 	for _, fd := range []int{p.raw, p.rawDir, p.worker, p.source, p.revision, p.root, p.apparmor, p.security, p.sys, p.proc, p.userNS, p.mountNS} {
 		if fd >= 0 {
 			err = errors.Join(err, unix.Close(fd))

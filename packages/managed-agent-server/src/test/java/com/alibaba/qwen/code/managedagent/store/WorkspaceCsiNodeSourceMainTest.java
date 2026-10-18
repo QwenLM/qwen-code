@@ -77,13 +77,60 @@ class WorkspaceCsiNodeSourceMainTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"installation.json", "profile-candidate.json", "profile-compile.json", "source-config.installed.json",
-        "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service"})
+        "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service",
+        "host-policies.json", "host-runtime.rules", "host-kubelet.rules", "host-registrar.rules", "host-plugin.rules",
+        "host-systemd.rules", "host-system-bus.rules"})
     void independentlyChangedReviewedBytesCannotBeLearnedFromTheStream(String name) throws Exception {
         var files = files(CsiCreationContractFixture.bytes());
         var before = observed(files);
         Files.writeString(files.deployment().installedArtifacts().resolve(name), "\n", java.nio.file.StandardOpenOption.APPEND);
         assertThatThrownBy(() -> WorkspaceCsiNodeSourceMain.nodeRequest(files.deployment(), before)).isInstanceOf(RuntimeException.class);
         assertThat(before.source()).isEqualTo(observed(files).source());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"host-version", "nested-pin", "missing-base", "extra-base", "oversized-base",
+        "old-candidate", "old-installation"})
+    void outerPinsCannotRepairUnsupportedHostMetadata(String fault) throws Exception {
+        var inputs = files(CsiCreationContractFixture.bytes());
+        Path root = inputs.deployment().installedArtifacts();
+        byte[] source = Files.readAllBytes(inputs.deployment().sourceConfiguration());
+        byte[] shim = Files.readAllBytes(inputs.deployment().shimConfiguration());
+        assertThat(WorkspaceCsiInstalledBytes.read(root, source, shim)).isEqualTo(inputs.reviewed());
+        var host = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("host-policies.json")));
+        var hostPins = (ObjectNode) host.path("files");
+        switch (fault) {
+            case "host-version" -> host.put("format", "qwen-k2-host-policies/0");
+            case "nested-pin" -> ((ObjectNode) hostPins.path("host-runtime.rules")).put("sha256", "0".repeat(64));
+            case "missing-base" -> hostPins.remove("host-runtime.rules");
+            case "extra-base" -> hostPins.set("../foreign.rules", hostPins.path("host-runtime.rules"));
+            case "oversized-base" -> Files.write(root.resolve("host-runtime.rules"), new byte[1024 * 1024 + 1]);
+        }
+        Files.write(root.resolve("host-policies.json"), json.writeValueAsBytes(host));
+        var candidate = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("profile-candidate.json")));
+        if (fault.equals("old-candidate")) {
+            candidate.put("format", "qwen-k2-profile-candidate/1");
+        }
+        var profilePins = (ObjectNode) candidate.path("files");
+        for (String name : List.of("host-policies.json", "host-runtime.rules")) {
+            byte[] raw = Files.readAllBytes(root.resolve(name));
+            profilePins.putObject(name).put("bytes", raw.length).put("sha256", hash(raw));
+        }
+        Files.write(root.resolve("profile-candidate.json"), json.writeValueAsBytes(candidate));
+        var compilation = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("profile-compile.json")));
+        compilation.put("profileCandidateSha256", hash(Files.readAllBytes(root.resolve("profile-candidate.json"))));
+        Files.write(root.resolve("profile-compile.json"), json.writeValueAsBytes(compilation));
+        var manifest = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("installation.json")));
+        if (fault.equals("old-installation")) {
+            manifest.put("format", "qwen-k2-installed-artifacts/1");
+        }
+        var pins = (ObjectNode) manifest.path("files");
+        for (String name : List.of("host-policies.json", "host-runtime.rules", "profile-candidate.json", "profile-compile.json")) {
+            byte[] raw = Files.readAllBytes(root.resolve(name));
+            pins.putObject(name).put("bytes", raw.length).put("sha256", hash(raw));
+        }
+        Files.write(root.resolve("installation.json"), json.writeValueAsBytes(manifest));
+        assertThatThrownBy(() -> WorkspaceCsiInstalledBytes.read(root, source, shim)).isInstanceOf(RuntimeException.class);
     }
 
     @Test
@@ -157,6 +204,15 @@ class WorkspaceCsiNodeSourceMainTest {
             files.put(name, ("explicit synthetic " + name).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
         files.put("creation-contract.json", Base64.getDecoder().decode(shimValue.path("creationContract").textValue()));
+        var hostPolicies = json.createObjectNode().put("format", "qwen-k2-host-policies/1");
+        var hostFiles = hostPolicies.putObject("files");
+        for (String role : List.of("runtime", "kubelet", "registrar", "plugin", "systemd", "system-bus")) {
+            String name = "host-" + role + ".rules";
+            byte[] raw = "  \"/explicit-inert-base-only\" r,\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            files.put(name, raw);
+            hostFiles.putObject(name).put("bytes", raw.length).put("sha256", hash(raw));
+        }
+        files.put("host-policies.json", json.writeValueAsBytes(hostPolicies));
         var artifacts = json.createObjectNode().put("format", "qwen-k2-pre-exec-artifacts/2");
         var executable = artifacts.putObject("artifacts");
         for (String role : List.of("source", "shim", "runc")) {
@@ -168,14 +224,16 @@ class WorkspaceCsiNodeSourceMainTest {
         artifacts.putObject("catalogues");
         artifacts.putObject("generators");
         files.put("artifact-manifest.json", json.writeValueAsBytes(artifacts));
-        var candidate = json.createObjectNode().put("format", "qwen-k2-profile-candidate/1")
+        var candidate = json.createObjectNode().put("format", "qwen-k2-profile-candidate/2")
                 .put("artifactManifestSha256", hash(files.get("artifact-manifest.json"))).put("shimConfigurationSha256", hash(shim));
         candidate.putObject("roleConfigPaths").put("source", "/etc/qwen-k2/source.json").put("gateway", "/etc/qwen-k2/gateway.json");
         candidate.putArray("boundaries").add("synthetic data only, no qualification");
         candidate.putObject("generators");
         var profileFiles = candidate.putObject("files");
         for (String name : List.of("source-config.json", "gateway-config.json", "target.json", "runtime.json", "creation-contract.json",
-                "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "qwen-k2-profiles")) {
+                "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "qwen-k2-profiles", "host-policies.json",
+                "host-runtime.rules", "host-kubelet.rules", "host-registrar.rules", "host-plugin.rules",
+                "host-systemd.rules", "host-system-bus.rules")) {
             profileFiles.putObject(name).put("bytes", files.get(name).length).put("sha256", hash(files.get(name)));
         }
         files.put("profile-candidate.json", json.writeValueAsBytes(candidate));
@@ -186,7 +244,7 @@ class WorkspaceCsiNodeSourceMainTest {
                 .put("parserConfigurationSha256", "0".repeat(64)).put("generatorSha256", "0".repeat(64)).put("exitCode", 0)
                 .put("packedBytes", files.get("packed.bin").length).put("packedSha256", hash(files.get("packed.bin")));
         files.put("profile-compile.json", json.writeValueAsBytes(compilation));
-        var manifest = json.createObjectNode().put("format", "qwen-k2-installed-artifacts/1");
+        var manifest = json.createObjectNode().put("format", "qwen-k2-installed-artifacts/2");
         var pins = manifest.putObject("files");
         for (var entry : files.entrySet()) {
             pins.putObject(entry.getKey()).put("bytes", entry.getValue().length).put("sha256", hash(entry.getValue()));

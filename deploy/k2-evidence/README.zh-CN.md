@@ -171,6 +171,8 @@ python3 deploy/k2-evidence/render-profiles.py \
   --source-config-sha256 REVIEWED_SOURCE_CONFIG_SHA256 \
   --gateway-config /absolute/reviewed/gateway.json \
   --gateway-config-sha256 REVIEWED_GATEWAY_CONFIG_SHA256 \
+  --host-policy /absolute/reviewed/complete-host-bases \
+  --host-policy-sha256 REVIEWED_HOST_POLICIES_MANIFEST_SHA256 \
   --worker-layout /absolute/reviewed/worker-oci \
   --sandbox-layout /absolute/reviewed/sandbox-oci \
   --output /absolute/output/new-profile-candidate
@@ -195,15 +197,19 @@ python3 deploy/k2-evidence/render-profiles.py \
 
 两份服务配置必须准确包含 Go 入口消费的字段。配置及 TLS 路径留在 `/etc/qwen-k2` 直接子文件，声明的私钥路径不能与其他角色或公开输入别名。宿主程序路径不能进入角色文件、journal、socket、kubelet 数据、proc/sys/dev、临时或 worker 可写根，防止程序身份字段形成第二条密钥/数据读取路径；实际 inode/密钥字节隔离仍需安装资格化。journal 根及 runtime socket 固定；frontend/backend socket basename 可在既有私有目录内变化。gateway URL 必须指向实际 IP listener；DNS 及未指定监听地址不在此离线支持范围。完整已保存 Runtime command/image、worker mount root 必须与契约及镜像一致，可写根不能覆盖受保护目录或镜像文件。
 
-输出包含单一 `qwen-k2-profiles` 源码、两份调整后的 unit、原服务/目标/Runtime/契约字节，以及绑定所有输出和生成器的 `profile-candidate.json`。不接受权限数组、调用者 AARE 或 include。完整 mount data 保留在原契约，规则只生成 AppArmor 可表达的类型、flags、source 和 destination；首个支持范围拒绝未知挂载选项、idmapped mount、相对 bind source 和宽泛设备许可。
+必填宿主目录含 `host-policies.json`（`qwen-k2-host-policies/1`），恰好包含 `format` 与 `files`；后者固定 `host-runtime.rules`、`host-kubelet.rules`、`host-registrar.rules`、`host-plugin.rules`、`host-systemd.rules`、`host-system-bus.rules` 的字节数和 SHA-256。每份是完整、独立已审、已展开的基础正文，至多 1 MiB，不能只提供少量 K2 权限。manifest 至多 64 KiB，需提供独立已审摘要。平面正文通道及代码拥有的配对新增规则见[完整宿主策略设计](../../docs/design/2026-10-18-k2-host-policy-set.zh-CN.md)。名字必须是根 namespace 内的字面标签，不含 `:`、`//` 或末尾斜杠。独立 bus 名字不能以 `/` 开头，避免形成隐式 executable attachment。bus 复用已显式 attachment 的宿主标签时，完整基础字节必须相同，该 profile 只输出一次。inert 测试夹具不提供可运行宿主基础策略。
+
+输出包含单一 `qwen-k2-profiles` 源码、全部七个宿主输入叶子、两份调整后的 unit、原服务/目标/Runtime/契约字节，以及绑定所有输出和生成器的第2版 `profile-candidate.json`。生成器拥有 Qwen 权限、全部 header/attachment 和 K2 配对/转换规则；不接受 target 事实中的任意权限数组、调用者模式或环境 include。完整 mount data 保留在原契约，规则只生成 AppArmor 可表达的类型、flags、source 和 destination；首个支持范围拒绝未知挂载选项、idmapped mount、相对 bind source 和宽泛设备许可。
 
 挂载规则区分外层 snapshot 与内层 OCI mount，并拆分初挂、propagation、bind remount、切根后的只读 finalize 及 masked paths。只读 remount 仅覆盖支持的继承安全 flags 的有限组合。镜像父链接先解析，再生成 mount/boot 路径；新 mountpoint 的父目录可尚未存在于镜像，普通镜像目录解析仍要求父项存在，解析结果超出 literal path 子集则拒绝。规则不能证明 source 类型、继承的 VFS flags、namespace 归属或实际 disconnected 名字，仍需已审目标和原生验收。source 仍不能写 cgroup controller；shim 新增 root-controller/statistics 权限只读，正常状态临时文件限定在原 CID 状态目录。
+
+pathname Unix socket 使用字面路径文件访问规则。Unix peer-label 规则覆盖 abstract/anonymous socket，不能强制 pathname peer 标签。可信程序仍保留实际 credential、executable/process/namespace 及原持有 peer 检查；actor/admission 排除及原生资格化仍是必要条件。
 
 此阶段不会运行 parser、加载或锁定策略、执行镜像或安装服务。清单记录仍待验证的语义边界，包括数字 proc 的仅自身修改检查、SDK parent/child OOM 关系、disconnected 对象命名及外部宿主策略/CSI 隔离；这些依赖实际内核和固定可信实现，策略源码及摘要不能证明。`workerPolicySha256` 最终必须使用实际 packed bundle hash。保留编译时的原候选及配置字节，后述组装阶段派生单独的部署配置，不重新生成已编译候选；临时摘要不能成为安装证据。真实正常生命周期、完整 actor 排除及最终物理释放权限仍待完成。
 
 ## 显式策略编译阶段
 
-`compile-profiles.py` 消费已审 `profile-candidate.json` 及其中每份 pinned 文件。仅接受生成器的平铺、有序五角色布局，不接受 ambient include、alias、ABI 选择或嵌套 profile；布局检查不是通用策略 parser 或权限审查。提供准确目标 parser ELF 及目标 feature 字节：
+`compile-profiles.py` 消费已审第2版 `profile-candidate.json` 及其中每份 pinned 文件。核对生成器的平铺、有序五个 Qwen profile 前缀，再从固定基础正文及 target/configuration 字节重建准确完整宿主后缀；不接受 ambient include、alias、ABI 选择或嵌套 profile。布局检查不是通用策略 parser 或权限审查。后续安装图为第2版，不转换旧候选或旧安装。提供准确目标 parser ELF 及目标 feature 字节：
 
 ```sh
 python3 deploy/k2-evidence/compile-profiles.py \
@@ -216,7 +222,7 @@ python3 deploy/k2-evidence/compile-profiles.py \
   --output /absolute/output/new-policy-compilation
 ```
 
-工具将准确 parser/source/features 复制到新的私有目录，使用显式空 parser 配置及两份显式 features 参数，关闭 kernel load 和 cache，记录实际 argv；未强制规则警告按错误处理。失败或超时保留 attempt、stderr 和部分输出，成功输出受 source reader 的8 MiB上限约束并记录长度及摘要。Parser 依赖、目标 feature 正确性及工具链来源仍需独立资格化；编译不会加载或锁定策略，也不能认证语义或安装。当前普通测试仅执行准备、布局拒绝和 argv 构造，并阻止 parser 执行；本候选未运行任何真实或模拟 parser。
+工具将准确 parser/source/features 复制到新的私有目录，使用显式空 parser 配置及两份显式 features 参数，关闭 kernel load 和 cache，记录实际 argv；未强制规则警告按错误处理。失败或超时保留 attempt、stderr 和部分输出，成功输出受 source reader 的8 MiB上限约束并记录长度及摘要。Parser 依赖、目标 feature 正确性及工具链来源仍需独立资格化；编译不会加载或锁定策略，也不能认证语义或安装。普通测试仅执行准备、布局拒绝和 argv 构造，并阻止 parser 执行。另行使用已有 AppArmor 5 parser 的无加载、无 cache、stdin 语法 smoke，不等于已审目标 Ubuntu 24 parser/features 的编译，且不产生正向 compilation 或 installation 协议记录。
 
 ## 安装工件字节组装
 
@@ -232,9 +238,9 @@ k2-assemble-artifacts \
   --output /absolute/output/new-installed-artifacts
 ```
 
-此离线命令只读取固定元数据文件，不打开配置引用的 TLS 或客户端凭据文件，不执行记录中的编译命令。在创建输出前核对原依赖摘要、成功编译记录、未变的已保存编译输入，以及 packed 长度和摘要。保留原策略候选及 source 配置，仅替换顶层 `workerPolicySha256` 的 JSON value token，派生 `source-config.installed.json`，其余所有原字节不变；gateway 配置保持逐字节相同。`installation.json` 绑定其余17份输出，包括将原 `compile.json` 更名保存的 `profile-compile.json`。
+此离线命令读取固定工件集，不打开配置引用的 TLS 或客户端凭据文件，不执行记录中的编译命令。在创建输出前核对原依赖摘要、成功编译记录、未变的已保存编译输入，以及 packed 长度和摘要。保留原策略候选及 source 配置，仅替换顶层 `workerPolicySha256` 的 JSON value token，派生 `source-config.installed.json`，其余所有原字节不变；gateway 配置保持逐字节相同。`installation.json` 绑定其余24份输出，包括全部七个宿主输入叶子和将原 `compile.json` 更名保存的 `profile-compile.json`。
 
-获准安装时应将这18份文件置于固定 `/etc/qwen-k2/artifacts` 根。该目录与 `/etc/qwen-k2` 均须在支持的 ext4 上由 root 拥有、私有且不可变；文件须满足既有 root 所有、不可变、只读和单链接检查。派生 source 配置安装在原声明的 source 路径，未变 gateway 配置在声明的 gateway 路径，准确 shim 配置在 `/etc/qwen-k2/shim.json`，自身 unit 在固定 `/etc/systemd/system` 路径。TLS 凭据是另行安装的角色私有输入。组装器不执行这些安装动作。
+获准安装时应将这25份文件置于固定 `/etc/qwen-k2/artifacts` 根。该目录与 `/etc/qwen-k2` 均须在支持的 ext4 上由 root 拥有、私有且不可变；文件须满足既有 root 所有、不可变、只读和单链接检查。派生 source 配置安装在原声明的 source 路径，未变 gateway 配置在声明的 gateway 路径，准确 shim 配置在 `/etc/qwen-k2/shim.json`，自身 unit 在固定 `/etc/systemd/system` 路径。TLS 凭据是另行安装的角色私有输入。组装器不执行这些安装动作。
 
 两个真实服务入口持有工件目录及受保护祖先，经目录 FD 只打开固定子名字，禁止符号链接及跨 mount，并将自身配置/unit、shim 配置与快照比较。既有请求守卫持续复核原持有对象；source 还将 packed 摘要及长度与内核实际加载策略比较。gateway 不取得 source 专用策略 exporter 权限，两个角色都不打开另一角色的真实配置或私钥。目录清单与策略源码单独限制16 MiB，packed 策略8 MiB，完整快照64 MiB，既有出生/配置32 KiB上限不变。
 
@@ -242,6 +248,6 @@ gateway 现在返回第2版 runtime 身份，包含其实际匹配的自身配�
 
 清单只证明字节一致性，不认证 systemd 有效设置、加载策略语义、runtime handler 选择、actor 排除、CSI 独占或安装 provenance。目前验证使用明确合成的编译数据和可移植字节测试，以及仅编译的 Linux 输出；组装器 CLI、真实受保护对象行为和现场安装尚未验收。[source/7](../../docs/design/2026-10-17-k2-installed-byte-journal.zh-CN.md) 现将两份字节观察写入 SOURCE_START，ARM 保存原持有 frontend 身份；Java 核对必填的独立已审元数据期待值。source/6 和旧 Node 配置直接拒绝，不转换。这仅记录事实，不提供安装信任、物理释放权限或安全复用。
 
-`node-config` 的 deployment JSON 现须在 `nodeName`、`client`、`sourceConfiguration`、`shimConfiguration` 之外提供必填 `installedArtifacts`，指向独立已审18文件元数据目录的绝对路径。使用准确派生 `source-config.installed.json` 及原 `shim.json`。Client 仍保留 source/coordinator 主体及外部 PKCS12/password/CA 路径，保存的 Node 配置仅含紧凑非秘密字节期待值，不持久保存元数据目录，也不把引用凭据文件当作工件打开。Java 仅读固定小型元数据及其 pin，真实 Go 服务持有完整工件图；这项操作员解析不代表安装资格。
+`node-config` 的 deployment JSON 现须在 `nodeName`、`client`、`sourceConfiguration`、`shimConfiguration` 之外提供必填 `installedArtifacts`，指向独立已审25文件工件目录的绝对路径。使用准确派生 `source-config.installed.json` 及原 `shim.json`。Client 仍保留 source/coordinator 主体及外部 PKCS12/password/CA 路径，保存的 Node 配置仅含紧凑非秘密字节期待值，不持久保存工件目录，也不把引用凭据文件当作工件打开。Java 核对固定元数据、有界完整宿主基础字节及其 pin，真实 Go 服务持有完整工件图；这项操作员解析不代表安装资格。
 
 两个服务还要求通过 `/run/systemd/private` 持有原 root PID-1 连接，其 executable 和 enforce label 必须匹配已审 `systemd` target，并持续持有其原 user/mount namespace。[有效服务身份检查](../../docs/design/2026-10-17-k2-effective-service-identity.zh-CN.md)在启动及既有操作边界读取固定自身 Unit/Service 属性：准确进程/command、无 drop-in 或待 reload 的 native unit、原 invocation/启动时间，以及部分权限属性。任何错误永久使该实例失效；客户端不重连、不管理服务。这些采样检查不代表全部有效设置或安装 provenance 已资格化。真实 systemd 属性兼容性、启动时序和已加载策略权限仍未验证。binary 与 profile generator 改变后需要重新形成工件 pins 并资格化。

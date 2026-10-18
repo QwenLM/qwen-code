@@ -20,6 +20,7 @@ class CompileProfilesDataTest(unittest.TestCase):
         self.fixture.render()
         self.candidate = self.fixture.output
         self.manifest = self.candidate / "profile-candidate.json"
+        self.qwen_source = (self.candidate / "qwen-k2-profiles").read_bytes().split(b'\nprofile "', 1)[0] + b"\n"
         self.parser = self.fixture.root / "inert-parser"
         self.parser.write_bytes(fixtures.inert_elf())
         self.features = self.fixture.root / "inert-features"
@@ -71,7 +72,7 @@ class CompileProfilesDataTest(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_flat_source_rejects_extra_or_nested_profiles(self):
-        raw = (self.candidate / "qwen-k2-profiles").read_bytes()
+        raw = self.qwen_source
         COMPILER.source(raw)
         for candidate in (raw + b"profile unexpected {\n}\n", raw.replace(b"  capability sys_ptrace,", b"  profile unexpected {\n  }", 1), raw + b"}\n"):
             with self.subTest(candidate=candidate[-50:]):
@@ -79,10 +80,31 @@ class CompileProfilesDataTest(unittest.TestCase):
                     COMPILER.source(candidate)
 
     def test_flat_source_rejects_ambient_policy_inputs(self):
-        raw = (self.candidate / "qwen-k2-profiles").read_bytes()
+        raw = self.qwen_source
         for prefix in (b"#include <tunables/global>\n", b"abi <abi/4.0>,\n", b"alias /a -> /b,\n", b"@{caller}=/**\n"):
             with self.assertRaisesRegex(ValueError, "no includes"):
                 COMPILER.source(prefix + raw)
+
+    def test_repinned_host_source_must_match_complete_generated_suffix(self):
+        path = self.candidate / "qwen-k2-profiles"
+        path.chmod(0o600)
+        path.write_bytes(path.read_bytes().replace(b'  deny "/explicit-inert-deny" w,', b'  "/explicit-inert-deny" w,', 1))
+        value = json.loads(self.manifest.read_bytes())
+        value["files"][path.name] = {"bytes": len(path.read_bytes()), "sha256": fixtures.digest(path)}
+        self.manifest.chmod(0o600)
+        self.manifest.write_bytes(fixtures.POLICY.encoded(value))
+        with self.assertRaisesRegex(ValueError, "complete generated host policy source differs"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_old_five_role_candidate_version_refuses(self):
+        value = json.loads(self.manifest.read_bytes())
+        value["format"] = "qwen-k2-profile-candidate/1"
+        self.manifest.chmod(0o600)
+        self.manifest.write_bytes(fixtures.POLICY.encoded(value))
+        with self.assertRaisesRegex(ValueError, "complete generated profile candidate"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
 
     def test_invalid_parser_is_data_refusal_without_execution(self):
         self.parser.write_bytes(b"not an executable")

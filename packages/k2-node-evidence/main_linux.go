@@ -255,7 +255,7 @@ func runSource(ctx context.Context, path string) error {
 	if err != nil || birth.VerifyExecutable(self, shimConfiguration.SourceSHA256) != nil || birth.VerifyExecutable(shimConfiguration.ShimPath, shimConfiguration.ShimSHA256) != nil {
 		return errors.New("actual source and shim executables differ from the protected handler configuration")
 	}
-	policy, err := openFixedWorkerPolicy(observed.PackedSHA256)
+	policy, err := openFixedWorkerPolicy(observed.PackedSHA256, installed.HostPolicyLabels())
 	if err != nil {
 		return err
 	}
