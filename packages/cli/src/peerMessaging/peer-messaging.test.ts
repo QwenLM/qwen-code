@@ -872,12 +872,26 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       .filter((receipt) => receipt.origMsgId === frame.msgId)
       .map((receipt) => receipt.status);
     expect(statuses).toEqual(['delivered', 'expired']);
+
+    // `expired` is what the gate elsewhere advertises as licence to retry,
+    // and the far model may already have read this message, so the honest
+    // retry has to be answered `duplicate` rather than admitted as new —
+    // which is why the settle does not roll the admission record back.
+    // The mirror of this is the `misaddressed` drain path, where the model
+    // provably never saw the frame and the record IS forgotten.
+    await send(started.socketPath!, { ...frame, msgId: 'retry-1' });
+    await settle();
+    expect(queued).toHaveLength(1);
   });
 
-  it('ignores a settle for a message that carried no delivery', () => {
+  it('ignores a settle for a message that carried no delivery', async () => {
     // A queue entry that never came from the transport has nothing to
-    // settle, and must not throw.
-    expect(() => messaging?.settleFailedPeerTurn(undefined)).not.toThrow();
+    // settle, and must not throw. Driven through a real instance: on a
+    // null `messaging` the optional chain would short-circuit and assert
+    // nothing at all.
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    expect(() => m.settleFailedPeerTurn(undefined)).not.toThrow();
+    expect(receipts).toEqual([]);
   });
 
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {

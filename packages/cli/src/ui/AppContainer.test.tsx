@@ -327,6 +327,7 @@ import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import type { DeliveryFailureReason } from './hooks/use-llm-stream.js';
 import { useLlmStream } from './hooks/use-llm-stream.js';
 import { useVim } from './hooks/vim.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
@@ -2638,7 +2639,7 @@ describe('AppContainer State Management', () => {
         const metadata = args[3] as
           | {
               onDeliveryFailed?: (
-                reason: 'cancelled' | 'error' | 'not-admitted',
+                reason: DeliveryFailureReason,
               ) => void;
             }
           | undefined;
@@ -2727,11 +2728,11 @@ describe('AppContainer State Management', () => {
         const metadata = args[3] as
           | {
               onDeliveryFailed?: (
-                reason: 'cancelled' | 'error' | 'not-admitted',
+                reason: DeliveryFailureReason,
               ) => void;
             }
           | undefined;
-        metadata?.onDeliveryFailed?.('error');
+        metadata?.onDeliveryFailed?.('error-before-send');
       }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
 
       const { rerender } = renderHook(
@@ -2779,6 +2780,139 @@ describe('AppContainer State Management', () => {
       expect(settleFailedPeerTurn).toHaveBeenCalledTimes(1);
     });
 
+    it('leaves a peer envelope alone when the turn carried it before failing', async () => {
+      // The turn streamed output or ran tools and only then died, so the
+      // envelope was consumed. Settling it would write a terminal `expired`
+      // to the sender for a message this session already acted on, and
+      // `expired` admits no correction — while the `delivered` receipt the
+      // sender holds is true. So neither the queue nor the receipt moves.
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return { kind: 'peer' as const, modelText, displayText, delivery };
+      });
+      const restorePeerMessage = vi.fn(() => {});
+      const settleFailedPeerTurn = vi.fn();
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | {
+              onDeliveryFailed?: (reason: DeliveryFailureReason) => void;
+            }
+          | undefined;
+        metadata?.onDeliveryFailed?.('error-after-send');
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
+
+      const { rerender } = renderHook(
+        ({ pendingSubmissionCount, submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            pendingSubmissionCount,
+            getPendingSubmissionCount: () => 0,
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            restorePeerMessage,
+            addHistoryItem: vi.fn(),
+            submitQuery,
+            submissionInFlightRef: { current: false },
+            submissionSettledRevision,
+            peerMessaging: {
+              drainQueuedFrame: () => true,
+              settleFailedPeerTurn,
+            } as unknown as PeerMessaging,
+          }),
+        {
+          initialProps: {
+            pendingSubmissionCount: 1,
+            submissionSettledRevision: 0,
+          },
+        },
+      );
+
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(1));
+      rerender({ pendingSubmissionCount: 0, submissionSettledRevision: 1 });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+      expect(settleFailedPeerTurn).not.toHaveBeenCalled();
+      expect(restorePeerMessage).not.toHaveBeenCalled();
+      expect(submitQuery).toHaveBeenCalledTimes(1);
+    });
+
+    it('settles a peer envelope that can never be admitted instead of restoring it', async () => {
+      // A mod that failed to initialize leaves `mods.ready` rejected until
+      // restart, so a restore re-attempts a submission that cannot succeed:
+      // one duplicate ERROR line per attempt, with the head of the queue
+      // held by an entry that can never drain.
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return { kind: 'peer' as const, modelText, displayText, delivery };
+      });
+      const restorePeerMessage = vi.fn(() => {});
+      const settleFailedPeerTurn = vi.fn();
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | {
+              onDeliveryFailed?: (reason: DeliveryFailureReason) => void;
+            }
+          | undefined;
+        metadata?.onDeliveryFailed?.('unrecoverable');
+      }) as unknown as ReturnType<typeof useLlmStream>['submitQuery'];
+
+      const { rerender } = renderHook(
+        ({ pendingSubmissionCount, submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            pendingSubmissionCount,
+            getPendingSubmissionCount: () => 0,
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            restorePeerMessage,
+            addHistoryItem: vi.fn(),
+            submitQuery,
+            submissionInFlightRef: { current: false },
+            submissionSettledRevision,
+            peerMessaging: {
+              drainQueuedFrame: () => true,
+              settleFailedPeerTurn,
+            } as unknown as PeerMessaging,
+          }),
+        {
+          initialProps: {
+            pendingSubmissionCount: 1,
+            submissionSettledRevision: 0,
+          },
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(settleFailedPeerTurn).toHaveBeenCalledWith(delivery);
+      });
+      expect(restorePeerMessage).not.toHaveBeenCalled();
+
+      rerender({ pendingSubmissionCount: 0, submissionSettledRevision: 1 });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(submitQuery).toHaveBeenCalledTimes(1);
+      expect(settleFailedPeerTurn).toHaveBeenCalledTimes(1);
+    });
+
     it('restores a peer envelope once when admission and delivery both fail', async () => {
       // use-llm-stream fires both callbacks when a submission never
       // starts. onAdmissionFailed restores it; restoring on the delivery
@@ -2799,7 +2933,7 @@ describe('AppContainer State Management', () => {
           | {
               onAdmissionFailed?: () => void;
               onDeliveryFailed?: (
-                reason: 'cancelled' | 'error' | 'not-admitted',
+                reason: DeliveryFailureReason,
               ) => void;
             }
           | undefined;
@@ -9383,6 +9517,10 @@ describe('AppContainer State Management', () => {
 
       // An accepted message that expired was never held: the wire text
       // for 'expired' speaks of a held message and must not be reused.
+      // `delivered -> expired` has two producers — the exit scrub and a
+      // turn that ended before it carried the envelope — and the sender
+      // cannot tell them apart, so the line names both and keeps the
+      // retry advice. Naming only the exit told a live peer it had died.
       act(() => {
         peer.emitReceipt({
           status: 'expired',
@@ -9392,8 +9530,10 @@ describe('AppContainer State Management', () => {
         });
       });
       expect(notices()).toHaveLength(6);
-      expect(notices()[5]).toContain('exited before it read');
       expect(notices()[5]).not.toContain('held');
+      expect(notices()[5]).not.toContain('exited before it read');
+      expect(notices()[5]).toContain('no turn carried it');
+      expect(notices()[5]).toContain('Retry once it is idle');
 
       act(() => {
         peer.emitReceipt({
