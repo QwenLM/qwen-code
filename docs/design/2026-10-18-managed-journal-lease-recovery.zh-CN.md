@@ -51,6 +51,7 @@ Hosted Session 通过 Session Store 为日志激活续租。控制面停机超�
 - `packages/core/src/managed-runtime/http-managed-session-store.test.ts`
   - 停机超过写者租约后重新取证，并接受用户 Turn；
   - 回复丢失但已落地的续租只应用一次；
+  - 日志的追加位置被其他写者的事务占据时由结算封闭；
   - 租约逾期叠加租户守卫预算耗尽时仍然封闭；
   - 永久 fence 仍然停止保活。
 - `packages/core/src/managed-runtime/managed-session-assembly.test.ts`

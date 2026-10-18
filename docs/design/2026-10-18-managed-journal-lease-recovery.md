@@ -64,6 +64,8 @@ not, and keeps its existing fence.
 - `packages/core/src/managed-runtime/http-managed-session-store.test.ts`
   - outage longer than the writer lease re-attests and accepts a user Turn;
   - a renewal that landed before its acknowledgement was lost is applied once;
+  - a journal whose append position holds another writer's transaction is
+    fenced by the settlement;
   - a lapsed lease with a spent guard budget still fences the log;
   - a permanent fence still stops keepalive.
 - `packages/core/src/managed-runtime/managed-session-assembly.test.ts`

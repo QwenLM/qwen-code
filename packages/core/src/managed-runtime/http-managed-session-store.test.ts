@@ -2496,6 +2496,60 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it("fences a journal whose append position holds another writer's transaction", async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let unavailable = false;
+    let loseFirstAck = true;
+    server.fetch.mockImplementation(async (input, init) => {
+      const url = requestUrl(input);
+      if (unavailable) {
+        if (
+          loseFirstAck &&
+          /\/transactions:commit(?:-v2)?$/.test(url) &&
+          (JSON.parse(String(init?.body)) as Record<string, unknown>)[
+            'operation'
+          ] === 'renewActivation'
+        ) {
+          loseFirstAck = false;
+          await originalFetch(input, init);
+        }
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'outage' } },
+          503,
+        );
+      }
+      const response = await originalFetch(input, init);
+      if (url.endsWith('/writers:acquire')) {
+        return jsonResponse({
+          ...(await response.json()),
+          leaseUntil: Date.now() + 50_000,
+        });
+      }
+      return response;
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      unavailable = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      unavailable = false;
+      // The revision our renewal occupied now holds a different transaction,
+      // as if another writer had extended the log while ours was unknown.
+      server.editStoredTransaction(server.storedTransactions.length - 1, {
+        recordDigest: 'f'.repeat(64),
+      });
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(session.authority.writesStopped).toBe(true);
+    } finally {
+      await stores.close().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1000);
+      await session.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps writer renewal after a rollbackable append rejection', async () => {
     vi.useFakeTimers({ now: 1_790_000_000_000 });
     const server = new FakeManagedSessionStore();
