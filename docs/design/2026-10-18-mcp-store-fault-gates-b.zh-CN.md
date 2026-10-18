@@ -24,7 +24,7 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_config
 | `store-reject-settled`            | 响应资源发布之后的 settled 提交                      | failed commit 回滚暂存的 response/catalog 行；测试先从 durable 状态 dispose/reopen authority（保持原 operation/runtime pins）再驱动后续 turn/close；恰好一次查询；没有第二次 read/get；副作用计数 1 |
 | `store-reject-releasing`          | release 派发之前的 `releasing` 提交                  | 下一次 detach 用同一 id **首次派发** `${configurationId}:release`；没有第二次 configure/invoke                                                                                                      |
 | `store-reject-drained`            | `drained` 提交                                       | Broker owner 与 storage holder 都保留；不伪造 drain 回执                                                                                                                                            |
-| `store-reject-released`           | owner release 之后的 `released` 提交                 | 记录保持 `drained`；下一次 detach 重发 owner release；断言其幂等；该格在 main 上可能红，随修复一起落地                                                                                              |
+| `store-reject-released`           | owner release 之后的 `released` 提交                 | 记录保持 `drained`；下一次 detach 重发 owner release；断言其幂等；该格在 MySQL 8.x 上为绿，钉住这一顺序                                                                                             |
 | `store-reject-reload-chain`       | 上述任一拒绝后重试并重载                             | 每个 id 只有一条逻辑记录链；没有重复的 configuration 记录；重试 revision 不是被拒状态的重复                                                                                                         |
 
 ## 决策
@@ -35,7 +35,7 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_config
 4. **内存暂存不等于持久发布。** `HttpManagedSessionResourceStore.publish()` 只在内存暂存字节；`commitResources()` 把字节嵌入事务，服务端在同一事务里插入 `ma_resource` 行。settled 提交失败会回滚新 response/catalog 行；只有更早提交的资源（intent 时的 arguments）保留。
 5. **owner/storage 的保留从对应行读取**，不由 5xx 推断。
 6. **新增 `HostedMcpStoreFaultGatesIT` 类**隔离 wrapper；FG12a/c/d 类不动；预算账目与 roster/per-ceiling 元测试在同一 diff 重钉。
-7. **`store-reject-released` 在 main 上可能合法地红。** `markReleased` 在 `broker.release()` 之后提交；若该提交被拒，owner 已释放。该格随修复一起落地（如 FG12d 的 R1-1），而不是断言 main 尚不具备的行为。
+7. **`store-reject-released` 钉住当前顺序，且在 MySQL 8.x 上为绿。** `markReleased` 在 `broker.release()` 之后提交；该提交被拒时记录保持 `drained`、owner 已释放，下一次 detach 恰好重发一次同一 release。该格断言这一形态；跳过重发或重发两次的回归都会使其变红。
 
 ## 夹具设计
 
