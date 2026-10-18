@@ -15,6 +15,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
@@ -66,6 +67,16 @@ class HostedMcpRestartFaultGatesIT {
     // Per-case evidence letter: FG12c keeps its directory, FG12d's release
     // cell lands under its own so the two letters' artefacts never mix.
     private String caseLetter;
+    private static final Map<String, String> CASE_LETTERS = Map.of(
+            "harnessKillDuringConfigureResolvesThroughStatusOnMySql",
+            "fg12c",
+            "harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql",
+            "fg12c",
+            "workerKillWhileIdleNeverMintsAFreshOwnerOnMySql", "fg12c",
+            "workerKillDuringOperationSettlesOutcomeUnknownOnMySql", "fg12c",
+            "stdioKillDuringRequestSettlesOutcomeUnknownOnMySql", "fg12c",
+            "harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
+            "fg12d");
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -107,7 +118,10 @@ class HostedMcpRestartFaultGatesIT {
     private Process harness;
 
     @BeforeEach
-    void boot() throws Exception {
+    void boot(TestInfo info) throws Exception {
+        caseLetter = info.getTestMethod()
+                .map(method -> CASE_LETTERS.get(method.getName()))
+                .orElse(null);
         assertThat(System.getProperty("mysql.url"))
                 .as("FG12c requires a disposable MySQL")
                 .startsWith("jdbc:mysql:");
@@ -177,7 +191,6 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void harnessKillDuringConfigureResolvesThroughStatusOnMySql()
             throws Exception {
-        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String configuration = uuid();
@@ -251,7 +264,6 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql()
             throws Exception {
-        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String operation = uuid();
@@ -314,7 +326,6 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql()
             throws Exception {
-        caseLetter = "fg12d";
         SessionRef session = createSession();
         baseline(session);
         JsonNode configuration = configuration(session.id());
@@ -462,7 +473,6 @@ class HostedMcpRestartFaultGatesIT {
     @Test
     @Timeout(600)
     void workerKillWhileIdleNeverMintsAFreshOwnerOnMySql() throws Exception {
-        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         JsonNode identity = configuration(session.id()).path("run")
@@ -531,7 +541,6 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void workerKillDuringOperationSettlesOutcomeUnknownOnMySql()
             throws Exception {
-        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String operation = uuid();
@@ -558,7 +567,6 @@ class HostedMcpRestartFaultGatesIT {
     @Test
     @Timeout(600)
     void stdioKillDuringRequestSettlesOutcomeUnknownOnMySql() throws Exception {
-        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String operation = uuid();
