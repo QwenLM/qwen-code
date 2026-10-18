@@ -457,15 +457,22 @@
                                  dropped-reply cancel cell (issue
                                  #14449) adds 150 s: the healthy sum
                                  becomes 5623 s, so the fork moves to
-                                 6233 s. The FG13a execute lost-reply
-                                 cell (issue #14449) adds 150 s: the
-                                 healthy sum becomes 5773 s, so the
-                                 fork moves to 6383 s. The FG13a status
+                                 6233 s, still inside those 115
+                                 minutes. The FG12b store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases, 49.6 s measured locally on
+                                 JDK 21 + MySQL 8.0.46) adds 120 s: the
+                                 healthy sum becomes 5743 s, so the
+                                 fork moves to 6353 s and the Verify
+                                 step to 116 minutes. The FG13a execute
                                  lost-reply cell (issue #14449) adds
-                                 150 s: the healthy sum becomes 5923 s,
-                                 so the fork moves to 6533 s and the
-                                 Verify step to 120 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6533</forkedProcessTimeoutInSeconds>
+                                 150 s: the healthy sum becomes 5893 s,
+                                 so the fork moves to 6503 s. The FG13a
+                                 status lost-reply cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 6043 s, so the fork moves to 6653 s
+                                 and the Verify step to 121 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6653</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -619,9 +626,9 @@
                     <includes><include>**/HostedMcp*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
-                         per-ceiling rule for this class: one @Timeout
-                         ceiling (600 s) plus the healthy runtime must
-                         fit 1200 s. -->
+                         per-class rule for the three MCP classes: the
+                         largest @Timeout ceiling (600 s) plus the
+                         classes' healthy runtime must fit 1200 s. -->
                     <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>

@@ -2324,3 +2324,54 @@ const timer = setInterval(() => {
     await control({ kind: 'release' });
   });
 });
+
+describe('Managed Runtime provider release deadline', () => {
+  let workspace: string;
+  let storage: string;
+  let executor: ManagedToolExecutor;
+  let provider: ManagedRuntimeProviderWorker;
+
+  beforeEach(() => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-provider-release-')),
+    );
+    storage = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-provider-release-storage-'),
+    );
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(storage);
+    executor = new ManagedToolExecutor(async () => undefined);
+    provider = new ManagedRuntimeProviderWorker(
+      executor,
+      async () => ({
+        directory: workspace,
+        workspaceRoot: workspace,
+        preapproved: true,
+      }),
+      50,
+    );
+    executor.attachProvider(provider);
+  });
+
+  afterEach(async () => {
+    await executor.close();
+    vi.restoreAllMocks();
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(storage, { recursive: true, force: true });
+  });
+
+  it('abandons a release that outlives its deadline and retries it', async () => {
+    await expect(provider.control(SESSION, { kind: 'acquire' })).resolves.toBe(
+      true,
+    );
+    const stuck = vi
+      .spyOn(ManagedToolRuntime.prototype, 'releasePrepared')
+      .mockImplementation(() => new Promise(() => {}));
+    await expect(
+      provider.control(SESSION, { kind: 'release' }),
+    ).rejects.toMatchObject({ code: 'managed_runtime_release_timeout' });
+    stuck.mockRestore();
+    await expect(provider.control(SESSION, { kind: 'release' })).resolves.toBe(
+      true,
+    );
+  });
+});
