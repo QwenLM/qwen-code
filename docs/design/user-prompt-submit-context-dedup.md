@@ -19,8 +19,10 @@ The retrieval extensions that ship with this repository make this easy to hit:
 the auto-recall hooks in `integrations/external-context` and
 `integrations/external-context-mem0` build their payload from a bounded,
 newest-first result window, so a stable upstream result set renders the same
-bytes turn after turn unless the configured dialect opts out of copying
-per-query scores.
+bytes turn after turn only when the configured dialect omits per-query scores. A
+dialect that copies a similarity score — the shipped example's
+`"scoreField": "score"` — re-renders the payload every turn, because the score is
+computed against the current prompt.
 
 ## Current state
 
@@ -149,19 +151,22 @@ accepted and documented as a limitation rather than solved here.
   dialect copies a similarity score, the payload differs whenever the score
   does, so suppression only fires when the score repeats as well. Dialects that
   omit the score see the full benefit.
-- **Raw history scans do not re-arm.** History replacement (compaction, session
-  restore) rebuilds the array; a restored transcript that still contains the
-  block keeps it suppressed, which is the intended reading of "already
-  present". Continuing a session in a new process was observed to keep the block
-  suppressed while the model could still reproduce it on request, so the two
-  sides of the trade-off hold together.
+- **History replacement re-injects once, then re-arms.** Suppression is
+  receipt-gated, and the receipt is re-stamped only where per-turn `hookContext`
+  provenance exists — the interactive resume path. Compaction, a client-driven
+  ACP rollback, and any restore that crosses serialization rebuild history
+  without that provenance, so the next identical block is injected once and
+  suppression re-arms from the fresh part.
 
 ## Validation plan
 
-1. Unit coverage for the predicate over absent, present, differently-wrapped,
-   whitespace-padded, and malformed entries, plus the provenance cases: the
-   tagged block in a model entry, as a sole user-authored part, and ahead of the
-   trailing part all inject rather than suppress.
+1. Unit coverage for the predicate over absent, present, and malformed entries,
+   plus the provenance cases: the tagged block in a model entry, as a sole
+   user-authored part, ahead of the trailing part, and a receipt-stamped part
+   that is not last all inject rather than suppress. The shape-only variants
+   (surrounding whitespace, no newline delimiters) are covered against
+   `isUserPromptSubmitContextPartText`, which recognizes any tagged block; the
+   predicate compares one exact payload and deliberately does not trim.
 2. A regression test at each injection site: with the tagged block already in
    history, the appended part and the recorded hook-context provenance are both
    absent on the interactive path, and only the prompt text is sent on the
@@ -181,9 +186,14 @@ is sent to the model.
 
 ## Acceptance criteria
 
-- A byte-identical hook context block reaches the model at most once per
-  session history, from either injection site, as observed in the model-bound
-  request and in the session transcript.
+- A byte-identical hook context block reaches the model at most once while it
+  stays the trailing part of its user entry, from either injection site, as
+  observed in the model-bound request and in the session transcript. A later
+  append into that entry (the manual plan-exit notice, a mid-turn merge) pushes
+  the stamped part off the trailing position, and a history rebuild without
+  per-turn `hookContext` provenance (compaction, or the resume of an ACP/IDE
+  turn, which records none) drops the receipt: each re-injects one duplicate and
+  then re-arms.
 - A changed payload is always appended.
 - No new configuration, schema, or public API surface beyond the one exported
   predicate.
