@@ -4099,8 +4099,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " s.workspace_id, s.tool_profile FROM ma_turn t JOIN ma_session s"
                         + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
                         + " WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?", (row, index) -> {
-                    if (!"qwen-code".equals(row.getString("agent_id"))
-                            || row.getString("agent_definition_digest") != null || row.getString("workspace_id") == null
+                    if (("qwen-code".equals(row.getString("agent_id"))
+                            ? row.getString("agent_definition_digest") != null
+                            : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
                             || !(WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
                         return null;
@@ -4122,7 +4123,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
-            boolean supported) {
+            boolean supported, boolean agentDefinitionSupported) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
@@ -4157,7 +4158,8 @@ public class ManagedAgentStore implements AgentStateStore {
             return new WebShellApprovalChangeResult(sessionId, (String) result.get("mode"),
                     ((Number) result.get("revision")).longValue(), true);
         }
-        if (!supported || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
+        if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
+                || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw new ApiException(HttpStatus.CONFLICT, "unsupported_feature", "Approval selection is unavailable");
         }
@@ -6049,17 +6051,20 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
-                        + " CASE WHEN agent_id=? AND agent_definition_digest IS NULL"
+                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
                         + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
-                        + " CASE WHEN agent_id=? AND agent_definition_digest IS NULL"
+                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
                         + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
                         + " THEN approval_revision ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, writeJson(input),
                 payloadDigest, now, now, "qwen-code".getBytes(StandardCharsets.UTF_8),
+                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
                 "qwen-code".getBytes(StandardCharsets.UTF_8), tenantId, sessionId);
     }
 
