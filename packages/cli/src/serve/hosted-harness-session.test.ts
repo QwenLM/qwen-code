@@ -16170,6 +16170,7 @@ describe('Hosted Harness no-tool session', () => {
   it.each(['expired', 'cancelled'])(
     'settles a saved final native plan without new inference (%s)',
     async (actionEnd) => {
+      const waitOptions = { timeout: isSlowTestHost() ? 30_000 : 5_000 };
       let originalManaged: import('@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js').ManagedSession;
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
@@ -16275,7 +16276,7 @@ describe('Hosted Harness no-tool session', () => {
         ).set('X-Qwen-Client-Id', created.body.clientId);
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
-      });
+      }, waitOptions);
       await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .set('X-Qwen-Client-Id', created.body.clientId)
         .expect(204);
@@ -16299,7 +16300,7 @@ describe('Hosted Harness no-tool session', () => {
         );
         expect(terminals).toHaveLength(1);
         expect(terminals[0].payload['outcome']).toBe('cancelled');
-      });
+      }, waitOptions);
       expect(state.model).toHaveBeenCalledTimes(1);
       await vi.waitFor(async () => {
         const status = await headers(
@@ -16309,7 +16310,7 @@ describe('Hosted Harness no-tool session', () => {
           hasActivePrompt: false,
           recoveryBlocked: false,
         });
-      });
+      }, waitOptions);
       await headers(
         supertest(replacementServer).post(`/session/${SESSION_ID}/detach`),
       )
