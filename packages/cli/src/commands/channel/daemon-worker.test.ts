@@ -298,7 +298,6 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
 }));
 
 import {
-  CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
   createDaemonChannelBridgeFacade,
   createDaemonSessionFactory,
   daemonWorkerCommand,
@@ -1041,7 +1040,6 @@ describe('runChannelDaemonWorker', () => {
     expect(sdk.DaemonClient).toHaveBeenCalledWith({
       baseUrl: 'http://127.0.0.1:4170',
       token: 'secret-token',
-      fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
     });
     expect(mockLoadChannelsFromExtensions).toHaveBeenCalled();
     expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
@@ -1853,7 +1851,6 @@ describe('runChannelDaemonWorker', () => {
 
     expect(sdk.DaemonClient).toHaveBeenCalledWith({
       baseUrl: 'https://127.0.0.1:4170',
-      fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
     });
   });
 
@@ -1879,7 +1876,6 @@ describe('runChannelDaemonWorker', () => {
 
     expect(sdk.DaemonClient).toHaveBeenCalledWith({
       baseUrl: 'https://[::1]:4170',
-      fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
     });
   });
 
@@ -1915,7 +1911,6 @@ describe('runChannelDaemonWorker', () => {
 
     expect(sdk.DaemonClient).toHaveBeenCalledWith({
       baseUrl: `https://${ownAddress}:4170`,
-      fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
     });
   });
 
@@ -1954,7 +1949,6 @@ describe('runChannelDaemonWorker', () => {
 
     expect(sdk.DaemonClient).toHaveBeenCalledWith({
       baseUrl: 'http://127.0.0.2:4170',
-      fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
     });
   });
 
@@ -2003,7 +1997,6 @@ describe('runChannelDaemonWorker', () => {
       });
       expect(sdk.DaemonClient).toHaveBeenCalledWith({
         baseUrl: 'http://127.0.0.2:4170',
-        fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
       });
     } finally {
       mockNetworkInterfaces.value = undefined;
@@ -2026,7 +2019,6 @@ describe('runChannelDaemonWorker', () => {
 
     expect(sdk.DaemonClient).toHaveBeenCalledWith({
       baseUrl: 'http://localhost:4170',
-      fetchTimeoutMs: CHANNEL_WORKER_DAEMON_REQUEST_TIMEOUT_MS,
     });
   });
 
