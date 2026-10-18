@@ -27,7 +27,7 @@ describe('private original CSI Hosted routes', () => {
     const handle = registerHostedCsiSessionRoutes(
       app,
       contract,
-      'http://127.0.0.1:8081/internal/managed-session-store/v1',
+      'http://127.0.0.1:8081',
       { baseUrl: 'http://127.0.0.1:8080', token: 'broker' },
       () => ordinaryOwns,
     );

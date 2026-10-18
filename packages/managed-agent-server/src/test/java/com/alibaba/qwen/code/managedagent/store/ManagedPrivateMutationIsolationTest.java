@@ -166,7 +166,7 @@ class ManagedPrivateMutationIsolationTest {
             }
             var receipts = jdbc.queryForList("SELECT * FROM ma_request_receipt");
             assertThatThrownBy(() -> transaction.execute(status -> store.changeSessionApproval("tenant", "actor",
-                    "session", "approval", "digest", "auto-edit", 0, true)))
+                    "session", "approval", "digest", "auto-edit", 0, true, true)))
                     .isInstanceOfSatisfying(ApiException.class,
                             error -> assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_session")).usingRecursiveComparison().isEqualTo(owner);

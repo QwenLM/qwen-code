@@ -342,7 +342,16 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     const { revision, ref } = pending.pop()!;
     const key = `${revision}\u0000${ref.resourceId}`;
     const stored = resources.get(ref.resourceId);
-    if (stored === undefined) throw corrupt('snapshot resource is missing.');
+    if (stored === undefined) {
+      // A manifest committed before the closure edge shipped names page
+      // envelopes the Session never staged. Keep such a snapshot
+      // inspectable by dropping the dangling page ref from the walk
+      // without registering it — adding it would fire the enumeration
+      // check below for exactly the snapshots this keeps readable
+      // (#13930 R1-43).
+      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      throw corrupt('snapshot resource is missing.');
+    }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
       throw corrupt('snapshot dependency was not committed at its use.');
     }
@@ -436,8 +445,14 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     return this.client.readJournal(options.maxBytes);
   }
 
-  appendTransaction(records: readonly unknown[]): Promise<void> {
-    return this.client.appendTransaction(records);
+  async appendTransaction(records: readonly unknown[]): Promise<void> {
+    try {
+      await this.client.appendTransaction(records);
+    } catch (error) {
+      if (!(error instanceof ManagedSessionCommitRejectedError))
+        this.client.stopWriterRenewal();
+      throw error;
+    }
   }
 
   blockRecovery(request: {
@@ -638,6 +653,7 @@ class ManagedSessionStoreHttpClient {
   private renewPromise: Promise<void> | undefined;
   private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
+  private renewalStopped = false;
   private sealed = false;
   private locallyStopped = false;
   private retirementJoin?: Promise<void>;
@@ -857,7 +873,7 @@ class ManagedSessionStoreHttpClient {
     // cannot each spend a fresh requestTimeoutMs behind one held tenant
     // guard (#13800).
     const contentionDeadline = Date.now() + this.requestTimeoutMs;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; ; attempt++) {
       try {
         committed =
           publicationId === undefined
@@ -904,16 +920,37 @@ class ManagedSessionStoreHttpClient {
           error instanceof TypeError ||
           (error instanceof DOMException &&
             ['AbortError', 'TimeoutError'].includes(error.name));
-        // withRetry marks its terminal error as exhausted only when guard
-        // retries actually consumed the shared budget; without the mark
-        // one attempt's own stall burned its own time, so the baseline
-        // restart stays allowed instead of being gated off by wall-clock
-        // inference alone (#13800 P2, R2-2).
+        // Activation can retry beyond the usual attempt cap. A guard refusal
+        // must still stop that lane once the shared budget cannot fit another
+        // guard retry, even when the inner call never retried the guard.
         const contentionSpent =
           error instanceof ManagedSessionStoreHttpError &&
-          error.contentionExhausted === true;
-        if (!uncertain || attempt === 2 || contentionSpent) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+          (error.contentionExhausted === true ||
+            (descriptor.operation === 'renewActivation' &&
+              error.status === 503 &&
+              error.remoteCode === 'tenant_guard_contended' &&
+              contentionDeadline - Date.now() <= 250));
+        const exhausted = attempt >= 2;
+        if (
+          !uncertain ||
+          contentionSpent ||
+          (exhausted &&
+            (descriptor.operation !== 'renewActivation' ||
+              this.renewalStopped ||
+              grant.leaseUntil <= Date.now()))
+        )
+          throw error;
+        await new Promise((resolve) =>
+          setTimeout(
+            resolve,
+            exhausted ? Math.min(1000, grant.leaseUntil - Date.now()) : 250,
+          ),
+        );
+        if (
+          exhausted &&
+          (this.renewalStopped || grant.leaseUntil <= Date.now())
+        )
+          throw error;
       }
     }
     const receipt = asRecord(committed, 'commit receipt');
@@ -946,7 +983,7 @@ class ManagedSessionStoreHttpClient {
       throw corrupt('commit receipt does not match the submitted transaction.');
     }
     this.grant = {
-      ...grant,
+      ...this.requireGrant(),
       journalRevision: revision,
       committedSequence: descriptor.lastSequence,
       lastCommitDigest: descriptor.commitDigest,
@@ -1444,7 +1481,7 @@ class ManagedSessionStoreHttpClient {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
     const grant = this.grant;
-    this.stopRenewal();
+    this.stopWriterRenewal();
     if (grant === undefined) {
       this.sealed = true;
       this.resources.clear();
@@ -1474,6 +1511,11 @@ class ManagedSessionStoreHttpClient {
     this.locallyStopped = true;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+  }
+
+  stopWriterRenewal(): void {
+    this.renewalStopped = true;
+    this.stopRenewal();
   }
 
   private async ensureWriter(): Promise<void> {
@@ -1539,24 +1581,34 @@ class ManagedSessionStoreHttpClient {
     return this.renewPromise;
   }
 
-  private scheduleRenewal(): void {
+  private scheduleRenewal(retrying = false): void {
     this.stopRenewal();
     if (
+      this.renewalStopped ||
       this.sealed ||
       this.locallyStopped ||
       this.retirementJoin ||
-      this.grant === undefined
+      this.grant === undefined ||
+      this.grant.leaseUntil <= Date.now()
     )
       return;
     const delay = Math.max(
       250,
       Math.min(
-        Math.floor(this.leaseDurationMs / 2),
+        retrying ? 1000 : Math.floor(this.leaseDurationMs / 2),
         this.grant.leaseUntil - Date.now() - 500,
       ),
     );
     this.renewTimer = setTimeout(() => {
-      void this.renewWriter().catch(() => undefined);
+      void this.renewWriter().catch((error: unknown) => {
+        if (
+          error instanceof ManagedSessionStoreTransportError ||
+          (error instanceof ManagedSessionStoreHttpError &&
+            [500, 502, 503, 504].includes(error.status))
+        ) {
+          this.scheduleRenewal(true);
+        }
+      });
     }, delay);
     this.renewTimer.unref();
   }

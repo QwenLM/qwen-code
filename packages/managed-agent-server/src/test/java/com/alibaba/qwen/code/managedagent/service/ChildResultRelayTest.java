@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
@@ -480,6 +481,53 @@ class ChildResultRelayTest {
         assertThat(harness.operations).isEmpty();
         verify(store, never()).defer(any(RelayRow.class), anyString(),
                 anyLong(), anyString(), anyLong(), anyLong());
+        verify(store, never()).classify(any(RelayRow.class), anyString(),
+                anyString(), any(), anyLong());
+    }
+
+    // #14387: a workflow Turn the coordinator refused to re-drive carries
+    // the durable mark on its still-active row. The relay consumes it:
+    // the record settles recovery_blocked (never failed as if observed),
+    // the child's close is admitted, and the ledger classifies unknown.
+    @Test
+    void aWorkflowTurnMarkedRecoveryBlockedSettlesTheRunBlocked() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "RUNNING", null,
+                        AgentStateStore.WORKFLOW_RECOVERY_BLOCKED, true,
+                        "epoch-old"));
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("recovery_blocked");
+        assertThat(harness.operations.get(0))
+                .containsEntry("reason", "runtime_lost")
+                .containsEntry("childRunId", RUN)
+                .containsEntry("childSessionId", CHILD);
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(store, never()).scheduleRetry(any(RelayRow.class),
+                anyString(), anyLong(), anyLong(), anyLong());
+    }
+
+    // A Turn parked while RUNNING and then cancelled keeps the mark
+    // (insertCancelCommand never clears error_code), so the blocked branch
+    // must not fire for it: the coordinator is driving that cancel to its
+    // own CANCELLED settlement, and the run's real end is the user's
+    // cancel — never an outcome-unknown verdict (review finding on
+    // #14461). The watch keeps looking while the cancel drives.
+    @Test
+    void aMarkedTurnInCancellingKeepsWaitingForTheCancel() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "CANCELLING", null,
+                        AgentStateStore.WORKFLOW_RECOVERY_BLOCKED, true,
+                        "epoch-old"));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
         verify(store, never()).classify(any(RelayRow.class), anyString(),
                 anyString(), any(), anyLong());
     }

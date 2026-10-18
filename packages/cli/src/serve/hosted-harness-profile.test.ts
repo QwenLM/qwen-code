@@ -44,8 +44,7 @@ describe('Hosted Harness profile', () => {
       hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
       managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
       managedRuntimeBrokerToken: 'broker-secret',
-      hostedCsiSessionStoreUrl:
-        'http://127.0.0.1:8081/internal/managed-session-store/v1',
+      hostedCsiSessionStoreUrl: 'http://127.0.0.1:8081',
     };
     expect(() => validateHostedHarnessProfile(privateOptions)).not.toThrow();
     for (const url of [

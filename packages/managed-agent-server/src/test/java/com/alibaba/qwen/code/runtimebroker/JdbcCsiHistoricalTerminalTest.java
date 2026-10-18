@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
@@ -61,6 +62,9 @@ class JdbcCsiHistoricalTerminalTest {
         identity.put("attestationGeneration", 1L);
         identity.put("startedAt", startedAt);
         String encoded = new ObjectMapper().writeValueAsString(identity);
+        String result = new ObjectMapper().writeValueAsString(Map.of("schemaVersion", 1, "data", Map.of(
+                "identity_json", encoded, "binding_id", binding, "runtime_generation", 1,
+                "storage_id", "storage", "physical_key", "a".repeat(64))));
         var blobRead = new AtomicBoolean();
         var rowClosed = new AtomicInteger();
         var statementClosed = new AtomicInteger();
@@ -71,17 +75,36 @@ class JdbcCsiHistoricalTerminalTest {
                     case "getString" -> switch ((String) arguments[0]) {
                         case "progress_format" -> "qwen-csi-application-retirement/1";
                         case "progress_stage" -> "DRAINED";
-                        case "identity_json" -> encoded;
-                        case "retirement_id" -> retirement;
+                        case "request_json" -> encoded;
+                        case "result_json" -> result;
+                        case "operation_id" -> retirement;
+                        case "operation_kind" -> "CSI_RETIREMENT";
+                        case "target_kind" -> "RUNTIME_BINDING";
+                        case "target_key" -> ManagedSchemaKeys.key(binding);
+                        case "scope_key" -> ManagedSchemaKeys.key("tenant");
+                        case "operation_key" -> ManagedSchemaKeys.key("CSI_RETIREMENT", "tenant", retirement);
+                        case "storage_key" -> JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage");
+                        case "request_digest" -> ManagedSchemaKeys.key(encoded);
                         case "physical_key" -> "a".repeat(64);
-                        case "phase" -> "DRAINING";
+                        case "phase", "state" -> "DRAINING";
                         default -> throw new AssertionError("Unexpected column read");
                     };
                     case "getLong" -> switch ((String) arguments[0]) {
                         case "progress_version" -> 4L;
+                        case "target_revision" -> 1L;
                         case "settlement_deadline_ms" -> deadline;
                         default -> throw new AssertionError("Unexpected long column read");
                     };
+                    case "getInt" -> {
+                        assertEquals("payload_version", arguments[0]);
+                        yield 1;
+                    }
+                    case "getBytes" -> switch ((String) arguments[0]) {
+                        case "tenant_id" -> ManagedSchemaKeys.identity("tenant");
+                        case "target_id" -> ManagedSchemaKeys.identity(binding);
+                        default -> throw new AssertionError("Unexpected binary column read");
+                    };
+                    case "wasNull" -> false;
                     case "getBinaryStream" -> {
                         assertEquals("frozen_request_bytes", arguments[0]);
                         blobRead.set(true);
@@ -92,7 +115,7 @@ class JdbcCsiHistoricalTerminalTest {
                 });
         var statement = (PreparedStatement) Proxy.newProxyInstance(PreparedStatement.class.getClassLoader(),
                 new Class<?>[] {PreparedStatement.class}, (proxy, method, arguments) -> switch (method.getName()) {
-                    case "setString", "setLong", "setQueryTimeout" -> null;
+                    case "setString", "setBytes", "setLong", "setQueryTimeout" -> null;
                     case "executeQuery" -> { queryCount.incrementAndGet(); yield rows; }
                     case "close" -> { statementClosed.incrementAndGet(); yield null; }
                     default -> throw new AssertionError("Unexpected SQL access: " + method.getName());
@@ -104,7 +127,8 @@ class JdbcCsiHistoricalTerminalTest {
                     case "getTransactionIsolation" -> Connection.TRANSACTION_REPEATABLE_READ;
                     case "prepareStatement" -> {
                         String sql = (String) arguments[0];
-                        assertTrue(sql.startsWith("SELECT ") && sql.contains("FROM managed_workspace_csi_retirement")
+                        assertTrue(sql.startsWith("SELECT ") && sql.contains("FROM ma_operation")
+                                && sql.contains("operation_kind = 'CSI_RETIREMENT'")
                                 && !sql.contains("FOR UPDATE"));
                         yield statement;
                     }

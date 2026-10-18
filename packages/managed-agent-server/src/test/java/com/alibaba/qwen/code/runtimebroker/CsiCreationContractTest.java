@@ -86,7 +86,7 @@ class CsiCreationContractTest {
     }
 
     private static ObjectNode birth(String role) throws Exception {
-        try (var input = CsiCreationContractTest.class.getResourceAsStream("/contracts/k2-node-source-v6.fixture.json")) {
+        try (var input = CsiCreationContractTest.class.getResourceAsStream("/contracts/k2-node-source-v7.fixture.json")) {
             var fixture = JSON.readTree(input);
             var evidence = CsiNodeSourceJournal.verify(Base64.getDecoder().decode(fixture.path("bytesBase64").textValue()),
                     new CsiNodeSourceJournal.Cursor(fixture.path("head").path("sequence").longValue(), fixture.path("head").path("hash").textValue()));

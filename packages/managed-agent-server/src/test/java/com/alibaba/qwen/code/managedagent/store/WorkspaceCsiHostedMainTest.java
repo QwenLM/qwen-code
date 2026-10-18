@@ -20,12 +20,64 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class WorkspaceCsiHostedMainTest {
+    @Test
+    void authenticatesRequestsAndRejectsInvalidHostedResponses() throws Exception {
+        record Reply(int status, String boot, String cache, String body) { }
+        var reply = new AtomicReference<>(new Reply(200, "boot", "no-store", "{\"attached\":true}"));
+        var headers = new AtomicReference<Map<String, String>>();
+        var requestBody = new AtomicReference<String>();
+        var receiver = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        receiver.createContext("/text", exchange -> {
+            headers.set(Map.of("authorization", exchange.getRequestHeaders().getFirst("Authorization"),
+                    "contentType", exchange.getRequestHeaders().getFirst("Content-Type"),
+                    "protocol", exchange.getRequestHeaders().getFirst("X-Qwen-Harness-Protocol-Version"),
+                    "boot", exchange.getRequestHeaders().getFirst("X-Qwen-Harness-Boot-Id")));
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            Reply current = reply.get();
+            if (current.boot() != null) {
+                exchange.getResponseHeaders().add("X-Qwen-Harness-Boot-Id", current.boot());
+            }
+            if (current.cache() != null) {
+                exchange.getResponseHeaders().add("Cache-Control", current.cache());
+            }
+            byte[] bytes = current.body().getBytes(StandardCharsets.UTF_8);
+            try {
+                exchange.sendResponseHeaders(current.status(), bytes.length);
+                exchange.getResponseBody().write(bytes);
+            } finally {
+                exchange.close();
+            }
+        });
+        receiver.start();
+        try (var client = HttpClient.newHttpClient()) {
+            URI uri = URI.create("http://127.0.0.1:" + receiver.getAddress().getPort() + "/text");
+            var json = JsonMapper.builder().build();
+            assertThat(WorkspaceCsiHostedMain.post(client, uri, "operator", "boot", Map.of("text", "hello"), json)
+                    .path("attached").asBoolean()).isTrue();
+            assertThat(headers.get()).isEqualTo(Map.of("authorization", "Bearer operator",
+                    "contentType", "application/json", "protocol", "1", "boot", "boot"));
+            assertThat(json.readTree(requestBody.get()).path("text").textValue()).isEqualTo("hello");
+            for (Reply invalid : List.of(new Reply(409, "boot", "no-store", "{}"),
+                    new Reply(200, "foreign", "no-store", "{}"), new Reply(200, null, "no-store", "{}"),
+                    new Reply(200, "boot", null, "{}"), new Reply(200, "boot", "public", "{}"),
+                    new Reply(200, "boot", "no-store", " ".repeat(1024 * 1024 + 1)),
+                    new Reply(200, "boot", "no-store", "[]"), new Reply(200, "boot", "no-store", "null"))) {
+                reply.set(invalid);
+                assertThatThrownBy(() -> WorkspaceCsiHostedMain.post(client, uri, "operator", "boot",
+                        Map.of("text", "hello"), json)).isInstanceOf(IllegalStateException.class);
+            }
+        } finally {
+            receiver.stop(0);
+        }
+    }
+
     @Test
     void cancelsAnIncompleteResponseBeforeClosingItsClient() throws Exception {
         var release = new CountDownLatch(1);

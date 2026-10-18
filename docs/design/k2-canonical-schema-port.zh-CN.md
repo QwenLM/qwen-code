@@ -13,7 +13,7 @@
 
 ## 数据库结构与行身份
 
-保留当前主干 V1–V8 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段，V6 增加四个审批选择字段。V7 增加 SSH storage 索引并扩展 operation kinds，V8 增加 input/cancel operation kinds，均不新增表或列。未发布的 K2 退役增量以不变 SQL 字节顺延为 V9，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 755 列，应用清单为 33 表 749 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
+保留当前主干 V1–V9 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段，V6 增加四个审批选择字段。V7 增加 SSH storage 索引并扩展 operation kinds，V8 增加 input/cancel operation kinds，均不新增表或列。V9 增加 runtime Session 的 harness 索引，不新增表或列。未发布的 K2 退役增量以不变 SQL 字节顺延为 V10，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 755 列，应用清单为 33 表 749 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
 
 十一个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL、三项重试预算字段与四项审批选择字段。私有 Session 仅支持审批覆盖 `(NULL,0)`；非默认覆盖阻塞，普通审批选择保留主干行为，Turn 审批字段保留实际 nullable 快照。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4/V6/V7 不伪装为已发布主干迁移，不修改 Flyway 历史。缺少已发布 SSH 索引或 operation check 的旧私有预览 catalog 在迁移前拒绝；历史访问保留原构建，本候选使用全新临时 catalog。
 
@@ -93,10 +93,10 @@ checkpoint 协议检查、精确应用像和回滚/重试行为、同步读端�
 
 本次仅增加 live 清单归属，不扩展历史 carrier 解码器，也不资格化任意并发 foreign 活动；已保存 OTHER 完整行仍参与全像比较。
 
-## 主干 3547398d2 兼容
+## 主干 fbc698a651 兼容
 
-合并逐字保留已发布 V1–V8 资源，仅将不变的私有退役 DDL 追加为 V9。显式初始化与 Flyway 均须识别并保留全部已发布前序、普通行和已安装历史。标准 DDL 组合器同时支持主干完整 check 替换和 K2 表/列/unique-index 增量；live 清单与保留历史使用的同 Connection 验证重载保持必需。旧私有 V7 catalog 不是已发布 V7 前序，必须拒绝，不 repair 或部分迁移。
+合并逐字保留已发布 V1–V9 资源，仅将不变的私有退役 DDL 追加为 V10。显式初始化与 Flyway 均须识别并保留全部已发布前序、普通行和已安装历史。标准 DDL 组合器同时支持主干完整 check 替换和 K2 表/列/unique-index 增量；live 清单与保留历史使用的同 Connection 验证重载保持必需。旧私有 V7 catalog 不是已发布 V7 前序，必须拒绝，不 repair 或部分迁移。
 
-主干 V7/V8 不增表或列，因此现有 typed 清单保持33表749列，另有6列的物理伴随表。新 SSH 和命令操作活动仍经过既有归属及支持活动规则，不能悄悄归为无关。普通取消在操作准入前保留私有 Session 守卫。仅前台 SSH 工具声明保留无 monitor/无 background 形状，同时共享既有 Write/Edit 描述。私有第6版 boot 与非容器及 publisher 模式一样拒绝 SSH runtime 注入。
+主干 V7/V8/V9 不增表或列，因此现有 typed 清单保持33表749列，另有6列的物理伴随表。新 SSH 和命令操作活动仍经过既有归属及支持活动规则，不能悄悄归为无关。普通取消在操作准入前保留私有 Session 守卫。仅前台 SSH 工具声明保留无 monitor/无 background 形状，同时共享既有 Write/Edit 描述。私有第6版 boot 与非容器及 publisher 模式一样拒绝 SSH runtime 注入。
 
-定向 H2/mock 与构建检查覆盖此次兼容增量；MySQL 迁移执行、私有 Main/F2、Hosted/原生故障组，以及物理/复用资格均不在这些检查范围内。
+定向 H2/mock、仓库构建与临时 MySQL 8.4 V9 至 V10 迁移检查覆盖此次兼容增量；私有 Main/F2、Hosted/原生故障组，以及物理/复用资格均不在这些检查范围内。

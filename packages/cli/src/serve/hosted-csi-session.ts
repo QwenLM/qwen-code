@@ -7,6 +7,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  extractTurnBudgetDirectiveText,
+  parseTurnBudgetDirective,
+} from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import type { Application, Response } from 'express';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -14,13 +18,16 @@ import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 import {
   assertManagedSessionKey,
+  ManagedSessionRecordError,
   type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   createHttpManagedSessionStores,
   type HttpManagedSessionStores,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { requestWasAuthenticated } from './auth.js';
+import { markAccessLogError } from './server/access-log.js';
 import { listenerIdentityOf } from './local-control/listener-identity.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
@@ -102,6 +109,24 @@ function active(owner: Owner): void {
     throw new Refusal('csi_attachment_recovery_required');
 }
 
+function blockOwner(
+  owner: Owner,
+  bootId: string,
+  phase: 'initialization' | 'activation renewal' | 'text turn',
+  cause: unknown,
+): void {
+  owner.blocked = true;
+  const code =
+    cause instanceof Refusal
+      ? cause.code
+      : cause instanceof ManagedSessionRecordError
+        ? 'native_persistence_unavailable'
+        : 'csi_operation_unavailable';
+  writeStderrLineSafe(
+    `qwen serve: Private CSI Session ${owner.key.sessionId} boot ${bootId} blocked during ${phase}: ${code}`,
+  );
+}
+
 function admit(owner: Owner): void {
   active(owner);
   if (owner.retirementId) throw new Refusal('csi_retirement_admission_closed');
@@ -115,6 +140,7 @@ function respond(res: Response, pending: Promise<unknown>): void {
         cause instanceof Refusal
           ? cause
           : new Refusal('csi_operation_unavailable', 503);
+      markAccessLogError(res, failure.code);
       res
         .status(failure.status)
         .json({ error: failure.code, code: failure.code });
@@ -311,9 +337,11 @@ async function initialize(
         (cause: unknown) => owner.failures.push(cause),
       );
       const pending = activationRenewal
-        .then(() => undefined)
-        .catch(async () => {
-          owner.blocked = true;
+        .then((renewed) => {
+          if (!renewed) throw new Refusal('csi_activation_renewal_unavailable');
+        })
+        .catch(async (cause: unknown) => {
+          blockOwner(owner, contract.bootId, 'activation renewal', cause);
           if (owner.session) owner.session.blocked = true;
           owner.active?.abort.abort();
           clearInterval(owner.timer);
@@ -337,7 +365,7 @@ async function initialize(
     active(owner);
     owner.session = { managed, cwd: owner.admission.cwd, blocked: false };
   } catch (cause) {
-    owner.blocked = true;
+    blockOwner(owner, contract.bootId, 'initialization', cause);
     clearInterval(owner.timer);
     await owner.stores?.stopLocal();
     throw cause;
@@ -359,14 +387,17 @@ export function registerHostedCsiSessionRoutes(
       !requestWasAuthenticated(req) ||
       listenerIdentityOf(req).kind !== 'primary'
     ) {
+      markAccessLogError(res, 'csi_operator_authentication_required');
       res.status(403).json({ code: 'csi_operator_authentication_required' });
       return;
     }
     if (stopped) {
+      markAccessLogError(res, 'csi_attachment_stopped');
       res.status(409).json({ code: 'csi_attachment_stopped' });
       return;
     }
     if (!UUID.test(req.params['id']!)) {
+      markAccessLogError(res, 'csi_request_invalid');
       res.status(400).json({ code: 'csi_request_invalid' });
       return;
     }
@@ -453,6 +484,8 @@ export function registerHostedCsiSessionRoutes(
         Buffer.byteLength(text) > 16 * 1024
       )
         throw new Refusal('csi_request_invalid', 400);
+      if (parseTurnBudgetDirective(extractTurnBudgetDirectiveText(text)))
+        throw new Refusal('csi_text_budget_unavailable', 400);
       const existing = owner.turns.get(promptId);
       if (existing) {
         if (existing.text !== text) throw new Refusal('csi_prompt_conflict');
@@ -540,7 +573,7 @@ export function registerHostedCsiSessionRoutes(
               ),
           });
         } catch (cause) {
-          owner.blocked = true;
+          blockOwner(owner, contract.bootId, 'text turn', cause);
           owner.session!.blocked = true;
           clearInterval(owner.timer);
           await owner.stores!.stopLocal();
@@ -653,6 +686,7 @@ export function registerHostedCsiSessionRoutes(
       req.path.startsWith('/internal-csi') ||
       owners.has(req.params['id']!.toLowerCase())
     ) {
+      markAccessLogError(res, 'csi_private_route_closed');
       res.status(409).json({ code: 'csi_private_route_closed' });
       return;
     }
@@ -661,6 +695,7 @@ export function registerHostedCsiSessionRoutes(
   app.post('/session', (req, res, next) => {
     const id = (req.body as Record<string, unknown> | undefined)?.['sessionId'];
     if (typeof id === 'string' && owners.has(id.toLowerCase())) {
+      markAccessLogError(res, 'csi_private_route_closed');
       res.status(409).json({ code: 'csi_private_route_closed' });
       return;
     }

@@ -175,7 +175,7 @@ class AutomationScannerTest {
     @Test
     void privateProfileAndRetainedPinRefuseCreateBeforeClaimOrHarness() {
         for (boolean privateProfile : List.of(true, false)) {
-            jdbc.update("UPDATE managed_agent_session SET tool_profile = ?,"
+            jdbc.update("UPDATE ma_session SET tool_profile = ?,"
                             + " runtime_request_key = ? WHERE tenant_id = ? AND session_id = ?",
                     privateProfile ? "csi-files-retirement/1" : "hosted-workspace-files/1",
                     privateProfile ? null : "a".repeat(64), tenant, sessionId);
@@ -199,7 +199,7 @@ class AutomationScannerTest {
         ScheduleRow original = ledger.findSchedule(tenant, automation.id()).orElseThrow();
         int operations = fake.operations.size();
         for (boolean privateProfile : List.of(true, false)) {
-            jdbc.update("UPDATE managed_agent_session SET tool_profile = ?,"
+            jdbc.update("UPDATE ma_session SET tool_profile = ?,"
                             + " runtime_request_key = ? WHERE tenant_id = ? AND session_id = ?",
                     privateProfile ? "csi-files-retirement/1" : "hosted-workspace-files/1",
                     privateProfile ? null : "b".repeat(64), tenant, sessionId);
@@ -225,7 +225,7 @@ class AutomationScannerTest {
         PublicAutomation automation = define("0 2 * * *", "allow", "none", null, true);
         ScheduleRow original = ledger.findSchedule(tenant, automation.id()).orElseThrow();
         int operations = fake.operations.size();
-        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED', runtime_request_key = ?"
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED', runtime_request_key = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 "c".repeat(64), tenant, sessionId);
         String key = "inactive-private-" + UUID.randomUUID();
@@ -261,7 +261,7 @@ class AutomationScannerTest {
         var command = new AutomationLedgerStore.CommandRow(tenant, key, ACTOR, "digest",
                 ManagedAutomationService.scheduleIdFor(tenant, key), "");
         assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
-            jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ?"
+            jdbc.update("UPDATE ma_session SET runtime_request_key = ?"
                             + " WHERE tenant_id = ? AND session_id = ?",
                     "d".repeat(64), tenant, sessionId);
             assertThatThrownBy(() -> ledger.claimCommand(sessionId, command, clock.get()))
@@ -269,7 +269,7 @@ class AutomationScannerTest {
                             assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
         })).isInstanceOf(UnexpectedRollbackException.class);
         assertThat(ledger.findCommand(tenant, key)).isEmpty();
-        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM managed_agent_session"
+        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, sessionId)).isNull();
         assertThat(ledger.claimCommand(sessionId, command, clock.get())).isTrue();
     }

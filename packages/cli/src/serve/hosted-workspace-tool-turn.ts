@@ -1468,14 +1468,15 @@ export async function journaledToolResultIds(
 /**
  * The one derivation of the child run id shared by the launcher, the
  * recovery probe and the gap fill: a wake turn's turn id already embeds
- * its commissioning child run (`<childRunId>:accept:notify`), so using it
- * verbatim as the launch base grows the next run id one suffix per hop
- * and walks a chained helper into the 128-char lineage bound by the
- * third hop. The replay-stable key needs determinism, not readability:
- * collapse the wake turn's identity to a bounded digest of its own
- * stable name — never grow across hops, always 17 chars plus the call
- * id. Calls keyed verbatim for every other turn — re-driven batches and
- * resumed Hook results both name the same run again and again.
+ * its commissioning child run (`<childRunId>:accept:notify` or
+ * `<childRunId>:blocked:notify`), so using it verbatim as the launch base
+ * grows the next run id one suffix per hop and walks a chained helper
+ * into the 128-char lineage bound by the third hop. The replay-stable key
+ * needs determinism, not readability: collapse the wake turn's identity
+ * to a bounded digest of its own stable name — never grow across hops,
+ * always 17 chars plus the call id. Calls keyed verbatim for every other
+ * turn — re-driven batches and resumed Hook results both name the same
+ * run again and again.
  */
 export function hostedChildRunIdFor(promptId: string, callId: string): string {
   return hostedCallKey(promptId, callId);
@@ -5226,14 +5227,15 @@ export class HostedWorkspaceToolTurn {
   /**
    * One derivation of the child run id shared by the launcher and the
    * recovery probe: a wake turn's turn id already embeds its
-   * commissioning child run (`<childRunId>:accept:notify`), so using it
-   * verbatim as the launch base grows the next run id one suffix per hop
-   * and walks a chained helper into the 128-char lineage bound by the
-   * third hop. The replay-stable key needs determinism, not readability:
-   * collapse the wake turn's identity to a bounded digest of its own
-   * stable name — never grow across hops, always 17 chars plus the call
-   * id. Calls keyed verbatim for every other turn — re-driven batches
-   * and resumed Hook results both name the same run again and again.
+   * commissioning child run (`<childRunId>:accept:notify` or
+   * `<childRunId>:blocked:notify`), so using it verbatim as the launch
+   * base grows the next run id one suffix per hop and walks a chained
+   * helper into the 128-char lineage bound by the third hop. The
+   * replay-stable key needs determinism, not readability: collapse the
+   * wake turn's identity to a bounded digest of its own stable name —
+   * never grow across hops, always 17 chars plus the call id. Calls keyed
+   * verbatim for every other turn — re-driven batches and resumed Hook
+   * results both name the same run again and again.
    */
   private childRunIdFor(callId: string): string {
     return hostedChildRunIdFor(this.promptId, callId);
@@ -6529,7 +6531,14 @@ export class HostedWorkspaceToolTurn {
       }
       const record = children.record(childRunId);
       if (record !== undefined) {
-        if (record.run.state === 'failed' || record.run.state === 'cancelled') {
+        // #14387: a recovery-blocked child is an ending too — its outcome
+        // is unwitnessed, but the wait must not poll forever: the parent
+        // gets the blocked line as its tool result and the await resolves.
+        if (
+          record.run.state === 'failed' ||
+          record.run.state === 'cancelled' ||
+          record.run.state === 'recovery_blocked'
+        ) {
           const ended = convertToFunctionErrorResponse(
             request.call.name,
             request.call.callId,

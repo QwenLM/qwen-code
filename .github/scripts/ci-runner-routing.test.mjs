@@ -1,5 +1,6 @@
 // Runner-routing regression guards for ci.yml, serve-ab.yml, e2e.yml, the
-// qwen-autofix.yml scan lane, and the trusted-PR lanes of #13245.
+// qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
+// control-plane jobs that run no PR code.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
@@ -706,6 +707,53 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'pull_request',
       ['push', 'workflow_dispatch'],
     ],
+    // managed-agent-gate.yml calls sdk-java.yml on an approval, whose event
+    // a fork PR can raise too: approving one must not put it on the pool.
+    [
+      'sdk-java.yml',
+      'mysql-integration',
+      'pull_request_review',
+      ['push', 'merge_group', 'workflow_dispatch'],
+    ],
+    // The gate's own jobs report the would-be required check, so a starved
+    // hosted queue must not hold them; fork PRs and fork approvals stay hosted.
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request',
+      ['push', 'merge_group'],
+    ],
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request_review',
+      ['push', 'merge_group'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    // Both gate lanes also run in the gate's approval-triggered full tier.
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
     [
       'assign-pr-owner.yml',
       'assign',
@@ -857,4 +905,88 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
   });
+});
+
+describe('control-plane jobs moved off the hosted queue', () => {
+  // None of these checks out or runs PR code, so each reaches the pool on
+  // every trigger, fork-raised events included; the kill-switch wins.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const jobs = [
+    [
+      'qwen-code-pr-review.yml',
+      'delay-automatic-review',
+      ['pull_request_target'],
+    ],
+    ['assign-issue-owner.yml', 'assign', ['issues', 'workflow_dispatch']],
+    [
+      'auto-minimize-spam.yml',
+      'minimize',
+      [
+        'issue_comment',
+        'pull_request_review_comment',
+        'schedule',
+        'push',
+        'workflow_dispatch',
+      ],
+    ],
+  ];
+
+  for (const [file, jobName, events] of jobs) {
+    const job = parse(readFileSync(join(workflowsDir, file), 'utf8')).jobs[
+      jobName
+    ];
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo: false, assoc });
+    const checkouts = job.steps.filter((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+
+    it(`${file} ${jobName}: every trigger reaches the pool, forks included`, () => {
+      assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+      for (const eventName of events) {
+        for (const assoc of ASSOCIATIONS) {
+          assert.deepEqual(route(eventName, assoc), ECS_LABELS, eventName);
+        }
+      }
+    });
+
+    it(`${file} ${jobName}: the kill-switch wins on every event`, () => {
+      for (const eventName of events) {
+        assert.deepEqual(route(eventName, 'OWNER', true), HOSTED_LABELS);
+      }
+    });
+
+    it(`${file} ${jobName}: checks out only the default branch`, () => {
+      // An omitted ref is the default branch on issues events and the
+      // write-access dispatcher's choice on workflow_dispatch.
+      for (const step of checkouts) {
+        assert.ok(
+          [undefined, '${{ github.event.repository.default_branch }}'].includes(
+            step.with?.ref,
+          ),
+          String(step.with?.ref),
+        );
+      }
+    });
+
+    if (checkouts.length > 0) {
+      it(`${file} ${jobName}: checkout is safe on a reused pool workspace`, () => {
+        const heal = job.steps.findIndex(
+          (s) => s.name === 'Restore workspace ownership',
+        );
+        assert.ok(heal !== -1 && heal < job.steps.indexOf(checkouts[0]));
+        assert.equal(
+          job.steps[heal].if,
+          "${{ runner.environment == 'self-hosted' }}",
+        );
+        // Cone mode rejects a file entry the reused index holds as a file.
+        for (const step of checkouts) {
+          assert.equal(step.with['sparse-checkout'], '.github/scripts');
+          assert.equal(step.with['sparse-checkout-cone-mode'], undefined);
+        }
+      });
+    }
+  }
 });

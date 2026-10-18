@@ -4,6 +4,8 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Timeout;
@@ -50,7 +52,7 @@ class ToolPublicationAdmissionLockTest {
     void receiptDoesNotHoldTenantWhileWaitingForNativeParent(boolean replay) throws Exception {
         var gates = new ParentGates();
         DataSource source = gates.wrap(publicationDataSource());
-        Flyway.configure().dataSource(source).load().migrate();
+        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
         var fixture = PublicationJournalFixture.create(source, false);
         fixture.reserve();
         var bucket = new ToolPublicationObjectStore() {
@@ -122,8 +124,9 @@ class ToolPublicationAdmissionLockTest {
                 assertThat(gates.receiptSeekingDomain.await(10, TimeUnit.SECONDS)).isTrue();
                 // A receipt waiting for the shared parent must leave the retention tenant available.
                 var tenantProbe = threads.submit(() -> transaction.execute(status ->
-                        fixture.jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
-                                + " WHERE tenant_id = 'tenant-1' FOR UPDATE", String.class)));
+                        fixture.jdbc.queryForObject("SELECT tenant_id FROM ma_tenant_guard"
+                                + " WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
+                                String.class, ManagedSchemaKeys.key("tenant-1"))));
                 assertThat(tenantProbe.get(2, TimeUnit.SECONDS)).isEqualTo("tenant-1");
                 if (receipt.isDone()) {
                     receipt.get(10, TimeUnit.SECONDS);
@@ -132,9 +135,9 @@ class ToolPublicationAdmissionLockTest {
                 gates.releaseNative.countDown();
                 assertThat(nativeCommit.get(10, TimeUnit.SECONDS).journalRevision()).isEqualTo(1);
                 assertThat(receipt.get(10, TimeUnit.SECONDS).path("decision").asText()).isEqualTo("blocked");
-                assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM qwen_tool_publication",
+                assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture",
                         String.class)).isEqualTo("REFERENCED");
-                assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
+                assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                         + " WHERE operation = 'recordToolResult'", Integer.class)).isEqualTo(1);
             } finally {
                 gates.releaseNative.countDown();
@@ -172,12 +175,14 @@ class ToolPublicationAdmissionLockTest {
                         return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class},
                                 (statement, call, parameters) -> {
                                     if (Thread.currentThread() == receiptWriter.get() && call.getName().startsWith("execute")
-                                            && sql.startsWith("INSERT INTO qwen_runtime_placement_guard")) {
+                                            && sql.startsWith("INSERT INTO ma_tenant_guard")
+                                            && sql.contains("'runtime_placement'")) {
                                         receiptSeekingDomain.countDown();
                                     }
                                     Object result = invoke(value, call, parameters);
                                     if (Thread.currentThread() == nativeWriter.get() && "executeQuery".equals(call.getName())
-                                            && sql.startsWith("SELECT tenant_id FROM qwen_runtime_placement_guard")
+                                            && sql.startsWith("SELECT tenant_id FROM ma_tenant_guard")
+                                            && sql.contains("'runtime_placement'")
                                             && paused.compareAndSet(false, true)) {
                                         nativeDomainHeld.countDown();
                                         if (!releaseNative.await(20, TimeUnit.SECONDS)) {

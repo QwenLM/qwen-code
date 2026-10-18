@@ -1088,6 +1088,8 @@ export async function settleCrashedWakeTurnAftermath(params: {
                 cwd,
                 promptId: turnId,
                 unobserved: carried,
+                broker,
+                shell: session.shell,
               });
               // A settle that could not verify the park journaled nothing:
               // the release and the terminal record must not build on it —
@@ -4847,6 +4849,7 @@ export function registerHostedHarnessSessionRoutes(
                     promptId: turn.turnId,
                     brokerOptions,
                     toolProfile: session.toolProfile !== undefined,
+                    shell: session.shell,
                     carryUnobservedInto: carried,
                     children: session.childAgents,
                     consume: (childRunId) =>
@@ -6216,14 +6219,21 @@ export function registerHostedHarnessSessionRoutes(
       );
       if (
         approvalSelection &&
-        (session.agentDefinition ||
-          !session.approval ||
-          ![
-            'hosted-workspace-files/1',
-            'hosted-workspace-shell/1',
-            'hosted-workspace-files/2',
-            'hosted-workspace-shell/2',
-          ].includes(session.toolProfile ?? '') ||
+        (!session.approval ||
+          !(
+            session.agentDefinition
+              ? [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-shell/2',
+                ]
+              : [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-files/2',
+                  'hosted-workspace-shell/2',
+                ]
+          ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
             approvalSelection.mode !== session.approval.mode))
       )
@@ -7500,6 +7510,37 @@ export function registerHostedHarnessSessionRoutes(
           case 'cancel':
             await children.requestStop(childRunId);
             break;
+          case 'recovery_blocked': {
+            // #14387: the relay's honest settlement for a child whose
+            // Harness generation was lost mid-run — the outcome stays
+            // unwitnessed, so the record blocks instead of failing. Only
+            // the lost-Runtime reason is admitted.
+            const reason = body?.['reason'];
+            const blockedChildSessionId = body?.['childSessionId'];
+            if (
+              reason !== 'runtime_lost' ||
+              !(
+                blockedChildSessionId === null ||
+                blockedChildSessionId === undefined ||
+                typeof blockedChildSessionId === 'string'
+              )
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.settleRecoveryBlocked(childRunId, {
+              reason,
+              ...(typeof blockedChildSessionId === 'string'
+                ? { childSessionId: blockedChildSessionId }
+                : {}),
+            });
+            // The blocked settlement of a background child is a committed
+            // notification — kick the parent like the accept arm does, or
+            // an idle Session's scheduler (which exits on an empty next())
+            // never delivers it. Fires on a replay too: the kick is the
+            // delivery, idempotent by the scheduler's own dedupe.
+            session.monitorWake?.kick();
+            break;
+          }
           case 'close_scope': {
             const started = body?.['started'];
             const childSessionId = body?.['childSessionId'];
@@ -8977,6 +9018,7 @@ export function registerHostedHarnessSessionRoutes(
       // their journal entry must stay honest (no stop was observed), on the
       // first settle and on a compensating retry alike.
       let unobserved: ReadonlySet<string> | undefined;
+      let broker: HostedWorkspaceBroker | undefined;
       try {
         // The phase-shape invariants decide the two settlement shapes
         // outright (R1-51): the agent wait's park names outstanding runs
@@ -8984,7 +9026,6 @@ export function registerHostedHarnessSessionRoutes(
         // the round pairs off — while no group means the Runtime park.
         const agentWait = cancelRunnable.checkpoint.agentWait;
         const commandWait = cancelRunnable.checkpoint.commandWait;
-        let broker: HostedWorkspaceBroker | undefined;
         if (commandWait !== null) {
           // H4e-b3's own mirror of the agent-wait cancellation: the
           // outstanding command runs answer by what their journal
@@ -9090,6 +9131,8 @@ export function registerHostedHarnessSessionRoutes(
               cwd: session.cwd,
               promptId,
               unobserved,
+              broker,
+              shell: session.shell,
             });
             if (settleOutcome === 'not-runnable')
               throw new Error(
@@ -9159,12 +9202,13 @@ export function registerHostedHarnessSessionRoutes(
         // runtime_session_busy while an execution is active. An agent wait
         // never held one — its recovery acquires nothing (acquiredRuntime
         // false), so there is no lease to hand back here.
+        const releaseBroker = broker;
         const handedBack =
-          broker === undefined ||
+          releaseBroker === undefined ||
           (session.mcp &&
-            broker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
+            releaseBroker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
             ? false
-            : await broker.release().then(
+            : await releaseBroker.release().then(
                 () => true,
                 (cause: unknown) => {
                   if (releaseIsSatisfied(cause)) return true;
@@ -9172,7 +9216,7 @@ export function registerHostedHarnessSessionRoutes(
                   // not refuse an answered cancellation. Leave the lease
                   // owed; later replays and the session close retry it.
                   writeStderrLineSafe(
-                    `qwen serve: Hosted Harness release of recovered Runtime ${broker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
+                    `qwen serve: Hosted Harness release of recovered Runtime ${releaseBroker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
                   );
                   return false;
                 },
@@ -9218,6 +9262,8 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             promptId,
             unobserved,
+            broker,
+            shell: session.shell,
           }).then(
             // A noop is completion here — the identity already moved past
             // this settle — but a not-runnable read proves nothing, so it

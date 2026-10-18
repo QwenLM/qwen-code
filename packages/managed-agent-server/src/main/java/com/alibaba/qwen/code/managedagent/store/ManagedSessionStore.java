@@ -1685,7 +1685,7 @@ public class ManagedSessionStore {
                 writerTokenHash, request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 validated.recordBytes(), validated.recordBytes().length,
-                validated.recordDigest(), now);
+                validated.recordDigest(), now.getTime());
     }
 
     record TerminalCandidate(CommitTransactionRequest request,
@@ -1787,7 +1787,7 @@ public class ManagedSessionStore {
                         + " activation_phase = 'released', activation_head_revision = ?, gmt_modified = ?"
                         + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'ACTIVE'"
                         + " AND journal_revision = ? AND committed_sequence = ? AND last_commit_digest = ?",
-                revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now,
+                revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now.getTime(),
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), tenant, session,
                 head.journalRevision(), head.committedSequence(), head.lastCommitDigest());
         if (changed != 1) {

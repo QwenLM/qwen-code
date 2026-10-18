@@ -2498,7 +2498,8 @@ class ToolPublicationStoreTest {
                 "captures".equals(capacity) ? 1 : 4);
         ObjectNode next = request("reserve");
         next.set("binding", second);
-        assertThatThrownBy(() -> store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN)).hasMessageContaining("capacity exhausted");
+        assertRefused(() -> store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN), false,
+                "bytes".equals(capacity) ? "tenant_bytes" : "active_captures");
         assertThat(jdbc.queryForList("SELECT * FROM ma_output_capture ORDER BY publication_id"))
                 .usingRecursiveComparison().isEqualTo(before);
     }
