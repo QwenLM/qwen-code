@@ -46,6 +46,10 @@ class Observer {
   controller = new AbortController();
   task?: Promise<void>;
   failure?: unknown;
+  // A resync_required frame carries no sequence id and is not part of the
+  // replayed stream — cursor-expired-resync asserts it exists exactly
+  // once and that nothing else replays behind it.
+  resyncFrame?: Record<string, unknown>;
 
   constructor(
     private readonly surface: 'public' | 'web',
@@ -125,6 +129,10 @@ class Observer {
                   .trim() ?? '',
               data: JSON.parse(data) as Record<string, unknown>,
             };
+            if (frame.event === 'agent.session.resync_required') {
+              this.resyncFrame = frame.data;
+              continue;
+            }
             assert.match(String(frame.id), /^\d+$/);
             assert.equal(
               frame.id,
@@ -308,6 +316,9 @@ type ProbeState = {
     byte_length: number;
     sha256: string;
   }>;
+  runtimeSessions: Array<{ runtime_session_id: string }>;
+  monitorObservations: number;
+  replayFloor: Record<string, unknown>;
 };
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
@@ -317,7 +328,7 @@ const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 function backgroundProducer(): string {
   return [
     "const fs = require('fs');",
-    "fs.writeFileSync('bg-started.txt', String(process.pid));",
+    "fs.appendFileSync('bg-started.txt', String(process.pid) + '\\n');",
     "process.stdout.write('FG8_RUN_STARTED\\n');",
     "fs.readFileSync('run-gate');",
     "process.stdout.write('FG8_RUN_RESUMED\\n');",
@@ -404,16 +415,28 @@ function pacedProducer(): string {
   ].join('\n');
 }
 
-function producerFor(name: string): { monitor: boolean; script: string } {
-  if (name.includes('monitor')) {
+function producerFor(
+  name: string,
+  phase = 1,
+): { monitor: boolean; script: string } {
+  if (name.includes('monitor') || name === 'observation-advance-reply') {
     return { monitor: true, script: monitorProducer() };
   }
+  const gate = phase === 2 ? 'run-gate-2' : 'run-gate';
   switch (name) {
     case 'publisher-kill-mid-capture':
       return { monitor: false, script: pacedProducer() };
     case 'in-flight-cap':
     case 'receipt-drop-after-watermark':
-      return { monitor: false, script: patternProducer(24, 'run-gate') };
+    case 'capture-commit-reply':
+    case 'manifest-commit':
+    case 'page-envelope-commit':
+    case 'cancel-during-capture':
+    case 'cancel-status-unavailable':
+    case 'cancel-reply-lost':
+    case 'routine-release-refusal':
+    case 'drain-release':
+      return { monitor: false, script: patternProducer(24, gate) };
     default:
       return { monitor: false, script: backgroundProducer() };
   }
@@ -457,16 +480,119 @@ async function releaseFifo(directory: string, name: string) {
 
 const operations: string[] = [];
 let proxyFailure: unknown;
+
+// Slice-2 broker arms. A reply-drop forwards and consumes the committed
+// upstream answer, then destroys the reply socket — the request DID land
+// server-side; a request-hold parks the request pre-forward until the case
+// releases it; an answer-once fabricates one upstream refusal. Every arm
+// fires exactly once and reports itself through the results file, so a
+// gate can never pass against a fault that never fired.
+type BrokerArm =
+  | {
+      kind: 'drop';
+      match: (
+        op: string,
+        parsed: Record<string, unknown> | undefined,
+      ) => boolean;
+      label: string;
+    }
+  | {
+      kind: 'hold';
+      match: (
+        op: string,
+        parsed: Record<string, unknown> | undefined,
+      ) => boolean;
+      label: string;
+    }
+  | {
+      kind: 'answer';
+      match: (
+        op: string,
+        parsed: Record<string, unknown> | undefined,
+      ) => boolean;
+      label: string;
+      status: number;
+      body: Record<string, unknown>;
+    };
+const brokerArms: BrokerArm[] = [];
+const brokerHolds: Array<() => void> = [];
+const brokerDrops: string[] = [];
+const brokerAnswers: string[] = [];
+const brokerFives: Array<{ op: string; status: number; body: string }> = [];
+// Every control call's wire kind, in order — "exactly one stop reaches
+// the worker" is a count over this log.
+const brokerControlKinds: string[] = [];
+
+function brokerOperation(req: { method?: string }, url: URL): string {
+  const path = url.pathname;
+  if (req.method === 'GET') return 'status';
+  for (const suffix of [
+    ':prepare',
+    ':start',
+    ':cancel',
+    ':release',
+    ':acknowledge',
+    ':acquire',
+    ':publisher',
+  ]) {
+    if (path.endsWith(suffix)) return suffix.slice(1);
+  }
+  if (path.endsWith('/control')) return 'control';
+  return path.split('/').at(-1)!;
+}
+
+function releaseBrokerHolds() {
+  const held = brokerHolds.splice(0);
+  console.log(`FG8_PROXY release ${held.length} held requests`);
+  for (const resolve of held) resolve();
+}
+
 const brokerProxy = createServer(async (req, res) => {
   try {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks);
     const url = new URL(req.url!, config.brokerUrl);
-    const operation =
-      req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
+    const operation = brokerOperation(req, url);
     operations.push(operation);
     console.log(`FG8_PROXY ${req.method} ${operation} begin`);
+    let parsed: Record<string, unknown> | undefined;
+    if (req.method === 'POST' && body.length > 0) {
+      try {
+        parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+      } catch {
+        parsed = undefined;
+      }
+    }
+    if (operation === 'control') {
+      brokerControlKinds.push(
+        String(
+          (parsed?.['operation'] as { kind?: string } | undefined)?.kind ??
+            'unknown',
+        ),
+      );
+    }
+    const armIndex = brokerArms.findIndex((arm) => {
+      try {
+        return arm.match(operation, parsed);
+      } catch {
+        return false;
+      }
+    });
+    const arm = armIndex >= 0 ? brokerArms.splice(armIndex, 1)[0] : undefined;
+    if (arm !== undefined && arm.kind === 'answer') {
+      brokerAnswers.push(arm.label);
+      console.log(
+        `FG8_PROXY answered ${arm.status} for ${operation} (${arm.label})`,
+      );
+      res.writeHead(arm.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(arm.body));
+      return;
+    }
+    if (arm !== undefined && arm.kind === 'hold') {
+      console.log(`FG8_PROXY hold ${operation} (${arm.label})`);
+      await new Promise<void>((resolve) => brokerHolds.push(resolve));
+    }
     const upstream = await fetch(url, {
       method: req.method,
       headers: {
@@ -478,6 +604,19 @@ const brokerProxy = createServer(async (req, res) => {
     });
     const bytes = Buffer.from(await upstream.arrayBuffer());
     console.log(`FG8_PROXY ${req.method} ${operation} -> ${upstream.status}`);
+    if (upstream.status >= 500) {
+      brokerFives.push({
+        op: operation,
+        status: upstream.status,
+        body: bytes.toString('utf8').slice(0, 1000),
+      });
+    }
+    if (arm !== undefined && arm.kind === 'drop') {
+      brokerDrops.push(arm.label);
+      console.log(`FG8_DROPPED ${operation} (${arm.label})`);
+      req.socket.destroy();
+      return;
+    }
     relayUpstream(res, upstream, bytes);
   } catch (cause) {
     proxyFailure = cause;
@@ -505,6 +644,15 @@ const heldReplies: Array<() => void> = [];
 let dropNextCommit = false;
 let droppedCommits = 0;
 const commitLog: Array<{ op: string; status: number | 'dropped' }> = [];
+// Slice-2 store arms: reply drops keyed by request shape, fired once each
+// and reported back through the results file, plus a 5xx capture log so a
+// store-failure case can point at the exact failed commit.
+const storeDropArms: Array<{
+  match: (parsed: Record<string, unknown>, path: string) => boolean;
+  label: string;
+}> = [];
+const storeDrops: string[] = [];
+const storeFives: Array<{ op: string; status: number; body: string }> = [];
 const storeProxy = createServer(async (req, res) => {
   try {
     const chunks: Buffer[] = [];
@@ -544,6 +692,27 @@ const storeProxy = createServer(async (req, res) => {
       signal: AbortSignal.timeout(120_000),
     });
     const bytes = Buffer.from(await upstream.arrayBuffer());
+    const storeArmIndex = storeDropArms.findIndex((arm) => {
+      try {
+        return parsed !== undefined && arm.match(parsed, url.pathname);
+      } catch {
+        return false;
+      }
+    });
+    if (storeArmIndex >= 0) {
+      const arm = storeDropArms.splice(storeArmIndex, 1)[0];
+      storeDrops.push(arm.label);
+      console.log(`FG8_DROPPED store ${arm.label}`);
+      req.socket.destroy();
+      return;
+    }
+    if (upstream.status >= 500) {
+      storeFives.push({
+        op: String(parsed?.['kind'] ?? parsed?.['operation'] ?? url.pathname),
+        status: upstream.status,
+        body: bytes.toString('utf8').slice(0, 1000),
+      });
+    }
     const isCommit =
       req.method === 'POST' &&
       (/:commit(?:-v2)?$/.test(url.pathname) ||
@@ -595,12 +764,22 @@ function checkStoreProxy() {
   if (storeProxyFailure) throw storeProxyFailure;
 }
 
+// Per-case monitor quota: a stop-armed case keeps the watch alive until
+// the driver drives the stop, so the quota is never the thing under gate.
+function monitorMaxEvents(name: string): number {
+  if (name === 'monitor-stop-reply') return 99;
+  return 2;
+}
+
 let current = config.cases[0];
 let modelCalls = 0;
 const model = await startFakeOpenAIServer(() => {
   modelCalls++;
-  const producer = producerFor(current.name);
-  if (modelCalls === 1) {
+  // FG8b drives two phases per case — the faulted pass, then the clean
+  // re-drive — each with its own first call that must issue the tool call.
+  const phase = modelCalls > 2 ? 2 : 1;
+  const producer = producerFor(current.name, phase);
+  if (modelCalls === 1 || (config.letter === 'fg8b' && modelCalls === 3)) {
     return {
       toolCalls: [
         producer.monitor
@@ -608,7 +787,7 @@ const model = await startFakeOpenAIServer(() => {
               'monitor',
               {
                 command: `${quote(process.execPath)} -e ${quote(producer.script)}`,
-                max_events: 2,
+                max_events: monitorMaxEvents(current.name),
                 // The fixture's 60 s events poll/heartbeat can hold a
                 // WebShell resume for a full poll cycle; the watch's idle
                 // window must outlive that, or it idle-kills the gated
@@ -1048,6 +1227,870 @@ async function runPublishCase() {
   }
 }
 
+// === Slice-2 drivers (FG8a/b/d and the FG8e cursor-expired case) ===
+
+// The driver issues broker verbs against its own proxy — same surface the
+// CLI rides, with the token the proxy injects for it.
+async function brokerDriver(
+  verb: string,
+  body?: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await fetch(
+    new URL(`/internal/runtime-broker/v1${verb}`, proxyUrl),
+    {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  const text = await response.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    parsed = {};
+  }
+  return { status: response.status, body: parsed };
+}
+
+// Cancel admission through the public surface (202 on acceptance).
+async function publicCancelTurn(sessionId: string, turnId: string) {
+  const response = await fetch(
+    new URL(`/v1/agents/sessions/${sessionId}/events`, config.storeUrl),
+    {
+      method: 'POST',
+      headers: {
+        'X-Qwen-Tenant-Id': config.tenantId,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': randomUUID(),
+      },
+      body: JSON.stringify({
+        type: 'agent.session.cancel',
+        turn_id: turnId,
+      }),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  const text = await response.text();
+  assert.equal(response.status, 202, text);
+  return JSON.parse(text) as Record<string, unknown>;
+}
+
+function runtimeSessionIdOf(state: ProbeState): string {
+  const row = state.runtimeSessions[0];
+  assert(row, 'no runtime session row yet');
+  return row.runtime_session_id;
+}
+
+function processRowOf(state: ProbeState) {
+  return state.executions.find((row) =>
+    row.execution_call_id.endsWith(':process'),
+  );
+}
+
+function invocationOf(state: ProbeState) {
+  return state.executions.find(
+    (row) => !row.execution_call_id.endsWith(':process'),
+  );
+}
+
+function monitorOf(state: ProbeState) {
+  return state.monitors[0] as
+    | {
+        observationSequence?: number;
+        notifiedThrough?: number;
+        stopReason?: string | null;
+      }
+    | undefined;
+}
+
+// One line per physical process start — second-admit failures can never
+// hide behind an overwritten marker (the slice-1 lesson, applied forward).
+function startedPids(): string[] {
+  try {
+    const text = readFileSync(
+      path.join(current.directory, 'bg-started.txt'),
+      'utf8',
+    );
+    return text.trim() === '' ? [] : text.trimEnd().split('\n');
+  } catch {
+    return [];
+  }
+}
+
+// A driver-driven control call against a live background run, the same
+// verb the drain arm reaches for (`shell-terminate` on the hold row).
+async function shellTerminate(runtimeSessionId: string) {
+  const state = await probe<ProbeState>(current.sessionId, 'state');
+  const inv = invocationOf(state);
+  const proc = processRowOf(state);
+  assert(inv, 'an invocation row is required');
+  assert(proc, 'a :process row is required');
+  return brokerDriver(
+    `/tool-sessions/${encodeURIComponent(runtimeSessionId)}/control`,
+    {
+      protocolVersion: 1,
+      requestId: randomUUID(),
+      harnessSessionId: current.sessionId,
+      runtimeSessionId,
+      operation: {
+        kind: 'shell-terminate',
+        sessionKey: {
+          tenantId: config.tenantId,
+          workspaceId: current.workspaceId,
+          sessionId: current.sessionId,
+        },
+        operationId: inv.execution_call_id,
+        targetOperationId: proc.execution_call_id,
+      },
+    },
+  );
+}
+
+async function bootSlice2Harness(withMonitorFifo: boolean, withGate2 = false) {
+  const cli = new HostedHarnessProcess();
+  step('harness boot');
+  await cli.start(model.baseUrl, {
+    extraArgs: [
+      '--managed-runtime-broker-url',
+      proxyUrl,
+      '--managed-runtime-broker-token',
+      'hosted-tools-broker-token',
+    ],
+  });
+  execFileSync('mkfifo', [
+    path.join(current.directory, withMonitorFifo ? 'monitor-gate' : 'run-gate'),
+  ]);
+  if (withGate2) {
+    execFileSync('mkfifo', [path.join(current.directory, 'run-gate-2')]);
+  }
+  return cli;
+}
+
+// FG8a — one background capability per case, exactly one committed reply
+// destroyed, and every re-drive resolves by the original identity.
+async function runReplyCase() {
+  const monitor =
+    current.name.includes('monitor') ||
+    current.name === 'observation-advance-reply';
+  const cli = await bootSlice2Harness(monitor);
+  try {
+    if (current.name === 'dispatch-reply') {
+      brokerArms.push({
+        kind: 'drop',
+        match: (op) => op === 'start',
+        label: 'dispatch',
+      });
+    }
+    if (current.name === 'capture-commit-reply') {
+      storeDropArms.push({
+        label: 'publish-page',
+        match: (parsed, path) =>
+          path.endsWith('/tool-results:publish') &&
+          parsed['kind'] === 'managed-tool-result-page',
+      });
+    }
+    const sessionStore =
+      current.name === 'capture-commit-reply' ||
+      current.name === 'observation-advance-reply'
+        ? storeProxyUrl
+        : config.storeUrl;
+    const { clientId } = await createSession(cli, sessionStore);
+    const promptId = await submitPrompt(
+      cli,
+      clientId,
+      `fg8 ${current.name} launch`,
+    );
+    step('prompt admitted');
+    if (current.name === 'dispatch-reply') {
+      await waitUntil(async () => {
+        checkProxy();
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        return processRowOf(state) !== undefined && brokerDrops.length === 1;
+      }, 120_000);
+      step('dropped the dispatch reply after commit');
+      await releaseFifo(current.directory, 'run-gate');
+      await waitUntil(async () => {
+        checkProxy();
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        const child = childRunOf(state);
+        return child?.run?.state === 'settled';
+      }, 120_000);
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        drops: [...brokerDrops],
+        startOps: operations.filter((op) => op === 'start').length,
+        pids: startedPids(),
+        runState: childRunOf(state)?.run?.state ?? null,
+        stopReason: childRunOf(state)?.stopReason ?? null,
+      };
+    }
+    if (current.name === 'monitor-stop-reply') {
+      await waitUntil(async () => {
+        checkProxy();
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        return (monitorOf(state)?.observationSequence ?? 0) >= 1;
+      }, 120_000);
+      step('watch live');
+      brokerArms.push({
+        kind: 'drop',
+        match: (op, parsed) =>
+          op === 'control' &&
+          (parsed?.['operation'] as { kind?: string } | undefined)?.kind ===
+            'monitor-stop',
+        label: 'monitor-stop',
+      });
+      await publicCancelTurn(current.sessionId, promptId);
+      step('cancelled the turn');
+      await waitUntil(async () => {
+        checkProxy();
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        const monitor = monitorOf(state);
+        return (
+          monitor?.stopReason != null &&
+          ['stop_requested', 'exited'].includes(String(monitor.stopReason))
+        );
+      }, 180_000);
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        drops: [...brokerDrops],
+        monitorStopOps: brokerControlKinds.filter(
+          (kind) => kind === 'monitor-stop',
+        ).length,
+        stopReason: monitorOf(state)?.stopReason ?? null,
+        observationSequence: monitorOf(state)?.observationSequence ?? 0,
+        notifiedThrough: monitorOf(state)?.notifiedThrough ?? 0,
+      };
+    }
+    if (current.name === 'capture-commit-reply') {
+      await waitUntil(async () => {
+        checkProxy();
+        checkStoreProxy();
+        return progressLines() >= 24 && storeDrops.length === 1;
+      }, 180_000);
+      step('dropped one page publish reply');
+      await releaseFifo(current.directory, 'run-gate');
+      await waitUntil(async () => {
+        checkProxy();
+        checkStoreProxy();
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        return childRunOf(state)?.run?.state === 'settled';
+      }, 180_000);
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        storeDrops: [...storeDrops],
+        runState: childRunOf(state)?.run?.state ?? null,
+        stopReason: childRunOf(state)?.stopReason ?? null,
+        committedSegments: fullSegments(state).length,
+      };
+    }
+    if (current.name === 'observation-advance-reply') {
+      await waitUntil(async () => {
+        checkProxy();
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        return (monitorOf(state)?.observationSequence ?? 0) >= 1;
+      }, 120_000);
+      step('watch live');
+      storeDropArms.push({
+        label: 'commit-monitor-run',
+        match: (parsed) => parsed['operation'] === 'commitMonitorRun',
+      });
+      // The producer only holds mid-window; the second advance carries the
+      // drop and its re-drive, then the quota stop settles the watch.
+      await releaseFifo(current.directory, 'monitor-gate');
+      await waitUntil(async () => {
+        checkProxy();
+        checkStoreProxy();
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        const monitor = monitorOf(state);
+        return storeDrops.length === 1 && monitor?.stopReason != null;
+      }, 180_000);
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const commits = commitLog.filter(
+        (entry) => entry.op === 'commitMonitorRun' && entry.status === 200,
+      );
+      return {
+        case: current.name,
+        storeDrops: [...storeDrops],
+        commitMonitorRunLanded: commits.length,
+        stopReason: monitorOf(state)?.stopReason ?? null,
+        observationSequence: monitorOf(state)?.observationSequence ?? 0,
+        notifiedThrough: monitorOf(state)?.notifiedThrough ?? 0,
+        observationResources: state.monitorObservations,
+      };
+    }
+    throw new Error(`unknown fg8a case ${current.name}`);
+  } catch (cause) {
+    await diagnose(
+      cli,
+      `modelCalls=${modelCalls} operations=${operations.join(',')}\n` +
+        `brokerDrops=${brokerDrops.join(',')} storeDrops=${storeDrops.join(',')} controlKinds=${brokerControlKinds.join(',')}`,
+    );
+    throw cause;
+  } finally {
+    await cli.close();
+  }
+}
+
+// FG8e cursor-expired-resync: an honestly expired resume cursor must read
+// exactly one resync_required frame and no fabricated replay.
+async function runCursorCase() {
+  const observer = new Observer('public', current.sessionId);
+  const cli = await bootSlice2Harness(false);
+  try {
+    const { clientId, created } = await createSession(cli, config.storeUrl);
+    await probe(current.sessionId, 'relay-start', {
+      created,
+      baseUrl: cli.baseUrl,
+      bootId: cli.bootId,
+    });
+    await observer.start();
+    const promptId = await submitPrompt(
+      cli,
+      clientId,
+      `fg8 ${current.name} launch`,
+    );
+    step('prompt admitted');
+    await waitUntil(async () => {
+      checkProxy();
+      if (observer.failure) throw observer.failure;
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const launchSettled = observer.frames.some(
+        (frame) =>
+          frame.data['terminal'] === true &&
+          observer.turnIdOf(frame) === promptId,
+      );
+      return launchSettled && processRowOf(state) !== undefined;
+    }, 120_000);
+    step('launch settled, run live');
+    observer.controller.abort();
+    await observer.task;
+    if (observer.failure) throw observer.failure;
+    const cursor = observer.frames.at(-1)!.id;
+    step(`stream aborted at ${cursor}`);
+    await releaseFifo(current.directory, 'run-gate');
+    await waitUntil(async () => {
+      checkProxy();
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const child = childRunOf(state);
+      return child?.run?.state === 'settled';
+    }, 120_000);
+    await submitPrompt(cli, clientId, `fg8 ${current.name} post-gap`);
+    await waitUntil(async () => {
+      checkProxy();
+      const ledger = await probe<Array<Record<string, unknown>>>(
+        current.sessionId,
+        'ledger',
+      );
+      return ledger.length > cursor + 1;
+    }, 120_000);
+    step('backlog committed past the cursor');
+    const floor = await probe<{
+      replay_floor_sequence: number;
+      last_sequence: number;
+      covered_sequence: number;
+    }>(current.sessionId, 'advance-floor', { floor: cursor + 1 });
+    assert.equal(
+      Number(floor.replay_floor_sequence),
+      cursor + 1,
+      'the replay floor must advance past the resume cursor',
+    );
+    step(`replay floor advanced to ${cursor + 1}`);
+    // Exactly one resync frame, no fabricated replay behind it.
+    const resumed = new Observer('public', current.sessionId);
+    await resumed.start(cursor);
+    await waitUntil(() => {
+      if (resumed.failure) throw resumed.failure;
+      return resumed.resyncFrame !== undefined;
+    }, 120_000);
+    const frame = resumed.resyncFrame!;
+    assert.equal(Number(frame.floorSequence), cursor + 1);
+    await resumed.close();
+    const ledger = await probe<Array<Record<string, unknown>>>(
+      current.sessionId,
+      'ledger',
+    );
+    await probe(current.sessionId, 'relay-stop');
+    const replayCount = resumed.frames.length;
+    assert.equal(
+      replayCount,
+      0,
+      'an expired cursor gets no fabricated replay frames',
+    );
+    return {
+      case: current.name,
+      cursor,
+      floorSequence: Number(frame.floorSequence),
+      action: frame.action,
+      replayFrames: replayCount,
+      ledgerLength: ledger.length,
+      promptId,
+    };
+  } catch (cause) {
+    await diagnose(cli, `cursor case failed: ${String(cause)}`);
+    throw cause;
+  } finally {
+    observer.controller.abort();
+    await cli.close();
+  }
+}
+
+// FG8b — one-shot store failure per case: the blocked half with the
+// trigger armed, then the honest landing after it is dropped.
+async function runStoreCase() {
+  const target = current.name.replace('-commit', '');
+  const producersGateTwice =
+    current.name === 'manifest-commit' ||
+    current.name === 'page-envelope-commit';
+  const cli = await bootSlice2Harness(false, producersGateTwice);
+  let triggerName = '';
+  try {
+    const { clientId } = await createSession(cli, storeProxyUrl);
+    const installed = await probe<{ name: string; marker: string }>(
+      current.sessionId,
+      'trigger-install',
+      { target },
+    );
+    triggerName = installed.name;
+    step(`trigger ${triggerName} armed for ${target}`);
+    assert.equal(
+      await probe<number>(current.sessionId, 'trigger-present', {
+        name: triggerName,
+      }),
+      1,
+      'trigger present before the fault window',
+    );
+    await submitPrompt(cli, clientId, `fg8 ${current.name} fault`);
+    step('fault pass submitted');
+    await waitUntil(async () => {
+      checkProxy();
+      checkStoreProxy();
+      return (
+        brokerFives.some((entry) => entry.body.includes(installed.marker)) ||
+        storeFives.some((entry) => entry.body.includes(installed.marker))
+      );
+    }, 120_000);
+    step(`fault fired with marker ${installed.marker}`);
+    const blocked = await probe<ProbeState>(current.sessionId, 'state');
+    await probe(current.sessionId, 'trigger-drop', { name: triggerName });
+    assert.equal(
+      await probe<number>(current.sessionId, 'trigger-present', {
+        name: triggerName,
+      }),
+      0,
+      'trigger dropped after the fault window',
+    );
+    // The fault pass's producer may hold its gate; release it so that pass
+    // unwinds and the clean re-drive gets a fresh turn.
+    if (producersGateTwice) {
+      await releaseFifo(current.directory, 'run-gate');
+      step('fault pass unwound');
+    }
+    await submitPrompt(cli, clientId, `fg8 ${current.name} replay`);
+    step('clean pass submitted');
+    await waitUntil(async () => {
+      checkProxy();
+      checkStoreProxy();
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      return state.executions.some((row) =>
+        row.execution_call_id.endsWith(':process'),
+      );
+    }, 180_000);
+    step('clean pass dispatched');
+    if (producersGateTwice) {
+      await releaseFifo(current.directory, 'run-gate-2');
+    } else {
+      await releaseFifo(current.directory, 'run-gate');
+    }
+    await waitUntil(async () => {
+      checkProxy();
+      checkStoreProxy();
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const children = state.childRuns as Array<{
+        run?: { state?: string };
+        stopReason?: string | null;
+      }>;
+      return children.some(
+        (child) =>
+          child?.run?.state === 'settled' && child.stopReason === 'exited',
+      );
+    }, 180_000);
+    step('clean pass settled with real exit evidence');
+    const settled = await probe<ProbeState>(current.sessionId, 'state');
+    const landed = (
+      settled.childRuns as Array<{
+        run?: { state?: string };
+        stopReason?: string | null;
+      }>
+    ).filter(
+      (child) =>
+        child?.run?.state === 'settled' && child.stopReason === 'exited',
+    );
+    return {
+      case: current.name,
+      marker: installed.marker,
+      firedWithMarker: true,
+      brokerMarkers: brokerFives
+        .filter((entry) => entry.body.includes(installed.marker))
+        .map((entry) => entry.op),
+      storeMarkers: storeFives
+        .filter((entry) => entry.body.includes(installed.marker))
+        .map((entry) => entry.op),
+      blocked: {
+        executions: blocked.executions.map((row) => [
+          row.execution_call_id,
+          row.execution_state,
+        ]),
+        processRows: blocked.executions.filter((row) =>
+          row.execution_call_id.endsWith(':process'),
+        ).length,
+        resourceByKind: kindCounts(blocked),
+        childRuns: (
+          blocked.childRuns as Array<{
+            run?: { state?: string };
+          }>
+        ).map((child) => child?.run?.state ?? null),
+      },
+      settled: {
+        executions: settled.executions.map((row) => [
+          row.execution_call_id,
+          row.execution_state,
+        ]),
+        processRows: settled.executions.filter((row) =>
+          row.execution_call_id.endsWith(':process'),
+        ).length,
+        resourceByKind: kindCounts(settled),
+        landedRuns: landed.length,
+      },
+      modelCalls,
+      pids: startedPids(),
+    };
+  } catch (cause) {
+    await diagnose(
+      cli,
+      `modelCalls=${modelCalls} target=${target} brokerFives=${brokerFives
+        .map((entry) => entry.op)
+        .join(',')} storeFives=${storeFives
+        .map((entry) => entry.op)
+        .join(',')}`,
+    );
+    throw cause;
+  } finally {
+    try {
+      if (triggerName !== '') {
+        await probe(current.sessionId, 'trigger-drop', { name: triggerName });
+      }
+    } catch {
+      // best-effort teardown
+    }
+    await cli.close();
+  }
+}
+
+function kindCounts(state: ProbeState) {
+  const counts: Record<string, number> = {};
+  for (const row of state.resources) {
+    counts[row.kind] = (counts[row.kind] ?? 0) + 1;
+  }
+  return counts;
+}
+
+// FG8d — cancellation arms against a live background run, then the
+// routine/drain release split.
+async function runCancelCase() {
+  const cli = await bootSlice2Harness(false);
+  try {
+    const { clientId } = await createSession(cli, config.storeUrl);
+    if (current.name === 'cancel-before-start') {
+      brokerArms.push({
+        kind: 'hold',
+        match: (op) => op === 'start',
+        label: 'dispatch-hold',
+      });
+    }
+    await submitPrompt(cli, clientId, `fg8 ${current.name} launch`);
+    step('prompt admitted');
+    if (current.name === 'cancel-before-start') {
+      // The cancel lands while the dispatch is held pre-start: nothing may
+      // start, and the record settles from the ledger's never-started
+      // proof (#14021).
+      await waitUntil(() => brokerHolds.length === 1, 120_000);
+      step('dispatch held');
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const inv = invocationOf(state);
+      assert(inv, 'the admitted invocation exists');
+      const runtimeSessionId = runtimeSessionIdOf(state);
+      const cancel = await brokerDriver(
+        `/executions/${encodeURIComponent(inv.execution_call_id)}:cancel`,
+        {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          harnessSessionId: current.sessionId,
+          runtimeSessionId,
+        },
+      );
+      assert(
+        cancel.status === 200,
+        `cancel refused: ${cancel.status} ${JSON.stringify(cancel.body)}`,
+      );
+      step('cancel committed mid-hold');
+      releaseBrokerHolds();
+      await waitUntil(async () => {
+        checkProxy();
+        const settledState = await probe<ProbeState>(
+          current.sessionId,
+          'state',
+        );
+        const row = invocationOf(settledState);
+        return processRowOf(settledState) === undefined && row !== undefined;
+      }, 180_000);
+      const settleState = await probe<ProbeState>(current.sessionId, 'state');
+      const children = settleState.childRuns as Array<{
+        run?: { state?: string };
+        stopReason?: string | null;
+      }>;
+      await waitUntil(() => {
+        return children.some((child) => child?.run?.state === 'settled');
+      }, 120_000);
+      return {
+        case: current.name,
+        cancelStatus: cancel.status,
+        processRows: settleState.executions.filter((row) =>
+          row.execution_call_id.endsWith(':process'),
+        ).length,
+        pids: startedPids(),
+        childStates: (
+          (await probe<ProbeState>(current.sessionId, 'state'))
+            .childRuns as Array<{
+            run?: { state?: string };
+            stopReason?: string | null;
+          }>
+        ).map((child) => [
+          child?.run?.state ?? null,
+          child?.stopReason ?? null,
+        ]),
+        startOps: operations.filter((op) => op === 'start').length,
+      };
+    }
+    // The remaining cases need a live background run first.
+    await waitUntil(async () => {
+      checkProxy();
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      return fullSegments(state).length >= 3;
+    }, 180_000);
+    step('run live mid-capture');
+    const state = await probe<ProbeState>(current.sessionId, 'state');
+    const runtimeSessionId = runtimeSessionIdOf(state);
+    const inv = invocationOf(state);
+    assert(inv, 'an invocation row is required');
+    if (current.name === 'cancel-during-capture') {
+      const stop = await shellTerminate(runtimeSessionId);
+      assert.equal(stop.status, 200, JSON.stringify(stop.body));
+      step('terminate issued mid-capture');
+      await waitUntil(async () => {
+        checkProxy();
+        const settleState = await probe<ProbeState>(current.sessionId, 'state');
+        const child = childRunOf(settleState);
+        return child?.run?.state === 'settled';
+      }, 180_000);
+      const settleState = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        stopStatus: stop.status,
+        stopReason: childRunOf(settleState)?.stopReason ?? null,
+        stopRequested:
+          (childRunOf(settleState) as { stopRequested?: boolean } | undefined)
+            ?.stopRequested ?? null,
+        runState: childRunOf(settleState)?.run?.state ?? null,
+        committedSegments: fullSegments(settleState).length,
+        pids: startedPids(),
+      };
+    }
+    if (current.name === 'cancel-status-unavailable') {
+      brokerArms.push({
+        kind: 'answer',
+        match: (op) => op === 'control',
+        label: 'control-unavailable',
+        status: 409,
+        body: {
+          protocolVersion: 1,
+          harnessSessionId: current.sessionId,
+          runtimeSessionId,
+          code: 'runtime_broker_execution_unknown',
+          error: 'status unavailable in this window',
+        },
+      });
+      const refused = await shellTerminate(runtimeSessionId);
+      assert.equal(
+        refused.status,
+        409,
+        'the window must answer the stop as unproven',
+      );
+      step('stop answered unavailable');
+      // No terminal event may be fabricated off the unproven answer: a
+      // bound the live record must hold before the honest re-drive.
+      const during = await probe<ProbeState>(current.sessionId, 'state');
+      assert.notEqual(
+        childRunOf(during)?.run?.state,
+        'settled',
+        'no fabricated settle during the unavailable window',
+      );
+      const stopped = await shellTerminate(runtimeSessionId);
+      assert.equal(stopped.status, 200, JSON.stringify(stopped.body));
+      step('stop re-driven');
+      await waitUntil(async () => {
+        checkProxy();
+        const settleState = await probe<ProbeState>(current.sessionId, 'state');
+        return childRunOf(settleState)?.run?.state === 'settled';
+      }, 180_000);
+      const settleState = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        refusedStatus: refused.status,
+        stoppedStatus: stopped.status,
+        answers: [...brokerAnswers],
+        stopReason: childRunOf(settleState)?.stopReason ?? null,
+        runState: childRunOf(settleState)?.run?.state ?? null,
+        pids: startedPids(),
+      };
+    }
+    if (current.name === 'cancel-reply-lost') {
+      brokerArms.push({
+        kind: 'drop',
+        match: (op) => op === 'cancel',
+        label: 'cancel-reply',
+      });
+      const first = await brokerDriver(
+        `/executions/${encodeURIComponent(inv.execution_call_id)}:cancel`,
+        {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          harnessSessionId: current.sessionId,
+          runtimeSessionId,
+        },
+      );
+      assert(
+        brokerDrops.includes('cancel-reply'),
+        'the drop arm must have fired',
+      );
+      assert(
+        first.status === 0,
+        `a destroyed reply can never answer 200 (got ${first.status})`,
+      );
+      step('cancel reply dropped after commit');
+      const second = await brokerDriver(
+        `/executions/${encodeURIComponent(inv.execution_call_id)}:cancel`,
+        {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          harnessSessionId: current.sessionId,
+          runtimeSessionId,
+        },
+      );
+      assert.equal(second.status, 200, JSON.stringify(second.body));
+      step('cancel re-driven');
+      const settleState = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        drops: [...brokerDrops],
+        cancelOps: operations.filter((op) => op === 'cancel').length,
+        secondStatus: second.status,
+        invocationState: invocationOf(settleState)?.execution_state ?? null,
+        invocationStatus: invocationOf(settleState)?.execution_status ?? null,
+      };
+    }
+    if (current.name === 'routine-release-refusal') {
+      const progressBefore = progressLines();
+      const refused = await brokerDriver(
+        `/tool-sessions/${encodeURIComponent(runtimeSessionId)}:release`,
+        {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          harnessSessionId: current.sessionId,
+          runtimeSessionId,
+        },
+      );
+      assert.equal(refused.status, 409, JSON.stringify(refused.body));
+      assert.equal(
+        refused.body['code'],
+        'runtime_session_held',
+        'the routine arm must answer held',
+      );
+      step('routine release refused held');
+      // Nothing is stopped while the arm refuses: the producer keeps
+      // advancing its own progress log.
+      await waitUntil(() => progressLines() > progressBefore, 30_000);
+      const after = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        refusedStatus: refused.status,
+        refusedCode: refused.body['code'],
+        processAlive: processRowOf(after) !== undefined,
+        progressBefore,
+        progressAfter: progressLines(),
+        runState: childRunOf(after)?.run?.state ?? null,
+        pids: startedPids(),
+      };
+    }
+    if (current.name === 'drain-release') {
+      const released = await brokerDriver(
+        `/tool-sessions/${encodeURIComponent(runtimeSessionId)}:release`,
+        {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          harnessSessionId: current.sessionId,
+          runtimeSessionId,
+          drain: true,
+        },
+      );
+      assert.equal(released.status, 200, JSON.stringify(released.body));
+      step('drain release accepted');
+      await waitUntil(async () => {
+        checkProxy();
+        const settleState = await probe<ProbeState>(current.sessionId, 'state');
+        return childRunOf(settleState)?.run?.state === 'settled';
+      }, 180_000);
+      const settleState = await probe<ProbeState>(current.sessionId, 'state');
+      return {
+        case: current.name,
+        releasedStatus: released.status,
+        releasedFlag: released.body['released'] ?? null,
+        stopReason: childRunOf(settleState)?.stopReason ?? null,
+        stopRequested:
+          (childRunOf(settleState) as { stopRequested?: boolean } | undefined)
+            ?.stopRequested ?? null,
+        runState: childRunOf(settleState)?.run?.state ?? null,
+        stopOps: brokerControlKinds.filter((kind) => kind === 'shell-terminate')
+          .length,
+        committedSegments: fullSegments(settleState).length,
+        pids: startedPids(),
+      };
+    }
+    throw new Error(`unknown fg8d case ${current.name}`);
+  } catch (cause) {
+    await diagnose(
+      cli,
+      `modelCalls=${modelCalls} operations=${operations.join(',')}\n` +
+        `brokerDrops=${brokerDrops.join(',')} answers=${brokerAnswers.join(',')} controlKinds=${brokerControlKinds.join(',')}`,
+    );
+    throw cause;
+  } finally {
+    await cli.close();
+  }
+}
+
+const LETTER_OK: Record<string, string> = {
+  fg8a: 'FG8_ORIGINAL_IDENTITY_OK',
+  fg8b: 'FG8_STORE_FAILURES_OK',
+  fg8d: 'FG8_CANCELLATION_DRAIN_OK',
+  fg8e: 'FG8_STREAM_GAPS_OK',
+  fg8f: 'FG8_OUTPUT_DELIVERY_OK',
+};
+
 try {
   const reports = [];
   for (current of config.cases) {
@@ -1058,8 +2101,26 @@ try {
     heldSegments = 0;
     dropNextCommit = false;
     droppedCommits = 0;
-    if (config.letter === 'fg8f') {
+    brokerArms.length = 0;
+    brokerDrops.length = 0;
+    brokerAnswers.length = 0;
+    brokerFives.length = 0;
+    brokerControlKinds.length = 0;
+    brokerHolds.length = 0;
+    storeDropArms.length = 0;
+    storeDrops.length = 0;
+    storeFives.length = 0;
+    commitLog.length = 0;
+    if (config.letter === 'fg8a') {
+      reports.push(await runReplyCase());
+    } else if (config.letter === 'fg8b') {
+      reports.push(await runStoreCase());
+    } else if (config.letter === 'fg8d') {
+      reports.push(await runCancelCase());
+    } else if (config.letter === 'fg8f') {
       reports.push(await runPublishCase());
+    } else if (current.name === 'cursor-expired-resync') {
+      reports.push(await runCursorCase());
     } else {
       const surface = current.name.startsWith('public') ? 'public' : 'web';
       reports.push(await runStreamCase(surface));
@@ -1069,9 +2130,7 @@ try {
   checkProxy();
   checkStoreProxy();
   await writeFile(config.resultFile, JSON.stringify(reports));
-  console.log(
-    config.letter === 'fg8f' ? 'FG8_OUTPUT_DELIVERY_OK' : 'FG8_STREAM_GAPS_OK',
-  );
+  console.log(LETTER_OK[config.letter]);
 } catch (cause) {
   console.error('FG8 failed at', current?.name, cause);
   throw cause;
