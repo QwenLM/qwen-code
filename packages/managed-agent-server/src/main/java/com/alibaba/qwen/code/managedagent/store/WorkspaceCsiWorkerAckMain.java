@@ -109,7 +109,7 @@ public final class WorkspaceCsiWorkerAckMain {
             }
 
             @Override
-            public void requireUnversioned() {
+            public void validateConfiguration() {
             }
         };
     }

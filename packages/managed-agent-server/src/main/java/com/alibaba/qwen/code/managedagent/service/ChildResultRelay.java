@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
@@ -899,6 +900,20 @@ public class ChildResultRelay {
         String turnId = turn.turnId();
         long completedAt = turn.completedAt() == null ? 0L
                 : turn.completedAt();
+        // #14387: the coordinator refused to re-drive this workflow Turn —
+        // the Harness generation running it was lost and the in-process
+        // run's outcome stays unwitnessed. Settle the record blocked and
+        // classify unknown: never re-executed, never failed as if its
+        // outcome were observed. A CANCELLING Turn keeps its mark but is
+        // the coordinator's in-flight cancel — its real end is the user's
+        // cancel settlement, so the blocked branch waits it out.
+        if (!TERMINAL_TURNS.contains(status)
+                && !"CANCELLING".equals(status)
+                && AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(
+                        turn.errorCode())) {
+            settleRecoveryBlocked(row, now);
+            return;
+        }
         boolean journalTurn = false;
         Integer messageCount = null;
         if ("COMPLETED".equals(status) || "CANCELLED".equals(status)
@@ -1023,6 +1038,35 @@ public class ChildResultRelay {
                     now + HEARTBEAT_MS,
                     now + LEASE_MS, now);
         }
+    }
+
+    /**
+     * #14387: the workflow child whose Harness generation was lost. The
+     * execution's outcome is unwitnessed, so the record settles blocked —
+     * {@code recovery_blocked} over {@code outcome_unknown} — never
+     * re-executed, never failed as if observed. The close rides the same
+     * capability rules as a failure's, and the ledger classifies unknown:
+     * no result was ever proven.
+     */
+    private void settleRecoveryBlocked(RelayRow row, long now) {
+        boolean closed = closeFinishedChild(row, now);
+        // The workflow child shares the parent's workspace, so no merge is
+        // owed — but the check is the settlement's, not the kind's: a
+        // future isolated workflow child must wait for its discard here.
+        if (!childWorkspaceFinished(row, false)) {
+            awaitMerge(row, now);
+            return;
+        }
+        Map<String, Object> blocked = new LinkedHashMap<>();
+        blocked.put("operationId", UUID.randomUUID().toString());
+        blocked.put("kind", "recovery_blocked");
+        blocked.put("childRunId", row.childRunId());
+        blocked.put("childSessionId", row.childSessionId());
+        blocked.put("reason", "runtime_lost");
+        harness.runChildOperation(row.tenantId(), row.parentSessionId(),
+                blocked);
+        finishOrRetainDebt(row, row.childSessionId(), closed, "unknown",
+                "workflow Turn recovery blocked", now);
     }
 
     /**
@@ -1320,14 +1364,15 @@ public class ChildResultRelay {
         return true;
     }
 
-    /** The terminal write of every settled arm: with its close admitted
-     * the row retires to its proven classification; without close
-     * capability the settled record already freed its quota and the
-     * parent's next Turn, so the row keeps only the close debt — parked
-     * due on the heartbeat, named by the child id, still claimed, and
-     * still discoverable, because a settled parent record is not the
-     * child Session's close and discarding this row would strand the
-     * ACTIVE child with no durable owner anywhere. */
+    /** The terminal write of every settled arm: the row retires to its
+     * proven classification either way. With its close admitted that is
+     * all; without close capability the settled record already freed its
+     * quota and the parent's next Turn, so only the close debt stays —
+     * parked due on the heartbeat, named by the child id, still claimed,
+     * and still discoverable, because a settled parent record is not the
+     * child Session's close and discarding it would strand the ACTIVE
+     * child with no durable owner anywhere. The classification never
+     * depends on that capability: an `unknown` run stays `unknown`. */
     private void finishOrRetainDebt(RelayRow row, String child,
             boolean closed, String classification, String lastError,
             long now) {
@@ -1335,7 +1380,7 @@ public class ChildResultRelay {
             relayStore.classify(row, owner, classification, lastError, now);
             return;
         }
-        relayStore.advance(row, owner, "close_debt", child,
+        relayStore.retainCloseDebt(row, owner, classification, child,
                 now + HEARTBEAT_MS,
                 "close debt retained: host cannot close a Workspace Session",
                 now + LEASE_MS, now);
@@ -1408,9 +1453,10 @@ public class ChildResultRelay {
      * owes through the ordinary defer; the row never retires with the
      * debt airborne. A host without close capability at all settles the
      * parent record on time (the give-up and its pairing are proven
-     * facts, not capability-held), then parks the row as `close_debt` —
-     * the settlement is nobody's close, so the ledger keeps the owed
-     * admission discoverable instead of classifying `unknown` over it.
+     * facts, not capability-held) and retires the walk under its own
+     * `unknown`; the settlement is nobody's close, so the owed admission
+     * parks beside that classification on its own close-debt row, still
+     * discoverable — the debt never stands in for the result's truth.
      * A worktree run whose merge was asked is the exception (#13753 I2):
      * the merge needs the child closed and holds the settlement, so that
      * run waits for a host that can close it.

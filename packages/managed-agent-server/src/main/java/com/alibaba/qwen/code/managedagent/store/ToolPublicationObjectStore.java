@@ -2,7 +2,10 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import java.io.InputStream;
 
-/** Private, immutable object storage for one publication service. */
+/**
+ * Private, immutable object storage for one publication service.
+ * Implementations report backend failures through {@link ToolPublicationStorageException}.
+ */
 public interface ToolPublicationObjectStore {
     /**
      * One physical create, with no automatic retries, for a key exclusively owned by its durable
@@ -14,15 +17,17 @@ public interface ToolPublicationObjectStore {
     /** The caller closes the stream after verifying its complete contents. */
     InputStream open(String key);
 
+    /** Check authorization before each new storage request, including implementation retries. */
     default InputStream open(String key, Runnable guard) {
         guard.run();
         return open(key);
     }
 
+    /** Physically delete the exact owned key; an absent object is already deleted. */
     default void deleteIfPresent(String key) {
         throw new UnsupportedOperationException("Output deletion is not supported by this adapter");
     }
 
-    /** A versioned or suspended bucket cannot enforce the no-overwrite rule. */
-    void requireUnversioned();
+    /** Validate private, durable, immutable storage and exact-key deletion guarantees. */
+    void validateConfiguration();
 }

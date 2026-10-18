@@ -2,6 +2,10 @@
 
 [English](2026-10-15-managed-approval-selector.md) | [中文](2026-10-15-managed-approval-selector.zh-CN.md)
 
+## Status
+
+This document records the initial creation-selector slice. Its fixed-policy and Shell Full Access restrictions are superseded by [Managed approval selection](managed-approval-selection.md), which adds capability-gated Full Access and idle Session policy changes while preserving this creation contract.
+
 ## Problem and current behavior
 
 Local WebShell exposes an approval selector, while Managed creation hides it. Managed already supports durable permission Actions and the shared ToolApproval card. The Java server pins an approval mode in each Session, and the Harness confirms that mode on load. Mode selection must change actual admission, not just its label.
