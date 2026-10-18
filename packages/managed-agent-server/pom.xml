@@ -440,10 +440,11 @@
                                  and the Verify step to 105 minutes.
                                  The FG12b store-failure class
                                  (HostedMcpStoreFaultGatesIT, eight
-                                 cases) measures 50.3 s locally on JDK 21
-                                 + MariaDB (~120 s budgeted at 2x): the
-                                 healthy sum becomes 5008 s, so the fork
-                                 moves to 5618 s. -->
+                                 cases) measures 49.6 s locally on JDK 21
+                                 + MySQL 8.0.46 (~120 s budgeted, a
+                                 conservative 2.4x): the healthy sum
+                                 becomes 5008 s, so the fork moves to
+                                 5618 s. -->
                             <forkedProcessTimeoutInSeconds>5618</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>

@@ -602,9 +602,9 @@ describe('Hosted real-process gates', () => {
       // and the Verify step to 100 minutes; the FG13d worker-stop cancel
       // cell adds 150 s, so the fork moves to 5368; FG11b's store faults add
       // ~130 s, so the fork moves to 5498 and the Verify step to 105
-      // minutes; the FG12b store-failure class measures 50.3 s locally on
-      // JDK 21 + MariaDB (~120 s budgeted at 2x), so the fork moves to
-      // 5618 and the Verify step to 107
+      // minutes; the FG12b store-failure class measures 49.6 s locally on
+      // JDK 21 + MySQL 8.0.46 (~120 s budgeted, a conservative 2.4x), so
+      // the fork moves to 5618 and the Verify step to 107
       // minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —

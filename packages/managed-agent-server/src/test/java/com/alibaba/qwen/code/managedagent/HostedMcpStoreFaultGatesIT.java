@@ -63,8 +63,9 @@ import static org.awaitility.Awaitility.await;
 // wrapper around the Session record store rejects one step of the MCP record
 // state machine inside the real commit transaction, so each case observes
 // what a rejected durable write really leaves behind. The Harness, durable
-// worker, stdio fixture and MariaDB 10.11 (the CI lane's MySQL 8.4.6) are the
-// FG12c boot; FG12c's own cases stay in their class.
+// worker and stdio fixture boot the way the FG12c class boots them; this
+// class runs on MySQL 8.0.46 locally and MySQL 8.4.6 in CI, and MariaDB
+// cannot run it at all. FG12c's own cases stay in their class.
 class HostedMcpStoreFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
     private static final String CASE_LETTER = "fg12b";
@@ -113,7 +114,7 @@ class HostedMcpStoreFaultGatesIT {
     void boot() throws Exception {
         StoreFaultGate.INSTANCE.clear();
         assertThat(System.getProperty("mysql.url"))
-                .as("FG12c requires a disposable MySQL/MariaDB")
+                .as("FG12b requires a disposable MySQL")
                 .startsWith("jdbc:mysql:");
         node = System.getProperty("node.executable");
         assertThat(node).isNotBlank();
@@ -432,10 +433,11 @@ class HostedMcpStoreFaultGatesIT {
                 .isEqualTo("released");
     }
 
-    // Red on main is the documented outcome of this cell (design decision 7):
-    // markReleased commits after broker.release(), so a rejected released
-    // commit leaves the owner already released. Keep the cell so the fix
-    // lands with it; do not weaken it to a shape main happens to have.
+    // Green on MySQL 8.x: markReleased commits after broker.release(), so a
+    // rejected released commit leaves the records drained and the owner
+    // already released, and the next detach re-sends that same release once.
+    // The cell pins that ordering; a regression that skips the resend, sends
+    // it twice, or answers a 409 reddens it.
     @Test
     @Timeout(600)
     void storeRejectReleasedResendsTheOwnerReleaseOnMySql() throws Exception {
