@@ -7500,6 +7500,7 @@ class QwenAgent implements Agent {
     after: PermissionRuleSet,
     settingScope: SettingScope,
     settingsCwd: string,
+    strict = false,
   ): void {
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
@@ -7544,6 +7545,7 @@ class QwenAgent implements Agent {
               error instanceof Error ? error.message : String(error)
             }`,
           );
+          if (strict) throw error;
         }
       }
     }
@@ -10655,9 +10657,10 @@ class QwenAgent implements Agent {
           }
           switch (kind) {
             case 'permissions': {
-              // A settings reload alone does not touch the live permission
-              // managers, so diff the rule sets the control engine persisted
-              // and sync them the way the permission-rule route does.
+              // The live manager holds the scopes' rules merged, without
+              // provenance, so diff the effective set: a rule another scope
+              // still provides must never be removed. The workspace filter
+              // stays on the apply.
               const before = readPermissionRuleSet(this.settings.merged);
               if (
                 !this.settings.reloadScopesFromDiskAtomically([
@@ -10669,18 +10672,16 @@ class QwenAgent implements Agent {
                   'The permission rules could not be reloaded for a workspace change.',
                 );
               }
-              const after = readPermissionRuleSet(this.settings.merged);
+              const scope =
+                params['scope'] === 'user'
+                  ? SettingScope.User
+                  : SettingScope.Workspace;
               this.syncLivePermissionManagers(
                 before,
-                after,
-                SettingScope.User,
+                readPermissionRuleSet(this.settings.merged),
+                scope,
                 changeCwd,
-              );
-              this.syncLivePermissionManagers(
-                before,
-                after,
-                SettingScope.Workspace,
-                changeCwd,
+                true,
               );
               break;
             }
