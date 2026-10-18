@@ -2164,7 +2164,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: true,
             description:
-              'Whether the provider supports forcing tool choice (tool_choice: "required"). Set false for endpoints that reject forced tool choice, such as Apple Foundation Models served through `fm serve`.',
+              'Whether the provider supports forcing tool choice (tool_choice: "required") on the Chat Completions wire. Set false for endpoints that reject forced tool choice, such as Apple Foundation Models served through `fm serve`. Does not affect the Responses or Anthropic wires.',
             parentKey: 'generationConfig',
             showInDialog: false,
           },

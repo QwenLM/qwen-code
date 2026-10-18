@@ -62,6 +62,18 @@ import { fnCall } from '../../test-utils/model-fixtures.js';
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => false),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/debugLogger.js')>()),
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
 
 vi.mock('./converter.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./converter.js')>();
@@ -700,6 +712,7 @@ describe('ContentGenerationPipeline', () => {
         includeThoughts?: boolean;
         expectedThinking?: boolean;
         expectedToolChoice?: string;
+        expectedOptOutLogs?: number;
         expectedReasoningEffort?: string;
       }>({
         'keep thinking for a thinkingMandatory model on Token Plan side queries':
@@ -779,17 +792,21 @@ describe('ContentGenerationPipeline', () => {
             model: 'qwen3.7-max',
             supportsForcedToolChoice: false,
             expectedToolChoice: undefined,
+            expectedOptOutLogs: 1,
           },
+        'suppress required tool selection on a non-DashScope endpoint': {
+          baseUrl: 'http://localhost:1976/v1',
+          model: 'system',
+          supportsForcedToolChoice: false,
+          expectedToolChoice: undefined,
+          expectedOptOutLogs: 1,
+        },
         'force required tool selection when the model declares it supports it':
           {
             model: 'qwen3.7-max',
             supportsForcedToolChoice: true,
             expectedToolChoice: 'required',
           },
-        'force required tool selection when the capability is unset': {
-          model: 'qwen3.7-max',
-          expectedToolChoice: 'required',
-        },
         'emit the tier-native disable shape under the config-level reasoning opt-out':
           {
             model: 'qwen3.8-max',
@@ -885,6 +902,16 @@ describe('ContentGenerationPipeline', () => {
 
       expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
       expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
+      const optOutLogs = mockDebugLogger.debug.mock.calls.filter(([message]) =>
+        String(message).includes('supportsForcedToolChoice=false'),
+      );
+      expect(optOutLogs).toHaveLength(testCase.expectedOptOutLogs ?? 0);
+      if (testCase.expectedOptOutLogs) {
+        expect(optOutLogs[0]).toEqual([
+          expect.stringContaining('omitting tool_choice="required"'),
+          { model: testCase.requestModel ?? testCase.model },
+        ]);
+      }
       if ('expectedReasoningEffort' in testCase) {
         expect(apiCall.reasoning_effort).toBe(testCase.expectedReasoningEffort);
       }

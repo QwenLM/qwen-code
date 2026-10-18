@@ -22,8 +22,9 @@ wire 上的 `tool_choice: 'required'`
 （`packages/core/src/core/openaiContentGenerator/pipeline.ts:1336-1343`）。
 
 后果：在任何拒绝强制 tool choice 的 OpenAI 兼容端点上，每一次结构化旁路查询
-（会话标题、摘要、记忆选择、权限分类器、压缩辅助、fork-tool 子查询）都以 500
-失败——在其他地方都正常的 wire 形态，在这类端点上却是致命的。
+（会话标题、后续建议、记忆选择、权限分类器、下一发言者检查及子代理生成）
+都会以 500 失败。摘要、会话回顾和聊天压缩等文本模式旁路查询从不发送
+`tool_choice`，因此不受影响。
 
 `response_format` 这条退路也不可用：`buildResponseFormat` 只对官方 OpenAI
 端点开放（`pipeline.ts:1631`，
@@ -56,8 +57,9 @@ wire 上的 `tool_choice: 'required'`
   （`:518-530`），并始终强制 ANY（`:563-571`）。
 - 响应处理：`respond_in_schema` function call 优先（`:604-613`）；否则响应
   文本经过 `parseLooseJsonObject`（`:615-620`，实现 `:410-437`）：剥离
-  ```json 围栏，取第一个 `{`到最后一个`}`之间的子串，只接受 JSON 对象
-（绝不接受数组），任何失败返回`null`。返回 `null` 时，`generateJson`返回`{}`（`:620`）。
+  JSON 代码围栏，取第一个 `{` 到最后一个 `}` 之间的子串，只接受 JSON 对象
+  （绝不接受数组），任何失败返回 `null`。返回 `null` 时，`generateJson`
+  返回 `{}`（`:620`）。
 - `forkedAgent` 在不保留 tools 时会以同样强制的配置到达同一管线
   （`packages/core/src/agents/forkedAgent.ts:566-591`），因此翻译点上的
   一个 guard 即可覆盖两个调用方。
@@ -145,15 +147,20 @@ supportsForcedToolChoice?: boolean;
 
 ### 6.2 写入点的 guard
 
-在 `pipeline.ts` 中扩展 `:1337` 的条件：
+在 `pipeline.ts` 中，当该能力被显式禁用时，`ANY` 分支省略强制选择并记录
+这次决策：
 
 ```ts
-if (
-  fcMode === 'ANY' &&
-  this.contentGeneratorConfig.supportsForcedToolChoice !== false
-) {
-  (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-    'required';
+if (fcMode === 'ANY') {
+  if (this.contentGeneratorConfig.supportsForcedToolChoice === false) {
+    debugLogger.debug(
+      'supportsForcedToolChoice=false: omitting tool_choice="required" for the Chat Completions wire',
+      { model: context.model },
+    );
+  } else {
+    (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+      'required';
+  }
 } else if (fcMode === 'NONE') {
   (baseRequest as unknown as Record<string, unknown>)['tool_choice'] = 'none';
 }
@@ -190,7 +197,11 @@ if (
    条目校验较宽松（`settingsSchema.ts:393-403`），该属性仅在
    `model.generationConfig` 节点上受 schema 校验；`modelProviders[]`
    条目面仅在文档中记录，不参与 schema 校验。
-5. **向导（待决问题）。** 在自定义 provider 设置流程中暴露开关
+5. **运行时模型切换。** Qwen OAuth 复用现有 generator，并在
+   `Config.handleModelChange` 中逐字段复制配置。在 `enableRequestMetadata`
+   旁同时复制 `supportsForcedToolChoice` 及其来源，包括以 `undefined`
+   清除上一个模型的退出设置。其他认证类型通过 `refreshAuth` 重建 generator。
+6. **向导（待决问题）。** 在自定义 provider 设置流程中暴露开关
    （`providers/types.ts:162-170`、
    `providers/provider-config.ts:106-139`）是可选项，暂缓；最小面是
    settings + 文档。
@@ -205,8 +216,10 @@ guard 抑制 `tool_choice` 后，请求仍携带 `respond_in_schema` 工具。�
 2. 读取文本（`:615`）并运行 `parseLooseJsonObject`（`:617`、`:410-437`）；
 3. 返回解析出的对象；文本不是可用 JSON 对象时返回 `{}`（`:620`）。
 
-`{}` 是静默降级（标题/建议为空，分类器退化为 `failUnavailable`），不是错误。
-它被接受为严格优于当前的 500（第 8 节）。
+`runSideQuery` 会对结果做 schema 校验，缺少必填属性时抛出
+`Invalid side query response`。权限分类器捕获该失败并调用
+`failUnavailable`，阻止自动批准并要求人工确认。只有接受空对象的 schema
+才会保留 `{}`；这一回退并非在所有情况下都是静默的（第 8 节）。
 
 ## 7. 约束
 
@@ -220,6 +233,8 @@ guard 抑制 `tool_choice` 后，请求仍携带 `respond_in_schema` 工具。�
 - **声明按模型作用域。** 受支持的配置面是按模型的 provider 条目
   （`modelProviders[].generationConfig`），与其他面向 provider 模型的
   请求塑形字段的声明方式一致（`docs/users/configuration/settings.md:197`）。
+- **运行时切换保留模型作用域。** Qwen OAuth 热切换会在现有的活配置对象上
+  更新取值及来源，包括 `false`、`true` 与 `undefined` 之间的转换。
 - **不修改 `isOfficialOpenAIEndpoint` 与 `buildResponseFormat`**
   （`prefix-caching.ts:34-47`、`pipeline.ts:1621-1648`）。
 - **不新增 provider 类，不做主机名检查，不加重试逻辑。**
@@ -227,10 +242,11 @@ guard 抑制 `tool_choice` 后，请求仍携带 `respond_in_schema` 工具。�
 ## 8. 风险与已接受的债务
 
 1. **在有能力支持的端点上置为 `false`。** 若用户在支持强制 tool choice 的
-   端点上关闭它，thinking 重的模型可能跳过 tool call，`generateJson` 静默
-   返回 `{}`（`baseLlmClient.ts:563-568` 记录了强制存在的原因）。缓解：
-   默认 `true`、仅显式退出、文档说明、测试钉住两个分支。这是 #13807 的
-   已接受债务：静默 `{}` 降级优于每次旁路查询都 500。
+   端点上关闭它，thinking 重的模型可能跳过 tool call。`generateJson`
+   解析散文，解析失败则返回 `{}`；`runSideQuery` 拒绝不符合使用方 schema
+   的结果，权限分类器按失败关闭原则转为人工批准。宽松 schema 仍可能接受
+   `{}`。缓解：默认 `true`、仅显式退出、文档说明、测试钉住两个分支。
+   这是把必然的 500 换成受 schema 校验的回退，并不保证一定得到可用对象。
 2. **回退只接受对象。** `parseLooseJsonObject` 拒绝数组与畸形 JSON
    （`baseLlmClient.ts:422-436`），因此即使模型输出了内容，`{}` 仍可能出现。
    由 `baseLlmClient.test.ts:293-320` 钉住。
@@ -244,6 +260,10 @@ guard 抑制 `tool_choice` 后，请求仍携带 `respond_in_schema` 工具。�
    需要放宽 gate（第 11 节）。
 6. **DashScope 冗余。** 在 DashScope 上置为 `false` 时，
    `pipeline.ts:1615` 的抑制变得冗余，但仍无害。
+7. **fork 查询解析方式不同。** `forkedAgent` 的缓存路径同样受益于省略强制
+   选择，但它的散文回退对完整的去空白响应调用 `JSON.parse`，只接受纯 JSON
+   对象，不接受带围栏或周围散文的 JSON。统一解析器暂缓处理；上面的宽松
+   解析保证仅适用于 `generateJson`。
 
 ## 9. 验证结果
 
@@ -257,10 +277,25 @@ guard 抑制 `tool_choice` 后，请求仍携带 `respond_in_schema` 工具。�
 | `cd packages/cli && npx vitest run src/config/settingsUtils.test.ts`                                                                                                                                    | `model.generationConfig` schema 节点接受布尔值 `supportsForcedToolChoice`（`modelProviders[]` 条目面仅在文档中记录，不参与 schema 校验） | 67/67 通过 ✅                                                                                                                                                                      |
 | `npm run build --workspace=@qwen-code/qwen-code-core`                                                                                                                                                   | 新字段与 guard 可编译                                                                                                                    | ✅                                                                                                                                                                                 |
 | `npm run typecheck`（仓库根目录）                                                                                                                                                                       | 全仓库类型检查                                                                                                                           | ✅                                                                                                                                                                                 |
-| 变异检查：移除 guard 中的 `supportsForcedToolChoice !== false` 条件后重建 core 并运行 `pipeline.test.ts`                                                                                                | 测试确实钉住 guard                                                                                                                       | 变异：1 failed / 289 passed——`pipeline.test.ts:886` 处 `AssertionError: expected 'required' to be undefined`；恢复：290/290 通过 ✅；变异前后 `git diff` sha256 一致（`dcf0bce…`） |
+| 变异检查：绕过 `supportsForcedToolChoice === false` 退出分支后重建 core 并运行 `pipeline.test.ts`                                                                                                       | 测试确实钉住 guard                                                                                                                       | 变异：1 failed / 289 passed——`pipeline.test.ts:886` 处 `AssertionError: expected 'required' to be undefined`；恢复：290/290 通过 ✅；变异前后 `git diff` sha256 一致（`dcf0bce…`） |
 | 手动：macOS、`fm serve`、fast model `openai:system\0http://localhost:1976/v1`、字段 `false`                                                                                                             | 旁路查询不再 500；散文解析产出对象；默认配置在支持处不变                                                                                 | 待办——未运行（仅 macOS）；应由报告者复验                                                                                                                                           |
 
 手动检查受环境限制（仅 macOS），无法在当前 Linux 工作区运行。
+
+2026-10-18 审查跟进，基于 PR head `362a00ce1a`：
+
+- 五个热切换回归用例在修复前失败，修复后均通过，覆盖 `false` 与
+  `undefined` 双向转换、`false` 与 `true` 双向转换，以及现有活配置对象上
+  的来源归属更新。
+- 五个聚焦 core 文件共 1,416 个测试通过（config 930、pipeline 290、
+  baseLlmClient 93、content-generator-config 41、modelConfigResolver 62）。
+  CLI settings 套件 67 个测试通过。已删除重复的散文回退与字段缺省用例，
+  原有覆盖仍保留。
+- 删除退出诊断会使两个抑制用例失败。把 `supportsForcedToolChoice === false`
+  限制为仅 DashScope 生效时，非 DashScope 用例失败，而 DashScope 用例仍
+  通过。恢复完全相同的生产源码后，两个用例均通过。
+- 全局 `qwen` CLI 不可用，因此模型切换复现采用文档规定的测试脚本替代
+  路径。这些结果不能证明真实端点或端到端 CLI 行为。
 
 ## 10. 验收标准
 
@@ -269,6 +304,8 @@ guard 抑制 `tool_choice` 后，请求仍携带 `respond_in_schema` 工具。�
 - [x] 字段缺省或为 `true` 时请求体不变；现有管线测试无需修改即可通过。
 - [x] 值沿 settings → 解析后的模型 → 按模型 generator → 管线中的
       `contentGeneratorConfig` 流动，且 provider 解析后来源追踪仍保留它。
+- [x] Qwen OAuth 热切换会在 `false`、`true` 与 `undefined` 之间转换时更新
+      现有的活配置对象及其来源。
 - [ ] `generateJson` 可通过 `parseLooseJsonObject` 从散文恢复 JSON 对象，
       解析失败时返回 `{}`。单元测试已全绿；实机 `fm serve` 的散文恢复
       尚未观测，报告者应复验。
@@ -287,7 +324,8 @@ guard 抑制 `tool_choice` 后，请求仍携带 `respond_in_schema` 工具。�
    为预期面？
 2. **wire 覆盖。** 本次变更是否扩展到 Responses wire 与 Anthropic 的抑制，
    还是作为后续工作跟踪？
-3. **可观测性。** 抑制时是否应输出类似 DashScope 删除的 `debugLogger` 行
-   （`pipeline.ts:1611-1614`）？
+3. **可观测性（已决定）。** 抑制时输出一条 `debugLogger.debug` 诊断，注明
+   被省略的字段与模型，做法与 DashScope 删除逻辑一致。管线测试固化了
+   `false` 时记录、其他值不记录的行为。
 4. **`'none'` 分支。** 若端点拒绝任何 `tool_choice` 值，之后是否以同样方式
    对 `'none'` 加 gate？

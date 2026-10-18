@@ -742,7 +742,7 @@ The configuration resolution follows a strict layering model with one crucial ru
 
 ### Forced tool choice opt-out
 
-Some endpoints reject `tool_choice: "required"`, which Qwen Code's structured side queries (session titles, summaries, memory selection, the permission classifier, and similar internal helpers) send to force a tool call. Apple Foundation Models served through `fm serve` is one such endpoint. Set `supportsForcedToolChoice` to `false` on the provider entry that targets it:
+Some endpoints reject `tool_choice: "required"`, which Qwen Code's structured side queries (session titles, follow-up suggestions, memory selection, the permission classifier, and similar internal helpers) send to force a tool call. Text-mode side queries, including summaries, session recaps, and chat compression, never send `tool_choice` and are unaffected. Apple Foundation Models served through `fm serve` is one such endpoint. Set `supportsForcedToolChoice` to `false` on the provider entry that targets it:
 
 ```json
 {

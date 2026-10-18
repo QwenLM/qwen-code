@@ -24,10 +24,11 @@ that mode into `tool_choice: 'required'` on the wire
 (`packages/core/src/core/openaiContentGenerator/pipeline.ts:1336-1343`).
 
 Consequence: on any OpenAI-compatible endpoint that rejects forced tool
-choice, every structured side query (session titles, summaries, memory
-selection, the permission classifier, compaction helpers, fork-tool
-sub-queries) fails with 500 — the wire shape that works everywhere else is
-fatal on this class of endpoint.
+choice, structured side queries (session titles, follow-up suggestions,
+memory selection, the permission classifier, next-speaker checks, and subagent
+generation) fail with 500. Text-mode side queries, including summaries,
+session recaps, and chat compression, never send `tool_choice` and are
+unaffected.
 
 The `response_format` escape hatch is not available either:
 `buildResponseFormat` is gated to official OpenAI endpoints
@@ -62,9 +63,10 @@ The endpoint needs a way to decline forced tool choice so that
   `respond_in_schema` tool (`:518-530`) and always forces ANY (`:563-571`).
 - Response handling: a `respond_in_schema` function call wins (`:604-613`);
   otherwise the response text is passed through `parseLooseJsonObject`
-  (`:615-620`, implementation `:410-437`), which strips a ```json fence,
-takes the substring from the first `{`to the last`}`, accepts only a JSON
-object (never an array), and returns `null`on any failure. When it returns`null`, `generateJson`returns`{}` (`:620`).
+  (`:615-620`, implementation `:410-437`), which strips a JSON code fence,
+  takes the substring from the first `{` to the last `}`, accepts only a JSON
+  object (never an array), and returns `null` on any failure. When it returns
+  `null`, `generateJson` returns `{}` (`:620`).
 - `forkedAgent` reaches the same pipeline with the same forced config when it
   does not preserve tools (`packages/core/src/agents/forkedAgent.ts:566-591`),
   so a guard at the translation site covers both callers.
@@ -158,15 +160,20 @@ supportsForcedToolChoice?: boolean;
 
 ### 6.2 Guard at the write site
 
-In `pipeline.ts`, extend the condition at `:1337`:
+In `pipeline.ts`, the `ANY` branch omits forced selection and logs the
+decision when the capability is explicitly disabled:
 
 ```ts
-if (
-  fcMode === 'ANY' &&
-  this.contentGeneratorConfig.supportsForcedToolChoice !== false
-) {
-  (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-    'required';
+if (fcMode === 'ANY') {
+  if (this.contentGeneratorConfig.supportsForcedToolChoice === false) {
+    debugLogger.debug(
+      'supportsForcedToolChoice=false: omitting tool_choice="required" for the Chat Completions wire',
+      { model: context.model },
+    );
+  } else {
+    (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+      'required';
+  }
 } else if (fcMode === 'NONE') {
   (baseRequest as unknown as Record<string, unknown>)['tool_choice'] = 'none';
 }
@@ -207,7 +214,12 @@ if (
    (`settingsSchema.ts:393-403`), so the property is schema-validated only on
    the `model.generationConfig` node; the `modelProviders[]` entry surface is
    documented but not schema-validated.
-5. **Wizard (open question).** Exposing a toggle in the custom-provider setup
+5. **Live model switching.** Qwen OAuth reuses the live generator and copies
+   its configuration field by field in `Config.handleModelChange`. Copy
+   `supportsForcedToolChoice` and its source alongside `enableRequestMetadata`,
+   including `undefined` to clear the previous model's opt-out. Other auth
+   types recreate the generator through `refreshAuth`.
+6. **Wizard (open question).** Exposing a toggle in the custom-provider setup
    flow (`providers/types.ts:162-170`,
    `providers/provider-config.ts:106-139`) is optional and deferred; the
    minimal surface is settings + docs.
@@ -225,9 +237,11 @@ applied as a generation guide and the object arrives as prose content with
 3. returns the parsed object, or `{}` when the text is not a usable JSON
    object (`:620`).
 
-`{}` is a silent degradation (empty titles/suggestions, `failUnavailable`
-classifier behavior), not an error. It is accepted as strictly better than
-the current 500 (section 8).
+`runSideQuery` schema-validates the result and throws `Invalid side query
+response` when required properties are missing. The permission classifier
+catches that failure and uses `failUnavailable`, which blocks automatic
+approval and requires manual approval. An empty object only survives a schema
+that accepts it; the fallback is not universally silent (section 8).
 
 ## 7. Constraints
 
@@ -242,6 +256,9 @@ the current 500 (section 8).
   per-model provider entry (`modelProviders[].generationConfig`), matching
   how other request-shaping fields are declared for provider models
   (`docs/users/configuration/settings.md:197`).
+- **Live switching preserves model scope.** Qwen OAuth hot switches update
+  both the value and source on the existing live configuration, including
+  transitions between `false`, `true`, and `undefined`.
 - **No changes to `isOfficialOpenAIEndpoint` or `buildResponseFormat`**
   (`prefix-caching.ts:34-47`, `pipeline.ts:1621-1648`).
 - **No new provider class, no hostname check, no retry logic.**
@@ -250,11 +267,12 @@ the current 500 (section 8).
 
 1. **Flag `false` on a capable endpoint.** If a user disables forced tool
    choice on an endpoint that supports it, thinking-heavy models may skip the
-   tool call and `generateJson` silently returns `{}`
-   (`baseLlmClient.ts:563-568` documents why forcing exists). Mitigations:
-   default `true`, explicit opt-out only, docs, and tests that pin both
-   branches. This is the accepted debt for #13807: silent `{}` degradation is
-   preferable to a 500 on every side query.
+   tool call. `generateJson` parses prose or returns `{}` when parsing fails;
+   `runSideQuery` rejects results that violate the consumer's schema, and the
+   permission classifier fails closed to manual approval. Permissive schemas
+   can still accept `{}`. Mitigations: default `true`, explicit opt-out only,
+   docs, and tests that pin both branches. This trades an unconditional 500
+   for a schema-validated fallback rather than guaranteeing a usable object.
 2. **Fallback is object-only.** `parseLooseJsonObject` rejects arrays and
    malformed JSON (`baseLlmClient.ts:422-436`), so `{}` remains possible even
    when the model emits content. Pinned by
@@ -271,6 +289,11 @@ the current 500 (section 8).
    any `tool_choice`, the gate must be widened (section 11).
 6. **DashScope redundancy.** With the flag `false` on DashScope, the
    suppression at `pipeline.ts:1615` becomes redundant but remains harmless.
+7. **Forked-query parsing differs.** The cache path in `forkedAgent` also
+   benefits from omitting forced selection, but its prose fallback uses
+   `JSON.parse` on the full trimmed response. It accepts plain JSON objects,
+   not fenced JSON or surrounding prose. Aligning that parser is deferred;
+   the loose-parser guarantee above applies to `generateJson`.
 
 ## 9. Validation results
 
@@ -285,11 +308,28 @@ convention, package tests ran from the package directory. TDD red baseline
 | `cd packages/cli && npx vitest run src/config/settingsUtils.test.ts`                                                                                                                                    | the `model.generationConfig` schema node accepts a boolean `supportsForcedToolChoice` (the `modelProviders[]` entry surface is documented but not schema-validated)                                | 67/67 passed ✅                                                                                                                                                                                          |
 | `npm run build --workspace=@qwen-code/qwen-code-core`                                                                                                                                                   | compilation of the new field and guard                                                                                                                                                             | ✅                                                                                                                                                                                                       |
 | `npm run typecheck` (repository root)                                                                                                                                                                   | repository-wide type checking                                                                                                                                                                      | ✅                                                                                                                                                                                                       |
-| Mutation check: remove `supportsForcedToolChoice !== false` from the guard, rebuild core, run `pipeline.test.ts`                                                                                        | the tests actually pin the guard                                                                                                                                                                   | Mutated: 1 failed / 289 passed — `AssertionError: expected 'required' to be undefined` at `pipeline.test.ts:886`; restored: 290/290 passed ✅; `git diff` sha256 identical before and after (`dcf0bce…`) |
+| Mutation check: bypass the `supportsForcedToolChoice === false` opt-out branch, rebuild core, run `pipeline.test.ts`                                                                                    | the tests actually pin the guard                                                                                                                                                                   | Mutated: 1 failed / 289 passed — `AssertionError: expected 'required' to be undefined` at `pipeline.test.ts:886`; restored: 290/290 passed ✅; `git diff` sha256 identical before and after (`dcf0bce…`) |
 | Manual: macOS, `fm serve`, fast model `openai:system\0http://localhost:1976/v1`, flag `false`                                                                                                           | side queries stop 500ing; prose parsing yields objects; default config unchanged where supported                                                                                                   | Pending — not run (macOS only); the reporter should re-verify                                                                                                                                            |
 
 The manual check is environment-gated (macOS only) and cannot run in this
 Linux workspace.
+
+Review follow-up, 2026-10-18, against PR head `362a00ce1a`:
+
+- The five hot-switch regressions failed before the fix and now pass. They
+  cover `false` to/from `undefined`, `false` to/from `true`, and source
+  attribution on the existing live configuration object.
+- The five focused core files pass 1,416 tests (config 930, pipeline 290,
+  baseLlmClient 93, content-generator-config 41, modelConfigResolver 62).
+  The CLI settings suite passes 67 tests. Duplicate prose-fallback and unset
+  capability cases were removed; their existing coverage remains.
+- Removing the opt-out diagnostic fails both suppression cases. Restricting
+  `supportsForcedToolChoice === false` to DashScope fails the non-DashScope
+  case while the DashScope case stays green. Restoring the exact production
+  source passes both cases.
+- The global `qwen` CLI is unavailable, so model-switch reproduction uses
+  the documented test-script fallback. These results do not establish live
+  endpoint or end-to-end CLI behavior.
 
 ## 10. Acceptance criteria
 
@@ -300,6 +340,8 @@ Linux workspace.
 - [x] The value flows settings → resolved model → per-model generator →
       `contentGeneratorConfig` in the pipeline, and source tracking retains
       it after provider resolution.
+- [x] Qwen OAuth hot switches update the existing live config and its source
+      for transitions between `false`, `true`, and `undefined`.
 - [ ] `generateJson` recovers a JSON object from prose via
       `parseLooseJsonObject` and returns `{}` when nothing parses. Unit tests
       are green; live `fm serve` prose recovery has not been observed and the
@@ -320,7 +362,8 @@ Linux workspace.
    intended surface for now?
 2. **Wire coverage.** Extend suppression to the Responses wire and Anthropic
    in this change, or track it as a follow-up?
-3. **Observability.** Should suppression emit a `debugLogger` line analogous
-   to the DashScope drop (`pipeline.ts:1611-1614`)?
+3. **Observability (decided).** Suppression emits one `debugLogger.debug`
+   diagnostic naming the omitted field and model, analogous to the DashScope
+   drop. Pipeline tests pin its presence for `false` and absence otherwise.
 4. **`'none'` branch.** If an endpoint rejects any `tool_choice` value, is
    gating `'none'` the same way in scope later?
