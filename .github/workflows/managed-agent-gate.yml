@@ -269,9 +269,10 @@ jobs:
     needs:
       - 'scope'
       - 'suite'
-    # A cancelled PR fast run must release concurrency without waiting for an
-    # ECS slot. Full runs and main/merge-group cancellations still report.
-    if: "${{ always() && (github.event_name != 'pull_request' || needs.scope.outputs.tier != 'fast' || !cancelled()) }}"
+    # A cancelled PR run must release concurrency even if scope was cancelled
+    # before choosing a tier. Full runs and main/merge-group cancellations
+    # still report.
+    if: "${{ always() && (github.event_name != 'pull_request' || needs.scope.outputs.tier == 'full' || !cancelled()) }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:

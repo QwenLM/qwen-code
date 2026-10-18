@@ -330,7 +330,9 @@ describe('Managed Agent gate required check', () => {
     ['pull_request_review', 'full', true, true],
     ['push', 'fast', true, true],
     ['merge_group', 'fast', true, true],
-    ['pull_request', '', true, true],
+    ['pull_request', '', false, true],
+    ['pull_request', '', true, false],
+    ['pull_request', 'none', true, false],
   ])(
     '%s %s tier with workflow cancelled=%s reports=%s',
     (event, tier, cancelled, expected) => {
