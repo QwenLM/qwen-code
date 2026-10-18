@@ -445,19 +445,27 @@
                                  at 2x): the healthy sum becomes
                                  5033 s, so the fork moves to 5643 s,
                                  which the Verify step's 105 minutes
-                                 still wrap. The FG13d dropped-reply
-                                 cancel cell (issue #14449) adds 150
-                                 s: the healthy sum becomes 5183 s, so
-                                 the fork moves to 5793 s. The FG13a
-                                 execute lost-reply cell (issue #14449)
-                                 adds 150 s: the healthy sum becomes
-                                 5333 s, so the fork moves to 5943 s.
-                                 The FG13a status lost-reply cell
-                                 (issue #14449) adds 150 s: the healthy
-                                 sum becomes 5483 s, so the fork moves
-                                 to 6093 s and the Verify step to 115
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6093</forkedProcessTimeoutInSeconds>
+                                 still wrap. The event-stream liveness
+                                 gates (HostedEventStreamLivenessIT,
+                                 four cases on the shipped 15 s
+                                 keepalive / 45 s bound, 214.4-215.0 s
+                                 healthy locally on JDK 21 and 25
+                                 across four runs, ~440 s budgeted at
+                                 2x) raise the healthy sum to 5473 s,
+                                 so the fork moves to 6083 s and the
+                                 Verify step to 115 minutes. The FG13d
+                                 dropped-reply cancel cell (issue
+                                 #14449) adds 150 s: the healthy sum
+                                 becomes 5623 s, so the fork moves to
+                                 6233 s. The FG13a execute lost-reply
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 5773 s, so the
+                                 fork moves to 6383 s. The FG13a status
+                                 lost-reply cell (issue #14449) adds
+                                 150 s: the healthy sum becomes 5923 s,
+                                 so the fork moves to 6533 s and the
+                                 Verify step to 120 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6533</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
