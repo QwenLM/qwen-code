@@ -43,6 +43,9 @@ function record(event, fields = {}) {
 const solo = signalMode === 'hook-solo';
 
 if (mode === 'child') {
+  // FG13d: the graceful pass signals every member; this descendant has to
+  // survive it so only the unit-wide cgroup.kill can empty the unit.
+  if (signalMode === 'hook-ignore-term') process.on('SIGTERM', () => {});
   record('hook.child');
   setInterval(() => {}, 1000);
 } else if (mode === 'hook') {
