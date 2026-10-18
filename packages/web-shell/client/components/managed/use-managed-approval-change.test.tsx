@@ -21,6 +21,7 @@ function deferred<T>() {
 
 const summary: ManagedAgentSessionSummary = {
   sessionId: 's1',
+  agentId: `agent_${'a'.repeat(32)}`,
   approvalMode: 'default',
   approvalRevision: 0,
   title: 'Task',
