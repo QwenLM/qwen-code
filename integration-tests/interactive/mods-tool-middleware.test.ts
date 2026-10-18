@@ -254,6 +254,7 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
         };
       });
       let session: InteractiveSession | undefined;
+      let exited: Promise<number> | undefined;
       let failure: unknown;
       try {
         if (headless) {
@@ -324,6 +325,17 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
               'default',
             ],
           },
+        });
+        exited = new Promise<number>((resolveExit) => {
+          (
+            session as unknown as {
+              ptyProcess: {
+                onExit: (
+                  listener: (event: { exitCode: number }) => void,
+                ) => void;
+              };
+            }
+          ).ptyProcess.onExit(({ exitCode }) => resolveExit(exitCode));
         });
         await session.idle(1000, 20000);
         await session.send(`RUN:${nonce}`);
@@ -398,7 +410,23 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
         await session.idle(700, 10000);
         writeFileSync(join(evidence, 'final.txt'), await session.screen());
         await session.send('/quit');
-        await session.idle(700, 10000);
+        let exitTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          expect(
+            await Promise.race([
+              exited,
+              new Promise<never>((_resolve, reject) => {
+                exitTimer = setTimeout(
+                  () =>
+                    reject(new Error('CLI did not drain and exit after /quit')),
+                  15000,
+                );
+              }),
+            ]),
+          ).toBe(0);
+        } finally {
+          clearTimeout(exitTimer);
+        }
         const recordings = files(runtime)
           .filter((file) => file.endsWith('.jsonl'))
           .flatMap((file) =>
