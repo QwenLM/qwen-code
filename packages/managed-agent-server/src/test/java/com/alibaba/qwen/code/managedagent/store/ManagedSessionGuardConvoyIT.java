@@ -577,6 +577,51 @@ class ManagedSessionGuardConvoyIT {
                 });
     }
 
+    @Test
+    void heldLifecycleGuardsBoundCompletion() throws Exception {
+        var fixture = new WorkspaceLifecycleStoreTest.Fixture(source);
+        String operationId = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, StoreModels.OperationKind.CLOSE, "owner", "a".repeat(64),
+                "close", "digest", true, 1).operation().operationId());
+        var operation = fixture.transactions.execute(ignored -> fixture.store.claimOperation(
+                "tenant", fixture.session, operationId, "worker", Duration.ofMinutes(5)).orElseThrow());
+        var effects = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
+        assertThat(effects.path("neverInitialized").asBoolean()).isTrue();
+        var before = fixture.store.findOperation("tenant", fixture.session, operationId).orElseThrow();
+        var manager = new DataSourceTransactionManager(source);
+        for (String boundary : List.of("placement", "publication", "stream")) {
+            var hold = manager.getTransaction(new DefaultTransactionDefinition());
+            try {
+                switch (boundary) {
+                    case "placement" -> WorkspaceLifecycleStore.lockPlacement(fixture.jdbc, "tenant");
+                    case "publication" -> ToolPublicationRetentionStore.lockTenant(fixture.jdbc, "tenant");
+                    case "stream" -> fixture.jdbc.queryForList(
+                            "SELECT stream_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
+                                    + " AND stream_kind = 'SESSION' AND stream_id = X'' FOR UPDATE",
+                            "tenant", fixture.session);
+                    default -> throw new IllegalStateException(boundary);
+                }
+                assertFastGuardFailure(() -> fixture.transactions.execute(ignored -> fixture.store.completeOperation(
+                        "tenant", fixture.session, operationId, "worker", operation.claimGeneration(), true)));
+                assertThat(fixture.store.findOperation("tenant", fixture.session, operationId).orElseThrow())
+                        .as(boundary).isEqualTo(before);
+                assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSING");
+            } finally {
+                manager.rollback(hold);
+            }
+        }
+        assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation(
+                "tenant", fixture.session, operationId, "worker", operation.claimGeneration(), true))).isTrue();
+        assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSED");
+        var completed = fixture.store.findOperation("tenant", fixture.session, operationId).orElseThrow();
+        assertThat(completed.state()).isEqualTo("COMPLETED");
+        assertThat(completed.deliveryState()).isEqualTo("CONFIRMED");
+        assertThat(completed.receiptId()).isNotBlank();
+        assertThat(fixture.jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ? AND event_type = 'session.closed'",
+                Integer.class, "tenant", fixture.session)).isEqualTo(1);
+    }
+
     private static final String TENANT = "tenant-a";
     private static final String WORKSPACE = "workspace-a";
     private static final String TOKEN = "w".repeat(32);

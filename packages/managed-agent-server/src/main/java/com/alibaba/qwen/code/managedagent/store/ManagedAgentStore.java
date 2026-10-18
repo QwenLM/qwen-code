@@ -59,8 +59,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ArgumentPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -3414,15 +3417,21 @@ public class ManagedAgentStore implements AgentStateStore {
             boolean harnessConfirmed) {
         requireLegacyMutation(tenantId, sessionId);
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
-        if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        boolean lifecycleProtocol = WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion());
+        if (lifecycleProtocol) {
+            ManagedSessionStore.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(
+                    jdbc, tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                    jdbc, tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         }
-        if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
+        if (target.kind() == OperationKind.DELETE && !lifecycleProtocol) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
-        if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion()) && target.kind() == OperationKind.DELETE) {
+        SessionRecord session = lifecycleProtocol
+                ? ManagedSessionStore.lockBoundedResult(() -> requireSessionForUpdate(
+                        tenantId, sessionId, true, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS))
+                : requireLegacySessionForUpdate(tenantId, sessionId);
+        if (lifecycleProtocol && target.kind() == OperationKind.DELETE) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
         OperationRecord operation = findSessionOperation(tenantId, sessionId, operationId, true)
@@ -6005,18 +6014,32 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private SessionRecord requireSessionForUpdate(
             String tenantId, String sessionId, boolean legacyMutation) {
+        return requireSessionForUpdate(tenantId, sessionId, legacyMutation, 0);
+    }
+
+    private SessionRecord requireSessionForUpdate(
+            String tenantId, String sessionId, boolean legacyMutation, int timeoutSeconds) {
+        Object[] arguments = {tenantId, sessionId};
+        PreparedStatementSetter parameters = jdbc instanceof ManagedSchemaJdbcTemplate managed
+                ? managed.newArgPreparedStatementSetter(arguments)
+                : new ArgumentPreparedStatementSetter(arguments);
         try {
-            return jdbc.queryForObject(
+            return DataAccessUtils.nullableSingleResult(jdbc.query(
                     SESSION_WITH_STREAM + " WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id ="
                             + " ? AND ma_session.session_id = ? FOR UPDATE",
+                    statement -> {
+                        parameters.setValues(statement);
+                        int current = statement.getQueryTimeout();
+                        if (timeoutSeconds > 0 && (current == 0 || current > timeoutSeconds)) {
+                            statement.setQueryTimeout(timeoutSeconds);
+                        }
+                    },
                     (rows, rowNumber) -> {
                         if (legacyMutation) {
                             ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("csi_guard"));
                         }
                         return sessionMapper.mapRow(rows, rowNumber);
-                    },
-                    tenantId,
-                    sessionId);
+                    }));
         } catch (EmptyResultDataAccessException error) {
             throw new ApiException(HttpStatus.NOT_FOUND,
                     "session_not_found", "The Session was not found.");

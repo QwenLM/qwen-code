@@ -190,8 +190,9 @@ public final class SessionResourceCollectionCollector {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
                                 String scope = (String) candidate.get("scope_key");
-                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-                                if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
+                                ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                                        jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+                                if (ManagedLegacySessionGuard.isPrivateBounded(jdbc, tenant, session)) {
                                     return null;
                                 }
                                 var head =
@@ -347,8 +348,10 @@ public final class SessionResourceCollectionCollector {
 
     private Boolean page(Claim claim) {
         // Session locks precede the ledger row lock, matching claim()'s order.
-        ToolPublicationRetentionStore.lockTenant(jdbc, claim.tenant());
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, claim.tenant(), claim.session());
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                jdbc, claim.tenant(), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        ManagedLegacySessionGuard.requireLegacyMutation(
+                ManagedLegacySessionGuard.isPrivateBounded(jdbc, claim.tenant(), claim.session()));
         var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, claim.tenant(), claim.session());
         var row =
                 jdbc.query(

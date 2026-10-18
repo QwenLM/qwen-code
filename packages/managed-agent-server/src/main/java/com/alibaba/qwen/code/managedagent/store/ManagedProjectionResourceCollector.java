@@ -84,8 +84,9 @@ final class ManagedProjectionResourceCollector {
                                         String tenant = (String) candidate.get("tenant_id");
                                         String session = (String) candidate.get("session_id");
                                         String id = (String) candidate.get("snapshot_id");
-                                        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-                                        if (ManagedLegacySessionGuard.isPrivate(
+                                        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                                                jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+                                        if (ManagedLegacySessionGuard.isPrivateBounded(
                                                 jdbc, tenant, session)) {
                                             return false;
                                         }
@@ -146,8 +147,9 @@ final class ManagedProjectionResourceCollector {
     }
 
     private boolean collect(String tenant, String session, String key) {
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-        if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        if (ManagedLegacySessionGuard.isPrivateBounded(jdbc, tenant, session)) {
             return false;
         }
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);

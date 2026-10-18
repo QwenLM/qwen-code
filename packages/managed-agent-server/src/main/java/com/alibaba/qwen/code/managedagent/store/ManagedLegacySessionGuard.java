@@ -12,7 +12,17 @@ final class ManagedLegacySessionGuard {
         // A locking read of the root: behind a tenant guard it can close a
         // cycle with a pinned CSI Session's continuation, so a deadlock
         // victim here is named like the guard side (#13800 R1-1).
-        return ManagedSessionStore.namedRootDeadlock(() -> Boolean.TRUE.equals(
+        return ManagedSessionStore.namedRootDeadlock(() -> isPrivate(jdbc, tenantId, sessionId, 10));
+    }
+
+    static boolean isPrivateBounded(JdbcTemplate jdbc, String tenantId, String sessionId) {
+        return ManagedSessionStore.lockBoundedResult(() -> isPrivate(jdbc, tenantId, sessionId,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+    }
+
+    private static boolean isPrivate(JdbcTemplate jdbc, String tenantId, String sessionId,
+            int timeoutSeconds) {
+        return Boolean.TRUE.equals(
                 jdbc.execute(
                         (ConnectionCallback<Boolean>)
                                 connection -> {
@@ -29,7 +39,7 @@ final class ManagedLegacySessionGuard {
                                                             + " WHERE tenant_id = ? AND session_id"
                                                             + " = ? AND csi_guard = TRUE FOR"
                                                             + " UPDATE")) {
-                                        statement.setQueryTimeout(10);
+                                        statement.setQueryTimeout(timeoutSeconds);
                                         statement.setBytes(
                                                 1,
                                                 com.alibaba.qwen.code.runtimebroker.managedschema
@@ -42,7 +52,7 @@ final class ManagedLegacySessionGuard {
                                             return rows.next();
                                         }
                                     }
-                                })));
+                                }));
     }
 
     static void requireLegacyMutation(JdbcTemplate jdbc, String tenantId, String sessionId) {
