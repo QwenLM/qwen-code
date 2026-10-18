@@ -1039,25 +1039,26 @@ describe('WebTerminalRegistry', () => {
       logFileEnabled.mockReturnValue(fileEnabled);
       logSessionEnabled.mockReturnValue(false);
       spawn.mockImplementation(() => ({ ...createSpawnedPty(), _agent: {} }));
-      const registry = await start('terminal:daemon');
+      const terminalId = 'terminal:daemon\n[INFO] forged line';
+      const registry = await start(terminalId);
 
-      expect(registry.write('terminal:daemon', 'private input')).toBe(
-        'unavailable',
-      );
-      registry.addOutputListener('terminal:daemon', vi.fn())?.();
+      expect(registry.write(terminalId, 'private input')).toBe('unavailable');
+      registry.addOutputListener(terminalId, vi.fn())?.();
       onData('private output');
-      registry.addOutputListener('terminal:daemon', vi.fn());
-      expect(registry.write('terminal:daemon', 'retry')).toBe('unavailable');
+      registry.addOutputListener(terminalId, vi.fn());
+      expect(registry.write(terminalId, 'retry')).toBe('unavailable');
       expect(stderr).toHaveBeenCalledExactlyOnceWith(
         expect.stringContaining('cannot inspect node-pty input queue'),
       );
-      const message = stderr.mock.calls[0][0];
+      const message = String(stderr.mock.calls[0][0]);
+      expect(message.trimEnd().split('\n')).toHaveLength(1);
+      expect(message).toContain(JSON.stringify(terminalId));
       for (const field of PTY_INPUT_QUEUE_FIELDS)
         expect(message).toContain(field);
       expect(message).not.toContain('private input');
       expect(message).not.toContain('private output');
       expect(warn).not.toHaveBeenCalled();
-      expect(registry.write('terminal:daemon', '\x03')).toBe('written');
+      expect(registry.write(terminalId, '\x03')).toBe('written');
       expect(stderr).toHaveBeenCalledOnce();
 
       await create(registry, 'terminal:another');
@@ -1066,8 +1067,8 @@ describe('WebTerminalRegistry', () => {
       expect(stderr.mock.calls[1][0]).toContain('terminal:another');
       logFileEnabled.mockReturnValue(true);
       logSessionEnabled.mockReturnValue(true);
-      expect(registry.write('terminal:daemon', 'retry')).toBe('unavailable');
-      expect(registry.write('terminal:daemon', 'retry')).toBe('unavailable');
+      expect(registry.write(terminalId, 'retry')).toBe('unavailable');
+      expect(registry.write(terminalId, 'retry')).toBe('unavailable');
       expect(warn).toHaveBeenCalledOnce();
       expect(stderr).toHaveBeenCalledTimes(2);
       registry.dispose();
@@ -1136,14 +1137,16 @@ describe('WebTerminalRegistry', () => {
         ...createSpawnedPty(),
         _agent: {},
       }));
-      const registry = await start('terminal:late-debug');
+      const terminalId = 'terminal:late-debug\n[INFO] forged line';
+      const registry = await start(terminalId);
       try {
-        expect(registry.write('terminal:late-debug', 'private input')).toBe(
-          'unavailable',
-        );
+        expect(registry.write(terminalId, 'private input')).toBe('unavailable');
         expect(warn).not.toHaveBeenCalled();
         expect(appendFile).not.toHaveBeenCalled();
         expect(stderr).toHaveBeenCalledOnce();
+        const stderrLine = String(stderr.mock.calls[0][0]);
+        expect(stderrLine.trimEnd().split('\n')).toHaveLength(1);
+        expect(stderrLine).toContain(JSON.stringify(terminalId));
 
         if (firstEnabled === 'file') {
           vi.stubEnv('QWEN_DEBUG_LOG_FILE', '1');
@@ -1152,9 +1155,7 @@ describe('WebTerminalRegistry', () => {
             getSessionId: () => 'terminal-debug-test',
           });
         }
-        expect(registry.write('terminal:late-debug', 'private input')).toBe(
-          'unavailable',
-        );
+        expect(registry.write(terminalId, 'private input')).toBe('unavailable');
         expect(warn).not.toHaveBeenCalled();
         expect(appendFile).not.toHaveBeenCalled();
 
@@ -1162,21 +1163,18 @@ describe('WebTerminalRegistry', () => {
         actual.setDebugLogSession({
           getSessionId: () => 'terminal-debug-test',
         });
-        expect(registry.write('terminal:late-debug', 'private input')).toBe(
-          'unavailable',
-        );
+        expect(registry.write(terminalId, 'private input')).toBe('unavailable');
         await vi.waitFor(() => expect(appendFile).toHaveBeenCalledTimes(1));
         const line = String(appendFile.mock.calls[0][1]);
         expect(line).toContain('[WARN] [WEB_TERMINAL_REGISTRY]');
-        expect(line).toContain('terminal:late-debug');
+        expect(line.trimEnd().split('\n')).toHaveLength(1);
+        expect(line).toContain(JSON.stringify(terminalId));
         expect(line).toContain('node-pty');
         for (const field of PTY_INPUT_QUEUE_FIELDS) {
           expect(line).toContain(field);
         }
         expect(line).not.toContain('private input');
-        expect(registry.write('terminal:late-debug', 'retry')).toBe(
-          'unavailable',
-        );
+        expect(registry.write(terminalId, 'retry')).toBe('unavailable');
         await new Promise((resolve) => setImmediate(resolve));
         expect(appendFile).toHaveBeenCalledTimes(1);
       } finally {
