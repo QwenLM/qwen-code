@@ -255,7 +255,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                             + " AND state = 'OPEN'", Integer.class)).isZero();
                     assertThat(nativeReads.get()).isGreaterThanOrEqualTo(7);
                     assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()"
-                            + " AND table_type = 'BASE TABLE'", Integer.class)).isEqualTo(33);
+                            + " AND table_type = 'BASE TABLE'", Integer.class)).isEqualTo(35);
                     verify(provisioner).ensureResource(any(), any(), any());
                     verify(provisioner).provision(any(), any());
                     String evidence = System.getProperty("csi.acceptance.evidence");

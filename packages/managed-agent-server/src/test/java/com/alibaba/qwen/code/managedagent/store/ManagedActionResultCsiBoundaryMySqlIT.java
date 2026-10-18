@@ -62,13 +62,13 @@ class ManagedActionResultCsiBoundaryMySqlIT {
             fixture.waitAtParent(session, () -> {
                 fixture.results.fail(claim, "RETRYABLE", "late-callback");
                 return null;
-            }, false);
+            }, true);
             assertThat(fixture.tables()).isEqualTo(before);
             fixture.waitAtParent(session, () -> fixture.results.complete(claim,
                     new ManagedToolResultStore.Projection(JSON.createObjectNode(), "missing", JSON.createObjectNode(),
                             JSON.nullNode(), List.of(), "policy"), "policy"), true);
             assertThat(fixture.tables()).isEqualTo(before);
-            fixture.waitAtParent(session, () -> fixture.results.admitsLegacyProjection(claim), false);
+            fixture.waitAtParent(session, () -> fixture.results.admitsLegacyProjection(claim), true);
             assertThat(fixture.tables()).isEqualTo(before);
         }
     }

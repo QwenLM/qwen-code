@@ -101,6 +101,25 @@ public class ToolPublicationRetentionStoreTest {
     }
 
     @Test
+    void validatesReadOnlyViewsWithoutRenewingAndRejectsExpiredLeases() {
+        try (var lease = retention.read(key)) {
+            long deadline = ToolPublicationRetentionStore.now(jdbc) + 60_000;
+            jdbc.update("UPDATE ma_read_lease SET expires_at = ? WHERE tenant_key = ?",
+                    deadline, ToolPublicationRetentionStore.hash(tenant));
+            var view = new TransactionTemplate(manager);
+            view.setReadOnly(true);
+            view.executeWithoutResult(status -> lease.checkReadView());
+            assertThat(jdbc.queryForObject("SELECT expires_at FROM ma_read_lease WHERE tenant_key = ?",
+                    Long.class, ToolPublicationRetentionStore.hash(tenant))).isEqualTo(deadline);
+            jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_key = ?",
+                    ToolPublicationRetentionStore.hash(tenant));
+            assertThatThrownBy(() -> view.executeWithoutResult(status -> lease.checkReadView()))
+                    .isInstanceOfSatisfying(ApiException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("tool_output_read_expired"));
+        }
+    }
+
+    @Test
     void expiredOrRetiredLeaseCannotBeRevivedByAnotherLease() {
         try (var old = retention.read(key)) {
             jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_key = ?",

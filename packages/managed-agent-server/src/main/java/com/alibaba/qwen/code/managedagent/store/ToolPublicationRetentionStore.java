@@ -394,7 +394,7 @@ public final class ToolPublicationRetentionStore {
         }
 
         synchronized void checkReadView() {
-            check(false);
+            checkLease(false);
         }
 
         private void check(boolean renew) {

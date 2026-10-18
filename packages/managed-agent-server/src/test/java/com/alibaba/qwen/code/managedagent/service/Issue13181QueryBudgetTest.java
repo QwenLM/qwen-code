@@ -162,12 +162,12 @@ class Issue13181QueryBudgetTest {
                 .containsExactly(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
         // Hot path 1 is bounded the same way hot path 3 is: the whole
         // batch's statement count is pinned, so any added per-row read
-        // shows here. Snapshot read/publication adds five separate retention
-        // probes in each writing batch; its generic head path reads the pin
-        // in the already locked root instead of a duplicate private probe.
-        assertThat(csiProbes).containsExactly(6L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 6L);
+        // shows here. Snapshot publication and close add two private probes
+        // in each writing batch; the read view only validates its existing
+        // lease, while admission reads the pin in its already locked root.
+        assertThat(csiProbes).containsExactly(3L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 3L);
         assertThat(totals)
-                .containsExactly(77L, 36L, 36L, 36L, 36L, 36L, 36L, 36L, 60L);
+                .containsExactly(68L, 36L, 36L, 36L, 36L, 36L, 36L, 36L, 51L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
