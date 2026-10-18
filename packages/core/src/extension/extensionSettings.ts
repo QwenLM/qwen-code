@@ -155,10 +155,11 @@ const getKeychainStorageName = (
   extensionName: string,
   extensionId: string,
   scope: ExtensionSettingScope,
+  workspaceDir = process.cwd(),
 ): string => {
   const base = `Qwen Code Extensions ${extensionName} ${extensionId}`;
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return `${base} ${process.cwd()}`;
+    return `${base} ${workspaceDir}`;
   }
   return base;
 };
@@ -166,9 +167,10 @@ const getKeychainStorageName = (
 const getEnvFilePath = (
   extensionName: string,
   scope: ExtensionSettingScope,
+  workspaceDir = process.cwd(),
 ): string => {
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return path.join(process.cwd(), EXTENSION_SETTINGS_FILENAME);
+    return path.join(workspaceDir, EXTENSION_SETTINGS_FILENAME);
   }
   return new ExtensionStorage(extensionName).getEnvFilePath();
 };
@@ -371,10 +373,11 @@ export async function getScopedEnvContents(
   extensionConfig: ExtensionConfig,
   extensionId: string,
   scope: ExtensionSettingScope,
+  workspaceDir = process.cwd(),
 ): Promise<Record<string, string>> {
   const { name: extensionName } = extensionConfig;
   const keychain = new HybridTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope),
+    getKeychainStorageName(extensionName, extensionId, scope, workspaceDir),
   );
   const selector =
     scope === ExtensionSettingScope.USER
@@ -382,11 +385,11 @@ export async function getScopedEnvContents(
       : undefined;
   const settingsStorage = selector
     ? createSelectedStorage(
-        getKeychainStorageName(extensionName, extensionId, scope),
+        getKeychainStorageName(extensionName, extensionId, scope, workspaceDir),
         selector.backend,
       )
     : keychain;
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath = getEnvFilePath(extensionName, scope, workspaceDir);
   let customEnv: Record<string, string> = {};
   if (fsSync.existsSync(envFilePath)) {
     const envFile = fsSync.readFileSync(envFilePath, 'utf-8');
@@ -426,6 +429,7 @@ export async function getScopedEnvContents(
 export async function getEnvContents(
   extensionConfig: ExtensionConfig,
   extensionId: string,
+  workspaceDir = process.cwd(),
 ): Promise<Record<string, string>> {
   if (!extensionConfig.settings || extensionConfig.settings.length === 0) {
     return Promise.resolve({});
@@ -435,11 +439,13 @@ export async function getEnvContents(
     extensionConfig,
     extensionId,
     ExtensionSettingScope.USER,
+    workspaceDir,
   );
   const workspaceSettings = await getScopedEnvContents(
     extensionConfig,
     extensionId,
     ExtensionSettingScope.WORKSPACE,
+    workspaceDir,
   );
 
   return { ...userSettings, ...workspaceSettings };
