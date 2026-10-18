@@ -174,7 +174,7 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             return;
         }
         String text = new String(body, StandardCharsets.UTF_8);
-        String kind = kindOf(text);
+        String kind = tagOf(text);
         Rule armed = null;
         for (Rule rule : rules) {
             if (rule.fires(method, path, text)) {
@@ -187,8 +187,7 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
             holdLatch = new CompletableFuture<>();
             latches.put(armed.name, holdLatch);
         }
-        String tag = method + " " + path
-                + (kind.isEmpty() ? "" : " kind=" + kind);
+        String tag = method + " " + path + kind;
         try {
             HttpRequest.Builder forward = HttpRequest.newBuilder(upstream
                             .resolve(exchange.getRequestURI().toString()))
@@ -199,13 +198,14 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
                             : HttpRequest.BodyPublishers.ofByteArray(body));
             HttpResponse<byte[]> response = client.send(forward.build(),
                     HttpResponse.BodyHandlers.ofByteArray());
+            String status = " status=" + response.statusCode();
             if (armed == null) {
-                record("PROXY passthru " + tag);
+                record("PROXY passthru " + tag + status);
             } else if (armed.disposition == Disposition.DROP) {
-                record("PROXY dropped " + armed.name + " " + tag);
+                record("PROXY dropped " + armed.name + " " + tag + status);
                 return;
             } else {
-                record("PROXY holding " + armed.name + " " + tag);
+                record("PROXY holding " + armed.name + " " + tag + status);
                 try {
                     holdLatch.get(90, TimeUnit.SECONDS);
                 } catch (Exception interrupted) {
@@ -242,11 +242,20 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         }
     }
 
-    private String kindOf(String text) {
+    /** The relay verb (`kind`), journal commit (`operation`) and its
+     * command id a body names, so the log tells one commit from another
+     * and a replay from a new step. */
+    private String tagOf(String text) {
         try {
             JsonNode parsed = json.readTree(text);
             JsonNode kind = parsed.path("kind");
-            return kind.isTextual() ? kind.asText() : "";
+            JsonNode operation = parsed.path("operation");
+            JsonNode command = parsed.path("commandId");
+            return (kind.isTextual() ? " kind=" + kind.asText() : "")
+                    + (operation.isTextual() ? " op=" + operation.asText()
+                            : "")
+                    + (operation.isTextual() && command.isTextual()
+                            ? " cmd=" + command.asText() : "");
         } catch (IOException ignored) {
             return "";
         }

@@ -10289,6 +10289,10 @@ export function createSessionControlPlane(
     BridgeSpawnRequest,
     { dispatched: boolean }
   >();
+  // Runtime-added MCP servers live only in the live child. Keep their names
+  // so a paired Bridge can tell that the Managed engine cannot reproduce this
+  // runtime's configuration.
+  const runtimeMcpServerNames = new Set<string>();
   const bridgeApi: AcpSessionBridge = {
     // Derived once from the frozen overrides and the configured channel
     // factory; immutable for the bridge's lifetime.
@@ -16113,6 +16117,8 @@ export function createSessionControlPlane(
       return queue;
     },
 
+    hasRuntimeMcpServers: () => runtimeMcpServerNames.size > 0,
+
     async addRuntimeMcpServer(name, config, originatorClientId) {
       // Round-trip the runtime-add ext-method through the
       // live ACP child and broadcast an `mcp_server_added` event on
@@ -16154,6 +16160,7 @@ export function createSessionControlPlane(
         const addSkipped = (response as { skipped?: boolean }).skipped === true;
         if (!addSkipped) {
           const ok = response as AddOk;
+          runtimeMcpServerNames.add(ok.name);
           broadcastWorkspaceEvent({
             type: 'mcp_server_added',
             data: {
@@ -16205,6 +16212,7 @@ export function createSessionControlPlane(
           (response as { skipped?: boolean }).skipped === true;
         if (!removeSkipped) {
           const ok = response as RemoveOk;
+          runtimeMcpServerNames.delete(ok.name);
           broadcastWorkspaceEvent({
             type: 'mcp_server_removed',
             data: {
