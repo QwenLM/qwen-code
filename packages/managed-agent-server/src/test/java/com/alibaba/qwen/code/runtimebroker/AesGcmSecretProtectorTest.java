@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Locale;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -117,6 +118,48 @@ class AesGcmSecretProtectorTest {
         assertThrows(IllegalArgumentException.class,
                 () -> AesGcmSecretProtector.fromBase64("key-1",
                         encodedKey(1), Map.of("key-1", encodedKey(2))));
+    }
+
+    @Test
+    void diagnosesResolvedIdsWithoutLoggingSecretsOrControlCharacters() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(AesGcmSecretProtector.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            String previousId = "legacy/v1 \n\u2028\u001b[31m";
+            String requestedId = "legacy/v1 \n\u2029\u001b[32m";
+            AesGcmSecretProtector protector = AesGcmSecretProtector.fromBase64(
+                    "key-2", encodedKey(2), Map.of(previousId, encodedKey(1)));
+            IllegalStateException unavailable = assertThrows(IllegalStateException.class,
+                    () -> protector.unprotect("binding-1",
+                            new ProtectedSecret(requestedId, "ciphertext-must-not-be-logged")));
+
+            assertEquals(1, appender.list.size());
+            String summary = appender.list.getFirst().getFormattedMessage();
+            String error = unavailable.getMessage();
+            assertTrue(summary.startsWith("Runtime credential key ring: active=\"key-2\""));
+            assertTrue(summary.contains("configured=[\"key-2\",\"legacy/v1 "));
+            assertTrue(error.contains("requested=\"legacy/v1 "));
+            assertTrue(error.contains("active=\"key-2\""));
+            for (String diagnostic : new String[] {summary, error}) {
+                assertFalse(diagnostic.contains("\n"));
+                assertFalse(diagnostic.contains("\u2028"));
+                assertFalse(diagnostic.contains("\u2029"));
+                assertFalse(diagnostic.contains("\u001b"));
+                assertTrue(diagnostic.contains("\\n"));
+                assertTrue(diagnostic.toLowerCase(Locale.ROOT).contains("\\u001b"));
+                assertFalse(diagnostic.contains(encodedKey(1)));
+                assertFalse(diagnostic.contains(encodedKey(2)));
+                assertFalse(diagnostic.contains("ciphertext-must-not-be-logged"));
+            }
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test
