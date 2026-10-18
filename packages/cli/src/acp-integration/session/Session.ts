@@ -6820,10 +6820,13 @@ export class Session implements SessionContext {
               // the reserved tag so it stays distinguishable from
               // user-authored text (same shape as the interactive path). An
               // unchanged payload already in session history is skipped for
-              // the same reason as there.
+              // the same reason as there — but never when the prompt resolved
+              // to no parts, where the append is the only thing keeping the
+              // request non-empty (`toParts` rejects an empty array).
               const additionalContext = hookOutput?.getAdditionalContext();
               if (
                 additionalContext &&
+                parts.length > 0 &&
                 !this.#getCurrentChat().findLastHistoryEntry((entry) =>
                   hasUserPromptSubmitContext(entry, additionalContext),
                 )
