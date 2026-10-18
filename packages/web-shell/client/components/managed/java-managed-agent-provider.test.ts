@@ -134,6 +134,43 @@ describe('createJavaManagedAgentProvider', () => {
     ).toBeUndefined();
   });
 
+  it('preserves stored-agent effective and initial approval policy from Session summaries', async () => {
+    const agentId = `agent_${'a'.repeat(32)}`;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        sessionId: 's',
+        agentId,
+        status: 'ACTIVE',
+        approvalMode: 'auto-edit',
+        initialApprovalMode: 'yolo',
+        approvalRevision: 2,
+        workspace: { workspaceId: 'workspace', cwdRelative: '.' },
+        capabilities: {
+          workspaceTurns: true,
+          approvalModeChange: true,
+          actions: true,
+        },
+        createdAt: 1,
+        updatedAt: 1,
+        lastSequence: 0,
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.getSession('s', { clientId: 'client' }),
+    ).toMatchObject({
+      agentId,
+      approvalMode: 'auto-edit',
+      initialApprovalMode: 'yolo',
+      approvalRevision: 2,
+      capabilities: { canSend: true, approvalModeChange: true, actions: true },
+    });
+  });
+
   it.each([
     {
       approvalMode: ['yolo'],
