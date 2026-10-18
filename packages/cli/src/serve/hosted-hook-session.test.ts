@@ -1268,13 +1268,15 @@ it('cancels a detached child after its async marker has admitted it', async () =
     true,
   );
   await hooks.status('call-1', true);
-  await vi.waitFor(() =>
-    expect(
-      session.authority
-        .extensionRecordsInDomain('hook_execution')
-        .filter((record) => !record.recordId.startsWith('hook-plan-'))
-        .map((record) => record.run.state),
-    ).toEqual(['cancelled']),
+  await vi.waitFor(
+    () =>
+      expect(
+        session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .filter((record) => !record.recordId.startsWith('hook-plan-'))
+          .map((record) => record.run.state),
+      ).toEqual(['cancelled']),
+    { timeout: isSlowTestHost() ? 30_000 : 1_000 },
   );
   expect(
     requests.filter((request) => request.kind === 'hook-cancel').length,

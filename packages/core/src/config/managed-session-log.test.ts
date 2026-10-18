@@ -62,6 +62,7 @@ import {
   managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
@@ -575,6 +576,10 @@ describe('Managed Session log recording', () => {
         title: 'Renamed title',
       });
     },
+    // The renewal loop runs until the log grows 70 KiB, so its duration is
+    // set by per-renewal cost under host contention; it has overrun the 60 s
+    // ecs-qwen lane ceiling (#14581). Slow hosts get double it.
+    isSlowTestHost() ? 120_000 : undefined,
   );
 
   it('adds no title on finalize right behind an anchor', async () => {
