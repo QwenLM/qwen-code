@@ -146,11 +146,17 @@ class HostedHookFaultGatesIT {
             // A Session the coordinator already attached is resident with a
             // Hook-pending Turn, and a second passive load of it is refused;
             // retry at most once a second so that attachment can win.
+            String refusal = null;
             if (System.nanoTime() - attachedAt[0] > 1_000_000_000L) {
                 attachedAt[0] = System.nanoTime();
-                connector.createOrLoad(tenant, session, true, true);
+                try {
+                    connector.createOrLoad(tenant, session, true, true);
+                } catch (RuntimeException refused) {
+                    refusal = refused.getMessage();
+                }
             }
-            throw new AssertionError("no attachment is serving the Hook status route yet");
+            throw new AssertionError("no attachment is serving the Hook status route yet"
+                    + (refusal == null ? "" : ": " + refusal));
         });
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         assertThat(worker(session)).isEqualTo(worker);
