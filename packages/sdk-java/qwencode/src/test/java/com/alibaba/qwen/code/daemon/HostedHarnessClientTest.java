@@ -1051,6 +1051,16 @@ class HostedHarnessClientTest {
                 .withStoppedMessages().toJson().get("childSnapshots"));
         assertEquals(Boolean.TRUE, load.forLifecycle("op-1", 3).withChildWorkspaces(true, true)
                 .toJson().get("childSnapshots"));
+        // #13905 (item 40): restating child Workspaces keeps the snapshot
+        // capability; only turning them off drops it, for good.
+        assertEquals(Boolean.TRUE, enabled.withChildWorkspaces(true).toJson().get("childSnapshots"));
+        assertEquals(Boolean.TRUE, enabled.forLifecycle("op-1", 3).withChildWorkspaces(true)
+                .toJson().get("childSnapshots"));
+        Map<String, Object> off = enabled.withChildWorkspaces(false).toJson();
+        assertFalse(off.containsKey("childWorkspaces"));
+        assertFalse(off.containsKey("childSnapshots"));
+        assertFalse(enabled.withChildWorkspaces(false).withChildWorkspaces(true).toJson()
+                .containsKey("childSnapshots"));
     }
 
     @Test
