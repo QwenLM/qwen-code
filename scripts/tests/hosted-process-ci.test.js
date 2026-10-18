@@ -411,9 +411,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (95 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (100 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 175, 190],
+    ['hosted-harness-mysql', 180, 195],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -589,14 +589,16 @@ describe('Hosted real-process gates', () => {
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
       // to 90 minutes; slice 3 (FG10d) brings it to ~247 s, so the fork
       // moves to 4484, still inside those 90 minutes; the FG12a MCP
-      // reply-loss letter adds ~15 s, so the fork moves to 4499; the
-      // event-stream liveness gates add ~440 s, so the fork moves to 4939
-      // and the Verify step to 95 minutes):
+      // reply-loss letter adds ~15 s, so the fork moves to 4499; the FG13c
+      // Hook owner-restart cells add three cases budgeted at 300 s, so the
+      // fork moves to 4799 and the Verify step to 95 minutes; the
+      // event-stream liveness gates add ~440 s, so the fork moves to 5239
+      // and the Verify step to 100 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4939);
+        expect(forkSeconds).toBe(5239);
       }
     },
   );
@@ -627,14 +629,16 @@ describe('Hosted real-process gates', () => {
   // FG12a's ~15s budgeted at 2x raised it to 3889s. On the lane (run
   // 39087108383 at a029896eff, FG10d's head, before FG12a) the nineteen
   // classes then in the fork ran 3085s from the first class's start to
-  // the last class's end. The event-stream liveness gates
+  // the last class's end. The FG13c Hook owner-restart cells (issue
+  // #14449, three cases) are budgeted at 300s until the lane measures
+  // them, which raised it to 4189s. The event-stream liveness gates
   // (HostedEventStreamLivenessIT, four cases on the shipped 15s keepalive
   // and 45s bound) measure 214.4–215.0s for the class locally on JDK 21
   // and 25 + MySQL 8.4.6 across four acceptance runs (~440s budgeted at
-  // 2x), so 4329s covers them all.
+  // 2x), so 4629s covers them all.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4329;
+  const hostedForkHealthySeconds = 4629;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -700,6 +704,7 @@ describe('Hosted real-process gates', () => {
       'HostedEventStreamLivenessIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHookFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
