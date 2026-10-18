@@ -13,6 +13,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { SESSION_LIST_PAGE_SIZE } from '../constants/sessions';
+import { SESSION_CATALOG_ERROR_RETRY_MS } from '../session-catalog/session-catalog-store';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -208,5 +209,42 @@ describe('useOtherWorkspaceSessions', () => {
       await Promise.resolve();
     });
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['c1']);
+  });
+
+  it('reports a failed first fetch as settled-but-degraded, then settles once the retry lands', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      capabilities = {
+        workspaces: [ws('/w', true, true), ws('/b', false, true)],
+      };
+      let calls = 0;
+      listWorkspaceSessionsPage.mockImplementation(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('first fetch failed');
+        return { sessions: [session('b1', '/b')] };
+      });
+      render();
+      await flush();
+      // The first fetch failed: the workspace is settled (not in flight), so
+      // `loading` must NOT be pinned — but it is degraded (errored with no
+      // page), so a consumer must not trust an absence from its list.
+      expect(latest.loading).toBe(false);
+      expect(latest.degraded).toBe(true);
+      expect(latest.sessions).toEqual([]);
+      // Advance past the store's error-retry window: it re-fetches /b and the
+      // retry lands a page, so the fan-out can prove absence again.
+      await act(async () => {
+        vi.advanceTimersByTime(SESSION_CATALOG_ERROR_RETRY_MS);
+      });
+      await flush();
+      await flush();
+      expect(latest.degraded).toBe(false);
+      expect(latest.loading).toBe(false);
+      expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

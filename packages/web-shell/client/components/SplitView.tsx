@@ -171,6 +171,13 @@ export function SplitView({
     // Defined only once the active list has loaded at least once — the
     // readiness signal for pruning panes whose session left the catalog.
     data: activeSessionPage,
+    // Page-completeness markers: a bounded page (more results than were
+    // fetched) or a merge that failed partway means "not in this page" is not
+    // "gone", so the prune guard waits for all three to be clean before
+    // trusting an absence.
+    nextCursor: activeSessionNextCursor,
+    liveMergeFailed: activeSessionLiveMergeFailed,
+    truncated: activeSessionTruncated,
   } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     pageSize: SESSION_LIST_PAGE_SIZE,
@@ -185,6 +192,7 @@ export function SplitView({
   const {
     sessions: otherSessions,
     loading: otherSessionsLoading,
+    degraded: otherSessionsDegraded,
     reload: reloadOther,
   } = useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
   const allSessions = useMemo(
@@ -297,6 +305,21 @@ export function SplitView({
   }, [normalizedSessionIds, sessionIdsControlled]);
   const paneIdsRef = useRef(paneIds);
   paneIdsRef.current = paneIds;
+  // The authoritative pane set in controlled mode is the prop, not the local
+  // state (which only mirrors the prop via the passive effect above). The
+  // async prune continuation must read the prop-derived set — in the
+  // commit→flush gap the state mirror is stale and can resurrect a pane the
+  // parent just closed.
+  const controlledIdsRef = useRef(normalizedSessionIds);
+  controlledIdsRef.current = normalizedSessionIds;
+  // Probe verdicts per session id, recorded for the lifetime of the pane set.
+  // Only definitive outcomes are recorded: a successful probe (the id is a
+  // live standalone session) and a not-found answer (it is not one — a
+  // workspace id is never a standalone session). A transient failure records
+  // nothing, so the next round re-probes. Without the cache, every catalog
+  // commit (the 5s live-state poll, every invalidation) would re-ask the
+  // daemon a question whose answer cannot change.
+  const probeVerdictsRef = useRef(new Map<string, 'alive' | 'absent'>());
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {
@@ -326,6 +349,21 @@ export function SplitView({
     }
   }, [pickerOpen, reload, reloadOther]);
 
+  // Last-seen title/workspace per session id (refreshed on every render). A
+  // pane the prune guard keeps can temporarily leave the merged catalog —
+  // e.g. its workspace flips untrusted and the fan-out stops querying it,
+  // dropping its snapshot — and its entries must stay resolvable or the pane
+  // renders with an empty title and remounts under the primary workspace.
+  const lastKnownById = useRef(
+    new Map<string, { title: string; workspaceCwd: string }>(),
+  );
+  for (const session of allSessions) {
+    lastKnownById.current.set(session.sessionId, {
+      title: session.displayName?.trim() || session.sessionId.slice(0, 8),
+      workspaceCwd: session.workspaceCwd,
+    });
+  }
+
   const titleById = useMemo(() => {
     const map = new Map<string, string>();
     for (const session of allSessions) {
@@ -334,8 +372,14 @@ export function SplitView({
         session.displayName?.trim() || session.sessionId.slice(0, 8),
       );
     }
+    for (const id of paneIds) {
+      if (!map.has(id)) {
+        const known = lastKnownById.current.get(id);
+        if (known) map.set(id, known.title);
+      }
+    }
     return map;
-  }, [allSessions]);
+  }, [allSessions, paneIds]);
 
   const sessionById = useMemo(
     () => new Map(allSessions.map((session) => [session.sessionId, session])),
@@ -352,6 +396,12 @@ export function SplitView({
     for (const session of allSessions) {
       map.set(session.sessionId, session.workspaceCwd);
     }
+    for (const id of paneIds) {
+      if (!map.has(id)) {
+        const known = lastKnownById.current.get(id);
+        if (known) map.set(id, known.workspaceCwd);
+      }
+    }
     if (
       currentSessionId &&
       connection.workspaceCwd &&
@@ -360,7 +410,7 @@ export function SplitView({
       map.set(currentSessionId, connection.workspaceCwd);
     }
     return map;
-  }, [allSessions, currentSessionId, connection.workspaceCwd]);
+  }, [allSessions, currentSessionId, connection.workspaceCwd, paneIds]);
 
   const addPane = useCallback(
     (sessionId: string) => {
@@ -424,15 +474,42 @@ export function SplitView({
   // session has left it (archived or deleted) has nothing left to load — the
   // provider parks on a terminal error with an empty transcript, and the
   // parent re-seeds the stale id from the persisted pane set on every entry
-  // into the split view. Wait for the active list (and, on a multi-workspace
-  // daemon, the other-workspace lists too) to settle at least once, so a
-  // still-loading workspace can't look like a vanished session. Standalone
-  // panes (deep-linked) never appear in a workspace list: probe them first and
-  // keep them on any non-not-found outcome — a transient probe failure must
-  // not close a live pane.
+  // into the split view.
+  //
+  // Pruning is only safe when the catalog can *prove* a session is gone. An
+  // absence from a bounded page (the daemon clamps the page size, so a busy
+  // workspace can have more sessions than were fetched), a merge that failed
+  // partway, or an other-workspace list that is still loading, degraded, or
+  // never queried is not proof of removal — a session may simply be missing
+  // from what we saw. Wait for the active page to settle *and* be complete
+  // (and, on a multi-workspace daemon, for the other-workspace fan-out to be
+  // able to prove absence too) before trusting an absence. The current
+  // session is never pruned: it is the seed pane, and its workspace is known
+  // to the connection even before the lists finish loading. Standalone panes
+  // (deep-linked) never appear in a workspace list: probe them first and keep
+  // them on any non-not-found outcome — a transient probe failure must not
+  // close a live pane.
   useEffect(() => {
     if (activeSessionPage === undefined || otherSessionsLoading) return;
-    const staleIds = paneIds.filter((id) => !knownSessionIds.has(id));
+    // A bounded page (more results than were fetched) or a merge that failed
+    // partway means "not in this page" is not "gone": a session can simply
+    // have fallen off the page, or live in the half that never merged.
+    if (
+      activeSessionTruncated ||
+      activeSessionNextCursor !== undefined ||
+      activeSessionLiveMergeFailed
+    ) {
+      return;
+    }
+    // `degraded` covers an other-workspace list that settled with an error
+    // (its sessions are missing for a reason other than archiving) and a
+    // workspace the daemon lists but we never queried (untrusted).
+    if (otherSessionsDegraded) return;
+    // Never prune the current session: it is the seed pane, and its workspace
+    // is known to the connection even before the lists finish loading.
+    const staleIds = paneIds.filter(
+      (id) => id !== currentSessionId && !knownSessionIds.has(id),
+    );
     if (staleIds.length === 0) return;
     let cancelled = false;
     const standaloneSessionsEnabled =
@@ -443,12 +520,20 @@ export function SplitView({
       const toPrune: string[] = [];
       await Promise.all(
         staleIds.map(async (id) => {
+          const verdict = probeVerdictsRef.current.get(id);
+          if (verdict === 'alive') return; // a live standalone pane — keep it
+          if (verdict === 'absent') {
+            toPrune.push(id);
+            return;
+          }
           if (standaloneSessionsEnabled) {
             try {
               await workspace.client.getStandaloneSession(id);
+              probeVerdictsRef.current.set(id, 'alive');
               return; // a live standalone pane — not part of the workspace list
             } catch (error) {
               if (!isStandaloneSessionNotFoundError(error)) return;
+              probeVerdictsRef.current.set(id, 'absent');
             }
           }
           toPrune.push(id);
@@ -457,8 +542,13 @@ export function SplitView({
       if (cancelled || toPrune.length === 0) return;
       // The probes may have taken a moment: re-check against the freshest pane
       // set and catalog before removing, so a re-unarchived session survives
-      // the round trip.
-      const currentPaneIds = paneIdsRef.current;
+      // the round trip. In controlled mode the authoritative set is the prop
+      // (state only mirrors it via a passive effect), so read the prop-derived
+      // ref — a stale state mirror would resurrect a pane the parent just
+      // closed.
+      const currentPaneIds = sessionIdsControlled
+        ? controlledIdsRef.current
+        : paneIdsRef.current;
       const next = currentPaneIds.filter(
         (id) => !toPrune.includes(id) || knownSessionIdsRef.current.has(id),
       );
@@ -471,9 +561,14 @@ export function SplitView({
     };
   }, [
     activeSessionPage,
+    activeSessionTruncated,
+    activeSessionNextCursor,
+    activeSessionLiveMergeFailed,
     otherSessionsLoading,
+    otherSessionsDegraded,
     paneIds,
     knownSessionIds,
+    currentSessionId,
     connection.capabilities,
     workspace.client,
     sessionIdsControlled,

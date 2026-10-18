@@ -20,13 +20,25 @@ import {
 export interface OtherWorkspaceSessionsResult {
   sessions: DaemonSessionSummary[];
   /**
-   * True until every non-primary workspace list has settled at least once
-   * (or failed, which leaves its page absent). Consumers that compare the
-   * merged list against live state (for example pruning panes) must wait for
-   * this to be false so a still-loading workspace can't look like a vanished
-   * session.
+   * True while any non-primary workspace list is still in flight. A first
+   * fetch that failed is settled, not loading — it is reported by `degraded`
+   * instead, so a persistently-failing workspace can't pin this forever.
+   * Consumers that compare the merged list against live state (for example
+   * pruning panes) must wait for this to be false so a still-loading
+   * workspace can't look like a vanished session.
    */
   loading: boolean;
+  /**
+   * True while the fan-out can't prove a session is gone, for a reason that
+   * isn't "still loading": a queried workspace settled with an error and no
+   * page (its sessions are missing from the merged list for a reason other
+   * than archiving), or the daemon lists a non-primary workspace we never
+   * queried (untrusted) whose sessions could still be a live pane. Consumers
+   * that prune panes on catalog absence must wait for this to be false as
+   * well — while it is true, absence from the merged list is not proof of
+   * removal.
+   */
+  degraded: boolean;
   reload: () => Promise<void>;
 }
 
@@ -89,18 +101,38 @@ export function useOtherWorkspaceSessions(
     );
     return merged.length === 0 ? EMPTY : merged;
   }, [snapshots]);
+  // In-flight only. A workspace whose first fetch failed has settled (its
+  // `loading` is false) but is unknown — that is reported by `degraded`, not
+  // pinned here. Keying `loading` off `page === undefined` (the old behaviour)
+  // kept a persistently-failing workspace "loading" forever, which blocked the
+  // prune for every pane, not just the failing workspace's.
   const loading = useMemo(
-    () =>
-      snapshots.some(
-        (snapshot) => snapshot.loading || snapshot.page === undefined,
-      ),
+    () => snapshots.some((snapshot) => snapshot.loading),
     [snapshots],
   );
+  // The fan-out can't prove a session is gone while: a queried workspace
+  // settled with an error and no page (its sessions are absent for a reason
+  // other than archiving), or the daemon lists a non-primary workspace we
+  // never queried (untrusted) whose sessions could still be a live pane. Only
+  // consulted while the hook is enabled — a disabled fan-out (single or
+  // workspace-locked split) has no other-workspace concern at all.
+  const degraded = useMemo(() => {
+    if (!enabled) return false;
+    const queried = new Set(queries.map((query) => query.workspaceCwd));
+    const unqueriedNonPrimary = (
+      workspace.capabilities?.workspaces ?? []
+    ).some((entry) => !entry.primary && !queried.has(entry.cwd));
+    const landedDegraded = snapshots.some(
+      (snapshot) =>
+        snapshot.error !== undefined && snapshot.page === undefined,
+    );
+    return unqueriedNonPrimary || landedDegraded;
+  }, [enabled, queries, snapshots, workspace.capabilities]);
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const reload = useCallback(async () => {
     if (queries.length === 0) return;
     await Promise.allSettled(queries.map((query) => store.refresh(query)));
   }, [queries, store]);
 
-  return { sessions, loading, reload };
+  return { sessions, loading, degraded, reload };
 }
