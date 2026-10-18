@@ -455,6 +455,8 @@ describe('no-AK integration CI wiring', () => {
       'OPENAI_MODEL',
       'OPENROUTER_API_KEY',
       'QWEN_API_KEY',
+      'QWENCLOUD_API_KEY',
+      'QWENCLOUD_TOKEN_PLAN_API_KEY',
       'QWEN_DEFAULT_AUTH_TYPE',
       'QWEN_MODEL',
       'REQUESTY_API_KEY',
@@ -882,14 +884,16 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('installs Playwright system dependencies only on hosted runners', () => {
+  it('installs Playwright system dependencies on hosted runners, and on pool hosts only when missing', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
+    expect(webShellJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''[\"ubuntu-latest\"]'') }}'",
+    );
     const hostedInstall = getWorkflowStep(
       webShellJob,
       'Install Playwright Chromium and WebKit (hosted)',
@@ -906,6 +910,15 @@ describe('no-AK integration CI wiring', () => {
       'node node_modules/playwright/cli.js install chromium webkit',
     );
     expect(selfHostedInstall).not.toContain('install --with-deps chromium');
+    // Pool hosts lacked WebKit's libraries: install them once per host, gated
+    // on Playwright's own validation, without prompting or racing apt locks.
+    expect(selfHostedInstall).toContain(
+      'if grep -q \'Host system is missing dependencies\' "${install_log}"; then',
+    );
+    expect(selfHostedInstall).toContain('DPkg::Lock::Timeout');
+    expect(selfHostedInstall).toContain(
+      'sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit',
+    );
     for (const step of [hostedInstall, selfHostedInstall]) {
       expect(step).toContain(
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",

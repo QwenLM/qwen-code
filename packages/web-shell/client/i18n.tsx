@@ -43,6 +43,11 @@ import {
   MANAGED_TASK_MESSAGES_ZH,
 } from './components/managed/managed-task-messages.js';
 
+import {
+  WORKSPACE_REGISTRATION_MESSAGES_EN,
+  WORKSPACE_REGISTRATION_MESSAGES_ZH,
+} from './components/managed/managed-workspace-messages.js';
+
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
@@ -252,6 +257,23 @@ const EN: Messages = {
   'managed.newWorkspaceTitle': 'New workspace',
   'managed.modelFixed':
     'The model is fixed for this task. Start a new task to choose another model.',
+  'managed.approvalChange.loading': 'Loading approval policies…',
+  'managed.approvalChange.optionsError': 'Could not load approval policies.',
+  'managed.approvalChange.reload': 'Reload policies',
+  'managed.approvalChange.nextTurn':
+    'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.changing': 'Changing approval policy…',
+  'managed.approvalChange.unconfirmed':
+    'Approval change is not confirmed. Continue confirming the original request.',
+  'managed.approvalChange.confirm': 'Continue confirming',
+  'managed.approvalChange.busy':
+    'Finish the current turn or recovery before changing approval policy.',
+  'managed.approvalChange.storage':
+    'Browser session storage is unavailable. The approval change was not sent.',
+  'managed.approvalChange.conflict':
+    'Approval policy changed elsewhere. Review the current selection.',
+  'managed.approvalChange.failed':
+    'Approval change was refused. Review the available policies.',
   'managed.model.loading': 'Loading available models…',
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
@@ -274,16 +296,22 @@ const EN: Messages = {
   'managed.approvalOptionsInvalid':
     'The service returned unsupported approval modes.',
   'managed.approvalFixed':
-    'Approval mode is fixed for this task. Start a new task to choose another mode.',
+    'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
-    'Create an empty workspace for Managed tasks.',
+    'Choose an existing project directory, or name a new empty workspace.',
+  'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
+  'managed.workspaceDirectoryHint':
+    'Choose an existing project on the Linux execution host within this authorized root.',
+  'managed.workspaceChooseDirectory': 'Choose existing directory',
+  'managed.workspaceDirectoryScope':
+    'Choose a directory inside the selected root.',
   'managed.newWorkspaceName': 'Workspace name',
   'managed.newWorkspaceNameInvalid':
     'Use a name of 1–128 characters without control characters.',
   'managed.newWorkspaceCreate': 'Create workspace',
   'managed.newWorkspaceCreating': 'Creating workspace…',
   'managed.newWorkspaceUncertain':
-    'The creation is not yet confirmed. Retry to check the same workspace.',
+    'The creation is not yet confirmed. Retry to check the same workspace, or abandon local confirmation to start again. Abandoning does not delete a workspace that may already exist.',
   'managed.newWorkspaceResume': 'Resume workspace creation',
   'managed.newWorkspaceClose': 'Close',
   'managed.workspaceUnsupported':
@@ -1852,6 +1880,8 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'sideTask.archiveCompleted': 'Archive completed',
+  'sideTask.archiveUnavailable': 'Only completed side tasks can be archived.',
   'webPreview.title': 'Web preview',
   'webPreview.openHint': 'Preview web apps',
   'webPreview.address': 'Development URL',
@@ -2401,6 +2431,7 @@ const EN: Messages = {
   'shell.result.cancelled': 'Cancelled',
   'shell.result.waiting': 'Waiting for output…',
   'shell.result.empty': 'No output',
+  'shell.result.unavailable': 'Output is unavailable for this tool call.',
   'shell.result.exited': (v) => `Exited with code ${v?.code}`,
   'turnCalls.open': 'View tool calls',
   'turnCalls.title': 'Tool calls',
@@ -4440,6 +4471,7 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4613,6 +4645,20 @@ const ZH: Messages = {
   'managed.workspaceEmpty': '没有可读取的工作区。',
   'managed.newWorkspaceTitle': '新建工作区',
   'managed.modelFixed': '当前任务的模型已固定；如需更换，请新建任务。',
+  'managed.approvalChange.loading': '正在加载审批策略…',
+  'managed.approvalChange.optionsError': '加载审批策略失败。',
+  'managed.approvalChange.reload': '重新加载策略',
+  'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.changing': '正在切换审批策略…',
+  'managed.approvalChange.unconfirmed':
+    '审批策略切换尚未确认，请继续确认原请求。',
+  'managed.approvalChange.confirm': '继续确认',
+  'managed.approvalChange.busy': '当前回合或恢复完成后才能切换审批策略。',
+  'managed.approvalChange.storage':
+    '浏览器会话存储不可用，审批策略变更未发送。',
+  'managed.approvalChange.conflict':
+    '审批策略已在其他页面修改，请检查当前选择。',
+  'managed.approvalChange.failed': '审批策略切换被拒绝，请检查可用策略。',
   'managed.model.loading': '正在加载可用模型…',
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
@@ -4629,14 +4675,21 @@ const ZH: Messages = {
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
-  'managed.approvalFixed': '当前任务的审批策略已固定；如需更换，请新建任务。',
-  'managed.newWorkspaceDescription': '为托管任务创建一个空工作区。',
+  'managed.approvalFixed': '当前会话不支持更改审批策略。',
+  'managed.newWorkspaceDescription':
+    '选择已有项目目录，或输入名称创建空工作区。',
+  'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
+  'managed.workspaceDirectoryHint':
+    '选择此授权根目录内、位于 Linux 执行机器上的已有项目。',
+  'managed.workspaceChooseDirectory': '选择已有目录',
+  'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
   'managed.newWorkspaceName': '工作区名称',
   'managed.newWorkspaceNameInvalid':
     '名称需为 1–128 个字符，不能包含控制字符。',
   'managed.newWorkspaceCreate': '创建工作区',
   'managed.newWorkspaceCreating': '正在创建工作区…',
-  'managed.newWorkspaceUncertain': '创建结果尚未确认，重试将查询同一个工作区。',
+  'managed.newWorkspaceUncertain':
+    '创建结果尚未确认。重试将查询同一个工作区，也可放弃本地确认后重新开始。放弃不会删除可能已经创建的工作区。',
   'managed.newWorkspaceResume': '继续确认工作区创建',
   'managed.newWorkspaceClose': '关闭',
   'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
@@ -6178,6 +6231,8 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'sideTask.archiveCompleted': '归档已完成任务',
+  'sideTask.archiveUnavailable': '只能归档已完成的侧边任务。',
   'webPreview.title': '网页预览',
   'webPreview.openHint': '预览网页应用',
   'webPreview.address': '开发地址',
@@ -6679,6 +6734,7 @@ const ZH: Messages = {
   'shell.result.cancelled': '已取消',
   'shell.result.waiting': '等待输出…',
   'shell.result.empty': '无输出',
+  'shell.result.unavailable': '无法获取此工具调用的输出。',
   'shell.result.exited': (v) => `退出码 ${v?.code}`,
   'turnCalls.open': '查看工具调用',
   'turnCalls.title': '工具调用',
@@ -8556,6 +8612,7 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

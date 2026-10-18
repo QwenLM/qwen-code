@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalChangeResult;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelOption;
@@ -10,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.EventIdentity.Identity;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -24,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
@@ -41,6 +45,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -48,6 +53,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -141,6 +147,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
+    private final ResidentWorkspaces residentWorkspaces;
     private final WorkspaceCreationRoots createdRoots;
     private static final String SESSION_WITH_STREAM =
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
@@ -313,6 +320,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
+        this.residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         this.createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
@@ -355,6 +363,18 @@ public class ManagedAgentStore implements AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest,
             WorkspaceSelection selection, String requestedApprovalMode) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest,
+                selection, requestedApprovalMode, false);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
+            boolean approvalSelectionSupported) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -367,7 +387,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     requestDigest, existing.getFirst(), false);
         }
         AgentPin pin = selectApprovalMode(resolveAgentPin(tenantId, agentId,
-                requestedRevision, true), requestedApprovalMode);
+                requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
         if (!input.isEmpty() && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
                 && !workspaceShellEnabled) {
             throw workspaceExecutionUnavailable();
@@ -376,12 +396,23 @@ public class ManagedAgentStore implements AgentStateStore {
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
-        // Admission already proved the agent is qwen-code or a compiled
-        // definition, so only the deployment mounts gate execution here.
-        if (!input.isEmpty()
+        boolean sshWorkspace = isSshWorkspace(workspace.binding());
+        if (sshWorkspace) {
+            requireSshToolProfile(pin.toolProfile());
+        }
+        boolean resident = residentWorkspaces.find(workspace.binding()) != null;
+        if (resident) {
+            if (!workspaceFilesEnabled) {
+                throw workspaceExecutionUnavailable();
+            }
+            residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
+        } else if (!sshWorkspace) {
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
+        }
+        if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
@@ -573,7 +604,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         SessionRecord parent = requireSessionForUpdate(tenantId,
                 parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+        if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
                 || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
@@ -880,6 +911,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String approvalMode, String toolProfile) {
     }
 
+    private boolean isSshWorkspace(ContextBinding binding) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
+                Long.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+    }
+
+    private static void requireSshToolProfile(String profile) {
+        if (!WorkspaceToolProfiles.FILES.equals(profile) && !WorkspaceToolProfiles.SHELL.equals(profile)) {
+            throw workspaceExecutionUnavailable();
+        }
+    }
+
     @Override
     @Transactional
     public WebShellSessionOptions workspaceSessionOptions(
@@ -896,11 +938,13 @@ public class ManagedAgentStore implements AgentStateStore {
                         : List.of("default", "auto-edit", "yolo");
     }
 
-    private static AgentPin selectApprovalMode(AgentPin pin, String requested) {
+    private static AgentPin selectApprovalMode(AgentPin pin, String requested, boolean supported) {
         if (requested == null) {
             return pin;
         }
-        if (!availableApprovalModes(pin).contains(requested)) {
+        if (!availableApprovalModes(pin).contains(requested)
+                && !(supported && pin.digest() == null && "yolo".equals(requested)
+                        && WorkspaceToolProfiles.isPublicShell(pin.toolProfile()))) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_approval_mode",
                     "The selected approval mode is not available for this Agent.");
         }
@@ -1007,9 +1051,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key, owner_actor_key, runtime_request_key) VALUES"
+                        + " creator_actor_key, owner_actor_key, runtime_request_key, approval_mode) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, pin.revision(), pin.digest(),
                 title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
@@ -1024,7 +1068,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         ? CsiFilesRetirementProfile.PROFILE
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
-                runtimeRequestKey);
+                runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo");
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
                         + " covered_sequence, gmt_modified) VALUES"
@@ -1040,15 +1084,6 @@ public class ManagedAgentStore implements AgentStateStore {
         } else {
             ManagedReceipts.insertCreation(jdbc, tenantId, actorKey,
                     idempotencyKey, requestDigest, sessionId, turnId, now);
-        }
-        // A definition pin applies to unbound Sessions too; qwen-code keeps
-        // the column default unless bound.
-        if (workspace != null || pin.digest() != null) {
-            jdbc.update(
-                    "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", approval_mode = ? WHERE tenant_id = ? AND session_id = ?",
-                    pin.approvalMode(),
-                    tenantId,
-                    sessionId);
         }
         appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
@@ -1075,7 +1110,11 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // A per-turn admission: a long holder of the tenant's placement row
+        // answers tenant_guard_contended within the hot-path bound instead
+        // of parking the submit past the caller's budget (#13800).
+        ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -1100,6 +1139,9 @@ public class ManagedAgentStore implements AgentStateStore {
             throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (isSshWorkspace(session.workspace())) {
+                requireSshToolProfile(session.toolProfile());
+            }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
@@ -1128,12 +1170,15 @@ public class ManagedAgentStore implements AgentStateStore {
         String turnId = publicId("turn");
         insertTurn(tenantId, sessionId, turnId,
                 UUID.randomUUID().toString(), input, payloadDigest, now);
+        byte[] actorKey = commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, "COMPLETED", null,
-                commandActorKey(tenantId, actorId), now);
+                sessionId, turnId, "COMPLETED", null, actorKey, now);
+        String operationId = insertTurnCommandOperation(tenantId, sessionId,
+                turnId, OperationKind.SUBMIT_INPUT, operation, idempotencyKey,
+                requestDigest, actorKey, session.status(), now);
         appendEvent(tenantId, sessionId, turnId, "turn.accepted",
                 acceptedData(turnId, input), false, null, now);
-        return new Admission(sessionId, turnId, false, true);
+        return new Admission(sessionId, turnId, false, true, operationId);
     }
 
     @Transactional
@@ -1149,15 +1194,18 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
-        if (requireLegacySessionForUpdate(tenantId, sessionId).workspace() != null
-                && !workspaceFilesEnabled) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() != null && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         long now = clock.millis();
+        byte[] actorKey = commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, turnId, "COMPLETED", null,
-                commandActorKey(tenantId, actorId), now);
+                sessionId, turnId, "COMPLETED", null, actorKey, now);
+        String operationId = insertTurnCommandOperation(tenantId, sessionId,
+                turnId, OperationKind.CANCEL, operation, idempotencyKey,
+                requestDigest, actorKey, session.status(), now);
         boolean commandEffect = ACTIVE_TURN_STATES.contains(turn.status())
                 && !"CANCELLING".equals(turn.status());
         if (commandEffect) {
@@ -1174,7 +1222,13 @@ public class ManagedAgentStore implements AgentStateStore {
                         false, null, now);
             }
         }
-        return new Admission(sessionId, turnId, false, commandEffect);
+        if (!commandEffect) {
+            // A Turn that already ended settles the cancel now; one already
+            // cancelling carries this cancel with the earlier one.
+            settleTurnCommands(tenantId, sessionId, turnId, now);
+        }
+        return new Admission(sessionId, turnId, false, commandEffect,
+                operationId);
     }
 
     @Override
@@ -1222,12 +1276,20 @@ public class ManagedAgentStore implements AgentStateStore {
                         "session_mutation_superseded",
                         "A later Session title attempt has been admitted.");
             }
-            if ("UNKNOWN".equals(row.get("state"))) {
+            // A parked delivery (UNKNOWN before D7-2 unified it) awaits the
+            // reconciler and is never re-sent.
+            if ("RECOVERY_BLOCKED".equals(row.get("state"))
+                    || "UNKNOWN".equals(row.get("state"))) {
                 throw new ApiException(
                         HttpStatus.CONFLICT,
                         "operation_outcome_unknown",
                         "The original title delivery is awaiting reconciliation.");
             }
+        }
+        // A delivery the reconciler proved never landed is FAILED: the key
+        // retries under a new revision, as any failed title key does.
+        if (!retained.isEmpty() && !"FAILED".equals(retained.getFirst().get("state"))) {
+            Map<String, Object> row = retained.getFirst();
             return new SessionMutationCommand(
                     sessionId,
                     "COMPLETED".equals(row.get("state")) ? "COMPLETED" : "PENDING",
@@ -1263,7 +1325,8 @@ public class ManagedAgentStore implements AgentStateStore {
         jdbc.update(
                 "UPDATE ma_operation SET state = 'SUPERSEDED', delivery_state = 'COMPLETED', phase"
                     + " = 'SUPERSEDED', gmt_modified = ? WHERE operation_kind = 'RENAME' AND"
-                    + " target_key = ? AND target_revision < ? AND state <> 'COMPLETED'",
+                    + " target_key = ? AND target_revision < ? AND state IN ('PENDING', 'RUNNING',"
+                    + " 'RECOVERY_BLOCKED', 'UNKNOWN')",
                 now,
                 renameTarget(tenantId, sessionId),
                 next);
@@ -1369,8 +1432,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 : !owner.equals(operation.get("claim_owner"))
                         || delivery.claimGeneration()
                                 != ((Number) operation.get("claim_generation")).longValue()
-                        || !("RUNNING".equals(operation.get("state"))
-                                || "UNKNOWN".equals(operation.get("state")))) {
+                        || !List.of("RUNNING", "RECOVERY_BLOCKED", "UNKNOWN")
+                                .contains(operation.get("state"))) {
             throw new ApiException(
                     HttpStatus.CONFLICT,
                     "operation_claim_lost",
@@ -1388,10 +1451,16 @@ public class ManagedAgentStore implements AgentStateStore {
                         SessionMutationKind.RENAME,
                         delivery.title(),
                         bootId);
+        // A parked delivery answered late by its own claim was confirmed by
+        // the Harness after all.
+        boolean parked = !"RUNNING".equals(operation.get("state"))
+                && !"PENDING".equals(operation.get("state"));
         jdbc.update(
                 "UPDATE ma_operation SET state = 'COMPLETED', phase = 'COMPLETED', delivery_state ="
                     + " 'COMPLETED', claim_owner = NULL, claim_until = NULL, gmt_modified = ?,"
-                    + " completed_at = ? WHERE operation_key = ?",
+                    + " completed_at = ?"
+                    + (parked ? ", admission_stage = 'HARNESS_CONFIRMED', failure_code = NULL" : "")
+                    + " WHERE operation_key = ?",
                 clock.millis(),
                 clock.millis(),
                 renameKey(tenantId, sessionId, delivery.revision()));
@@ -1414,10 +1483,17 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    @Transactional
     public List<RenameDelivery> deliverableRenames(long now) {
-        jdbc.update(
-                "UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED', gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
-                now);
+        // A submitted delivery whose claim expired was never answered, and a
+        // delivery parked UNKNOWN before D7-2 waits the same way: both park
+        // for the reconciler.
+        String unanswered = "(state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_until <= "
+                + ManagedSchemaTime.SQL_NOW + " OR state = 'UNKNOWN')";
+        for (Map<String, Object> row : jdbc.queryForList(
+                "SELECT operation_key, tenant_id, session_id, idempotency_key FROM ma_operation WHERE operation_kind = 'RENAME' AND " + unanswered + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100")) {
+            parkRename(row, unanswered);
+        }
         jdbc.update(
                 "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase = 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
                 now,
@@ -1478,15 +1554,10 @@ public class ManagedAgentStore implements AgentStateStore {
         WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
         requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
         String key = renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision());
-        jdbc.update(
-                "UPDATE ma_operation SET state = 'UNKNOWN', delivery_state = 'BLOCKED', gmt_modified"
-                    + " = ? WHERE operation_key = ? AND operation_kind = 'RENAME' AND state ="
-                    + " 'RUNNING' AND phase = 'SUBMITTED' AND claim_owner = ? AND claim_generation"
-                    + " = ?",
-                clock.millis(),
-                key,
-                owner,
-                delivery.claimGeneration());
+        parkRename(Map.of("operation_key", key, "tenant_id", delivery.tenantId(),
+                        "session_id", delivery.sessionId(), "idempotency_key", delivery.idempotencyKey()),
+                "state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_owner = ? AND claim_generation = ?",
+                owner, delivery.claimGeneration());
         jdbc.update(
                 "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase ="
                     + " 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL,"
@@ -1498,6 +1569,29 @@ public class ManagedAgentStore implements AgentStateStore {
                 key,
                 owner,
                 delivery.claimGeneration());
+    }
+
+    // Parks one delivery whose submission went unanswered, if it still
+    // matches the guard. Its receipt retires as an abandoned delivery's
+    // does, so the parked title holds neither later titles nor the Session
+    // lifecycle hostage; the claim's own late reply and the reconciler both
+    // complete a retired receipt.
+    private void parkRename(Map<String, Object> row, String guard, Object... guardArguments) {
+        List<Object> arguments = new ArrayList<>(List.of(lifecycleDatabaseTime(), clock.millis(),
+                row.get("operation_key")));
+        arguments.addAll(List.of(guardArguments));
+        if (jdbc.update("UPDATE ma_operation SET " + PARK_RENAME + ", available_at = ?, gmt_modified = ?"
+                        + " WHERE operation_key = ? AND operation_kind = 'RENAME' AND " + guard,
+                arguments.toArray()) != 1) {
+            return;
+        }
+        String tenantId = (String) row.get("tenant_id");
+        jdbc.update(
+                "UPDATE ma_request_receipt SET state = 'FAILED', gmt_modified = ? WHERE receipt_key = ?"
+                    + " AND namespace = 'SESSION_COMMAND' AND session_id = ? AND state = 'PENDING'",
+                clock.millis(),
+                ManagedReceipts.commandKey(tenantId, "RENAME_SESSION", (String) row.get("idempotency_key")),
+                row.get("session_id"));
     }
 
     private RenameDelivery renameDelivery(java.sql.ResultSet row, int index) throws java.sql.SQLException {
@@ -1523,11 +1617,14 @@ public class ManagedAgentStore implements AgentStateStore {
                 renameTarget(tenant, session),
                 "rename:" + revision);
     }
+    // A parked title (RECOVERY_BLOCKED, or UNKNOWN before D7-2) is not
+    // pending: nothing sends it again, and the reconciler settles it in any
+    // Session status, so it never holds the lifecycle (D7-2).
     private boolean hasPendingRenameDelivery(String tenantId, String sessionId) {
         return jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND"
                             + " target_key = ? AND tenant_id = ? AND session_id = ? AND state IN"
-                            + " ('PENDING', 'RUNNING', 'UNKNOWN')",
+                            + " ('PENDING', 'RUNNING')",
                         Integer.class,
                         renameTarget(tenantId, sessionId),
                         tenantId,
@@ -1835,6 +1932,184 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private static final String SESSION_OPERATION_KINDS =
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL')";
+    // D7-1: a Turn input or cancel command targets its Turn, never the
+    // Session, so no Session barrier above counts it: the Turn row is its
+    // barrier, and the Turn dispatcher, which holds the only lease that may
+    // act on the Turn, is its only deliverer.
+    private static final String TURN_COMMAND_KINDS = "('SUBMIT_INPUT', 'CANCEL')";
+    // D7-2: RECOVERY_BLOCKED carries two meanings, decided by kind. For
+    // these kinds it means the command's acceptance is unknown: no claim
+    // ever takes the row, nothing re-sends it, and only the reconciler
+    // settles it, from the kind's own keyed evidence.
+    private static final String ACCEPTANCE_UNKNOWN_KINDS =
+            "('TASK_CANCEL', 'SUBMIT_INPUT', 'RENAME')";
+    // For these it is a published wait on a precondition of an operation
+    // whose acceptance is known: the lifecycle coordinator re-drives it, and
+    // keyed effect receipts keep the re-drive from repeating an effect.
+    private static final String LIFECYCLE_WAIT_KINDS =
+            "('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE')";
+    /** Turn input whose submission no Harness answered (D7-2). */
+    static final String SUBMIT_INPUT_UNCONFIRMED = "submit_input_unconfirmed";
+    /** A Session title whose submitted delivery no Harness answered (D7-2). */
+    static final String SESSION_TITLE_UNCONFIRMED = "session_title_unconfirmed";
+    /** A parked Session title the sealed journal proves never landed. */
+    static final String SESSION_TITLE_UNDELIVERED = "session_title_undelivered";
+    // A RENAME parks with the same columns either way: acceptance unknown,
+    // never re-sent, settled only by the reconciler or by the same claim's
+    // own late reply. Its claim fields stay, so that late reply still settles.
+    private static final String PARK_RENAME = "state = 'RECOVERY_BLOCKED',"
+            + " phase = 'RECOVERY_BLOCKED', admission_stage = 'JAVA_DURABLE',"
+            + " delivery_state = 'BLOCKED', failure_code = '"
+            + SESSION_TITLE_UNCONFIRMED + "'";
+
+    private String insertTurnCommandOperation(String tenantId,
+            String sessionId, String turnId, OperationKind kind,
+            String command, String idempotencyKey, String requestDigest,
+            byte[] actorKey, String sessionStatus, long now) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String target = turnOperationTarget(turnId);
+        String operationId = publicId("op");
+        String operationKey = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
+                scope, target, operationId);
+        jdbc.update(
+                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                    + " target_kind, target_key, target_id, phase, request_json,"
+                    + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
+                    + " actor_key, idempotency_key, request_digest, state, admission_stage,"
+                    + " delivery_state, session_status_before, available_at, gmt_create,"
+                    + " gmt_modified) VALUES (?, ?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?)",
+                operationKey,
+                scope,
+                scope,
+                target,
+                turnId,
+                writeJson(Map.of("schemaVersion", 1, "kind", kind.name(),
+                        "sessionId", sessionId, "turnId", turnId)),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
+                        idempotencyKey),
+                tenantId,
+                sessionId,
+                operationId,
+                kind.name(),
+                actorKey,
+                idempotencyKey,
+                requestDigest,
+                sessionStatus,
+                now,
+                now,
+                now);
+        ManagedReceipts.linkCommandOperation(jdbc, tenantId, command,
+                idempotencyKey, operationKey);
+        return operationId;
+    }
+
+    private static String turnOperationTarget(String turnId) {
+        return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(turnId);
+    }
+
+    /**
+     * Settles the open input and cancel operations of a Turn from the Turn's
+     * own committed facts, in the transaction that commits them. Input is
+     * accepted once the Turn holds a Harness event epoch, the fact its
+     * dispatcher records when a Harness admits the Turn; until then a
+     * cancelled or failed Turn ends the input undelivered. A cancel
+     * completes when the Turn is cancelled — by the Harness, or by Java
+     * before any Harness admitted it — and fails turn_already_settled when
+     * the Turn ended otherwise. A Turn that has not ended leaves its cancels
+     * pending, so cancels of one Turn coalesce.
+     */
+    private void settleTurnCommands(String tenantId, String sessionId,
+            String turnId, long now) {
+        // Current reads only: every caller holds the Session row, but its
+        // snapshot may predate that lock and miss a cancel committed since.
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
+        boolean admitted = turn.harnessEventEpoch() != null;
+        if (admitted) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "COMPLETED", "HARNESS_CONFIRMED",
+                    null, now);
+        } else if ("CANCELLED".equals(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "CANCELLED", "JAVA_DURABLE",
+                    null, now);
+        } else if ("FAILED".equals(turn.status())
+                && turn.submissionAttempted()) {
+            // A null epoch does not prove non-admission (R10-4): the submit
+            // may have been admitted and its reply lost. The input parks
+            // until the Session journal proves which (D7-2).
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "RECOVERY_BLOCKED",
+                    "JAVA_DURABLE", SUBMIT_INPUT_UNCONFIRMED, now);
+        } else if ("FAILED".equals(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.SUBMIT_INPUT, "FAILED", "JAVA_DURABLE",
+                    turn.errorCode(), now);
+        }
+        if ("CANCELLED".equals(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.CANCEL, "COMPLETED",
+                    admitted ? "HARNESS_CONFIRMED" : "JAVA_DURABLE", null, now);
+        } else if (!ACTIVE_TURN_STATES.contains(turn.status())) {
+            settleTurnCommand(tenantId, sessionId, turnId,
+                    OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
+                    "turn_already_settled", now);
+        }
+    }
+
+    // Only a completed operation is delivered and carries a receipt; a
+    // failed or cancelled one stays java_durable and blocked, so it is never
+    // delivered again, and a parked one is due for the reconciler at once.
+    private void settleTurnCommand(String tenantId, String sessionId,
+            String turnId, OperationKind kind, String state,
+            String admissionStage, String failureCode, long now) {
+        boolean completed = "COMPLETED".equals(state);
+        boolean parked = "RECOVERY_BLOCKED".equals(state);
+        // The identity index confines this locking scan to the Turn's own
+        // operations. Left to the optimizer, a long settled history steers it
+        // to a (kind, state) index whose range holds every Session's pending
+        // rows, and two Sessions' settles then deadlock. H2 skips the hint.
+        for (String operationKey : jdbc.queryForList("SELECT operation_key"
+                        + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
+                        + " WHERE scope_key = ? AND"
+                        + " operation_kind = ? AND target_key = ? AND state ="
+                        + " 'PENDING' FOR UPDATE", String.class,
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                kind.name(), turnOperationTarget(turnId))) {
+            jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"
+                            + " admission_stage = ?, delivery_state = ?,"
+                            + " receipt_id = ?, failure_code = ?,"
+                            + " available_at = ?, gmt_modified = ?,"
+                            + " completed_at = ? WHERE"
+                            + " operation_key = ? AND state = 'PENDING'",
+                    state, state, admissionStage,
+                    completed ? "CONFIRMED" : "BLOCKED",
+                    completed ? publicId("rcpt") : null, failureCode, now,
+                    now, parked ? null : now, operationKey);
+        }
+    }
+
+    private Optional<OperationRecord> findTurnCommandOperation(
+            String tenantId, String sessionId, String operationId) {
+        return jdbc
+                .query(
+                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE scope_key = ? AND operation_kind IN "
+                                + TURN_COMMAND_KINDS
+                                + " AND operation_id = ?",
+                        (result, row) -> {
+                            if (!tenantId.equals(result.getString("tenant_id"))
+                                    || !sessionId.equals(result.getString("session_id"))) {
+                                throw new IllegalStateException(
+                                        "Session operation identity does not match its index key");
+                            }
+                            return operationMapper.mapRow(result, row);
+                        },
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        operationId)
+                .stream()
+                .findFirst();
+    }
 
     private static String sessionOperationTarget(String sessionId) {
         return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(sessionId);
@@ -2212,6 +2487,9 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
                     "Only a Workspace operator may change the Session directory.");
         }
+        if (residentWorkspaces.find(binding) != null) {
+            throw workspaceExecutionUnavailable();
+        }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId,
                 binding.getStorageId());
         if (!workspaceFilesEnabled) {
@@ -2559,17 +2837,242 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public List<OperationTarget> findParkedTaskCancels(int limit) {
-        // delivery_state leads the pending index, so the per-second scan
-        // never reads the whole table.
+    public List<ParkedOperation> findParkedOperations(int limit) {
+        // Kind and state lead the due index, so the per-second scan reads
+        // only parked rows, never a kind's settled history.
         return jdbc.query(
-                "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE delivery_state"
-                    + " = 'BLOCKED' AND available_at <= ? AND operation_kind = 'TASK_CANCEL' AND"
-                    + " state = 'RECOVERY_BLOCKED' AND EXISTS (SELECT 1 FROM ma_session s WHERE"
-                    + " s.tenant_id = ma_operation.tenant_id AND s.session_id ="
-                    + " ma_operation.session_id AND s.csi_guard = FALSE) ORDER BY available_at"
-                    + " LIMIT ?",
-                operationTargetMapper, lifecycleDatabaseTime(), limit);
+                "SELECT tenant_id, session_id, operation_id, operation_kind FROM ma_operation"
+                    + " WHERE operation_kind IN " + ACCEPTANCE_UNKNOWN_KINDS + " AND state ="
+                    + " 'RECOVERY_BLOCKED' AND available_at <= ? AND delivery_state = 'BLOCKED'"
+                    + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id ="
+                    + " ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND"
+                    + " s.csi_guard = FALSE) ORDER BY available_at LIMIT ?",
+                (result, row) -> new ParkedOperation(result.getString("tenant_id"),
+                        result.getString("session_id"), result.getString("operation_id"),
+                        result.getString("operation_kind")),
+                lifecycleDatabaseTime(), limit);
+    }
+
+    @Override
+    @Transactional
+    public boolean settleParkedOperation(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        requireLegacyMutation(parked.tenantId(), parked.sessionId());
+        long now = lifecycleDatabaseTime();
+        List<Object> arguments = new ArrayList<>();
+        String update = switch (verdict.acceptance()) {
+            case COMMITTED -> {
+                arguments.add(publicId("rcpt"));
+                arguments.add(now);
+                arguments.add(now);
+                yield "UPDATE ma_operation SET phase = 'COMPLETED', state = 'COMPLETED',"
+                        + " admission_stage = 'HARNESS_CONFIRMED',"
+                        + " delivery_state = 'CONFIRMED', receipt_id = ?,"
+                        + " failure_code = NULL, gmt_modified = ?, completed_at = ?";
+            }
+            case NOT_COMMITTED -> {
+                // Terminal yet blocked, as the contract has it: available_at
+                // moves past every scan of the blocked range for good.
+                arguments.add(verdict.failureCode());
+                arguments.add(Long.MAX_VALUE);
+                arguments.add(now);
+                arguments.add(now);
+                yield "UPDATE ma_operation SET phase = 'FAILED', state = 'FAILED',"
+                        + " admission_stage = 'JAVA_DURABLE',"
+                        + " delivery_state = 'BLOCKED', failure_code = ?,"
+                        + " available_at = ?, gmt_modified = ?, completed_at = ?";
+            }
+            case UNKNOWN -> {
+                arguments.add(Math.addExact(now,
+                        Math.max(0, retryAt - clock.millis())));
+                arguments.add(now);
+                yield "UPDATE ma_operation SET available_at = ?, gmt_modified = ?,"
+                        + " attempt_count = attempt_count + 1";
+            }
+        };
+        arguments.addAll(List.of(parked.kind(), parked.operationId(),
+                parked.tenantId(), parked.sessionId()));
+        // Only a still-parked row: a reconciliation never rewrites an
+        // outcome already recorded, and no claim holds a parked row.
+        return jdbc.update(update + " WHERE operation_kind = ? AND operation_id = ?"
+                        + " AND tenant_id = ? AND session_id = ? AND operation_kind IN "
+                        + ACCEPTANCE_UNKNOWN_KINDS + " AND state = 'RECOVERY_BLOCKED' AND"
+                        + " delivery_state = 'BLOCKED' AND claim_owner IS NULL",
+                arguments.toArray()) == 1;
+    }
+
+    /**
+     * The Harness admits a prompt by committing {@code submitInput} to the
+     * Session journal under the prompt's id, so the journal row keyed by that
+     * command is the admission's own evidence. Its absence proves nothing
+     * while a writer may still commit it; once the head refuses every writer
+     * (DELETING or DELETED) and compaction has not started, the journal is
+     * complete and the absence is proof. Both facts come from one statement,
+     * whose single read view holds under any isolation level: a commit that
+     * preceded the deletion is visible beside it, and no commit can land
+     * between the two reads, as it could between two statements under READ
+     * COMMITTED and turn an admitted input into a failed one.
+     */
+    @Override
+    public AcceptanceVerdict turnInputAcceptance(String tenantId,
+            String sessionId, String operationId) {
+        String turnId = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE"
+                        + " scope_key = ? AND operation_kind = 'SUBMIT_INPUT' AND operation_id = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                operationId).stream().findFirst().orElse(null);
+        TurnRecord turn = turnId == null ? null
+                : findTurn(tenantId, sessionId, turnId).orElse(null);
+        if (turn == null) {
+            return AcceptanceVerdict.unknown();
+        }
+        if (turn.harnessEventEpoch() != null) {
+            return AcceptanceVerdict.committed();
+        }
+        JournalEvidence evidence = journalEvidence(tenantId, sessionId,
+                "submitInput", turn.promptId());
+        if (evidence.admittedDigest() != null) {
+            if (("sha256:" + evidence.admittedDigest()).equals(turn.payloadDigest())) {
+                return AcceptanceVerdict.committed();
+            }
+            LOG.warn("Journal admission digest differs from its Turn tenant={}"
+                    + " session={} turn={}", tenantId, sessionId, turnId);
+            return AcceptanceVerdict.unknown();
+        }
+        return evidence.sealed() ? AcceptanceVerdict.notCommitted(turn.errorCode())
+                : AcceptanceVerdict.unknown();
+    }
+
+    private record JournalEvidence(String admittedDigest, boolean sealed) {
+    }
+
+    /**
+     * The Session journal's own record of one keyed command: the content
+     * digest it was admitted with, if any, and whether the journal is sealed
+     * complete (no writer can still commit, compaction has not started).
+     */
+    private JournalEvidence journalEvidence(String tenantId, String sessionId,
+            String operation, String commandId) {
+        return jdbc.queryForObject("SELECT (SELECT content_digest"
+                        + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                        + " AND command_key_hash = ?) AS admitted_digest, (SELECT COUNT(*) FROM"
+                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                        + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                        + " AND state IN ('DELETING', 'DELETED') AND"
+                        + " COALESCE(compacted_through_revision, 0) = 0) AS sealed",
+                (result, row) -> new JournalEvidence(result.getString("admitted_digest"),
+                        result.getLong("sealed") > 0),
+                tenantId, sessionId,
+                ManagedSessionStore.commandKeyHash(operation, commandId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId,
+                sessionId);
+    }
+
+    /**
+     * The Hosted Harness commits a fenced title to the Session journal as
+     * {@code renameSession} under {@code hosted-title:<revision>}, with the
+     * title's SHA-256 as its content digest. That commit is the delivery's
+     * own evidence, read in one statement beside the head exactly as a Turn
+     * input's admission is.
+     */
+    @Override
+    public Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
+        var rows = jdbc.queryForList("SELECT target_revision, request_json FROM ma_operation"
+                        + " WHERE scope_key = ? AND operation_kind = 'RENAME' AND operation_id = ?"
+                        + " AND tenant_id = ? AND session_id = ? AND state = 'RECOVERY_BLOCKED'",
+                ManagedSessionStore.sessionScopeKey(parked.tenantId(), parked.sessionId()),
+                parked.operationId(), parked.tenantId(), parked.sessionId());
+        if (rows.isEmpty()) {
+            return Optional.empty();
+        }
+        long revision = ((Number) rows.getFirst().get("target_revision")).longValue();
+        String title = (String) readMap((String) rows.getFirst().get("request_json")).get("title");
+        JournalEvidence evidence = journalEvidence(parked.tenantId(), parked.sessionId(),
+                "renameSession", "hosted-title:" + revision);
+        // A row without its title can still be proven undelivered, never
+        // matched (review of #14475).
+        if (evidence.admittedDigest() != null) {
+            if (title != null && DigestUtils.sha256Hex(title).equals(evidence.admittedDigest())) {
+                return Optional.of(AcceptanceVerdict.committed());
+            }
+            LOG.warn("Journal title digest differs from its delivery tenant={}"
+                    + " session={} revision={}", parked.tenantId(), parked.sessionId(), revision);
+            return Optional.of(AcceptanceVerdict.unknown());
+        }
+        return Optional.of(evidence.sealed()
+                ? AcceptanceVerdict.notCommitted(SESSION_TITLE_UNDELIVERED)
+                : AcceptanceVerdict.unknown());
+    }
+
+    @Override
+    @Transactional
+    public boolean settleParkedRename(ParkedOperation parked, AcceptanceVerdict verdict,
+            long retryAt) {
+        String tenantId = parked.tenantId();
+        String sessionId = parked.sessionId();
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        // Only a still-parked row: the claim's own late reply or a later
+        // title may have settled it since the evidence was read.
+        var rows = jdbc.queryForList("SELECT operation_key, idempotency_key, request_json"
+                        + " FROM ma_operation WHERE scope_key = ? AND operation_kind = 'RENAME'"
+                        + " AND operation_id = ? AND tenant_id = ? AND session_id = ? AND state ="
+                        + " 'RECOVERY_BLOCKED' AND delivery_state = 'BLOCKED' FOR UPDATE",
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), parked.operationId(),
+                tenantId, sessionId);
+        if (rows.isEmpty()) {
+            return false;
+        }
+        String operationKey = (String) rows.getFirst().get("operation_key");
+        String key = (String) rows.getFirst().get("idempotency_key");
+        String receipt = ManagedReceipts.commandKey(tenantId, "RENAME_SESSION", key);
+        long now = clock.millis();
+        switch (verdict.acceptance()) {
+            case COMMITTED -> {
+                // The Harness holds the title, so the Session shows it in
+                // whatever status a lifecycle has since reached, unless a
+                // deletion took the Session away. A later title would have
+                // superseded this row, so it is still the newest.
+                String title = (String) readMap((String) rows.getFirst().get("request_json"))
+                        .get("title");
+                if (title != null && !List.of("DELETING", "DELETED").contains(session.status())) {
+                    jdbc.update("UPDATE ma_session SET title = ?, gmt_modified = ?,"
+                                    + " version = version + 1 WHERE tenant_id = ? AND session_id = ?",
+                            title, now, tenantId, sessionId);
+                    appendEvent(tenantId, sessionId, null,
+                            mutationEvent(SessionMutationKind.RENAME, "completed"),
+                            Map.of("sessionId", sessionId, "metadata", Map.of("title", title)),
+                            false, mutationSource("RENAME_SESSION", key, "completed"), now);
+                }
+                jdbc.update("UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ?"
+                                + " WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
+                        now, receipt);
+                jdbc.update("UPDATE ma_operation SET state = 'COMPLETED', phase = 'COMPLETED',"
+                                + " admission_stage = 'HARNESS_CONFIRMED', delivery_state = 'COMPLETED',"
+                                + " failure_code = NULL, claim_owner = NULL, claim_until = NULL,"
+                                + " gmt_modified = ?, completed_at = ? WHERE operation_key = ?",
+                        now, now, operationKey);
+            }
+            case NOT_COMMITTED -> {
+                // Terminal yet blocked, as every proven non-commit is: its
+                // available_at moves past every scan for good.
+                jdbc.update("UPDATE ma_request_receipt SET state = 'FAILED', gmt_modified = ?"
+                                + " WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'"
+                                + " AND state = 'PENDING'",
+                        now, receipt);
+                jdbc.update("UPDATE ma_operation SET state = 'FAILED', phase = 'FAILED',"
+                                + " admission_stage = 'JAVA_DURABLE', delivery_state = 'BLOCKED',"
+                                + " failure_code = ?, available_at = ?, claim_owner = NULL,"
+                                + " claim_until = NULL, gmt_modified = ?, completed_at = ?"
+                                + " WHERE operation_key = ?",
+                        verdict.failureCode(), Long.MAX_VALUE, now, now, operationKey);
+            }
+            case UNKNOWN -> jdbc.update("UPDATE ma_operation SET available_at = ?, gmt_modified = ?,"
+                            + " attempt_count = attempt_count + 1 WHERE operation_key = ?",
+                    Math.addExact(lifecycleDatabaseTime(), Math.max(0, retryAt - now)), now,
+                    operationKey);
+        }
+        return true;
     }
 
     @Override
@@ -2577,14 +3080,14 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean settleTaskCancel(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             TaskCancelOutcome outcome, long retryAt) {
+        if (owner == null) {
+            throw new IllegalArgumentException(
+                    "A parked task cancel settles through settleParkedOperation");
+        }
         requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
-        // A leased claim settles only while it is still this worker's; a
-        // parked one (owner null) only while it is still parked, so a
-        // reconciliation can never rewrite an outcome already recorded.
-        String claim = owner == null
-                ? " AND state = 'RECOVERY_BLOCKED' AND delivery_state = 'BLOCKED'"
-                : " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "";
+        // A leased claim settles only while it is still this worker's.
+        String claim = " AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_owner = ? AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "";
         List<Object> arguments = new ArrayList<>();
         String update = switch (outcome.status()) {
             case "completed" -> {
@@ -2629,10 +3132,7 @@ public class ManagedAgentStore implements AgentStateStore {
             default -> throw new IllegalArgumentException(
                     "Unknown task cancel outcome " + outcome.status());
         };
-        arguments.addAll(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), tenantId, sessionId, operationId));
-        if (owner != null) {
-            arguments.addAll(List.of(owner, claimGeneration));
-        }
+        arguments.addAll(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), sessionOperationTarget(sessionId), tenantId, sessionId, operationId, owner, claimGeneration));
         return jdbc.update(
                         update
                                 + " WHERE scope_key = ? AND operation_kind IN "
@@ -2830,7 +3330,9 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId) {
-        return findSessionOperation(tenantId, sessionId, operationId, false);
+        return findSessionOperation(tenantId, sessionId, operationId, false)
+                .or(() -> findTurnCommandOperation(tenantId, sessionId,
+                        operationId));
     }
 
     @Override
@@ -2841,9 +3343,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 new ArrayList<>(
                         jdbc.query(
                                 // Every blocked lifecycle shape is
-                                // re-driven: only CLOSE and DELETE are ever
-                                // delivered (an archive completes at
-                                // admission), and both publish their waits.
+                                // re-driven. CLOSE, DELETE and CWD_CHANGE
+                                // are the delivered kinds (an archive
+                                // completes at admission): CLOSE and DELETE
+                                // publish their writer-live and stale-boot
+                                // waits, and a cwd change stays bounded by
+                                // its own attempt budget in the coordinator
+                                // (review round 2, R2-15).
                                 "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE"
                                     + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE',"
                                     + " 'CWD_CHANGE') AND state IN ('PENDING', 'RUNNING',"
@@ -2879,8 +3385,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         "UPDATE ma_operation SET phase = 'RUNNING', state = 'RUNNING', delivery_state = 'LEASED', claim_owner = ?, claim_until = (" + ManagedSchemaTime.SQL_NOW + " + ?), claim_generation = claim_generation + 1, gmt_modified = ? WHERE scope_key = ? AND operation_kind IN "
                                 + SESSION_OPERATION_KINDS
                                 + " AND target_key = ? AND tenant_id = ? AND session_id = ? AND"
-                                + " operation_id = ? AND state IN ('PENDING', 'RUNNING',"
-                                + " 'RECOVERY_BLOCKED') AND ((delivery_state IN ('PENDING', 'BLOCKED')"
+                                + " operation_id = ? AND (state IN ('PENDING', 'RUNNING')"
+                                + " OR state = 'RECOVERY_BLOCKED' AND operation_kind IN "
+                                + LIFECYCLE_WAIT_KINDS
+                                + ") AND ((delivery_state IN ('PENDING', 'BLOCKED')"
                                 + " AND available_at <= ?) OR (delivery_state = 'LEASED' AND"
                                 + " claim_until < " + ManagedSchemaTime.SQL_NOW + "))",
                         owner,
@@ -3261,17 +3769,24 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest) {
-        CommandRecord command = findCommand(tenantId, operation,
-                idempotencyKey).orElseThrow(() -> new ApiException(
-                        HttpStatus.CONFLICT, "idempotency_conflict",
-                        "The idempotency key is already in use."));
+        ManagedReceipts.Receipt command = ManagedReceipts.command(jdbc,
+                tenantId, operation, idempotencyKey, false);
+        if (command == null) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict",
+                    "The idempotency key is already in use.");
+        }
         if (!command.requestDigest().equals(requestDigest)) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "idempotency_conflict",
                     "The idempotency key was reused with different content.");
         }
+        String operationId = command.resultOperationKey() == null ? null
+                : jdbc.queryForObject("SELECT operation_id FROM ma_operation"
+                                + " WHERE operation_key = ?", String.class,
+                        command.resultOperationKey());
         return new Admission(command.sessionId(), command.turnId(), true,
-                false);
+                false, operationId);
     }
 
     public Optional<CommandRecord> findCommand(String tenantId,
@@ -3515,21 +4030,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId))) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_model", "The model is not published by this host");
         }
-        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
-        requireSessionStatus(session.status(), "ACTIVE");
-        requireCwdChangeRegistryFacts(session);
-        if (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)) {
-            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval");
-        }
-        if (hasOpenOperation(tenantId, sessionId) || hasPendingRenameDelivery(tenantId, sessionId)
-                || hasRetainedRuntimeSession(tenantId, sessionId)
-                || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
-                        + " AND status = 'RECOVERY_BLOCKED' LIMIT 1", tenantId, sessionId).isEmpty()
-                || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
-                        + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
-                        + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {
-            throw new ApiException(HttpStatus.CONFLICT, "session_context_busy", "The Session requires settlement");
-        }
+        requireIdlePolicyChange(session);
         long current = jdbc.queryForObject("SELECT model_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L) {
@@ -3556,6 +4057,156 @@ public class ManagedAgentStore implements AgentStateStore {
         appendEvent(tenantId, sessionId, null, "session.model.changed",
                 Map.of("modelId", modelId, "revision", revision), false, null, now);
         return new WebShellModelChangeResult(sessionId, new WebShellModelSelection(modelId, revision), false);
+    }
+
+    @Override
+    public Map<String, WebShellApprovalSelection> findApprovalSelections(String tenantId,
+            List<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<Object> args = new ArrayList<>();
+        args.add(tenantId);
+        args.addAll(sessionIds);
+        Map<String, WebShellApprovalSelection> result = new HashMap<>();
+        jdbc.query("SELECT session_id, COALESCE(selected_approval_mode, approval_mode) AS mode,"
+                        + " approval_revision FROM ma_session WHERE tenant_id=? AND session_id IN ("
+                        + placeholders(sessionIds.size()) + ") AND session_kind='PUBLIC'",
+                row -> { result.put(row.getString("session_id"), new WebShellApprovalSelection(
+                        row.getString("mode"), row.getLong("approval_revision"))); }, args.toArray());
+        return result;
+    }
+
+    @Override
+    public Set<String> findApprovalOwners(String tenantId, String actorId, List<String> sessionIds) {
+        if (sessionIds.isEmpty() || actorId == null || actorId.isEmpty()) {
+            return Set.of();
+        }
+        List<Object> args = new ArrayList<>();
+        args.add(tenantId);
+        args.add(ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        args.addAll(sessionIds);
+        return new HashSet<>(jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=?"
+                        + " AND COALESCE(owner_actor_key, creator_actor_key)=? AND session_id IN ("
+                        + placeholders(sessionIds.size()) + ")", String.class, args.toArray()));
+    }
+
+    @Override
+    public WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
+            String promptId) {
+        var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision,"
+                        + " s.approval_revision AS selected_revision, s.agent_id, s.agent_definition_digest,"
+                        + " s.workspace_id, s.tool_profile FROM ma_turn t JOIN ma_session s"
+                        + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
+                        + " WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?", (row, index) -> {
+                    if (("qwen-code".equals(row.getString("agent_id"))
+                            ? row.getString("agent_definition_digest") != null
+                            : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
+                            || !(WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
+                            || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
+                        return null;
+                    }
+                    String mode = row.getString("approval_mode");
+                    if (mode == null && row.getLong("selected_revision") != 0) {
+                        throw new ApiException(HttpStatus.CONFLICT, "approval_snapshot_missing", "The Turn has no approval snapshot");
+                    }
+                    // Legacy prompt replays must preserve the original absence of a selection.
+                    return mode == null ? null : new WebShellApprovalSelection(mode, row.getLong("approval_revision"));
+                }, tenantId, sessionId, promptId);
+        if (rows.size() != 1) {
+            throw new ApiException(HttpStatus.CONFLICT, "turn_not_found", "The Turn was not found");
+        }
+        return rows.getFirst();
+    }
+
+    @Override
+    @Transactional
+    public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Approval selection requires a Workspace Session");
+        }
+        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId());
+        if (!access.canRead()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found");
+        }
+        if (!workspaces.isSessionOwner(tenantId, actorId, sessionId)
+                || !access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
+                    "Only the Session owner with OPERATOR access may change approval policy");
+        }
+        String scope = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys
+                .key("SET_APPROVAL", sessionId, actorId);
+        var namespace = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
+        var scopeKind = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope.ACTOR;
+        ManagedReceipts.Receipt replay = ManagedReceipts.find(jdbc, namespace, tenantId,
+                scopeKind, scope, key, false);
+        if (replay != null) {
+            if (!digest.equals(replay.requestDigest())
+                    || !sessionId.equals(replay.sessionId())
+                    || !"SET_APPROVAL".equals(replay.operation())
+                    || !java.util.Arrays.equals(actorId.getBytes(StandardCharsets.UTF_8),
+                            replay.actorKey())) {
+                throw new ApiException(HttpStatus.CONFLICT, "idempotency_conflict",
+                        "The idempotency key was reused with different content");
+            }
+            Map<String, Object> result = readMap(replay.resultJson());
+            return new WebShellApprovalChangeResult(sessionId, (String) result.get("mode"),
+                    ((Number) result.get("revision")).longValue(), true);
+        }
+        if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
+                || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
+                || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
+            throw new ApiException(HttpStatus.CONFLICT, "unsupported_feature", "Approval selection is unavailable");
+        }
+        if (!WorkspaceToolProfiles.supportsApprovalMode(mode)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_approval_mode", "The approval mode is unavailable");
+        }
+        requireIdlePolicyChange(session);
+        long current = jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id = ?"
+                + " AND session_id = ?", Long.class, tenantId, sessionId);
+        if (current != expectedRevision || current >= 9_007_199_254_740_991L) {
+            throw new ApiException(HttpStatus.CONFLICT, "approval_selection_conflict", "The approval revision changed");
+        }
+        long revision = current + 1;
+        long now = clock.millis();
+        jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, gmt_modified = ?,"
+                + " version = version + 1 WHERE tenant_id = ? AND session_id = ? AND approval_revision = ?",
+                mode, revision, now, tenantId, sessionId, current);
+        ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,
+                "SET_APPROVAL", actorId.getBytes(StandardCharsets.UTF_8), sessionId, null,
+                "COMPLETED", session.status(), true, now);
+        jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?",
+                writeJson(Map.of("mode", mode, "revision", revision)),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.receiptKey(
+                        namespace, tenantId, scopeKind, scope, key));
+        appendEvent(tenantId, sessionId, null, "session.approval.changed",
+                Map.of("mode", mode, "revision", revision), false, null, now);
+        return new WebShellApprovalChangeResult(sessionId, mode, revision, false);
+    }
+
+    private void requireIdlePolicyChange(SessionRecord session) {
+        String tenantId = session.tenantId();
+        String sessionId = session.sessionId();
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+        requireSessionStatus(session.status(), "ACTIVE");
+        requireCwdChangeRegistryFacts(session);
+        if (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)) {
+            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval");
+        }
+        if (hasOpenOperation(tenantId, sessionId) || hasPendingRenameDelivery(tenantId, sessionId)
+                || hasRetainedRuntimeSession(tenantId, sessionId)
+                || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND status = 'RECOVERY_BLOCKED' LIMIT 1", tenantId, sessionId).isEmpty()
+                || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
+                        + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
+                        + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT, "session_context_busy", "The Session requires settlement");
+        }
     }
 
     // Reads leave the Turn's input out; the public view never shows it.
@@ -3627,8 +4278,12 @@ public class ManagedAgentStore implements AgentStateStore {
                 pairs.append(",");
             }
             pairs.append(" (?, ?)");
-            arguments.add(turn.sessionId());
-            arguments.add(turn.turnId());
+            // Bound as identity bytes: H2 types row-comparison parameters
+            // as VARCHAR, and a command it recompiles after binding (any
+            // new session or SET in between) refuses VARBINARY rows against
+            // VARCHAR ones. Bytes compare the same on MySQL and MariaDB.
+            arguments.add(ManagedSchemaKeys.identity(turn.sessionId()));
+            arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest
@@ -3955,8 +4610,13 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
+        // #14387: a Turn marked recovery-blocked (its workflow's Harness
+        // generation was lost) is parked, never re-dispatched — without
+        // the carve-out the sweep would claim → refuse → release it once
+        // per tick forever. A cancel still scans it: settling the Turn
+        // cancelled is the cancel's own act, not a re-dispatch.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code <> '" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "') AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -4002,6 +4662,28 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
                         + " ('ACCEPTED', 'RUNNING', 'CANCELLING')",
                 tenantId, sessionId, turnId, owner);
+    }
+
+    @Override
+    @Transactional
+    public boolean markTurnRecoveryBlocked(String tenantId,
+            String sessionId, String turnId, String owner,
+            String errorCode, String errorMessage) {
+        requireLegacyMutation(tenantId, sessionId);
+        long now = clock.millis();
+        // The verdict parks the Turn out of the dispatch sweep, so it is
+        // fenced by the live dispatch lease like every terminal decision:
+        // an owner whose lease already expired holds nothing to park with.
+        return jdbc.update("UPDATE ma_turn SET error_code = ?,"
+                        + " error_message = ?, dispatch_owner = NULL,"
+                        + " dispatch_lease_until = NULL, gmt_modified = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND"
+                        + " dispatch_owner = ? AND dispatch_lease_until >= ?"
+                        + " AND status IN ('ACCEPTED', 'RUNNING',"
+                        + " 'CANCELLING')",
+                errorCode, errorMessage, now, tenantId, sessionId, turnId,
+                owner, now) == 1;
     }
 
     @Override
@@ -4171,6 +4853,7 @@ public class ManagedAgentStore implements AgentStateStore {
             appendEvent(tenantId, sessionId, turnId, "turn.started",
                     Map.of("turnId", turnId), false, null, now);
         }
+        settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
     @Transactional
@@ -4231,6 +4914,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Hosted Harness recovery epoch changed");
         }
+        settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
     @Transactional
@@ -4589,6 +5273,9 @@ public class ManagedAgentStore implements AgentStateStore {
         List<EventRecord> committed = appendEvents(tenantId, sessionId,
                 turnId, eventEpoch, lastSourceId, session.lastSequence(),
                 projected, now);
+        if (terminal != null) {
+            settleTurnCommands(tenantId, sessionId, turnId, now);
+        }
         publishAfterCommit(committed);
     }
 
@@ -4685,6 +5372,51 @@ public class ManagedAgentStore implements AgentStateStore {
         return List.copyOf(records);
     }
 
+    @Override
+    @Transactional
+    public boolean cancelUnadmittedTurn(String tenantId, String sessionId,
+            String turnId, String owner) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
+        if (!"CANCELLING".equals(turn.status())
+                || !owner.equals(turn.dispatchOwner())
+                || turn.harnessEventEpoch() != null
+                || !turn.submissionAttempted()) {
+            return false;
+        }
+        var heads = WorkspaceOperations.rows(jdbc,
+                "SELECT tenant_id, session_id, state, writer_lease_until FROM"
+                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ?"
+                        + " AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId));
+        long now = lifecycleDatabaseTime();
+        if (heads.size() != 1 || !tenantId.equals(heads.getFirst().get("tenant_id"))
+                || !sessionId.equals(heads.getFirst().get("session_id"))
+                || !("SEALED".equals(heads.getFirst().get("state"))
+                        || "ACTIVE".equals(heads.getFirst().get("state"))
+                                && heads.getFirst().get("writer_lease_until") instanceof Number until
+                                && until.longValue() <= now)) {
+            return false;
+        }
+        // The locked, fenced writer cannot admit a late HTTP request. Even an
+        // idle journal may contain this prompt's completed admission: replay
+        // its real result instead of replacing it with cancellation.
+        java.util.Set<String> accepted;
+        try {
+            accepted = WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
+                    tenantId, sessionId, false,
+                    WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2);
+        } catch (ApiException unverified) {
+            return false;
+        }
+        if (accepted.contains(turn.promptId()) || !withdrawSubmissionAttempted(tenantId, sessionId, turnId, owner)) {
+            return false;
+        }
+        cancelBeforeAdmission(tenantId, sessionId, turnId, owner);
+        return "CANCELLED".equals(requireTurn(tenantId, sessionId, turnId).status());
+    }
+
     @Transactional
     public void cancelBeforeAdmission(String tenantId, String sessionId,
             String turnId, String owner) {
@@ -4712,17 +5444,31 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         appendEvent(tenantId, sessionId, turnId, "turn.cancelled",
                 Map.of("turnId", turnId), true, null, now);
+        settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
     @Transactional
     public void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message) {
+        settleFailedTurn(tenantId, sessionId, turnId, owner, code, message, true);
+    }
+
+    @Transactional
+    public boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
+            String turnId, String owner, String message) {
+        return settleFailedTurn(tenantId, sessionId, turnId, owner,
+                "managed_runtime_recovery_blocked", message, false);
+    }
+
+    private boolean settleFailedTurn(String tenantId, String sessionId, String turnId,
+            String owner, String code, String message, boolean allowCancelling) {
         // Session-row lock first; see recordAdmission.
         requireLegacySessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
-                || !ACTIVE_TURN_STATES.contains(turn.status())) {
-            return;
+                || !ACTIVE_TURN_STATES.contains(turn.status())
+                || !allowCancelling && "CANCELLING".equals(turn.status())) {
+            return false;
         }
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET status ="
@@ -4732,15 +5478,18 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " dispatch_lease_until = NULL, version = version +"
                         + " 1 WHERE tenant_id = ? AND session_id = ? AND"
                         + " turn_id = ? AND dispatch_owner = ? AND status IN"
-                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
+                        + (allowCancelling ? " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
+                                : " ('ACCEPTED', 'RUNNING') AND")
                         + " dispatch_lease_until >= ?",
                 code, message, now, now, tenantId, sessionId, turnId, owner,
                 now);
         if (updated != 1) {
-            return;
+            return false;
         }
         appendEvent(tenantId, sessionId, turnId, "turn.failed",
                 Map.of("code", code, "message", message), true, null, now);
+        settleTurnCommands(tenantId, sessionId, turnId, now);
+        return true;
     }
 
     @Transactional
@@ -5299,12 +6048,24 @@ public class ManagedAgentStore implements AgentStateStore {
             String payloadDigest, long now) {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, gmt_create, gmt_modified, model_id, model_revision) SELECT"
+                        + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
-                        + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END"
+                        + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
+                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
+                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
+                        + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
+                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
+                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
+                        + " THEN approval_revision ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, writeJson(input),
-                payloadDigest, now, now, tenantId, sessionId);
+                payloadDigest, now, now, "qwen-code".getBytes(StandardCharsets.UTF_8),
+                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
+                "qwen-code".getBytes(StandardCharsets.UTF_8), tenantId, sessionId);
     }
 
     private void insertCommand(String tenantId, String operation,
@@ -5447,11 +6208,30 @@ public class ManagedAgentStore implements AgentStateStore {
             }
         }
         if ("ACTIVE".equals(status)
-                && (hasActiveTurn(session.tenantId(), session.sessionId())
+                && (hasLiveTurn(session.tenantId(), session.sessionId())
                         || session.workspace() != null && hasDecidableAction(session))) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active",
                     "The Session has an active Turn.");
         }
+    }
+
+    /**
+     * #14387: the lifecycle gate's active-Turn count. A Turn marked
+     * recovery-blocked is parked out of the dispatch sweep and never
+     * drives again — it is evidence of an unwitnessed execution, not live
+     * work, so it does not hold a lifecycle operation open. A CANCELLING
+     * Turn still blocks: its cancel is in flight.
+     */
+    private boolean hasLiveTurn(String tenantId, String sessionId) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " ma_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? AND status IN"
+                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING')"
+                        + " AND (status = 'CANCELLING' OR error_code IS NULL"
+                        + " OR error_code <> '"
+                        + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "')",
+                Integer.class, tenantId, sessionId);
+        return count != null && count > 0;
     }
 
     private boolean hasDecidableAction(SessionRecord session) {
@@ -5480,7 +6260,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "CLOSING";
             case ARCHIVE -> "ARCHIVING";
             case DELETE -> "DELETING";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
@@ -5490,7 +6270,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.close.requested";
             case ARCHIVE -> "session.archive.requested";
             case DELETE -> "session.delete.requested";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
@@ -5500,7 +6280,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.closed";
             case ARCHIVE -> "session.archived";
             case DELETE -> "session.deleted";
-            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL ->
+            case ACTION_RESPONSE, CWD_CHANGE, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
                     throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }

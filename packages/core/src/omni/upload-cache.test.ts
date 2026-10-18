@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { OmniUploadCache } from './upload-cache.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 let root: string;
 
@@ -25,11 +26,9 @@ afterEach(async () => {
 
 const SHA = 'a'.repeat(64);
 
-// chmod-based denial tests are meaningless on Windows and as root (root
-// bypasses file permission bits).
-const canDropPermissions =
-  process.platform !== 'win32' &&
-  (typeof process.getuid !== 'function' || process.getuid() !== 0);
+// chmod-based denial tests are meaningless where permission bits do not
+// bind: on Windows, and for root with its DAC capabilities.
+const canDropPermissions = arePermissionBitsEnforced();
 
 async function listCorruptBackups(): Promise<string[]> {
   return (await fs.readdir(root)).filter((n) =>

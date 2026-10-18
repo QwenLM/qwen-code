@@ -30,6 +30,9 @@ class RuntimeHarnessDrainTest {
     private final RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
             WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
     private final RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope, "harness", "local-process", "storage");
+    private final RuntimeScope sharedScope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+            WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+    private final RuntimeProvisionRequest shared = new RuntimeProvisionRequest(sharedScope, null, "local-process", "storage");
     private final Provider provisioner = new Provider();
     private final Transport transport = new Transport();
 
@@ -1068,6 +1071,97 @@ class RuntimeHarnessDrainTest {
         }
     }
 
+    @Test
+    void sessionCloseReleasesOnlyTheClosingSessionsSharedRuntimeSessions() throws Exception {
+        var binding = ready(bindings, shared);
+        var ours = bindings.admitSession(sessions, sharedCandidate(binding, "harness", "ours"));
+        assertNotNull(sessions.compareAndSet(ours, ours.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        var theirs = bindings.admitSession(sessions, sharedCandidate(binding, "harness-b", "theirs"));
+        assertNotNull(sessions.compareAndSet(theirs, theirs.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        try (var service = service()) {
+            service.requestHarnessDrain("tenant", "harness");
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(sharedScope, "ours").getState());
+            assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(sharedScope, "theirs").getState());
+            var current = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.READY, current.getState());
+            assertFalse(current.isDrainRequested());
+            assertNull(current.getDrainReceipt());
+            assertEquals(1, transport.releases);
+            assertEquals(0, provisioner.stops);
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(1, transport.releases);
+        }
+    }
+
+    @Test
+    void resourceCleanupReleasesSharedRuntimeSessionsWithTheClosingSessionsClaim() throws Exception {
+        var binding = ready(bindings, shared);
+        var ours = bindings.admitSession(sessions, sharedCandidate(binding, "harness", "ours"));
+        assertNotNull(sessions.compareAndSet(ours, ours.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        var theirs = bindings.admitSession(sessions, sharedCandidate(binding, "harness-b", "theirs"));
+        assertNotNull(sessions.compareAndSet(theirs, theirs.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        var authority = resourceClaim();
+        try (var service = service()) {
+            service.drainHarnessResources("tenant", "harness", authority, false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(sharedScope, "ours").getState());
+            assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(sharedScope, "theirs").getState());
+            var current = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.READY, current.getState());
+            assertNull(current.getDrainReceipt());
+            assertEquals(1, transport.releases);
+            assertEquals(0, provisioner.stops);
+        }
+    }
+
+    @Test
+    void resourceCleanupWithAForeignClaimLeavesSharedRuntimeSessionsActive() throws Exception {
+        var binding = ready(bindings, shared);
+        var ours = bindings.admitSession(sessions, sharedCandidate(binding, "harness", "ours"));
+        assertNotNull(sessions.compareAndSet(ours, ours.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        resourceClaim();
+        try (var service = service()) {
+            var failure = assertThrows(ExecutionException.class, () -> service.drainHarnessResources("tenant", "harness",
+                    new RuntimeLifecycleAuthority("foreign", 1), false).toCompletableFuture().get());
+            assertEquals("runtime_admission_closed",
+                    assertInstanceOf(RuntimeBrokerException.class, failure.getCause()).getCode());
+            assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(sharedScope, "ours").getState());
+            assertEquals(0, transport.releases);
+            assertEquals(0, provisioner.stops);
+        }
+    }
+
+    @Test
+    void lostSharedWorkerBlocksSessionClose() throws Exception {
+        var binding = ready(bindings, shared);
+        var ours = bindings.admitSession(sessions, sharedCandidate(binding, "harness", "ours"));
+        assertNotNull(sessions.compareAndSet(ours, ours.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        try (var service = service()) {
+            service.requestHarnessDrain("tenant", "harness");
+            var failure = assertThrows(ExecutionException.class,
+                    () -> service.drainHarnessSession("tenant", "harness").toCompletableFuture().get());
+            assertEquals("workspace_close_identity_unverified",
+                    assertInstanceOf(RuntimeBrokerException.class, failure.getCause()).getCode());
+            assertTrue(sessions.findById(sharedScope, "ours").isActive());
+            var current = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.READY, current.getState());
+            assertNull(current.getDrainReceipt());
+            assertEquals(0, transport.releases);
+            assertEquals(0, provisioner.stops);
+            // Even with the storage fenced for retirement, one Session's close
+            // never stops a shared worker through the loss path.
+            bindings.requestStorageFence("tenant", "storage", "retirement");
+            var fenced = assertThrows(ExecutionException.class,
+                    () -> service.drainHarnessSession("tenant", "harness").toCompletableFuture().get());
+            assertEquals("workspace_close_identity_unverified",
+                    assertInstanceOf(RuntimeBrokerException.class, fenced.getCause()).getCode());
+            assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(binding.getBindingId()).getState());
+            assertEquals(0, provisioner.stops);
+        }
+    }
+
     private RuntimeRecoveryEvidence evidence(RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
             RuntimeRecoveryEvidence.Fact fact) {
         return new RuntimeRecoveryEvidence(fact.name(), fact, "operator-attested:original", Instant.now(), "original-host",
@@ -1129,7 +1223,11 @@ class RuntimeHarnessDrainTest {
     }
 
     private RuntimeBindingRecord ready(RuntimeBindingRepository registry) {
-        var initial = registry.findOrCreate(request);
+        return ready(registry, request);
+    }
+
+    private RuntimeBindingRecord ready(RuntimeBindingRepository registry, RuntimeProvisionRequest provisionRequest) {
+        var initial = registry.findOrCreate(provisionRequest);
         var claimed = registry.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
         var seed = claimed.getProvisionSeed();
         var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9999"),
@@ -1143,6 +1241,11 @@ class RuntimeHarnessDrainTest {
     private RuntimeSessionRecord candidate(RuntimeBindingRecord binding, String id) {
         return new RuntimeSessionRecord(new RuntimeSession("harness", id, "bootstrap", scope), binding.getBindingId(),
                 binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
+    }
+
+    private RuntimeSessionRecord sharedCandidate(RuntimeBindingRecord binding, String harnessSessionId, String id) {
+        return new RuntimeSessionRecord(new RuntimeSession(harnessSessionId, id, "bootstrap", sharedScope),
+                binding.getBindingId(), binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
     }
 
     private RuntimeDrainReceipt receipt(RuntimeBindingRecord binding) {

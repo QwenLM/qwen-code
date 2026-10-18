@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,11 +17,20 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Repository
 public class ManagedWorkspaceRegistry {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
+    private com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings ssh;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void configureSsh(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
+        this.ssh = properties.getRuntimeBroker().getSsh();
+    }
 
     public ManagedWorkspaceRegistry(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
@@ -115,11 +125,13 @@ public class ManagedWorkspaceRegistry {
             String actorId, String afterId, int limit) {
         byte[] key = actorKey(tenantId, actorId);
         byte[] after = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(afterId == null ? "" : afterId);
-        return jdbc.query("SELECT r.workspace_id, r.display_name, r.state, a.role FROM ma_workspace r"
+        List<WorkspaceSummary> rows = jdbc.query("SELECT r.workspace_id, r.display_name, r.state, r.workspace_kind, s.storage_kind, a.role FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id AND a.workspace_id = r.workspace_id"
+                        + " LEFT JOIN ma_storage s ON s.tenant_id = r.tenant_id AND s.storage_id = r.storage_id"
                         + " WHERE r.tenant_id = ? AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
                         + " AND r.workspace_id > ? ORDER BY r.workspace_id LIMIT ?",
                 (result, row) -> summary(result), tenantId, key, after, limit);
+        return withDefaults(tenantId, rows);
     }
 
     public WorkspaceSummary findReadable(String tenantId, String actorId,
@@ -127,15 +139,16 @@ public class ManagedWorkspaceRegistry {
         byte[] key = actorKey(tenantId, actorId);
         List<WorkspaceSummary> rows = jdbc.query(
                 "SELECT r.workspace_id, r.display_name, r.state,"
-                        + " a.role FROM ma_workspace r"
+                        + " r.workspace_kind, s.storage_kind, a.role FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
+                        + " LEFT JOIN ma_storage s ON s.tenant_id = r.tenant_id AND s.storage_id = r.storage_id"
                         + " WHERE r.tenant_id = ? AND r.workspace_id = ?"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
                         + " 'OPERATOR', 'OWNER')",
                 (result, row) -> summary(result), tenantId, workspaceId, key);
-        return rows.isEmpty() ? null : rows.getFirst();
+        return rows.isEmpty() ? null : withDefaults(tenantId, rows).getFirst();
     }
 
     /**
@@ -199,7 +212,34 @@ public class ManagedWorkspaceRegistry {
                 result.getString("display_name"), state,
                 WorkspaceAccess.valueOf(result.getString("role"))
                         .atLeast(WorkspaceAccess.OPERATOR)
-                        && "ACTIVE".equals(state));
+                        && "ACTIVE".equals(state), ".",
+                "OWNER".equals(result.getString("role")) && "ACTIVE".equals(state)
+                        && "ROOT".equals(result.getString("workspace_kind"))
+                        && !"SSH_LOCAL".equals(result.getString("storage_kind"))
+                        && !"CSI".equals(result.getString("storage_kind")));
+    }
+
+    private List<WorkspaceSummary> withDefaults(String tenantId, List<WorkspaceSummary> items) {
+        List<String> keys = items.stream().map(WorkspaceSummary::workspaceId)
+                .filter(id -> id.matches("workspace-[a-f0-9]{64}"))
+                .map(id -> id.substring("workspace-".length())).toList();
+        if (keys.isEmpty()) {
+            return items;
+        }
+        List<Object> arguments = new java.util.ArrayList<>();
+        arguments.add(tenantId);
+        arguments.addAll(keys);
+        Map<String, String> defaults = new HashMap<>();
+        jdbc.query("SELECT receipt_key, result_json FROM ma_request_receipt WHERE tenant_id = ?"
+                        + " AND namespace = 'WORKSPACE_CREATE' AND state = 'COMPLETED' AND receipt_key IN ("
+                        + String.join(",", java.util.Collections.nCopies(keys.size(), "?")) + ")",
+                row -> {
+                    var details = WorkspaceCreationRoots.details(row.getString("result_json"), row.getString("receipt_key"));
+                    defaults.put(details.workspaceId(), details.cwdRelative() == null ? "." : details.cwdRelative());
+                }, arguments.toArray());
+        return items.stream().map(item -> new WorkspaceSummary(item.workspaceId(), item.displayName(),
+                item.state(), item.canCreateSession(), defaults.getOrDefault(item.workspaceId(), "."),
+                item.canSelectDirectory())).toList();
     }
 
     private static ReadableGrant readableGrant(ResultSet result)
@@ -227,7 +267,10 @@ public class ManagedWorkspaceRegistry {
     }
 
     public record WorkspaceSummary(String workspaceId, String displayName,
-            String state, boolean canCreateSession) {
+            String state, boolean canCreateSession, String defaultCwdRelative, boolean canSelectDirectory) {
+        public WorkspaceSummary(String workspaceId, String displayName, String state, boolean canCreateSession) {
+            this(workspaceId, displayName, state, canCreateSession, ".", false);
+        }
     }
 
     /**
@@ -306,6 +349,22 @@ public class ManagedWorkspaceRegistry {
                     "workspace_forbidden", "Workspace cannot be used.");
         }
         WorkspaceRecord record = records.getFirst();
+        var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
+                String.class, com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenantId, record.getStorageId()));
+        if (!remote.isEmpty()) {
+            boolean allowed = false;
+            if (ssh != null && ssh.isEnabled()) {
+                try {
+                    String nodeId = JSON.readTree(remote.getFirst()).path("nodeId").asText();
+                    allowed = ssh.getNodes().stream().anyMatch(node -> node.nodeId().equals(nodeId) && node.admits(tenantId, actorId));
+                } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+                    throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable", "Workspace registration is invalid.");
+                }
+            }
+            if (!allowed) {
+                throw new ApiException(HttpStatus.FORBIDDEN, "runtime_node_forbidden", "New SSH Sessions are disabled or unauthorized.");
+            }
+        }
         if (record.getState() != WorkspaceState.ACTIVE) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -319,6 +378,16 @@ public class ManagedWorkspaceRegistry {
                 descriptorRef(record.getConfigRef(), record.getPolicyRef()), 1);
         return new ResolvedBinding(binding, record.getConfigRef(),
                 record.getPolicyRef());
+    }
+
+    ResolvedBinding resolveOwnedDirectory(String tenant, String actor, String workspace, String cwd) {
+        ResolvedBinding resolved = resolveForCreation(tenant, actor, new WorkspaceSelection(workspace, cwd));
+        if (accessOf(tenant, actor, workspace) != WorkspaceAccess.OWNER
+                || jdbc.queryForList("SELECT 1 FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
+                        + " AND workspace_kind = 'ROOT'", Integer.class, tenant, workspace).isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "workspace_not_found", "Workspace not found.");
+        }
+        return resolved;
     }
 
     public static byte[] actorKey(String tenantId, String actorId) {
