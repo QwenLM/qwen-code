@@ -126,6 +126,9 @@ export interface SidebarConnection {
   workspaceCwd: string;
   /** Partial: suites flip single feature bits on the connection at runtime. */
   capabilities?: Partial<SidebarConnectionCapabilities>;
+  /** Suites flip transcript-load state at runtime (restore-failure flows). */
+  error?: Error | undefined;
+  loadingTranscript: boolean;
   sessionContext?:
     | { kind: 'workspace'; cwd: string }
     | { kind: 'standalone' }
@@ -140,6 +143,7 @@ export function createSidebarConnection(
     status: 'connected',
     sessionId: null,
     workspaceCwd: '/tmp/project',
+    loadingTranscript: false,
     ...overrides,
   };
 }
@@ -147,6 +151,11 @@ export function createSidebarConnection(
 export interface SidebarWorkspaceClient {
   workspaceByCwd: Mock;
   searchWorkspaceSessions?: Mock;
+  /** Paginated workspace catalog read (standalone-sessions flows). */
+  listWorkspaceSessionsPage: Mock;
+  /** Paginated standalone catalog read. */
+  listStandaloneSessionsPage: Mock;
+  archiveStandaloneSessions: Mock;
 }
 
 export interface SidebarWorkspace {
@@ -169,6 +178,9 @@ export function createSidebarWorkspace(options: {
           searchWorkspaceSessions: vi.fn().mockResolvedValue({ results: [] }),
         }
       : {}),
+    listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
+    listStandaloneSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
+    archiveStandaloneSessions: vi.fn(),
     workspaceByCwd: vi.fn(() => ({
       listWorkspaceSessions: vi.fn().mockResolvedValue([]),
       listSessionGroups: vi.fn().mockResolvedValue({
