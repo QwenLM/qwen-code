@@ -65,7 +65,7 @@ class HostedMcpRestartFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
     // Per-case evidence letter: FG12c keeps its directory, FG12d's release
     // cell lands under its own so the two letters' artefacts never mix.
-    private String caseLetter = "fg12c";
+    private String caseLetter;
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -177,6 +177,7 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void harnessKillDuringConfigureResolvesThroughStatusOnMySql()
             throws Exception {
+        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String configuration = uuid();
@@ -250,6 +251,7 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql()
             throws Exception {
+        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String operation = uuid();
@@ -460,6 +462,7 @@ class HostedMcpRestartFaultGatesIT {
     @Test
     @Timeout(600)
     void workerKillWhileIdleNeverMintsAFreshOwnerOnMySql() throws Exception {
+        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         JsonNode identity = configuration(session.id()).path("run")
@@ -528,6 +531,7 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void workerKillDuringOperationSettlesOutcomeUnknownOnMySql()
             throws Exception {
+        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String operation = uuid();
@@ -554,6 +558,7 @@ class HostedMcpRestartFaultGatesIT {
     @Test
     @Timeout(600)
     void stdioKillDuringRequestSettlesOutcomeUnknownOnMySql() throws Exception {
+        caseLetter = "fg12c";
         SessionRef session = createSession();
         baseline(session);
         String operation = uuid();
@@ -1377,6 +1382,7 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private void saveEvidence() {
+        assertThat(caseLetter).as("caseLetter must be set by each test").isNotNull();
         try {
             Path destination = Files.createDirectories(Path.of(
                     "target/fg12-cases", caseLetter, tenant));
