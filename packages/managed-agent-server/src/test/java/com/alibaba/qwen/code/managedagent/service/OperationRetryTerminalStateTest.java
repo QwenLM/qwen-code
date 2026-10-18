@@ -1391,10 +1391,10 @@ class OperationRetryTerminalStateTest {
     // state into a permanent one) and its attempts must not spend the
     // budget. Past the budget the wait is published with the daemon's own
     // code so it stays visible, still re-driven by the recovery scan.
-    @ParameterizedTest(name = "attemptCount = {0}")
-    @ValueSource(ints = {0, 10})
+    @ParameterizedTest(name = "attemptCount = {0}, wrapped = {1}")
+    @CsvSource({"0, false", "10, false", "0, true", "10, true"})
     void aDaemonRecoveryRefusalWaitsWithoutSpendingTheBudget(
-            int attemptCount) {
+            int attemptCount, boolean wrapped) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
@@ -1420,7 +1420,17 @@ class OperationRetryTerminalStateTest {
         DaemonHttpException recovery = mock(DaemonHttpException.class);
         when(recovery.getErrorCode())
                 .thenReturn("hosted_lifecycle_recovery_required");
-        doThrow(recovery).when(harness).detachLifecycle(any());
+        // The SDK wraps the daemon's refusal in MutationOutcomeUnknownException
+        // once the non-idempotent detach may have been delivered, so the wire
+        // code lives on the cause chain — the reason daemonRefusalCode walks it.
+        if (wrapped) {
+            com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException outcome =
+                    mock(com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException.class);
+            when(outcome.getCause()).thenReturn(recovery);
+            doThrow(outcome).when(harness).detachLifecycle(any());
+        } else {
+            doThrow(recovery).when(harness).detachLifecycle(any());
+        }
 
         SessionLifecycleCoordinator coordinator =
                 new SessionLifecycleCoordinator(
