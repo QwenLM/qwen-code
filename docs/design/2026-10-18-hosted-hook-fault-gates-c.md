@@ -45,9 +45,9 @@ Hook-only definition on `hosted-workspace-files/1`:
 - No MCP server in the definition, so Hooks do not ride MCP's owner
   (`hosted-harness-session.ts:4619-4625`).
 - The profile is Hook-capable and closes under lifecycle protocol 1
-  (`WorkspaceToolProfiles.java:26-33`), so every reload after a kill mints a
-  fresh owner. That is the path under test: recovery must reach the record's
-  own `runtimeSessionId`, not the current activation.
+  (`WorkspaceToolProfiles.java:26-33`), so a Turn reload after a kill mints a
+  fresh owner. Recovery must therefore reach the record's own
+  `runtimeSessionId`, not the current activation.
 - The packaged Harness, the in-JVM Spring with its embedded broker, a real
   MySQL 8.4 schema, the durable worker, and a delegated cgroup v2 root.
 - `HostedHookFaultProcess` (`src/test/resources/hosted-hook-fault-process.mjs`)

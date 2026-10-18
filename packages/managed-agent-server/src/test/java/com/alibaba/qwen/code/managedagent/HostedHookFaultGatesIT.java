@@ -91,7 +91,7 @@ class HostedHookFaultGatesIT {
     @Test
     @Timeout(300)
     void fg13cHarnessKillDuringCommandSettlesFromTheOriginalReceiptOnMySql() throws Exception {
-        boot("15000", "default");
+        boot("30000", "default");
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
         submit(session, "FG13_HARNESS_KILL");
@@ -110,6 +110,10 @@ class HostedHookFaultGatesIT {
         JsonNode worker = worker(session);
         int generation = generation(session);
 
+        // The kill must land while the gate still holds: a command that had
+        // already allowed would let the old Harness settle the record, and
+        // the later status read would pass without proving anything.
+        assertThat(events("hook.allow")).as("Hook still holding at the kill").isEmpty();
         replaceHarness();
         // The public POST can be refused by the control plane's active-Turn
         // check before it reaches the Harness, so it is a refusal probe, not
@@ -131,6 +135,8 @@ class HostedHookFaultGatesIT {
         waitFor(() -> assertThat(harnessHookStatus(session, executionId, clientId).path("state").asText())
                 .isEqualTo("settled"));
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        assertThat(worker(session)).isEqualTo(worker);
+        assertThat(generation(session)).isEqualTo(generation);
         JsonNode executionAfter = hookExecution(session);
         assertThat(executionAfter.path("resultRef").isNull()).isFalse();
         assertThat(executionAfter.path("hookExecutionId").asText()).isEqualTo(executionId);

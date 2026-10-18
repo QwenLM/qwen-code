@@ -37,9 +37,8 @@ Issue #14449 跟踪 FG13，即 Hosted Hook 两个域 `hook_registration` 与
 - 定义里没有 MCP server，因此 Hook 不跟随 MCP 的 owner
   （`hosted-harness-session.ts:4619-4625`）。
 - 该 profile 支持 Hook，且关闭走 lifecycle 协议 1
-  （`WorkspaceToolProfiles.java:26-33`），所以每次杀进程后的重载都会新建 owner。
-  这正是被测路径：恢复必须到达记录自身的 `runtimeSessionId`，而不是当前
-  activation。
+  （`WorkspaceToolProfiles.java:26-33`），所以杀进程后的一次 Turn 重载会新建
+  owner；恢复必须到达记录自身的 `runtimeSessionId`，而不是当前 activation。
 - 打包 Harness、带内嵌 Broker 的进程内 Spring、真实 MySQL 8.4 schema、
   durable worker，以及委派的 cgroup v2 根。
 - `HostedHookFaultProcess`（`src/test/resources/hosted-hook-fault-process.mjs`）
