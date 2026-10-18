@@ -42,8 +42,10 @@ public final class WorkspaceToolProfiles {
     }
 
     public static boolean supportsApprovalSelection(StoreModels.SessionRecord session) {
-        return session.workspace() != null && "qwen-code".equals(session.agentId())
-                && session.agentDefinitionDigest() == null
+        return session.workspace() != null
+                && ("qwen-code".equals(session.agentId())
+                        ? session.agentDefinitionDigest() == null
+                        : session.agentDefinitionDigest() != null)
                 && (FILES.equals(session.toolProfile()) || isPublicShell(session.toolProfile()));
     }
 

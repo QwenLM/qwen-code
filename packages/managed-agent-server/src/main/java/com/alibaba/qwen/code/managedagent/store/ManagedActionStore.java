@@ -146,6 +146,8 @@ public class ManagedActionStore {
                 continue;
             }
             ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
+            jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
+                    String.class, tenantId, sessionId);
             JsonNode envelope = event.deepCopy();
             ((com.fasterxml.jackson.databind.node.ObjectNode) envelope).remove("subject");
             if (event.has("subject")) {
@@ -283,6 +285,29 @@ public class ManagedActionStore {
                                 + ManagedExtensionProjection.recordKey(
                                         sessionId, "action_decision", id + ":" + decided.digest());
                 digest = decided.digest();
+                if ("allow".equals(body.path("optionId").asText()) && publicPlanExit(tenantId, sessionId, options)) {
+                    JsonNode input = read(new String(resource(options.path("inputRef"), "managed-tool-input", resources).bytes(),
+                            StandardCharsets.UTF_8));
+                    JsonNode request = read(input.path("payloadJson").asText());
+                    JsonNode continuation = read(new String(resource(options.path("continuationRef"),
+                            "hosted-approval-continuation", resources).bytes(), StandardCharsets.UTF_8));
+                    require(sessionId.equals(input.path("harnessSessionId").asText())
+                            && "exit_plan_mode".equals(request.path("toolName").asText())
+                            && request.path("input").size() == 1 && request.path("input").path("plan").isTextual()
+                            && !request.path("input").path("plan").asText().isBlank()
+                            && continuation.path("promptId").equals(options.path("turnId"))
+                            && continuation.path("calls").size() == 1
+                            && continuation.path("calls").get(0).path("call").path("name").asText().equals("exit_plan_mode")
+                            && continuation.path("calls").get(0).path("call").path("callId").equals(options.path("functionCallId"))
+                            && continuation.path("calls").get(0).path("inputRef").equals(options.path("inputRef"))
+                            && continuation.path("calls").get(0).path("actionId").asText().equals(id));
+                    jdbc.update("UPDATE ma_session SET plan_enabled=FALSE, approval_revision=approval_revision+1,"
+                                    + " version=version+1, gmt_modified=? WHERE tenant_id=? AND session_id=? AND plan_enabled=TRUE"
+                                    + " AND approval_revision=(SELECT approval_revision FROM ma_turn WHERE tenant_id=?"
+                                    + " AND session_id=? AND prompt_id=? AND plan_enabled=TRUE)",
+                            event.path("occurredAt").asLong(), tenantId, sessionId, tenantId, sessionId,
+                            options.path("turnId").asText());
+                }
             } else {
                 require(decision.isNull());
             }
@@ -343,6 +368,14 @@ public class ManagedActionStore {
                     "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                     scope, recordKey, revision, ManagedSchemaKeys.key(scope, resourceId), tenantId, workspaceId, sessionId, resourceId);
         }
+    }
+
+    private boolean publicPlanExit(String tenantId, String sessionId, JsonNode options) {
+        return options.path("v").asInt() == 3 && options.path("toolName").asText().equals("exit_plan_mode")
+                && jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn t JOIN ma_session s ON s.tenant_id=t.tenant_id"
+                        + " AND s.session_id=t.session_id WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?"
+                        + " AND t.plan_enabled=TRUE AND s.session_kind='PUBLIC' AND s.parent_session_id IS NULL",
+                        Integer.class, tenantId, sessionId, options.path("turnId").asText()) == 1;
     }
 
     public Optional<Action> find(String tenantId, String sessionId, String id) {
@@ -606,6 +639,11 @@ public class ManagedActionStore {
                                                 "action_not_found",
                                                 "The Action was not found."));
         JsonNode o = action.options();
+        if (publicPlanExit(tenantId, sessionId, o)
+                && (!admitted || !workspaceOperatorAdmits(tenantId, ownerRow, actorId))) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "action_forbidden",
+                    "Only the Session owner with current OPERATOR access may approve a public plan.");
+        }
         if (body.size() != 3
                 || !body.path("optionId").isTextual()
                 || !List.of("allow", "deny").contains(body.path("optionId").asText())

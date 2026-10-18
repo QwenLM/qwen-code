@@ -226,6 +226,22 @@ class ChildResultRelayTest {
             RelayRow before = row.get();
             row.set(new RelayRow(before.tenantId(),
                             before.parentSessionId(), before.childRunId(),
+                            before.creationKey(),
+                            (String) args.getArgument(3), "close_debt",
+                            (String) args.getArgument(1),
+                            ((Number) args.getArgument(6)).longValue(),
+                            before.attempts(),
+                            ((Number) args.getArgument(4)).longValue(),
+                            (String) args.getArgument(5), before.createdAt(),
+                            clock.get()));
+            return null;
+        }).when(store).retainCloseDebt(any(RelayRow.class), anyString(),
+                        anyString(), any(), anyLong(), any(), anyLong(),
+                        anyLong());
+        Mockito.doAnswer(args -> {
+            RelayRow before = row.get();
+            row.set(new RelayRow(before.tenantId(),
+                            before.parentSessionId(), before.childRunId(),
                             before.creationKey(), before.childSessionId(),
                             args.getArgument(2), null, 0, before.attempts(),
                             before.nextRetryAt(),
@@ -511,6 +527,32 @@ class ChildResultRelayTest {
                 anyString(), anyLong(), anyLong(), anyLong());
     }
 
+    // #14165 FG10d: where the host cannot close the child, the blocked run
+    // still retires under `unknown` — the close debt parks beside the
+    // classification, never in place of it (the debt arm used to write
+    // `done`/`delivered` for a run that delivered nothing). A proven
+    // failure keeps `done`.
+    @Test
+    void aBlockedRunWithoutCloseRetainsTheDebtUnderUnknown() {
+        when(childCloses.closeSupported()).thenReturn(false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "RUNNING", null,
+                        AgentStateStore.WORKFLOW_RECOVERY_BLOCKED, true,
+                        "epoch-old"));
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("recovery_blocked");
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        verify(store).retainCloseDebt(any(RelayRow.class), anyString(),
+                Mockito.eq("unknown"), Mockito.eq(CHILD), anyLong(), any(),
+                anyLong(), anyLong());
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
     // A Turn parked while RUNNING and then cancelled keeps the mark
     // (insertCancelCommand never clears error_code), so the blocked branch
     // must not fire for it: the coordinator is driving that cancel to its
@@ -570,6 +612,9 @@ class ChildResultRelayTest {
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
                 .containsExactly("fail");
+        verify(store).retainCloseDebt(any(RelayRow.class), anyString(),
+                Mockito.eq("done"), Mockito.eq(CHILD), anyLong(), any(),
+                anyLong(), anyLong());
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
         // Capability returns: the next due scan discharges exactly the
@@ -659,9 +704,9 @@ class ChildResultRelayTest {
 
     // The bounded give-up on a capability-less host settles the parent's
     // record on time — the give-up and its started pairing are proven
-    // facts — but never classifies `unknown` over the owed close: the
-    // row parks as `close_debt`, still names the child, and discharges
-    // once a capable scan sees it.
+    // facts — and retires the walk under `unknown`, never `done`: the
+    // owed close parks on its own close-debt row, still names the child,
+    // and discharges once a capable scan sees it.
     @Test
     void aGiveUpWithoutCloseSupportRetainsItsCloseDebt() {
         when(childCloses.closeSupported()).thenReturn(false);
@@ -669,6 +714,9 @@ class ChildResultRelayTest {
                 "watching", "owner", now + 30_000, 63, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
         relay.scan();
+        verify(store).retainCloseDebt(any(RelayRow.class), anyString(),
+                Mockito.eq("unknown"), Mockito.eq(CHILD), anyLong(), any(),
+                anyLong(), anyLong());
         assertThat(row.get().state()).isEqualTo("close_debt");
         assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         assertThat(harness.operations)
