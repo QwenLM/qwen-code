@@ -25,6 +25,12 @@ const { createHttpManagedSessionStores } = await import(
 const { openManagedSession } = await import(
   core('managed-runtime/managed-session-assembly')
 );
+const { LocalManagedSessionAuthority } = await import(
+  core('managed-runtime/managed-session-authority')
+);
+const { ManagedSessionRecordSink } = await import(
+  core('managed-runtime/managed-session-record-sink')
+);
 const { createManagedHarnessHandle } = await import(
   core('managed-runtime/managed-harness-factory')
 );
@@ -53,6 +59,33 @@ const headers = {
 };
 const checks = [];
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const wires = [];
+async function observedFetch(url, options = {}) {
+  if (!input.cold || new URL(url).pathname.startsWith('/fixture:'))
+    return fetch(url, options);
+  const wire = {
+    url: String(url),
+    method: options.method ?? 'GET',
+    headers: Object.fromEntries(new Headers(options.headers)),
+    body: options.body ?? null,
+    startedAt: Date.now(),
+  };
+  wires.push(wire);
+  try {
+    const response = await fetch(url, options);
+    wire.status = response.status;
+    wire.responseHeaders = Object.fromEntries(response.headers);
+    wire.responseBase64 = Buffer.from(
+      await response.clone().arrayBuffer(),
+    ).toString('base64');
+    return response;
+  } catch (error) {
+    wire.failure = String(error);
+    throw error;
+  } finally {
+    wire.endedAt = Date.now();
+  }
+}
 async function post(
   origin,
   route,
@@ -61,7 +94,7 @@ async function post(
   expected = 200,
   label = route,
 ) {
-  const response = await fetch(new URL(route, origin), {
+  const response = await observedFetch(new URL(route, origin), {
     method: 'POST',
     headers: supplied,
     body: JSON.stringify(body),
@@ -84,6 +117,555 @@ const broker = (route, body = {}) =>
     runtimeSessionId: key.sessionId,
     ...body,
   });
+
+const binaryTypes = new Set([-2, -3, -4, 2004]);
+const rowCells = (row) => JSON.parse(row);
+const cell = (row, column) => {
+  const [, type, value] = rowCells(row).find(([name]) => name === column);
+  return value === null || !binaryTypes.has(type)
+    ? value
+    : Buffer.from(value, 'base64').toString('utf8');
+};
+const changedRow = (row, fields, clear = false) =>
+  JSON.stringify(
+    rowCells(row).map(([name, type, original]) => {
+      const value = Object.hasOwn(fields, name)
+        ? fields[name]
+        : clear
+          ? null
+          : undefined;
+      return [
+        name,
+        type,
+        value === undefined
+          ? original
+          : value === null
+            ? null
+            : binaryTypes.has(type)
+              ? Buffer.from(String(value)).toString('base64')
+              : String(value),
+      ];
+    }),
+  );
+function tupleKey(...parts) {
+  const digest = createHash('sha256');
+  for (const part of parts) {
+    const bytes = Buffer.from(part);
+    const length = Buffer.alloc(4);
+    length.writeInt32BE(bytes.length);
+    digest.update(length).update(bytes);
+  }
+  return digest.digest('hex');
+}
+const wireJson = (wire) =>
+  JSON.parse(Buffer.from(wire.responseBase64, 'base64').toString('utf8'));
+const wirePath = (wire) => new URL(wire.url).pathname;
+const writerWires = (id, suffix) =>
+  wires.filter(
+    (wire) =>
+      wirePath(wire).endsWith(suffix) &&
+      wire.body &&
+      JSON.parse(wire.body).writerId === id,
+  );
+async function fileImage() {
+  const image = [];
+  async function walk(relative) {
+    const file = path.join(workspace, relative);
+    const stat = await fs.lstat(file, { bigint: true });
+    image.push({
+      path: relative,
+      dev: String(stat.dev),
+      ino: String(stat.ino),
+      mode: String(stat.mode),
+      bytes: stat.isFile()
+        ? (await fs.readFile(file)).toString('base64')
+        : null,
+    });
+    if (stat.isDirectory())
+      for (const name of (await fs.readdir(file)).sort())
+        await walk(path.join(relative, name));
+  }
+  await walk('');
+  return image;
+}
+async function coldImage(label) {
+  const snapshot = await fixture('/fixture:cold-observe');
+  snapshot.files = await fileImage();
+  snapshot.worker = structuredClone(worker.ready);
+  assert.equal(Object.keys(snapshot.image).length, 35);
+  await fs.writeFile(
+    path.join(output, `${label}.json`),
+    JSON.stringify(snapshot, null, 2),
+  );
+  return snapshot;
+}
+function sameSideEffects(before, after) {
+  assert.deepEqual(after.files, before.files);
+  assert.deepEqual(after.worker, before.worker);
+  assert.deepEqual(after.counters, before.counters);
+}
+function unchanged(before, after) {
+  sameSideEffects(before, after);
+  assert.deepEqual(after.image, before.image);
+}
+function timeBetween(value, before, after) {
+  assert.ok(
+    Number.isSafeInteger(value) && value >= before.now && value <= after.now,
+  );
+  return value;
+}
+function publicationImage(before, after, ref, bytes) {
+  const expected = structuredClone(before.image);
+  const scope = tupleKey(key.tenantId, key.sessionId);
+  const added = after.image.ma_resource.filter(
+    (row) => !before.image.ma_resource.includes(row),
+  );
+  assert.equal(added.length, 1);
+  const created = timeBetween(
+    Number(cell(added[0], 'gmt_create')),
+    before,
+    after,
+  );
+  expected.ma_resource.push(
+    changedRow(
+      before.image.ma_resource[0],
+      {
+        resource_key: tupleKey(scope, ref.resourceId),
+        session_scope_key: scope,
+        tenant_id: key.tenantId,
+        workspace_id: key.workspaceId,
+        session_id: key.sessionId,
+        resource_id: ref.resourceId,
+        kind: ref.kind,
+        schema_version: ref.schemaVersion,
+        byte_length: bytes.length,
+        sha256: hash(bytes),
+        storage_kind: 'MYSQL_INLINE',
+        inline_bytes: bytes.toString('utf8'),
+        publish_command_id: ref.resourceId,
+        state: 'PUBLISHED',
+        gmt_create: created,
+        last_verified_at: created,
+      },
+      true,
+    ),
+  );
+  expected.ma_resource.sort();
+  sameSideEffects(before, after);
+  assert.deepEqual(after.image, expected);
+}
+function installedImage(
+  before,
+  after,
+  wire,
+  activation,
+  writerId,
+  writerToken,
+) {
+  const request = JSON.parse(wire.body);
+  const receipt = wireJson(wire);
+  const expected = structuredClone(before.image);
+  const revision = request.expectedJournalRevision + 1;
+  assert.equal(request.operation, 'installActivation');
+  assert.equal(request.writerGeneration, 2);
+  assert.equal(request.activationEpoch, 2);
+  assert.equal(request.eventCount, 1);
+  assert.equal(receipt.journalRevision, revision);
+  assert.equal(receipt.replayed, false);
+  const records = Buffer.from(request.recordBytesBase64, 'base64')
+    .toString('utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  const events = records
+    .map((record) => record.managedSession)
+    .filter((record) => record.kind === 'activation.changed');
+  assert.equal(events.length, 1);
+  const event = events[0].payload;
+  assert.equal(event.activationId, activation.activationId);
+  assert.equal(event.epoch, 2);
+  assert.equal(event.workerId, writerId);
+  assert.equal(event.phase, 'active');
+  assert.equal(event.boundaryRef, null);
+  const head = after.image.ma_session_head[0];
+  const now = timeBetween(Number(cell(head, 'gmt_modified')), before, after);
+  expected.ma_session_head = [
+    changedRow(before.image.ma_session_head[0], {
+      journal_revision: revision,
+      committed_sequence: request.lastSequence,
+      last_commit_digest: request.commitDigest,
+      activation_epoch: 2,
+      activation_id: activation.activationId,
+      activation_phase: 'active',
+      activation_event_epoch: 2,
+      activation_expires_at: event.expiresAt,
+      activation_head_revision: revision,
+      gmt_modified: now,
+    }),
+  ];
+  const recordBytes = Buffer.from(request.recordBytesBase64, 'base64');
+  assert.equal(hash(recordBytes), request.recordDigest);
+  expected.ma_session_journal_tx.push(
+    changedRow(
+      before.image.ma_session_journal_tx[0],
+      {
+        tenant_id: key.tenantId,
+        workspace_id: key.workspaceId,
+        session_id: key.sessionId,
+        journal_revision: revision,
+        command_key_hash: hash(`${request.operation}\0${request.commandId}`),
+        transaction_id: request.transactionId,
+        operation: request.operation,
+        command_id: request.commandId,
+        content_digest: request.contentDigest,
+        first_sequence: request.firstSequence,
+        last_sequence: request.lastSequence,
+        event_count: request.eventCount,
+        events_digest: request.eventsDigest,
+        previous_commit_digest: request.previousCommitDigest,
+        commit_digest: request.commitDigest,
+        writer_generation: 2,
+        writer_id: writerId,
+        writer_token_hash: hash(writerToken),
+        activation_epoch: 2,
+        latest_checkpoint_resource_id: request.latestCheckpointResourceId,
+        record_encoding: 'identity',
+        record_bytes: recordBytes.toString('utf8'),
+        byte_length: recordBytes.length,
+        record_digest: request.recordDigest,
+        gmt_create: now,
+      },
+      true,
+    ),
+  );
+  assert.equal(request.resources.length, 1);
+  const resource = request.resources[0];
+  assert.equal(resource.resourceId, event.installRef.resourceId);
+  assert.equal(resource.kind, 'managed-activation-install');
+  const scope = tupleKey(key.tenantId, key.sessionId);
+  const bytes = Buffer.from(resource.bytesBase64, 'base64');
+  assert.equal(hash(bytes), resource.digest);
+  assert.equal(bytes.length, resource.byteLength);
+  expected.ma_resource.push(
+    changedRow(
+      before.image.ma_resource[0],
+      {
+        resource_key: tupleKey(scope, resource.resourceId),
+        session_scope_key: scope,
+        tenant_id: key.tenantId,
+        workspace_id: key.workspaceId,
+        session_id: key.sessionId,
+        resource_id: resource.resourceId,
+        kind: resource.kind,
+        schema_version: resource.schemaVersion,
+        byte_length: resource.byteLength,
+        sha256: resource.digest,
+        storage_kind: 'MYSQL_INLINE',
+        inline_bytes: bytes.toString('utf8'),
+        publish_command_id: request.commandId,
+        state: 'REFERENCED',
+        gmt_create: now,
+        last_verified_at: now,
+      },
+      true,
+    ),
+  );
+  expected.ma_resource_ref.push(
+    changedRow(
+      before.image.ma_resource_ref[0],
+      {
+        session_scope_key: scope,
+        owner_kind: 'JOURNAL',
+        owner_key: scope,
+        owner_revision: revision,
+        resource_key: tupleKey(scope, resource.resourceId),
+        tenant_id: key.tenantId,
+        workspace_id: key.workspaceId,
+        session_id: key.sessionId,
+        journal_revision: revision,
+        resource_id: resource.resourceId,
+        gmt_create: now,
+      },
+      true,
+    ),
+  );
+  for (const rows of Object.values(expected)) rows.sort();
+  sameSideEffects(before, after);
+  assert.deepEqual(after.image, expected);
+}
+
+async function coldTakeover(cut, writerId, writerToken) {
+  await stopActivation();
+  await stores.assertWritable();
+  const renewal = writerWires(writerId, '/writers:renew').at(-1);
+  assert.equal(renewal.status, 200);
+  const transaction = writerWires(writerId, '/transactions:commit').at(-1);
+  assert.equal(transaction.status, 200);
+  const preparation = wires.find(
+    (wire) =>
+      wirePath(wire).endsWith('/executions:prepare') && wire.status === 200,
+  );
+  assert.ok(preparation);
+  const { resultJson } = await fixture('/fixture:cold-result', {
+    executionCallId: cut.executionCallId,
+  });
+  assert.deepEqual(JSON.parse(resultJson), cut.result);
+  const beforePublication = await coldImage('cold-before-publication');
+  const bytes = Buffer.from(resultJson, 'utf8');
+  const resourceId = randomUUID();
+  const ref = await stores.toolResultResources.publish(
+    'managed-tool-result-content',
+    bytes,
+    resourceId,
+  );
+  const published = await coldImage('cold-published');
+  publicationImage(beforePublication, published, ref, bytes);
+  const publication = writerWires(writerId, '/tool-results:publish').at(-1);
+  assert.equal(publication.status, 200);
+  assert.deepEqual(
+    await stores.toolResultResources.publish(ref.kind, bytes, resourceId),
+    ref,
+  );
+  const retried = await coldImage('cold-publication-retried');
+  unchanged(published, retried);
+  await stores.stopLocal();
+  assert.ok(
+    writerWires(writerId, '/writers:renew').every(
+      (wire) => wire.status === 200 && wire.endedAt,
+    ),
+  );
+  assert.equal(writerWires(writerId, '/writers:renew').at(-1), renewal);
+  const quiet = await coldImage('cold-renewals-joined');
+  unchanged(retried, quiet);
+  assert.equal(
+    Number(cell(quiet.image.ma_session_head[0], 'writer_generation')),
+    1,
+  );
+  assert.equal(
+    Number(cell(quiet.image.ma_session_head[0], 'activation_epoch')),
+    1,
+  );
+  const expiry = Math.max(
+    Number(cell(quiet.image.ma_session_head[0], 'writer_lease_until')),
+    Number(cell(quiet.image.ma_session_head[0], 'activation_expires_at')),
+  );
+  const clock = [{ now: quiet.now, expiry }];
+  const deadline = Date.now() + 20000;
+  let now = quiet.now;
+  while (now <= expiry) {
+    const sample = await fixture('/fixture:cold-observe');
+    now = sample.now;
+    clock.push({ now: sample.now, expiry });
+    assert.deepEqual(sample.image, quiet.image);
+    assert.deepEqual(sample.counters, quiet.counters);
+    if (sample.now > expiry) break;
+    assert.ok(Date.now() < deadline, 'Natural database lease expiry timed out');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await fs.writeFile(
+    path.join(output, 'cold-clock.json'),
+    JSON.stringify(clock, null, 2),
+  );
+  const expired = await coldImage('cold-expired');
+  unchanged(quiet, expired);
+  const candidates = [randomUUID(), randomUUID()];
+  const client = (id) => {
+    const result = createHttpManagedSessionStores({
+      baseUrl: input.adapter,
+      sessionKey: key,
+      writerId: id,
+      writerToken,
+      leaseDurationMs: 300000,
+      requestTimeoutMs: 20000,
+      fetchFn: observedFetch,
+    });
+    coldStores.push(result);
+    return result;
+  };
+  const clients = candidates.map(client);
+  await fixture('/fixture:cold-arm', { writers: candidates });
+  const acquiring = Promise.allSettled(
+    clients.map((candidate) =>
+      candidate.journalStore.open({ sessionKey: key }),
+    ),
+  );
+  let contention;
+  let outcomes;
+  try {
+    contention = await fixture('/fixture:cold-release');
+  } finally {
+    outcomes = await acquiring;
+  }
+  await fs.writeFile(
+    path.join(output, 'cold-contention.json'),
+    JSON.stringify(contention, null, 2),
+  );
+  assert.equal(
+    outcomes.filter((outcome) => outcome.status === 'fulfilled').length,
+    1,
+  );
+  const winner = outcomes.findIndex(
+    (outcome) => outcome.status === 'fulfilled',
+  );
+  const loser = 1 - winner;
+  const journal = outcomes[winner].value;
+  assert.equal(journal.takeoverCommitProof, undefined);
+  const claims = candidates.flatMap((id) =>
+    writerWires(id, '/writers:acquire'),
+  );
+  assert.equal(claims.length, 2);
+  assert.deepEqual(claims.map((wire) => wire.status).sort(), [200, 409]);
+  assert.equal(
+    wireJson(claims.find((wire) => wire.status === 409)).error.code,
+    'managed_session_writer_conflict',
+  );
+  const grant = wireJson(
+    writerWires(candidates[winner], '/writers:acquire')[0],
+  );
+  assert.equal(grant.writerGeneration, 2);
+  assert.equal(grant.activationEpoch, 1);
+  assert.equal(grant.replayed, false);
+  const claimed = await coldImage('cold-claimed');
+  const expected = structuredClone(expired.image);
+  const head = expired.image.ma_session_head[0];
+  assert.equal(grant.journalRevision, Number(cell(head, 'journal_revision')));
+  assert.equal(
+    grant.committedSequence,
+    Number(cell(head, 'committed_sequence')),
+  );
+  assert.equal(grant.lastCommitDigest, cell(head, 'last_commit_digest'));
+  const claimedAt = timeBetween(grant.leaseUntil - 300000, expired, claimed);
+  expected.ma_session_head = [
+    changedRow(head, {
+      writer_id: candidates[winner],
+      writer_generation: 2,
+      writer_lease_until: grant.leaseUntil,
+      gmt_modified: claimedAt,
+    }),
+  ];
+  sameSideEffects(expired, claimed);
+  assert.deepEqual(claimed.image, expected);
+  for (const warm of Object.values(contention.warmed)) {
+    assert.equal(warm.isolation, input.cold);
+    assert.equal(warm.autoCommit, false);
+    assert.equal(warm.writerId, writerId);
+    assert.equal(warm.writerGeneration, 1);
+    assert.equal(warm.journalRevision, grant.journalRevision);
+    assert.equal(warm.committedSequence, grant.committedSequence);
+    assert.equal(warm.lastCommitDigest, grant.lastCommitDigest);
+    assert.equal(warm.activationEpoch, 1);
+  }
+  await assert.rejects(
+    client(candidates[loser]).journalStore.open({ sessionKey: key }),
+    (error) =>
+      error.status === 409 &&
+      error.remoteCode === 'managed_session_writer_conflict',
+  );
+  unchanged(claimed, await coldImage('cold-loser-retried'));
+  async function replay(original, label, code) {
+    const before = await coldImage(`${label}-before`);
+    const response = await observedFetch(original.url, {
+      method: original.method,
+      headers: original.headers,
+      body: original.body,
+      signal: AbortSignal.timeout(20000),
+    });
+    assert.equal(response.status, 409);
+    const answer = await response.json();
+    if (wirePath(original).startsWith('/internal/runtime-broker/')) {
+      assert.equal(answer.code, code);
+      assert.equal(typeof answer.error, 'string');
+      assert.equal(answer.retryable, false);
+    } else {
+      assert.equal(answer.error.code, code);
+    }
+    const expected = structuredClone(before);
+    if (wirePath(original).endsWith('/writers:renew')) expected.counters[3]++;
+    unchanged(expected, await coldImage(`${label}-after`));
+  }
+  await replay(
+    preparation,
+    'cold-before-install-prepare',
+    'csi_original_activation_unavailable',
+  );
+  const restoreStart = wires.length;
+  const authority = await LocalManagedSessionAuthority.open({
+    journal,
+    resources: clients[winner].resourceStore,
+    sessionKey: key,
+    cwd: '/workspace',
+    version: 'hosted-harness/1',
+  });
+  const restored = await coldImage('cold-restored');
+  const restoration = wires.slice(restoreStart);
+  assert.equal(
+    restoration.filter((wire) => wirePath(wire).endsWith('/restore')).length,
+    1,
+  );
+  assert.ok(
+    restoration.some((wire) => wirePath(wire).endsWith('/transactions')),
+  );
+  assert.ok(
+    restoration.every(
+      (wire) =>
+        wire.method === 'GET' &&
+        wire.status === 200 &&
+        (wirePath(wire).endsWith('/restore') ||
+          wirePath(wire).endsWith('/transactions')),
+    ),
+  );
+  unchanged(claimed, restored);
+  assert.equal(authority.currentActivation.epoch, 1);
+  const activation = await authority.installActivation({
+    activationId: randomUUID(),
+    workerId: candidates[winner],
+    leaseDurationMs: 300000,
+  });
+  assert.equal(activation.epoch, 2);
+  const installed = await coldImage('cold-installed');
+  const installs = writerWires(candidates[winner], '/transactions:commit');
+  assert.equal(installs.length, 1);
+  assert.equal(installs[0].status, 200);
+  installedImage(
+    restored,
+    installed,
+    installs[0],
+    activation,
+    candidates[winner],
+    writerToken,
+  );
+  for (const [label, request] of [
+    ['transaction', transaction],
+    ['renewal', renewal],
+    ['publication', publication],
+  ])
+    await replay(
+      request,
+      `cold-stale-${label}`,
+      'managed_session_writer_conflict',
+    );
+  assert.ok(
+    candidates.every((id) => writerWires(id, '/writers:renew').length === 0),
+  );
+  assert.equal(writerWires(writerId, '/writers:seal').length, 0);
+  assert.equal(
+    Number(cell(installed.image.ma_session_head[0], 'activation_epoch')),
+    2,
+  );
+  return {
+    isolation: input.cold,
+    writerGeneration: 2,
+    activationEpoch: 2,
+    publication: ref,
+    originalWriterId: writerId,
+    winner: candidates[winner],
+    loser: candidates[loser],
+    contention,
+    resourceReads:
+      restored.image.ma_request_receipt.length -
+      claimed.image.ma_request_receipt.length,
+  };
+}
 
 // This platform facade delegates all file operations to real handles/inodes.
 // It does not intercept authentication, SQL native fetch, composition, tools or results.
@@ -135,6 +717,8 @@ let worker,
   stores,
   session,
   retirementJoined = false;
+const coldStores = [];
+let stopActivation = async () => {};
 try {
   await fs.writeFile(path.join(workspace, 'marker.txt'), 'alpha\n', {
     mode: 0o640,
@@ -198,8 +782,9 @@ try {
     sessionKey: key,
     writerId,
     writerToken,
-    leaseDurationMs: 300000,
+    leaseDurationMs: input.cold ? 15000 : 300000,
     requestTimeoutMs: 20000,
+    fetchFn: observedFetch,
   });
   const definitionRef = await stores.resourceStore.publish(
     'managed-definition',
@@ -215,7 +800,7 @@ try {
     'managed-root',
     Buffer.from(JSON.stringify({ cwd: '/workspace' })),
   );
-  session = await openManagedSession({
+  const sessionOptions = {
     runtimeBaseDir: output,
     transcriptPath: '',
     sessionId: key.sessionId,
@@ -223,12 +808,75 @@ try {
     cwd: '/workspace',
     version: 'hosted-harness/1',
     workerId: writerId,
-    activationLeaseDurationMs: 300000,
+    activationLeaseDurationMs: input.cold ? 15000 : 300000,
     journalStore: stores.journalStore,
     resourceStore: stores.resourceStore,
     requireNew: true,
     create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
-  });
+  };
+  if (input.cold) {
+    const journal = await stores.journalStore.open({ sessionKey: key });
+    const authority = await LocalManagedSessionAuthority.open({
+      journal,
+      resources: stores.resourceStore,
+      sessionKey: key,
+      cwd: sessionOptions.cwd,
+      version: sessionOptions.version,
+      requireNew: true,
+      create: sessionOptions.create,
+    });
+    const activation = await authority.installActivation({
+      activationId: randomUUID(),
+      workerId: writerId,
+      leaseDurationMs: 15000,
+    });
+    const deny = async () => assert.fail('Cold cut must not close or release');
+    session = {
+      authority,
+      resources: stores.resourceStore,
+      activation,
+      sink: new ManagedSessionRecordSink(
+        authority,
+        stores.resourceStore,
+        () => ({
+          class: 'harness',
+          activation,
+        }),
+      ),
+      close: deny,
+      releaseActivation: deny,
+      replaceActivation: deny,
+    };
+    let stopped = false;
+    let renewal;
+    const failures = [];
+    const timer = setInterval(() => {
+      if (stopped || renewal) return;
+      const pending = authority.renewActivation({ leaseDurationMs: 15000 });
+      renewal = pending;
+      void pending.then(
+        (value) => {
+          if (!value) failures.push('Activation renewal returned no outcome');
+          renewal = undefined;
+        },
+        (error) => {
+          failures.push(String(error));
+          renewal = undefined;
+        },
+      );
+    }, 5000);
+    timer.unref();
+    stopActivation = async () => {
+      stopped = true;
+      clearInterval(timer);
+      await renewal;
+      assert.deepEqual(failures, []);
+      assert.equal(authority.currentActivation.phase, 'active');
+      assert.equal(authority.currentActivation.epoch, 1);
+    };
+  } else {
+    session = await openManagedSession(sessionOptions);
+  }
   const initialActivation = { ...session.activation };
   const control = async (action, extra = {}) =>
     (
@@ -311,6 +959,13 @@ try {
   const invocations = [];
   let firstPins;
   let completedTurns = 0;
+  let firstSettled;
+  let coldResult;
+  let reachCut;
+  const cutReached = new Promise((resolve) => {
+    reachCut = resolve;
+  });
+  let producerState;
   for (const [index, mutation] of [
     {
       name: 'write_file',
@@ -352,7 +1007,7 @@ try {
       },
     );
     const harness = createManagedHarnessHandle(session);
-    await new ManagedHookActivationController(session).runTurn(
+    const producer = new ManagedHookActivationController(session).runTurn(
       promptId,
       async (scope) =>
         harness.run(async () => {
@@ -564,6 +1219,7 @@ try {
               status = (await response.json()).status;
             }
             assert.equal(status.state, 'settled', JSON.stringify(status));
+            firstSettled ??= { executionCallId, result: status.result };
             assert.equal(
               status.result.executionStatus,
               'success',
@@ -606,7 +1262,7 @@ try {
               await fs.readFile(path.join(workspace, 'marker.txt')),
               workingBefore,
             );
-            if (!input.retirement) {
+            if (!input.retirement && !input.cold) {
               const bindRequest = { ...request, action: 'bind', subject: null };
               const nativeRoute = '/internal/runtime-broker/csi/v1/native:read';
               await post(input.broker, nativeRoute, bindRequest, workerHeaders);
@@ -786,6 +1442,16 @@ try {
               }),
               { class: 'trusted_entry' },
             );
+            if (input.cold && member === members.at(-1)) {
+              invocations.push({
+                tool: fc.name,
+                executionCallId,
+                grantDigest: hash(JSON.stringify(grant)),
+                responseParts: status.result.responseParts,
+              });
+              reachCut(firstSettled);
+              await new Promise(() => {});
+            }
             await session.sink.write(tool);
             parent = tool.uuid;
             await harness.resolveAwaitRuntime(executionCallId, outcomeRef);
@@ -830,6 +1496,25 @@ try {
           );
         }),
     );
+    if (input.cold) {
+      producerState = 'pending';
+      void producer.then(
+        () => {
+          producerState = 'completed';
+        },
+        (error) => {
+          producerState = String(error);
+        },
+      );
+      const cut = await Promise.race([
+        cutReached,
+        producer.then(() => assert.fail('Producer completed before cold cut')),
+      ]);
+      coldResult = await coldTakeover(cut, writerId, writerToken);
+      assert.equal(producerState, 'pending');
+      break;
+    }
+    await producer;
     assert.deepEqual(session.activation, initialActivation);
     if (index === 0) firstPins = structuredClone(observation.retainedBackups);
     else
@@ -851,13 +1536,16 @@ try {
     assert.equal(pin.mode, 0o640);
     retained.push(bytes.toString());
   }
-  assert.deepEqual(retained.sort(), ['alpha\n', 'beta\n']);
+  assert.deepEqual(
+    retained.sort(),
+    input.cold ? ['alpha\n'] : ['alpha\n', 'beta\n'],
+  );
   const finalBytes = await fs.readFile(
     path.join(workspace, 'marker.txt'),
     'utf8',
   );
-  assert.equal(finalBytes, 'gamma\n');
-  assert.equal(observation.state.snapshots.length, 2);
+  assert.equal(finalBytes, input.cold ? 'beta\n' : 'gamma\n');
+  assert.equal(observation.state.snapshots.length, input.cold ? 1 : 2);
   let retirementResult = {};
   if (input.retirement) {
     retirementJoined = true;
@@ -902,6 +1590,7 @@ try {
     JSON.stringify(
       {
         ...retirementResult,
+        ...coldResult,
         completedTurns,
         nativeSqlGrant: true,
         workerClosed: true,
@@ -909,7 +1598,7 @@ try {
         retained,
         invocations,
         refusalChecks: checks.length,
-        writerGeneration: 1,
+        writerGeneration: coldResult?.writerGeneration ?? 1,
         originalActivation: initialActivation,
         platformFixture: `${actualPlatform.value} real inodes; explicit mount/proc-fd and placement mapping`,
         nativeCsiDeployment: false,
@@ -926,11 +1615,14 @@ try {
 } finally {
   const cleanupErrors = [];
   for (const close of [
+    () => stopActivation(),
+    ...coldStores.map((candidate) => () => candidate.stopLocal()),
     () =>
-      retirementJoined
+      input.cold || retirementJoined
         ? stores?.stopLocal()
         : session?.close({ releaseActivation: false }),
-    () => (retirementJoined ? stores?.stopLocal() : stores?.close()),
+    () =>
+      input.cold || retirementJoined ? stores?.stopLocal() : stores?.close(),
   ]) {
     try {
       await close();
@@ -954,6 +1646,11 @@ try {
   Object.assign(fs, native);
   for (const handle of opened) await handle.close();
   await rootHandle.close();
+  if (input.cold)
+    await fs.writeFile(
+      path.join(output, 'cold-wires.json'),
+      JSON.stringify(wires, null, 2),
+    );
   await fs.rm(workspace, { recursive: true, force: true });
   assert.deepEqual(cleanupErrors, [], 'Unexpected private cleanup refusal');
 }

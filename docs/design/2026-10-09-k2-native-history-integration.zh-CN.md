@@ -640,6 +640,8 @@ ID 充当权威、重建正向 SQL 行，也不能用 retirement export 授予�
 赋予 InnoDB isolation 资格。真实 READ COMMITTED 与预热 REPEATABLE READ 竞争须分别
 观察。首个 receipt 窗口只是增量，不是全部冷恢复或完整 K2。
 
+[2026-10-18 组件争用测试](2026-10-18-k2-cold-writer-contention.zh-CN.md)增加数据库自然过期后的独立真实 READ COMMITTED 与预热 REPEATABLE READ acquire。其 focused 四项运行包含未改的普通/退役场景、唯一 generation 2 胜者、败者及胜者存活时的重试拒绝、真实恢复和 epoch 2 安装，以及准确旧 transaction/renewal/content-publication 的重放拒绝。测试保持 producer 停在原 cut，并逐个声明的边界比较完整 SQL/文件像。该组件运行不证明 owner 进程崩溃、model2 continuation、claim 后 install 前的崩溃窗口、全部冷 cut 或 native 部署资格。
+
 影响层为私有 Hosted session/tool turn/history 消费者、native activation/conversation/
 checkpoint proof、同 Connection activation/execution 准入，以及 Managed Session
 writer/commit/publication fencing。同批更新 collocated tests 与双语设计。复用既有

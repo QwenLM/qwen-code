@@ -50,9 +50,12 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -75,15 +78,32 @@ class WorkspaceCsiSqlWorkerMySqlIT {
 
     @Test
     void sqlGrantExecutesOriginalWorkerAndContinuesWithRetainedHistory() throws Exception {
-        run(false);
+        run(false, 0);
     }
 
     @Test
     void drainsOriginalWorkerAndReadsRetainedProgressAfterItStops() throws Exception {
-        run(true);
+        run(true, 0);
     }
 
-    private void run(boolean retire) throws Exception {
+    @Test
+    void reclaimsOriginalWriterAtReadCommitted() throws Exception {
+        run(false, Connection.TRANSACTION_READ_COMMITTED);
+    }
+
+    @Test
+    void reclaimsOriginalWriterAtWarmedRepeatableRead() throws Exception {
+        run(false, Connection.TRANSACTION_REPEATABLE_READ);
+    }
+
+    private void run(boolean retire, int isolation) throws Exception {
+        boolean coldRun = isolation != 0;
+        Path scenario = directory;
+        String evidence = System.getProperty("csi.acceptance.evidence");
+        if (coldRun && evidence != null) {
+            Files.createDirectories(Path.of(evidence));
+            scenario = Files.createTempDirectory(Path.of(evidence), "cold-" + isolation + "-");
+        }
         Path root = Path.of("../..").toRealPath();
         assertThat(Files.isRegularFile(root.resolve("packages/cli/dist/src/serve/managed-csi-file-worker.js")))
                 .as("Run npm run build before this explicitly invoked integration gate").isTrue();
@@ -94,6 +114,10 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             var manager = new DataSourceTransactionManager(source);
             var transaction = new TransactionTemplate(manager);
             transaction.setTimeout(10);
+            if (coldRun) {
+                transaction.setIsolationLevel(isolation);
+            }
+            var cold = new ColdContention(source, manager, isolation);
             var apiFixture = new WorkspaceCsiWorkerApiFixture();
             var registration = apiFixture.registration;
             var storage = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
@@ -140,8 +164,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             var retirement = new AtomicReference<WorkspaceCsiReservationStore.Retirement>();
             var nativeReads = new AtomicInteger();
             String operatorToken = UUID.randomUUID().toString();
+            var lifetime = coldRun ? Duration.ofMinutes(5) : Duration.ofSeconds(30);
             try (provisioner; var service = new RuntimeBrokerService(access, provisioner, access, bindings, sessions, executions,
-                    "owned-broker", Duration.ofSeconds(30), Duration.ofSeconds(30));
+                    "owned-broker", lifetime, lifetime);
                     var broker = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", brokerPort), operatorToken,
                             service, false, (token, body) -> {
                                 nativeReads.incrementAndGet();
@@ -200,6 +225,17 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                         "activationRevision", jdbc.queryForObject(
                                                 "SELECT first_activation_journal_revision FROM ma_runtime_binding", Long.class),
                                         "nativeReads", nativeReads.get());
+                                case "/fixture:cold-observe" -> Map.of("image", tableImage(source),
+                                        "now", jdbc.queryForObject("SELECT "
+                                                + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW,
+                                                Long.class),
+                                        "counters", List.of(apiFixture.calls.get(), rpcCalls.get(), nativeReads.get(), renewals.get()));
+                                case "/fixture:cold-result" -> Map.of("resultJson", jdbc.queryForObject(
+                                        "SELECT result_json FROM ma_tool_execution WHERE execution_call_id=?",
+                                        String.class, body.get("executionCallId")));
+                                case "/fixture:cold-arm" -> cold.arm(((List<?>) body.get("writers")).stream()
+                                        .map(String.class::cast).toList());
+                                case "/fixture:cold-release" -> cold.release();
                                 default -> throw new IllegalArgumentException("Unknown owned fixture route");
                             };
                             respond(exchange, 200, response);
@@ -220,19 +256,30 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                 : suffix.startsWith("/resources/")
                                 ? journal.readOwnerResource("tenant", query.get("workspaceId"), sessionId,
                                         suffix.substring("/resources/".length()), token)
-                                : transaction.execute(status -> switch (suffix) {
-                                    case "/writers:acquire" -> journal.acquireWriter("tenant", sessionId, token,
-                                            read(raw, ManagedSessionStoreModels.AcquireWriterRequest.class));
-                                    case "/writers:renew" -> journal.renewWriter("tenant", sessionId, token,
-                                            read(raw, ManagedSessionStoreModels.RenewWriterRequest.class));
-                                    case "/writers:seal" -> journal.sealWriter("tenant", sessionId, token,
-                                            read(raw, ManagedSessionStoreModels.SealWriterRequest.class));
-                                    case "/transactions:commit", "/transactions:commit-v2" -> journal.commit("tenant", sessionId,
-                                            token, read(raw, ManagedSessionStoreModels.CommitTransactionRequest.class));
-                                    case "/restore" -> journal.restore("tenant", query.get("workspaceId"), sessionId, token);
-                                    case "/transactions" -> journal.transactions("tenant", query.get("workspaceId"), sessionId,
-                                            token, Long.parseLong(query.get("afterRevision")), Integer.parseInt(query.get("limit")));
-                                    default -> throw new IllegalArgumentException("Unknown owned Session store route");
+                                : suffix.equals("/writers:acquire")
+                                ? cold.acquire(journal, token, sessionId, read(raw, ManagedSessionStoreModels.AcquireWriterRequest.class))
+                                : transaction.execute(status -> {
+                                    if (coldRun) {
+                                        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                                            assertThat(connection.getAutoCommit()).isFalse();
+                                            assertThat(connection.getTransactionIsolation()).isEqualTo(isolation);
+                                            return null;
+                                        });
+                                    }
+                                    return switch (suffix) {
+                                        case "/tool-results:publish" -> journal.publishToolResult("tenant", sessionId, token,
+                                                read(raw, ManagedSessionStoreModels.PublishToolResultRequest.class));
+                                        case "/writers:renew" -> journal.renewWriter("tenant", sessionId, token,
+                                                read(raw, ManagedSessionStoreModels.RenewWriterRequest.class));
+                                        case "/writers:seal" -> journal.sealWriter("tenant", sessionId, token,
+                                                read(raw, ManagedSessionStoreModels.SealWriterRequest.class));
+                                        case "/transactions:commit", "/transactions:commit-v2" -> journal.commit("tenant", sessionId,
+                                                token, read(raw, ManagedSessionStoreModels.CommitTransactionRequest.class));
+                                        case "/restore" -> journal.restore("tenant", query.get("workspaceId"), sessionId, token);
+                                        case "/transactions" -> journal.transactions("tenant", query.get("workspaceId"), sessionId,
+                                                token, Long.parseLong(query.get("afterRevision")), Integer.parseInt(query.get("limit")));
+                                        default -> throw new IllegalArgumentException("Unknown owned Session store route");
+                                    };
                                 });
                         if (response instanceof ManagedSessionStoreModels.StoredResource resource) {
                             exchange.getResponseHeaders().set("Cache-Control", "no-store");
@@ -270,27 +317,41 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 adapter.start();
                 Process child = null;
                 try {
-                    Path input = directory.resolve("input.json");
+                    Path input = scenario.resolve("input.json");
                     String foreignOwner = UUID.randomUUID().toString();
                     JSON.writeValue(input.toFile(), Map.of("adapter", "http://127.0.0.1:" + adapter.getAddress().getPort(),
                             "broker", broker.getBaseUri().toString(), "operatorToken", operatorToken,
                             "foreignOwnerSessionId", foreignOwner,
                             "foreignOwnerOperationId", UUID.nameUUIDFromBytes(foreignOwner.getBytes(StandardCharsets.UTF_8)).toString(),
                             "retirement", retire,
+                            "cold", isolation,
                             "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", sessionId)));
-                    Path producer = directory.resolve("producer.mjs");
+                    Path producer = scenario.resolve("producer.mjs");
                     try (var script = getClass().getResourceAsStream("/csi-sql-worker-acceptance.mjs");
                             var declarations = getClass().getResourceAsStream("/csi-native-file-declarations.json")) {
                         assertThat(script).isNotNull();
                         assertThat(declarations).isNotNull();
                         Files.copy(script, producer);
-                        Files.copy(declarations, directory.resolve("declarations.json"));
+                        Files.copy(declarations, scenario.resolve("declarations.json"));
                     }
-                    child = new ProcessBuilder("node", producer.toString(), input.toString(), directory.toString())
-                            .directory(root.toFile()).redirectErrorStream(true).redirectOutput(directory.resolve("node.log").toFile()).start();
+                    child = new ProcessBuilder("node", producer.toString(), input.toString(), scenario.toString())
+                            .directory(root.toFile()).redirectErrorStream(true).redirectOutput(scenario.resolve("node.log").toFile()).start();
                     assertThat(child.waitFor(180, TimeUnit.SECONDS)).as("Owned Node chain timed out").isTrue();
-                    assertThat(child.exitValue()).as(Files.readString(directory.resolve("node.log"))).isZero();
-                    var result = JSON.readTree(directory.resolve("result.json").toFile());
+                    assertThat(child.exitValue()).as(Files.readString(scenario.resolve("node.log"))).isZero();
+                    var result = JSON.readTree(scenario.resolve("result.json").toFile());
+                    if (coldRun) {
+                        assertThat(result.path("writerGeneration").asLong()).isEqualTo(2);
+                        assertThat(result.path("activationEpoch").asLong()).isEqualTo(2);
+                        assertThat(result.path("isolation").asInt()).isEqualTo(isolation);
+                        assertThat(result.path("workerClosed").asBoolean()).isTrue();
+                        assertThat(result.path("completedTurns").asInt()).isZero();
+                        assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class)).isEqualTo(2);
+                        assertThat(jdbc.queryForObject("SELECT activation_epoch FROM ma_session_head", Long.class)).isEqualTo(2);
+                        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE execution_state='SETTLED'", Integer.class))
+                                .isEqualTo(2);
+                        assertThat(cold.warmed).hasSize(2);
+                        return;
+                    }
                     assertThat(result.path("completedTurns").asInt()).isEqualTo(2);
                     assertThat(result.path("nativeSqlGrant").asBoolean()).isTrue();
                     assertThat(result.path("workerClosed").asBoolean()).isTrue();
@@ -321,13 +382,13 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("DRAINING");
                         assertThat(jdbc.queryForObject("SELECT binding_id FROM ma_storage_owner", String.class)).isEqualTo(original.getBindingId());
                     }
-                    String evidence = System.getProperty("csi.acceptance.evidence");
                     if (evidence != null) {
                         Path output = Path.of(evidence);
                         Files.createDirectories(output);
-                        Files.copy(directory.resolve("result.json"), output.resolve(retire ? "retirement-result.json" : "result.json"));
+                        Files.copy(scenario.resolve("result.json"), output.resolve(retire ? "retirement-result.json" : "result.json"));
                     }
                 } finally {
+                    cold.stop();
                     boolean childExited = true;
                     if (child != null && child.isAlive()) {
                         child.destroyForcibly();
@@ -373,6 +434,136 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
+    }
+
+    private static final class ColdContention {
+        private final DataSource source;
+        private final DataSourceTransactionManager manager;
+        private final int isolation;
+        private final Set<String> entered = ConcurrentHashMap.newKeySet();
+        private final Map<String, Map<String, Object>> warmed = new ConcurrentHashMap<>();
+        private final CountDownLatch snapshots = new CountDownLatch(2);
+        private final CountDownLatch start = new CountDownLatch(1);
+        private volatile List<String> writers = List.of();
+        private Connection holder;
+        private long holderId;
+
+        private ColdContention(DataSource source, DataSourceTransactionManager manager, int isolation) {
+            this.source = source;
+            this.manager = manager;
+            this.isolation = isolation;
+        }
+
+        private Map<String, Object> arm(List<String> contenders) throws Exception {
+            assertThat(isolation).isIn(Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ);
+            assertThat(contenders).hasSize(2).doesNotHaveDuplicates();
+            assertThat(writers).isEmpty();
+            writers = List.copyOf(contenders);
+            holder = source.getConnection();
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant", 5);
+            try (var statement = holder.prepareStatement("SELECT CONNECTION_ID()"); var row = statement.executeQuery()) {
+                assertThat(row.next()).isTrue();
+                holderId = row.getLong(1);
+            }
+            return Map.of("holderId", holderId);
+        }
+
+        private ManagedSessionStoreModels.WriterGrant acquire(ManagedSessionStore journal, String token,
+                String session, ManagedSessionStoreModels.AcquireWriterRequest request) {
+            var transaction = new TransactionTemplate(manager);
+            transaction.setTimeout(10);
+            boolean contender = writers.contains(request.writerId()) && entered.add(request.writerId());
+            if (isolation != 0) {
+                transaction.setIsolationLevel(isolation);
+            }
+            return transaction.execute(status -> {
+                if (contender) {
+                    new ManagedSchemaJdbcTemplate(source).execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                        assertThat(connection.getAutoCommit()).isFalse();
+                        assertThat(connection.getTransactionIsolation()).isEqualTo(isolation);
+                        try (var statement = connection.prepareStatement("SELECT CONNECTION_ID(), writer_id, writer_generation,"
+                                + " journal_revision, committed_sequence, last_commit_digest, activation_epoch FROM ma_session_head");
+                                var row = statement.executeQuery()) {
+                            assertThat(row.next()).isTrue();
+                            warmed.put(request.writerId(), Map.of("connectionId", row.getLong(1),
+                                    "isolation", connection.getTransactionIsolation(), "autoCommit", connection.getAutoCommit(),
+                                    "writerId", row.getString(2), "writerGeneration", row.getLong(3),
+                                    "journalRevision", row.getLong(4), "committedSequence", row.getLong(5),
+                                    "lastCommitDigest", row.getString(6), "activationEpoch", row.getLong(7)));
+                            assertThat(row.next()).isFalse();
+                        }
+                        snapshots.countDown();
+                        await(start);
+                        return null;
+                    });
+                }
+                return journal.acquireWriter("tenant", session, token, request);
+            });
+        }
+
+        private Map<String, Object> release() throws Exception {
+            try {
+                await(snapshots);
+                start.countDown();
+                var jdbc = new ManagedSchemaJdbcTemplate(source);
+                List<Map<String, Object>> waits = List.of();
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                var connections = warmed.values().stream().map(row -> ((Number) row.get("connectionId")).longValue()).toList();
+                while (System.nanoTime() < until) {
+                    waits = jdbc.queryForList("SELECT DISTINCT requester.PROCESSLIST_ID AS requester, blocker.PROCESSLIST_ID AS blocker,"
+                            + " locks.OBJECT_NAME AS table_name, requester.PROCESSLIST_INFO AS sql_text"
+                            + " FROM performance_schema.data_lock_waits waits"
+                            + " JOIN performance_schema.data_locks locks ON locks.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID"
+                            + " JOIN performance_schema.threads requester ON requester.THREAD_ID=waits.REQUESTING_THREAD_ID"
+                            + " JOIN performance_schema.threads blocker ON blocker.THREAD_ID=waits.BLOCKING_THREAD_ID"
+                            + " WHERE locks.OBJECT_SCHEMA=DATABASE()");
+                    var direct = waits.stream().filter(row -> ((Number) row.get("blocker")).longValue() == holderId)
+                            .map(row -> ((Number) row.get("requester")).longValue()).toList();
+                    if (direct.containsAll(connections)) {
+                        break;
+                    }
+                    Thread.sleep(10);
+                }
+                assertThat(connections).hasSize(2).doesNotHaveDuplicates().doesNotContain(holderId);
+                assertThat(waits).hasSizeBetween(2, 3);
+                var direct = waits.stream().filter(row -> ((Number) row.get("blocker")).longValue() == holderId)
+                        .map(row -> ((Number) row.get("requester")).longValue()).toList();
+                assertThat(direct).containsExactlyInAnyOrderElementsOf(connections);
+                for (var row : waits) {
+                    assertThat(row.get("table_name")).isEqualTo("ma_tenant_guard");
+                    long blocker = ((Number) row.get("blocker")).longValue();
+                    assertThat(blocker == holderId || connections.contains(blocker)).isTrue();
+                    assertThat(connections).contains(((Number) row.get("requester")).longValue());
+                    assertThat(((Number) row.get("requester")).longValue()).isNotEqualTo(blocker);
+                    assertThat((String) row.get("sql_text")).contains("INSERT INTO ma_tenant_guard");
+                }
+                return Map.of("warmed", warmed, "waits", waits, "holderId", holderId);
+            } finally {
+                stop();
+            }
+        }
+
+        private static void await(CountDownLatch latch) {
+            try {
+                assertThat(latch.await(8, TimeUnit.SECONDS)).as("Owned contention barrier timed out").isTrue();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Owned contention barrier interrupted", interrupted);
+            }
+        }
+
+        private synchronized void stop() throws Exception {
+            start.countDown();
+            if (holder != null) {
+                try {
+                    holder.rollback();
+                } finally {
+                    holder.close();
+                    holder = null;
+                }
+            }
+        }
     }
 
     private static Map<String, Object> retained(DataSource source, String session, String retirement,
@@ -527,11 +718,24 @@ class WorkspaceCsiSqlWorkerMySqlIT {
     }
 
     private static String fingerprint(DataSource source) throws Exception {
-        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        return DigestUtils.sha256Hex(JSON.writeValueAsBytes(tableImage(source)));
+    }
+
+    private static Map<String, List<String>> tableImage(DataSource source) throws Exception {
         var image = new TreeMap<String, List<String>>();
         try (var connection = source.getConnection()) {
-            for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
-                    + " WHERE table_schema=DATABASE() AND table_type='BASE TABLE' ORDER BY table_name", String.class)) {
+            connection.setReadOnly(true);
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            connection.setAutoCommit(false);
+            var tables = new ArrayList<String>();
+            try (var statement = connection.prepareStatement("SELECT table_name FROM information_schema.tables"
+                    + " WHERE table_schema=DATABASE() AND table_type='BASE TABLE' ORDER BY table_name");
+                    var rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    tables.add(rows.getString(1));
+                }
+            }
+            for (String table : tables) {
                 assertThat(table).matches("[a-z_]+");
                 var rows = new ArrayList<String>();
                 try (var statement = connection.prepareStatement("SELECT * FROM `" + table + "`");
@@ -552,7 +756,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 Collections.sort(rows);
                 image.put(table, rows);
             }
+            connection.rollback();
         }
-        return DigestUtils.sha256Hex(JSON.writeValueAsBytes(image));
+        return image;
     }
 }

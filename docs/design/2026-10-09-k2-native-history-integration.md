@@ -833,6 +833,8 @@ H2/unit fixtures cannot qualify InnoDB isolation. Observe actual
 READ COMMITTED and warmed REPEATABLE READ contention separately. The first
 receipt cut is one increment, not all cold recovery or complete K2.
 
+The [2026-10-18 component contention test](2026-10-18-k2-cold-writer-contention.md) adds separate actual READ COMMITTED and warmed REPEATABLE READ acquisitions after natural database expiry. Its focused four-case run includes the unchanged ordinary/retirement cases, one generation-two winner, a refused loser and live-winner retry, actual restoration and epoch-two installation, and refused exact old transaction/renewal/content-publication replays. It preserves the parked producer and the complete SQL/file image at each declared boundary. This component run does not establish an owner-process crash, model2 continuation, the claim-before-install crash window, all cold cuts or native deployment qualification.
+
 Affected implementation layers are the private Hosted session/tool turn/history
 consumer, native activation/conversation/checkpoint proof, same-Connection
 activation/execution admission and Managed Session writer/commit/publication
