@@ -1946,7 +1946,9 @@ try {
         for (const [child] of formerPair) {
           signalProcessTree(child.child, 'SIGCONT');
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        // InnoDB reuses its transaction snapshot until no reader has
+        // queried it for 100ms; faster polling can keep a stale busy view.
+        await new Promise((resolve) => setTimeout(resolve, 150));
       }
     } else if (harnessOnly) {
       // Kill only the Harness: a live control plane must adopt the next
