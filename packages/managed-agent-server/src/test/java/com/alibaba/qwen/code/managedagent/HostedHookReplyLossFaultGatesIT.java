@@ -304,10 +304,6 @@ class HostedHookReplyLossFaultGatesIT {
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
-
-    // The Harness status route identifies the caller by the client id its
-    // attach minted and the process generation it attached to; the connector
-    // keeps both on the private attachment ref.
     private record HarnessAttach(String clientId, String bootId) {}
 
     private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
@@ -532,7 +528,7 @@ class HostedHookReplyLossFaultGatesIT {
         Path destination = Files.createDirectories(Path.of("target/failsafe-reports/hosted-hook-fault-evidence", tenant));
         System.out.println("HOSTED_HOOK_FAULT_EVIDENCE " + destination.toAbsolutePath());
         json.writeValue(destination.resolve("model-requests.json").toFile(), modelRequests);
-        for (String name : List.of("processes.jsonl", "harness-1.log", "harness-2.log")) {
+        for (String name : List.of("processes.jsonl", "harness-1.log", "harness-2.log", "proxy.log")) {
             Path source = temporary.resolve(name);
             if (Files.exists(source)) {
                 Files.copy(source, destination.resolve(source.getFileName()));
