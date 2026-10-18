@@ -360,6 +360,10 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg10-cases/',
     );
+    // FG12a's MCP reply-loss evidence lives in target/fg12-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg12-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag. The arms
     // that write it run in the failover job, so the upload lives there.
@@ -584,14 +588,15 @@ describe('Hosted real-process gates', () => {
       // the Verify step to 85 minutes; their slice 2 (FG10c/FG10e) brings
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
       // to 90 minutes; slice 3 (FG10d) brings it to ~247 s, so the fork
-      // moves to 4484, still inside those 90 minutes; the event-stream
-      // liveness gates add ~440 s, so the fork moves to 4924 and the
-      // Verify step to 95 minutes):
+      // moves to 4484, still inside those 90 minutes; the FG12a MCP
+      // reply-loss letter adds ~15 s, so the fork moves to 4499; the
+      // event-stream liveness gates add ~440 s, so the fork moves to 4939
+      // and the Verify step to 95 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4924);
+        expect(forkSeconds).toBe(4939);
       }
     },
   );
@@ -618,14 +623,15 @@ describe('Hosted real-process gates', () => {
   // measure 246.1–246.8s for the class locally on JDK 21 + MySQL 8.4.6
   // across three acceptance runs (~494s budgeted at 2x, as FG10a, up from
   // slice 2's ~363s); with the fork itself ~14s, 3874s (3545s after slice
-  // 1, plus slice 2's ~198s and slice 3's ~131s) covered them. The
-  // event-stream liveness gates (HostedEventStreamLivenessIT, four cases
-  // on the shipped 15s keepalive and 45s bound) measure 214.4–215.0s for
-  // the class locally on JDK 21 and 25 + MySQL 8.4.6 across four
-  // acceptance runs (~440s budgeted at 2x), so 4314s covers them all.
+  // 1, plus slice 2's ~198s and slice 3's ~131s) covered them, and
+  // FG12a's ~15s budgeted at 2x raised it to 3889s. The event-stream
+  // liveness gates (HostedEventStreamLivenessIT, four cases on the
+  // shipped 15s keepalive and 45s bound) measure 214.4–215.0s for the
+  // class locally on JDK 21 and 25 + MySQL 8.4.6 across four acceptance
+  // runs (~440s budgeted at 2x), so 4329s covers them all.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4314;
+  const hostedForkHealthySeconds = 4329;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -727,6 +733,18 @@ describe('Hosted real-process gates', () => {
     const ceilings = ceilingsOf(
       hostedTestSource('HostedWorkflowRelayFaultGatesIT'),
     );
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedMcpReplyLossIT ceilings inside the shared fork budget', () => {
+    // The FG12a MCP reply-loss letter boots its own Spring, Harness and
+    // broker proxy, the same per-ceiling shape the FG8/FG10 letters use.
+    const ceilings = ceilingsOf(hostedTestSource('HostedMcpReplyLossIT'));
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {
       expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
