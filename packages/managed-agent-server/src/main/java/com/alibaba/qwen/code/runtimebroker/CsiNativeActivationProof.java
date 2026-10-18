@@ -1621,7 +1621,10 @@ public final class CsiNativeActivationProof {
             require(install && generation == 1 && epoch == 1 && number(metadata.get("firstSequence")) == 1
                     && number(body.get("leaseDurationMs")) == lease);
         } else if (install) {
-            throw invalid();
+            require(generation > previous.writerGeneration() && epoch == previous.epoch() + 1
+                    && !id.equals(previous.activationId()) && !writerId.equals(previous.workerId())
+                    && time(event.get("occurredAt")) >= previous.expiresAt()
+                    && number(body.get("leaseDurationMs")) == lease);
         } else {
             require(id.equals(previous.activationId()) && writerId.equals(previous.workerId())
                     && generation == previous.writerGeneration() && epoch == previous.epoch()
