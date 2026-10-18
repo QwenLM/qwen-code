@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
@@ -196,7 +197,11 @@ process.on('exit', () => writeFileSync(${JSON.stringify(observed)}, JSON.stringi
       );
       const result = spawnSync(
         process.execPath,
-        ['--import', preload, '.github/scripts/choose-rocketmq-ports.mjs'],
+        [
+          '--import',
+          pathToFileURL(preload).href,
+          '.github/scripts/choose-rocketmq-ports.mjs',
+        ],
         { encoding: 'utf8', timeout: 10_000 },
       );
       expect(result.status, result.stderr).toBe(0);

@@ -8,8 +8,10 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ArgumentPreparedStatementSetter;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -87,11 +89,11 @@ public final class ToolPublicationRetentionStore {
      * the root's {@code csi_guard} as committed now: the read is a locking one.
      */
     static boolean lockSessionRoot(JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionRoot(jdbc, tenant, session, false);
+        return lockSessionRoot(jdbc, tenant, session, false, 0);
     }
 
     private static boolean lockSessionRoot(
-            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
+            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation, int timeoutSeconds) {
         long time = now(jdbc);
         // Behind a tenant guard this root wait can close a cycle with a
         // pinned CSI Session's continuation, which holds its root while it
@@ -100,19 +102,36 @@ public final class ToolPublicationRetentionStore {
         return ManagedSessionStore.namedRootDeadlock(() -> {
             jdbc.update(
                     "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
-                    tenant, session, hash(tenant), hash(session), ManagedSessionStore.sessionScopeKey(tenant, session), time, time);
+                    boundedParameters(jdbc, timeoutSeconds, tenant, session, hash(tenant), hash(session),
+                            ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
             return jdbc.query(
                     "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
                             + " session_id = ? FOR UPDATE",
+                    boundedParameters(jdbc, timeoutSeconds, tenant, session),
                     (row, index) -> {
                         boolean guarded = row.getBoolean("csi_guard");
                         if (legacyMutation) {
                             ManagedLegacySessionGuard.requireLegacyMutation(guarded);
                         }
                         return guarded;
-                    },
-                    tenant, session).getFirst();
+                    }).getFirst();
         });
+    }
+
+    private static PreparedStatementSetter boundedParameters(
+            JdbcTemplate jdbc, int timeoutSeconds, Object... parameters) {
+        PreparedStatementSetter arguments = jdbc instanceof ManagedSchemaJdbcTemplate managed
+                ? managed.newArgPreparedStatementSetter(parameters)
+                : new ArgumentPreparedStatementSetter(parameters);
+        return statement -> {
+            if (timeoutSeconds > 0) {
+                int existingTimeout = statement.getQueryTimeout();
+                if (existingTimeout == 0 || existingTimeout > timeoutSeconds) {
+                    statement.setQueryTimeout(timeoutSeconds);
+                }
+            }
+            arguments.setValues(statement);
+        };
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
@@ -121,24 +140,22 @@ public final class ToolPublicationRetentionStore {
 
     private static Map<String, Object> lockSessionHead(
             JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
-        // Retention-read callers reach the tenant CAS row here before the
-        // head row, so the acquisition runs bounded with the shared
-        // named-failure mapping: a held row answers tenant_guard_contended
-        // instead of out-waiting the caller's own request budget (#13800).
-        ManagedSessionStore.lockBounded(() -> lockTenant(jdbc, tenant,
-                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        lockSessionRoot(jdbc, tenant, session, legacyMutation);
-        var heads =
-                jdbc.query(
-                        "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
+        // Bound the root and head waits as well: holding the tenant guard
+        // behind one Session's writer must not convoy unrelated Sessions
+        // until the database's default lock timeout (#14393 A.2).
+        return ManagedSessionStore.lockBoundedResult(() -> {
+            int timeoutSeconds = ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS;
+            lockTenant(jdbc, tenant, timeoutSeconds);
+            lockSessionRoot(jdbc, tenant, session, legacyMutation, timeoutSeconds);
+            var heads = jdbc.query(
+                    "SELECT state FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND"
                             + " tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id"
                             + " = ? FOR UPDATE",
-                        (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                        ManagedSchemaKeys.key(tenant),
-                        ManagedSchemaKeys.key(session),
-                        tenant,
-                        session);
-        return heads.isEmpty() ? null : heads.getFirst();
+                    boundedParameters(jdbc, timeoutSeconds, ManagedSchemaKeys.key(tenant),
+                            ManagedSchemaKeys.key(session), tenant, session),
+                    (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
+            return heads.isEmpty() ? null : heads.getFirst();
+        });
     }
 
     static void requireLive(JdbcTemplate jdbc, String tenant, String session) {

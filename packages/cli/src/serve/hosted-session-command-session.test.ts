@@ -728,27 +728,42 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
       executionCallId: 'prompt-1:call-8',
       closing: false,
     });
-    // Mint 256 entries by hand: a direct count of outbound records is the
-    // rule's own evidence, so the suite plants the history instead of
-    // driving 256 funnels calls.
-    for (let index = 0; index < 255; index += 1) {
+    // Seed counted history so this boundary test avoids 256 durable writes.
+    const committedCommands = member.commands.commands.bind(member.commands);
+    const first = committedCommands()[0]!;
+    const history = Array.from({ length: 254 }, (_, index) => ({
+      ...first,
+      commandId: `cmd_extra_${index}`,
+      run: {
+        ...first.run,
+        executionCallId: `prompt-1:call-extra-${index}`,
+      },
+    }));
+    const commands = vi
+      .spyOn(member.commands, 'commands')
+      .mockImplementation(() => [...history, ...committedCommands()]);
+    try {
+      expect(member.commands.commands()).toHaveLength(255);
       await member.commands.runCommand({
-        commandId: `cmd_extra_${index}`,
+        commandId: 'cmd_extra_254',
         kind: 'board_read',
         args: TASK_LIST_ARGS,
-        executionCallId: `prompt-1:call-extra-${index}`,
+        executionCallId: 'prompt-1:call-extra-254',
         closing: false,
       });
+      expect(member.commands.commands()).toHaveLength(256);
+      await expect(
+        member.commands.runCommand({
+          commandId: commandIdOf('call-9'),
+          kind: 'board_read',
+          args: TASK_LIST_ARGS,
+          executionCallId: 'prompt-1:call-9',
+          closing: false,
+        }),
+      ).rejects.toThrow(/budget_exhausted/);
+    } finally {
+      commands.mockRestore();
     }
-    await expect(
-      member.commands.runCommand({
-        commandId: commandIdOf('call-9'),
-        kind: 'board_read',
-        args: TASK_LIST_ARGS,
-        executionCallId: 'prompt-1:call-9',
-        closing: false,
-      }),
-    ).rejects.toThrow(/budget_exhausted/);
   }, 30_000);
 
   it("commits the leader's receipt against an attached run and refetches its reply", async () => {

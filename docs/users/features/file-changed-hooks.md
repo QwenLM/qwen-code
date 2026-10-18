@@ -23,6 +23,11 @@ belong to the listening session; they do not identify the writer. Multiple
 sessions watching a shared directory can each receive its changes. File content
 is not included.
 
+Only file events are delivered. Directory-self `addDir` and `unlinkDir` events
+are not delivered. Integrations tracking a watched root's own lifecycle must
+check filesystem state (for example with `stat`) and reconcile independently;
+a child's `unlink` does not prove that the root was removed.
+
 ## Watch filenames in the working directory
 
 Add a `FileChanged` hook with literal filenames separated by `|`:

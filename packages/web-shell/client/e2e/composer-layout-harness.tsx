@@ -1,9 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
-
-const indexEntry = '../index.tsx';
-const { WebShellWithProviders } = await import(/* @vite-ignore */ indexEntry);
+import { WebShellWithProviders } from '../index';
 
 const params = new URLSearchParams(window.location.search);
 const emptyMobileWelcome = params.get('emptyMobileWelcome') === 'true';

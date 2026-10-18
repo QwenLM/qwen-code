@@ -437,8 +437,35 @@
                                  measure 30.8-64.5 s (~130 s budgeted
                                  at 2x): the healthy sum becomes
                                  4888 s, so the fork moves to 5498 s
-                                 and the Verify step to 105 minutes. -->
-                            <forkedProcessTimeoutInSeconds>5498</forkedProcessTimeoutInSeconds>
+                                 and the Verify step to 105 minutes.
+                                 FG11b slice 2's Harness-side store
+                                 faults, a third method of the class
+                                 (four cases, three cold restarts),
+                                 measure 62.1-72.4 s (~145 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 5033 s, so the fork moves to 5643 s,
+                                 which the Verify step's 105 minutes
+                                 still wrap. The event-stream liveness
+                                 gates (HostedEventStreamLivenessIT,
+                                 four cases on the shipped 15 s
+                                 keepalive / 45 s bound, 214.4-215.0 s
+                                 healthy locally on JDK 21 and 25
+                                 across four runs, ~440 s budgeted at
+                                 2x) raise the healthy sum to 5473 s,
+                                 so the fork moves to 6083 s and the
+                                 Verify step to 115 minutes. The FG13d
+                                 dropped-reply cancel cell (issue
+                                 #14449) adds 150 s: the healthy sum
+                                 becomes 5623 s, so the fork moves to
+                                 6233 s, still inside those 115
+                                 minutes. The FG12b store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases, 49.6 s measured locally on
+                                 JDK 21 + MySQL 8.0.46) adds 120 s: the
+                                 healthy sum becomes 5743 s, so the
+                                 fork moves to 6353 s and the Verify
+                                 step to 116 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6353</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -592,9 +619,9 @@
                     <includes><include>**/HostedMcp*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
-                         per-ceiling rule for this class: one @Timeout
-                         ceiling (600 s) plus the healthy runtime must
-                         fit 1200 s. -->
+                         per-class rule for the three MCP classes: the
+                         largest @Timeout ceiling (600 s) plus the
+                         classes' healthy runtime must fit 1200 s. -->
                     <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>

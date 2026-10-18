@@ -96,6 +96,10 @@ is logged without changing the originating file operation.
   handling; do not add a second memory persistence pipeline.
 - Register only paths explicitly requested by hooks. There is no implicit memory
   directory registration, memory enable/disable event, or content in the payload.
+- Deliver only file `add`, `change`, and `unlink` events, excluding directory-self
+  `addDir` and `unlinkDir`. Integrations tracking a watched root's own lifecycle
+  must check filesystem state (for example with `stat`) and reconcile independently;
+  a child's `unlink` does not prove that the root was removed.
 - Hooks that write a watched file can trigger themselves. Handlers must avoid
   such writes or deduplicate their work.
 - Notifications are not durable: filesystem coalescing, process downtime,
