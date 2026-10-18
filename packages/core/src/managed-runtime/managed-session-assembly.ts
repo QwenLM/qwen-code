@@ -57,6 +57,27 @@ function describeRenewalError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Rejects a close whose activation release and writer seal both failed.
+ *
+ * `errors` keeps both failures. The seal failure is the one that says what
+ * state the writer was left in, so a caller that classifies a close failure
+ * (a writer conflict, a lost writer) reads `sealError` rather than this
+ * wrapper, whose own class names neither.
+ */
+export class ManagedSessionCloseError extends AggregateError {
+  constructor(
+    readonly sealError: unknown,
+    readonly releaseError: unknown,
+  ) {
+    super(
+      [sealError, releaseError],
+      `Managed Session close failed to seal the writer (${describeRenewalError(sealError)}) after releasing the activation failed (${describeRenewalError(releaseError)})`,
+    );
+    this.name = 'ManagedSessionCloseError';
+  }
+}
+
 export interface OpenManagedSessionOptions {
   readonly runtimeBaseDir: string;
   readonly sessionId: string;
@@ -139,6 +160,8 @@ export interface ManagedSession {
   /**
    * Seals the writer, leaving the at-rest barrier in place. Omit activation
    * release only when an external permanent lifecycle fence forbids appends.
+   * When both the release and the seal fail, the close rejects with a
+   * `ManagedSessionCloseError`; otherwise with the failure itself.
    */
   close(options?: { readonly releaseActivation?: boolean }): Promise<void>;
 }
@@ -256,15 +279,41 @@ export async function openManagedSession(
       return activation;
     },
     // Sealing is the at-rest barrier, but only the lease's owner may end it.
-    // Normally the lifecycle owner also records the boundary, or the activation
-    // reads as abandoned. An external permanent fence can forbid that append.
-    // An adopted lease stops renewal but leaves the lease with its owner.
+    // A call that owns the whole lifecycle also records the boundary, or the
+    // activation would read as abandoned. An external permanent fence may
+    // forbid that append. An adopted lease still stops the
+    // renewal it started; only the lease itself stays with its owner.
+    // The seal runs even when releasing the activation failed: a writer left
+    // unsealed can neither resume cleanly nor be taken over. A release
+    // failure rejects the close; when the seal fails too, the close rejects
+    // with both, so neither is lost to a debug line that is off by default
+    // (review round 1, R1-4). The seal error itself is left untouched: the
+    // lease hands the same memoized rejection to every later seal, and the
+    // seal often carries a cause of its own (review round 1, R1-3 and R1-4).
+    // The wrapper exposes the seal error for callers that classify it.
     close: async (options) => {
       renewal.stop();
       if (adopted) return;
-      if (options?.releaseActivation !== false)
-        await authority.releaseActivation();
-      await authority.close();
+      let released = true;
+      let releaseError: unknown;
+      try {
+        if (options?.releaseActivation !== false)
+          await authority.releaseActivation();
+      } catch (error) {
+        released = false;
+        releaseError = error;
+        debugLogger.debug(
+          'Managed Session activation release failed before seal',
+          describeRenewalError(error),
+        );
+      }
+      try {
+        await authority.close();
+      } catch (sealError) {
+        if (released) throw sealError;
+        throw new ManagedSessionCloseError(sealError, releaseError);
+      }
+      if (!released) throw releaseError;
     },
   };
 }

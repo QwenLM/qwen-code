@@ -13,16 +13,16 @@ on:
     # to surface a regression as it lands; a failure there files an issue with
     # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
     # one per red merge, not per red nightly only.
-    # 'SDK Java' is on the list for its post-merge push run. Its path filter
-    # watches the SDK's embedding surfaces too (packages/cli/src/serve/**,
-    # packages/acp-bridge/**, packages/cli/src/acp-integration/**), so it
-    # fires on roughly half of recent merges to `main`, not only on SDK
-    # changes — and that run is the only signal when a merge result is broken
-    # in a way neither PR could see: two green branches whose Flyway
-    # migrations claim one version collide only after both land (#12940: main
-    # red for two hours while three more merges stacked on it). It has no
-    # scheduled run, so the push arm covers it.
-    workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']
+    # Daily Java and Desktop checks report main regressions through the same
+    # deduplicated issue and autofix route as the nightly CLI checks.
+    # The Managed Agent gate's post-merge fast tier rides the push arm.
+    workflows:
+      - 'E2E Tests'
+      - 'Managed Agent gate'
+      - 'SDK Java'
+      - 'SDK Python'
+      - 'Qwen Code CI'
+      - 'Desktop Checks'
     types: ['completed']
     # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
     # completes on every pull request, and without this each of those would
@@ -42,7 +42,13 @@ jobs:
   # job as outputs.
   analyze:
     name: 'Identify the failing tests'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && (github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI')) }}"
+    if: >-
+      ${{ github.repository == 'QwenLM/qwen-code' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' ||
+      (github.event.workflow_run.event == 'schedule' &&
+      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow.name))) }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     permissions:
@@ -126,7 +132,7 @@ jobs:
           # test pins the equality. There the same annotation class auto-reruns
           # a PR's red check; here it suppresses the per-commit issue.
           # Full rationale → qwen-autofix.md#af-076
-          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired'
+          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
         run: |-
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
 
@@ -157,7 +163,14 @@ jobs:
                 echo "Failed job ${job_id} carries no infrastructure annotation; the run gets an issue."
               fi
             done < <(
-              jq -r '.jobs[] | select(.conclusion == "failure") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
+              # The gate workflow's reporter job is always() and fails with
+              # only the tier-result error, which carries no infrastructure
+              # signature; excluding it by its failing step keeps a lane's
+              # infra death classifiable. Filtering the step rather than the
+              # job keeps the legitimate rerun: when the reporter's own
+              # runner dies no step has failed, so the job still counts and
+              # its GitHub-generated annotation still matches.
+              jq -r '.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
                 "${jobs_json}" 2>/dev/null
             )
             if [[ "${total}" -gt 0 && "${infra}" -eq "${total}" ]]; then
@@ -172,7 +185,7 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
-          WORKFLOW_NAME: '${{ github.event.workflow_run.name }}'
+          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           # Actions supplies the timestamp; the helper stays free of clock reads

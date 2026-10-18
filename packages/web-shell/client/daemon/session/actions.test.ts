@@ -3921,7 +3921,9 @@ describe('createDaemonSessionActions', () => {
         restartEventStream,
         onContinuationAdmitted,
       });
-      const pending = actions.continueSession();
+      const pending = actions.continueSession({
+        confirmCancellation: 'legacy-daemon',
+      });
       expect(getConnection().context?.recovery).toEqual({
         kind: 'interrupted_prompt',
         canContinue: false,
@@ -3938,6 +3940,7 @@ describe('createDaemonSessionActions', () => {
       await expect(pending).resolves.toBeUndefined();
       expect(session.continueSession).toHaveBeenCalledWith(
         expect.any(AbortSignal),
+        { confirmCancellation: 'legacy-daemon' },
       );
       expect(restartEventStream).toHaveBeenCalledWith('session-a');
       expect(onContinuationAdmitted).toHaveBeenCalledExactlyOnceWith(

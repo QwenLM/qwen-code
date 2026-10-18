@@ -22,6 +22,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { buildSessionRecoveryPlan } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { SessionStartSource } from '@qwen-code/qwen-code-core/hooks/types.js';
@@ -201,6 +202,7 @@ export async function handleResumeSession(
     }
     uiSwapped = true;
     config.getLlmClient()?.commitTelemetrySwap?.();
+    await getInteractiveModSession(config)?.syncSession('resume');
   } catch (error) {
     if (coreSwapped && !uiSwapped) {
       try {
@@ -379,6 +381,8 @@ export async function handleBranchSession(
     // The UI re-key commits the swap: from here on a failure keeps the
     // replay — it belongs to the session the user is on.
     config.getLlmClient()?.commitTelemetrySwap?.();
+
+    await getInteractiveModSession(config)?.syncSession('resume');
 
     // 9. Apply the persisted title to the session-name surface.
     host.setSessionName(effectiveTitle);
