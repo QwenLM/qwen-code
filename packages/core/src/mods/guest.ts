@@ -83,11 +83,8 @@ export const MOD_GUEST_FACTORY = String.raw`
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
   });
-  const api = (id, frames, recoveringReentry = false) => {
-    const invoke = (name, value) => {
-      if (recoveringReentry) throw new Error('Mod API calls are unavailable during re-entry recovery');
-      return call(id, frames, name, value);
-    };
+  const api = (id, frames) => {
+    const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
       command: { register: spec => invoke('command.register', spec) },
       ui: { log: (text, options = {}) => {
@@ -148,19 +145,6 @@ export const MOD_GUEST_FACTORY = String.raw`
         run.inputs.set(hook.id, input);
         if (hook.matcher !== undefined && !matches(hook.matcher, input)) return invoke(index + 1, input, frames);
         const nested = [...frames, hook.id];
-        if (run.told.includes(hook.id)) {
-          if (!hook.caught) return invoke(index + 1, input, frames);
-          let replay;
-          const next = nextFor(run, () => replay ??= invoke(index + 1, input, nested), {error: freeze({kind:'re-entry',budget:1000}), called:false});
-          try {
-            const result = await hook.caught(api(run.id, nested, true), frozen(input), next);
-            if (result !== undefined) {
-              status(run.id, 'validateResult', stringify(result));
-              return result;
-            }
-          } catch {}
-          return replay ?? invoke(index + 1, input, frames);
-        }
         const next = nextFor(run, async e => {
           status(run.id, 'validate', stringify(e));
           const result = await invoke(index + 1, frozen(e), nested);
@@ -182,7 +166,7 @@ export const MOD_GUEST_FACTORY = String.raw`
       let replay;
       for (const hook of run.selected) {
         const input = run.inputs.get(hook.id) ?? run.input;
-        if (run.told.includes(hook.id) || !hook.caught || hook.matcher !== undefined && !matches(hook.matcher, input)) continue;
+        if (!hook.caught || hook.matcher !== undefined && !matches(hook.matcher, input)) continue;
         let used = false;
         const next = nextFor(run, e => { used = true; return replay ??= call(run.id, [hook.id], 'next', recovery.called ? undefined : e); }, {
           error: frozen(recovery.error), called: recovery.called
