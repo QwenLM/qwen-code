@@ -718,6 +718,7 @@ describe('Hosted real-process gates', () => {
       'HostedHookFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
+      'HostedMcpStoreFaultGatesIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',
