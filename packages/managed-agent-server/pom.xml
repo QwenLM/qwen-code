@@ -408,22 +408,24 @@
                                  locally on macOS JDK 21 + MariaDB
                                  10.11 (~15 s budgeted at 2x): the
                                  healthy sum becomes 3889 s, so the
-                                 fork moves to 4499 s. The FG13c Hook
+                                 fork moves to 4499 s. The FG12c MCP
+                                 restart matrix (HostedMcpRestartFault
+                                 GatesIT, five process-kill cases)
+                                 measures ~49 s healthy locally (~98 s
+                                 budgeted at 2x); the FG13c Hook
                                  owner-restart cells (three cases,
-                                 issue #14449) are budgeted at 300 s
-                                 inside the same envelope: the healthy
-                                 sum becomes 4189 s, so the fork moves
-                                 to 4799 s and the Verify step to 95
-                                 minutes. The FG11a automation
-                                 lost-reply letter
+                                 issue #14449) are budgeted at 300 s:
+                                 the healthy sum becomes 4238 s, so the
+                                 fork moves to 4848 s. The FG11a
+                                 automation lost-reply letter
                                  (HostedAutomationFaultGatesIT, eight
                                  cases on one minute boundary)
                                  measures 46.3-85.0 s locally on JDK 21
                                  + MySQL 8.4.6 (~170 s budgeted at 2x):
-                                 the healthy sum becomes 4359 s, so the
-                                 fork moves to 4969 s, which the Verify
+                                 the healthy sum becomes 4408 s, so the
+                                 fork moves to 5018 s, which the Verify
                                  step's 95 minutes still wrap. -->
-                            <forkedProcessTimeoutInSeconds>4969</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>5018</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

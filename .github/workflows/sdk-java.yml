@@ -679,7 +679,10 @@ jobs:
     # The step ceilings today (95 + 10 + 20 + 50 = 175 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
-    # letter to 4499 s and the FG13c Hook owner-restart cells to 4799 s, so
+    # letter to 4499 s, the FG12c restart matrix to 4548 s and the FG13c
+    # Hook owner-restart cells to 4799 s; with FG12c's 49 s the merged
+    # healthy sum is 4238 s and the fork 4848 s, and the FG11a automation
+    # lost-reply letter's ~170 s brings them to 4408 s and 5018 s, so
     # Verify wraps it at its fork + 600 s plus margin, the Broker fault
     # gates keep 10, and admission plus O4 keep per-fork ceilings) plus ~13
     # minutes for the uncapped setup steps (Checkout.. cgroup delegation,
@@ -774,7 +777,7 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 4969 s, so the step wraps to fork + 600 s plus margin.
+        # 5018 s, so the step wraps to fork + 600 s plus margin.
         timeout-minutes: 95
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'

@@ -593,16 +593,17 @@ describe('Hosted real-process gates', () => {
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
       // to 90 minutes; slice 3 (FG10d) brings it to ~247 s, so the fork
       // moves to 4484, still inside those 90 minutes; the FG12a MCP
-      // reply-loss letter adds ~15 s, so the fork moves to 4499; the FG13c
-      // Hook owner-restart cells add three cases budgeted at 300 s, so the
-      // fork moves to 4799 and the Verify step to 95 minutes; the FG11a
-      // automation lost-reply letter adds ~170 s, so the fork moves to
-      // 4969, still inside those 95 minutes):
+      // reply-loss letter adds ~15 s, so the fork moves to 4499; the FG12c
+      // restart matrix (five cases) adds ~49 s and the FG13c Hook
+      // owner-restart cells add 300 s, so the fork moves to 4848 and the
+      // Verify step stays at 95 minutes; the FG11a automation lost-reply
+      // letter adds ~170 s, so the fork moves to 5018, still inside those
+      // 95 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4969);
+        expect(forkSeconds).toBe(5018);
       }
     },
   );
@@ -633,16 +634,17 @@ describe('Hosted real-process gates', () => {
   // ~15s budgeted at 2x raises it to 3889s. On the lane (run 39087108383
   // at a029896eff, FG10d's head, before FG12a) the nineteen classes then
   // in the fork ran 3085s from the first class's start to the last
-  // class's end. The FG13c Hook owner-restart cells (issue #14449, three
-  // cases) are budgeted at 300s until the lane measures them, so the
-  // healthy sum becomes 4189s. The FG11a automation lost-reply letter
-  // (HostedAutomationFaultGatesIT, eight cases sharing one minute
-  // boundary) measures 46.3-85.0s locally on JDK 21 + MySQL 8.4.6
-  // across four acceptance runs (~170s budgeted at 2x), so it becomes
-  // 4359s.
+  // class's end. FG12c's five-case restart matrix measures ~49s healthy
+  // locally (~98s budgeted at 2x); the FG13c Hook owner-restart cells
+  // (issue #14449, three cases) are budgeted at 300s until the lane
+  // measures them. The healthy sum becomes 4238s. The FG11a automation
+  // lost-reply letter (HostedAutomationFaultGatesIT, eight cases sharing
+  // one minute boundary) measures 46.3-85.0s locally on JDK 21 + MySQL
+  // 8.4.6 across four acceptance runs (~170s budgeted at 2x), so it
+  // becomes 4408s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4359;
+  const hostedForkHealthySeconds = 4408;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -710,6 +712,7 @@ describe('Hosted real-process gates', () => {
       'HostedHarnessMySqlIT',
       'HostedHookFaultGatesIT',
       'HostedMcpReplyLossIT',
+      'HostedMcpRestartFaultGatesIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',
