@@ -30,6 +30,8 @@ Workspace migration also counts every unfinished title delivery in its tenant/st
 
 Close, archive, delete and cwd changes refuse admission while a title delivery remains unfinished. A FAILED public command can still have an accepted remote write, so its delivery must finish before sealing or moving the Session. A fresh rename may supersede that delivery. Existing completed lifecycle receipts remain replayable.
 
+D7-2 update: a delivery whose submission went unanswered, which #14069 parked `UNKNOWN` and never sent again, now parks `recovery_blocked` and retires its public receipt, so it no longer refuses later titles or lifecycle changes. The operation reconciler settles it from the Session journal: the Harness's commit of its revision completes it and shows the title, and a deleted Session's complete journal without that commit fails it. See [operation reconciliation](2026-10-17-managed-operation-reconciliation.md), decision 8. Workspace migration still waits for it.
+
 The two stores are not one transaction: titles may temporarily differ while delivery is pending or a dependency is unavailable. Recovery establishes eventual equality for the latest admitted attempt. A permanently unavailable Harness remains an external blocker; the server preserves the delivery rather than claiming completion. A protocol refusal after admission does not establish that an earlier attempt never wrote. Protocol errors after sending, including invalid reply fields, remain ambiguous and continue recovery; no retry cap discards them.
 
 ## Acceptance

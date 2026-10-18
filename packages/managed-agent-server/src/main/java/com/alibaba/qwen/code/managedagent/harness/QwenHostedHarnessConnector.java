@@ -432,6 +432,40 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsAgentDefinitionApprovalSelection() {
+        try {
+            var features = client().capabilities().getFeatures();
+            return features.contains("approval-selection/1")
+                    && features.contains("agent-definition-approval-selection/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    private boolean supportsApprovalSelection(SessionRecord session) {
+        return session.agentDefinitionDigest() == null
+                ? supportsApprovalSelection() : supportsAgentDefinitionApprovalSelection();
+    }
+
+    @Override
+    public boolean supportsPlanMode() {
+        try {
+            return client().capabilities().getFeatures().contains("plan-mode/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean supportsInputAttachments() {
+        try {
+            return client().capabilities().getFeatures().contains("input-attachments/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsModelSelection() {
         try {
             return client().capabilities().getFeatures().contains("model-selection/1");
@@ -443,7 +477,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
-        requireReadyForNewWork(tenantId, sessionId, false);
+        SessionRecord session = requireReadyForNewWork(tenantId, sessionId, false);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
@@ -459,11 +493,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         var policy = sessions.findTurnApprovalSelection(tenantId, sessionId, promptId);
         // Revision zero uses the immutable definition on every Harness generation.
         if (policy != null && policy.revision() > 0) {
-            if (supportsApprovalSelection()) {
-                builder.approvalSelection(policy.mode(), policy.revision());
+            if (supportsApprovalSelection(session)) {
+                if (policy.planMode() && !supportsPlanMode()) {
+                    throw new IllegalStateException("Hosted Plan mode is unavailable");
+                }
+                builder.approvalSelection(policy.mode(), policy.revision(), policy.planMode());
             } else {
                 throw new IllegalStateException("Hosted approval selection is unavailable");
             }
+        }
+        if (input.stream().anyMatch(block -> "image".equals(block.get("type")) || "resource".equals(block.get("type")))
+                && !supportsInputAttachments()) {
+            throw new IllegalStateException("Hosted input attachments are unavailable");
         }
         input.forEach(builder::addContent);
         PromptReceipt receipt = client().submitTurn(builder.build());
@@ -1102,7 +1143,35 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId) {
         SessionRecord session = requireRecoverableSession(tenantId, sessionId,
                 true);
-        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        return loadCancellationTakeover(session);
+    }
+
+    @Override
+    public Attachment recoverManagedFailureCancellation(String tenantId,
+            String sessionId, String turnId, String dispatchOwner) {
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
+        if (session.workspace() == null || !isWorkspaceFilesAvailable()
+                || actions == null) {
+            throw new IllegalStateException("Hosted Workspace files are unavailable");
+        }
+        workspaceExecution.authorizeRecoveryCancellation(session, turnId, dispatchOwner);
+        try {
+            return loadCancellationTakeover(session);
+        } catch (DaemonHttpException error) {
+            if (error.getStatusCode() == 409
+                    && HostedHarnessRecoveryDeclinedException.CODE.equals(error.getErrorCode())) {
+                throw new HostedHarnessRecoveryDeclinedException(error.getBodyField("reason"));
+            }
+            throw error;
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Attachment loadCancellationTakeover(SessionRecord session) {
+        AttachmentKey key = new AttachmentKey(session.tenantId(), session.sessionId());
         // A Session THIS Harness already serves can still park a dead
         // generation's Turn: the plain cancel route settles nothing there
         // and answered the coded refusal, so the cancellation load always
@@ -1214,22 +1283,33 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void requireApprovalSelectionSupport(SessionRecord session) {
+        var active = sessions.findActiveTurns(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
+        var activeTurn = active == null ? null : sessions.findTurn(session.tenantId(), session.sessionId(), active.turnId())
+                .orElseThrow(() -> new IllegalStateException("The active Turn is missing"));
+        if (activeTurn != null && activeTurn.input().stream().anyMatch(block -> "image".equals(block.get("type"))
+                || "resource".equals(block.get("type"))) && !supportsInputAttachments()) {
+            throw new IllegalStateException("Hosted input attachments are unavailable");
+        }
         if (!WorkspaceToolProfiles.supportsApprovalSelection(session)) {
             return;
         }
         var selected = sessions.findApprovalSelections(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
+        if (selected != null && selected.planMode() && !supportsPlanMode()) {
+            throw new IllegalStateException("Hosted Plan mode is unavailable");
+        }
         boolean changed = selected != null && selected.revision() > 0;
-        if (!supportsApprovalSelection() && (changed
+        if (!supportsApprovalSelection(session) && (changed
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && "yolo".equals(session.approvalMode()))) {
             throw new IllegalStateException("Hosted approval selection is unavailable");
         }
         if (changed) {
-            var active = sessions.findActiveTurns(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
-            if (active != null) {
-                var turn = sessions.findTurn(session.tenantId(), session.sessionId(), active.turnId())
-                        .orElseThrow(() -> new IllegalStateException("The active approval snapshot Turn is missing"));
-                if (sessions.findTurnApprovalSelection(session.tenantId(), session.sessionId(), turn.promptId()) == null) {
+            if (activeTurn != null) {
+                var policy = sessions.findTurnApprovalSelection(session.tenantId(), session.sessionId(), activeTurn.promptId());
+                if (policy == null) {
                     throw new IllegalStateException("The active Turn approval snapshot is missing");
+                }
+                if (policy.planMode() && !supportsPlanMode()) {
+                    throw new IllegalStateException("Hosted Plan mode is unavailable");
                 }
             }
         }

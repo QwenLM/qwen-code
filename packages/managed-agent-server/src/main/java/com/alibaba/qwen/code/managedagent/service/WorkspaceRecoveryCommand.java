@@ -57,7 +57,7 @@ public final class WorkspaceRecoveryCommand {
             DataSource dataSource = context.getBean(DataSource.class);
             var bindings = new JdbcRuntimeBindingRepository(dataSource,
                     AesGcmSecretProtector.fromBase64(options.getCredentialKeyId(),
-                            options.getCredentialKey()));
+                            options.getCredentialKey(), options.getPreviousCredentialKeys()));
             var sessions = new JdbcRuntimeSessionRepository(dataSource);
             var executions = new JdbcToolExecutionRepository(dataSource);
             var manager = new JdbcTransactionManager(dataSource);

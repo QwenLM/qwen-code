@@ -277,6 +277,7 @@ export function ToolApproval({
           ? request.options.filter(
               (option) =>
                 option.id === 'restore_previous' ||
+                option.id === 'allow' ||
                 option.kind === 'reject_once' ||
                 option.kind === 'reject_always',
             )
@@ -307,7 +308,10 @@ export function ToolApproval({
         if (option.kind === 'allow_once') return t('approval.goal.confirm');
         if (option.kind === 'reject_once') return t('approval.goal.reject');
       }
-      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+      if (
+        hasPlanExecutionMode &&
+        (option.id === 'restore_previous' || option.id === 'allow')
+      ) {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
         });
