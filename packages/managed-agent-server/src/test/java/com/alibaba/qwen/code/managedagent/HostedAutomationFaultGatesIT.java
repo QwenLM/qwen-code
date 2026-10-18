@@ -51,6 +51,7 @@ import java.util.function.Predicate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * FG11 (#14446): the automation domains, {@code schedule} and
@@ -62,6 +63,8 @@ class HostedAutomationFaultGatesIT {
     private static final String TOKEN = "fg11-local-fixture";
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private static final String OPERATIONS = "/automations/operations";
+    // The Harness store client's bounded retry of one commit (http-managed-session-store.ts).
+    private static final int STORE_ATTEMPTS = 3;
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
@@ -91,6 +94,18 @@ class HostedAutomationFaultGatesIT {
     // Parks the scanner while the clock-bound cases set up.
     private CountDownLatch scannerHold;
     private Process harness;
+    // Kept for a cold restart on the same port.
+    private Path harnessCli;
+    private int harnessPort;
+    private int brokerPort;
+    // Spring arguments a test adds before it boots.
+    private final List<String> springExtras = new ArrayList<>();
+    // Fronts the Session Store for the Harness when a test asks for it before booting, and
+    // drops the answer to the one commit whose command id is armed.
+    private boolean storeRelayed;
+    private HostedLifecycleRelay storeRelay;
+    private final AtomicReference<String> storeDrop = new AtomicReference<>();
+    private final List<String> storeCommits = new CopyOnWriteArrayList<>();
     private Path decoy;
     private String node;
     private int port;
@@ -309,6 +324,8 @@ class HostedAutomationFaultGatesIT {
     @Test
     @Timeout(600)
     void fg11bStoreFaultsNeverFireTwiceOnMySql() throws Exception {
+        assumeTrue(anySelected("fg11b", "occurrence-insert", "occurrence-settle", "watermark", "revision-race",
+                "receipt-claim", "receipt-settle"));
         boot("fg11b");
         // As in FG11a, the clock-bound cases set up with the scanner parked, so each fault is in
         // place before the minute boundary its slot fires on.
@@ -337,6 +354,173 @@ class HostedAutomationFaultGatesIT {
                 String.class, tenant)).as("skipped or unknown occurrences").isEmpty();
         assertThat(holds).as("every hold was reached").isEmpty();
         assertNoModelFailure();
+    }
+
+    @Test
+    @Timeout(600)
+    void fg11bHarnessStoreFaultsNeverRunTwiceOnMySql() throws Exception {
+        // The two FG11b methods share one case selector; neither boots for the other's case.
+        assumeTrue(anySelected("fg11b", "store-transport", "revision-1", "revision-2", "projection"));
+        // A restarted Harness takes a Session over once its dead writer's lease lapses.
+        springExtras.add("--qwen.managed-agent.session-store.writer-lease-duration=15s");
+        storeRelayed = true;
+        boot("fg11b");
+        if (selected("fg11b", "store-transport")) {
+            storeTransport();
+        }
+        if (selected("fg11b", "revision-1")) {
+            revisionRefused("revision-1", "rev1", 1);
+        }
+        if (selected("fg11b", "revision-2")) {
+            revisionRefused("revision-2", "rev2", 2);
+        }
+        if (selected("fg11b", "projection")) {
+            projectionRefused();
+        }
+        assertThat(jdbc.queryForList("SELECT CONCAT(occurrence_key, ' ', outcome, ' ', COALESCE(reason, ''))"
+                + " FROM ma_schedule_occurrence WHERE tenant_id = ? AND outcome IN ('skipped', 'unknown')",
+                String.class, tenant)).as("skipped or unknown occurrences").isEmpty();
+        assertNoModelFailure();
+    }
+
+    // revision-1 / revision-2: the journal refuses one revision of a manual run's fire. The
+    // Harness's store client gives up after its bounded retry, the manual run answers a
+    // retryable 503, and the Session stops writing: once the refusal drops, the same key still
+    // answers 503 until the Harness is restarted. On the reloaded Session the retry fires the
+    // same run once. Revision 1 refused leaves nothing committed; revision 2 refused leaves the
+    // claim, which the replay completes.
+    private void revisionRefused(String name, String marker, int revision) throws Exception {
+        String session = createSession(marker);
+        String id = create(session, "FG11B_" + marker.toUpperCase(), "0 0 1 1 *", marker + "-base");
+        refuse(name, "INSERT", "ma_session_journal_tx", "NEW.session_id = '" + session
+                + "' AND NEW.operation = 'fireRun' AND NEW.command_id LIKE '%:" + revision + "'", "NEW.command_id");
+        String key = marker + "-run";
+        String path = "/v1/agent-automations/" + id + "/runs";
+        assertUnknown(send("POST", path, null, key));
+        List<String> refused = refusedDetails(name);
+        assertThat(refused).as("the store client's bounded retry").hasSizeGreaterThanOrEqualTo(STORE_ATTEMPTS);
+        assertThat(refused).containsOnly(refused.getFirst());
+        String runId = refused.getFirst().substring(0, refused.getFirst().lastIndexOf(':'));
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .as("committed while refused").hasSize(revision - 1);
+        dropRefusal(name);
+        assertUnknown(send("POST", path, null, key));
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .as("a Session whose commit failed writes nothing more").hasSize(revision - 1);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id)).isEmpty();
+        long generation = coldRestart(session);
+        JsonNode run = retryUntilAccepted("POST", path, null, key);
+        assertThat(run.path("id").asText()).isEqualTo(runId);
+        assertThat(writerGeneration(session)).as("the reloaded Session's writer").isGreaterThan(generation);
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> "completed".equals(runState(runId)));
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":1", runId + ":2");
+        assertThat(commands(session, "settleRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":3");
+        assertThat(events(session, "input.accepted")).filteredOn(event -> event.startsWith(runId + ":"))
+                .containsExactly(runId + ":input:accepted");
+        assertThat(events(session, "turn.settled")).filteredOn(event -> event.contains(runId))
+                .containsExactly("turn:" + runId + ":input");
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id)).hasSize(1);
+        assertThat(jdbc.queryForObject("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ? AND"
+                + " schedule_id = ? AND occurrence_key = ?", String.class, tenant, id, "manual:" + key))
+                .isEqualTo("fired");
+    }
+
+    // store-transport: the store commits a manual run's first revision and its answer to the
+    // Harness is lost on the connection. The store client's bounded retry sends the same command
+    // again, the store answers it as the commit it holds, and the fire goes on: the run fires
+    // once, with no failure reaching the caller and no restart.
+    private void storeTransport() throws Exception {
+        String session = createSession("transport");
+        String id = create(session, "FG11B_TRANSPORT", "0 0 1 1 *", "transport-base");
+        String key = "transport-run";
+        String runId = com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.automationRunId(id,
+                "manual:" + key);
+        storeDrop.set(runId + ":1");
+        JsonNode run = request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202);
+        assertThat(run.path("id").asText()).isEqualTo(runId);
+        assertThat(storeDrop.get()).as("the commit's answer was dropped").isNull();
+        assertThat(storeCommits).filteredOn(commit -> commit.startsWith(runId + ":1 "))
+                .as("the commit and its replay").hasSize(2).first().isEqualTo(runId + ":1 dropped");
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> "completed".equals(runState(runId)));
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":1", runId + ":2");
+        assertThat(commands(session, "settleRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":3");
+        assertThat(events(session, "turn.settled")).filteredOn(event -> event.contains(runId))
+                .containsExactly("turn:" + runId + ":input");
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id)).hasSize(1);
+    }
+
+    // projection: the schedule mirror's projection of an update is refused inside the journal
+    // commit's own transaction, so the revision rolls back with it: neither the journal nor the
+    // mirror moves past revision 1. After a restart, the retry under the same key commits
+    // revision 2 once, and the journal and the mirror agree.
+    private void projectionRefused() throws Exception {
+        String session = createSession("projection");
+        String id = create(session, "FG11B_PROJECTION", "0 0 1 1 *", "projection-base");
+        refuse("projection", "UPDATE", "ma_schedule", "NEW.schedule_id = '" + id
+                + "' AND NEW.definition_revision <> OLD.definition_revision", "NEW.definition_revision");
+        Map<String, Object> update = Map.of("prompt", "FG11B_PROJECTION_TWO reply with FG11_DONE.");
+        String path = "/v1/agent-automations/" + id;
+        assertUnknown(send("POST", path, update, "projection-update"));
+        assertThat(refusedDetails("projection")).as("the store client's bounded retry")
+                .hasSizeGreaterThanOrEqualTo(STORE_ATTEMPTS).containsOnly("2");
+        assertThat(commands(session, "defineSchedule")).as("the rolled-back revision").hasSize(1);
+        assertThat(recordRevision(session, "schedule", id)).isEqualTo(1);
+        assertThat(mirrorRevision(id)).isEqualTo(1);
+        dropRefusal("projection");
+        long generation = coldRestart(session);
+        JsonNode revised = retryUntilAccepted("POST", path, update, "projection-update");
+        assertThat(revised.path("definition_revision").asLong()).isEqualTo(2);
+        assertThat(writerGeneration(session)).as("the reloaded Session's writer").isGreaterThan(generation);
+        assertThat(commands(session, "defineSchedule")).hasSize(2);
+        assertThat(recordRevision(session, "schedule", id)).isEqualTo(2);
+        assertThat(mirrorRevision(id)).isEqualTo(2);
+    }
+
+    // A Harness-side store failure reaches the caller as the operation's unknown outcome, never
+    // as a refusal the caller would not retry.
+    private static void assertUnknown(HttpResponse<String> response) {
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(503);
+        assertThat(response.body()).contains("automation_operation_unknown");
+    }
+
+    // SIGKILLs the Harness and starts a cold one on the same port, and returns the Session's
+    // writer generation before it; the next relay that reaches the Session reloads it.
+    private long coldRestart(String session) throws Exception {
+        long generation = writerGeneration(session);
+        harness.descendants().forEach(ProcessHandle::destroyForcibly);
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(20, TimeUnit.SECONDS)).as("the killed Harness exited").isTrue();
+        startHarness();
+        return generation;
+    }
+
+    // Retries the same request, under the same key, until the reloaded Session answers it: the
+    // dead writer's lease lapses first, and every attempt before that is the same operation.
+    // Until it lapses the cold Harness's load is refused, and the public route passes that
+    // through as 409 managed_session_writer_conflict (see the design's Findings); any other
+    // refusal fails the case.
+    private JsonNode retryUntilAccepted(String method, String path, Object body, String key) throws Exception {
+        AtomicReference<HttpResponse<String>> accepted = new AtomicReference<>();
+        waiting().atMost(Duration.ofSeconds(90)).pollInterval(Duration.ofSeconds(1)).until(() -> {
+            HttpResponse<String> response = send(method, path, body, key);
+            if (response.statusCode() == 409) {
+                assertThat(response.body()).contains("managed_session_writer_conflict");
+            } else {
+                assertThat(response.statusCode()).as(response.body()).isIn(202, 503);
+            }
+            accepted.set(response);
+            return response.statusCode() == 202;
+        });
+        return json.readTree(accepted.get().body());
+    }
+
+    private long mirrorRevision(String scheduleId) {
+        return jdbc.queryForObject("SELECT definition_revision FROM ma_schedule WHERE tenant_id = ? AND"
+                + " schedule_id = ?", Long.class, tenant, scheduleId);
     }
 
     // occurrence-insert: the scanner's record of the next slot is refused in MySQL. Nothing
@@ -538,12 +722,32 @@ class HostedAutomationFaultGatesIT {
         jdbc.execute("DROP TRIGGER IF EXISTS " + refusals.remove(name));
     }
 
+    // Drops every trigger this test installed, each on its own so one failing drop leaves none of
+    // the others on the shared fork's schema, then the refusal table they wrote to.
     private void dropRefusals() {
-        if (jdbc != null) {
-            refusals.values().forEach(trigger -> jdbc.execute("DROP TRIGGER IF EXISTS " + trigger));
-            jdbc.execute("DROP TABLE IF EXISTS fg11b_fire");
+        if (jdbc == null) {
+            return;
         }
-        refusals.clear();
+        RuntimeException failure = null;
+        try {
+            for (String trigger : refusals.values()) {
+                try {
+                    jdbc.execute("DROP TRIGGER IF EXISTS " + trigger);
+                } catch (RuntimeException error) {
+                    if (failure == null) {
+                        failure = error;
+                    } else {
+                        failure.addSuppressed(error);
+                    }
+                }
+            }
+            jdbc.execute("DROP TABLE IF EXISTS fg11b_fire");
+        } finally {
+            refusals.clear();
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     private int refusedCount(String name) {
@@ -561,6 +765,15 @@ class HostedAutomationFaultGatesIT {
             assertNoModelFailure();
             assertThat(refusedCount(name)).as("%s refusals", name).isGreaterThanOrEqualTo(times);
         });
+    }
+
+    private boolean anySelected(String letter, String... names) {
+        for (String name : names) {
+            if (selected(letter, name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean selected(String letter, String name) {
@@ -700,8 +913,6 @@ class HostedAutomationFaultGatesIT {
         Files.createDirectory(root.resolve("child"));
         // Keep the initialized root's mtime distinct from its birth time without sleeping.
         Files.setLastModifiedTime(root, FileTime.fromMillis(1));
-        int harnessPort;
-        int brokerPort;
         try (var springSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
                 var harnessSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
                 var brokerSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
@@ -727,8 +938,19 @@ class HostedAutomationFaultGatesIT {
                 return relayed(request, status);
             }
         });
+        if (storeRelayed) {
+            storeRelay = new HostedLifecycleRelay();
+            storeRelay.backend(URI.create("http://127.0.0.1:" + port));
+            storeRelay.fault(new HostedLifecycleRelay.Fault() {
+                @Override
+                public boolean after(HostedLifecycleRelay.Request request, int status) throws Exception {
+                    return storeAnswered(request, status);
+                }
+            });
+        }
         startSpring(cli, root, brokerPort);
-        startHarness(cli, harnessPort, brokerPort);
+        harnessCli = cli;
+        startHarness();
         register(root);
         publicRelay = new HostedLifecycleRelay();
         publicRelay.backend(URI.create("http://127.0.0.1:" + port));
@@ -745,6 +967,20 @@ class HostedAutomationFaultGatesIT {
                         || !publicDrop.compareAndSet(wanted, null);
             }
         });
+    }
+
+    // Records each journal commit the Harness sends the store, by command id, and closes the
+    // connection without the store's answer for the armed one: the store committed it, and the
+    // Harness never reads that it did.
+    private boolean storeAnswered(HostedLifecycleRelay.Request request, int status) throws Exception {
+        if (!"POST".equals(request.method()) || !request.path().contains("/transactions:commit")) {
+            return true;
+        }
+        String command = json.readTree(request.body()).path("commandId").asText();
+        String wanted = storeDrop.get();
+        boolean drop = status / 100 == 2 && command.equals(wanted) && storeDrop.compareAndSet(wanted, null);
+        storeCommits.add(command + (drop ? " dropped" : " " + status));
+        return !drop;
     }
 
     // Parks the first automation operation a hold rule matches until its case releases it, then
@@ -792,7 +1028,8 @@ class HostedAutomationFaultGatesIT {
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "root"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--qwen.managed-agent.session-store.enabled=true",
-                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + port,
+                "--qwen.managed-agent.session-store.base-url="
+                        + (storeRelay == null ? "http://127.0.0.1:" + port : storeRelay.uri()),
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
                 "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
@@ -817,6 +1054,7 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + root));
+        arguments.addAll(springExtras);
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .initializers(context -> context.getBeanFactory().registerSingleton("fg11Authentication",
                         authentication()))
@@ -872,8 +1110,10 @@ class HostedAutomationFaultGatesIT {
         return filter;
     }
 
-    private void startHarness(Path cli, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectory(temporary.resolve("home"));
+    // A cold Harness: a fresh HOME and QWEN_HOME each start, on the same port.
+    private void startHarness() throws Exception {
+        Path cli = harnessCli;
+        Path home = Files.createDirectory(temporary.resolve("home-" + UUID.randomUUID()));
         Path config = Files.createDirectory(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
         Files.writeString(config.resolve("settings.json"), json.writeValueAsString(Map.of(
@@ -886,7 +1126,8 @@ class HostedAutomationFaultGatesIT {
                 Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
                 "--managed-runtime-broker-url", "http://127.0.0.1:" + brokerPort,
                 "--managed-runtime-broker-token", TOKEN)
-                .directory(decoy.toFile()).redirectErrorStream(true).redirectOutput(log.toFile());
+                .directory(decoy.toFile()).redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
         Map<String, String> environment = builder.environment();
         environment.clear();
         for (String name : List.of("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT")) {
@@ -977,6 +1218,12 @@ class HostedAutomationFaultGatesIT {
         return request;
     }
 
+    private long writerGeneration(String session) {
+        Long generation = jdbc.queryForObject("SELECT writer_generation FROM ma_session_head WHERE tenant_id = ?"
+                + " AND session_id = ?", Long.class, tenant, session);
+        return generation == null ? 0 : generation;
+    }
+
     // The relay's operation log and the Harness log, kept for the CI upload either way.
     private void writeEvidence() throws IOException {
         if (temporary == null || harnessRelay == null) {
@@ -1028,6 +1275,9 @@ class HostedAutomationFaultGatesIT {
                 } },
                 () -> { if (publicRelay != null) {
                     publicRelay.close();
+                } },
+                () -> { if (storeRelay != null) {
+                    storeRelay.close();
                 } },
                 () -> { if (model != null) {
                     model.stop(0);

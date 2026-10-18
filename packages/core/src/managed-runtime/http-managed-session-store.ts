@@ -136,6 +136,8 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
     readonly remoteCode: string,
     message: string,
     readonly contentionExhausted?: boolean,
+    // The envelope's other scalar fields, such as the limit a refusal names.
+    readonly details?: Readonly<Record<string, string | number | boolean>>,
     // The refusing store route ("POST /writers:renew", "GET /restore", …).
     // The public message is shared across server predicates (review
     // #14522), so the route travels in its own field.
@@ -1137,6 +1139,7 @@ class ManagedSessionStoreHttpClient {
             error.code,
             error.message,
             undefined,
+            error.details,
             `${method} ${path}`,
           );
         }
@@ -1617,6 +1620,7 @@ class ManagedSessionStoreHttpClient {
               // only collided with the near-deadline instant did not
               // spend it, and the caller's restart stays allowed.
               guardRetries > 0 || undefined,
+              contendedRefusal.details,
               contendedRefusal.route,
             );
           }
@@ -1631,6 +1635,7 @@ class ManagedSessionStoreHttpClient {
                 error.remoteCode,
                 detail,
                 undefined,
+                error.details,
                 error.route,
               );
             if (error instanceof ManagedSessionStoreTransportError)
@@ -1704,6 +1709,7 @@ class ManagedSessionStoreHttpClient {
         error.code,
         error.message,
         undefined,
+        error.details,
         `${method} ${path}`,
       );
     }
@@ -2203,15 +2209,28 @@ function requireSameRef(
   }
 }
 
-async function readHttpError(
-  response: Response,
-): Promise<{ code: string; message: string }> {
+async function readHttpError(response: Response): Promise<{
+  code: string;
+  message: string;
+  details?: Record<string, string | number | boolean>;
+}> {
   try {
     const body = asRecord((await response.json()) as unknown, 'error response');
     const error = asRecord(body['error'], 'error');
+    const details: Record<string, string | number | boolean> = {};
+    for (const [key, value] of Object.entries(error))
+      if (
+        key !== 'code' &&
+        key !== 'message' &&
+        (typeof value === 'string' ||
+          typeof value === 'number' ||
+          typeof value === 'boolean')
+      )
+        details[key] = value;
     return {
       code: string(error['code'], 'error.code'),
       message: string(error['message'], 'error.message'),
+      ...(Object.keys(details).length > 0 ? { details } : {}),
     };
   } catch {
     return {
