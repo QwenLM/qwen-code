@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
@@ -2284,12 +2285,13 @@ describe('qwen-triage verify hardening', () => {
     },
   );
 
-  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
+  it.skipIf(!hasGnuRealpath || !arePermissionBitsEnforced())(
     'fails closed when the corrupt workspace cannot be unlinked',
     () => {
       // A swallowed `rm -f` failure would let the mkdir and the wipe run on
-      // a path that is still a symlink. Root bypasses the mode bits, so the
-      // fixture cannot produce the refusal there.
+      // a path that is still a symlink. Root with its DAC capabilities
+      // bypasses the mode bits, so the fixture cannot produce the refusal
+      // there.
       for (const stepName of WIPE_STEPS) {
         const parent = mkdtempSync(join(tmpdir(), 'verify-heal-perm-'));
         const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));

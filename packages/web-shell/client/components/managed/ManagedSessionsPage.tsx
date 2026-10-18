@@ -46,7 +46,14 @@ import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
+  ManagedInputBlock,
 } from './managed-agent-provider';
+import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
+import {
+  encodeManagedInput,
+  isManagedInput,
+  restoreManagedAttachments,
+} from './managed-input';
 
 interface PendingPrompt {
   idempotencyKey: string;
@@ -54,6 +61,7 @@ interface PendingPrompt {
   draftText?: string;
   sessionId?: string;
   cwd?: string;
+  input?: ManagedInputBlock[];
 }
 
 function readPending(key: string): PendingPrompt | undefined {
@@ -63,7 +71,8 @@ function readPending(key: string): PendingPrompt | undefined {
     const pending = value as Record<string, unknown>;
     if (
       typeof pending['idempotencyKey'] !== 'string' ||
-      typeof pending['text'] !== 'string'
+      typeof pending['text'] !== 'string' ||
+      (pending['input'] !== undefined && !isManagedInput(pending['input']))
     )
       return undefined;
     if (
@@ -84,12 +93,16 @@ function readPending(key: string): PendingPrompt | undefined {
   }
 }
 
-function persistPending(key: string, value: PendingPrompt | undefined): void {
+function persistPending(
+  key: string,
+  value: PendingPrompt | undefined,
+): boolean {
   try {
     if (value) sessionStorage.setItem(key, JSON.stringify(value));
     else sessionStorage.removeItem(key);
+    return true;
   } catch {
-    // The in-memory attempt still preserves retries when storage is disabled.
+    return false;
   }
 }
 
@@ -216,6 +229,7 @@ function ManagedSessionsContent({
     readPending(pendingKey),
   );
   const pendingRef = useRef(pending);
+  const encoding = useRef(false);
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
   );
@@ -403,12 +417,18 @@ function ManagedSessionsContent({
     }
   }
 
-  async function submit(submittedText = text, commit?: ComposerSubmitCommit) {
+  async function submit(
+    submittedText = text,
+    commit?: ComposerSubmitCommit,
+    images?: PromptImage[],
+    files?: PromptFile[],
+  ) {
     const abort = lifetime.current;
     if (
       !abort ||
       abort.signal.aborted ||
       busy ||
+      encoding.current ||
       cwd.isBlocked() ||
       modelChange.isBlocked() ||
       approvalChange.isBlocked()
@@ -418,20 +438,37 @@ function ManagedSessionsContent({
     let attempt = pendingRef.current;
     if (!attempt) {
       if (
-        !submittedText.trim() ||
+        (!submittedText.trim() && !images?.length && !files?.length) ||
         (sessionId && !detail.summary?.capabilities.canSend)
       )
         return;
+      let input: ManagedInputBlock[];
+      encoding.current = true;
+      setBusy(true);
+      try {
+        input = await encodeManagedInput(submittedText, images, files);
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : String(failure));
+        return;
+      } finally {
+        encoding.current = false;
+        setBusy(false);
+      }
+      if (abort.signal.aborted || selection.current !== sessionId) return;
       attempt = {
         idempotencyKey: managedRequestId(),
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
         cwd: workspaceCwd,
+        ...(images?.length || files?.length ? { input } : {}),
       };
+      if (!persistPending(pendingKey, attempt)) {
+        setError(t('managed.workspaceStorageUnavailable'));
+        return;
+      }
       pendingRef.current = attempt;
       setPending(attempt);
-      persistPending(pendingKey, attempt);
       composerCommit.current = commit;
     }
     setBusy(true);
@@ -446,12 +483,16 @@ function ManagedSessionsContent({
       const admission = attempt.sessionId
         ? await provider.submitPrompt(
             attempt.sessionId,
-            { text: attempt.text },
+            {
+              text: attempt.text,
+              ...(attempt.input ? { input: attempt.input } : {}),
+            },
             opts,
           )
         : await provider.createSession(
             {
               text: attempt.text,
+              ...(attempt.input ? { input: attempt.input } : {}),
               workspaceCwd: provider.acceptsWorkspaceCwd
                 ? attempt.cwd
                 : undefined,
@@ -492,6 +533,8 @@ function ManagedSessionsContent({
         setPending(undefined);
         persistPending(pendingKey, undefined);
         if (selection.current === selectedAtSubmit) setText(attempt.text);
+        if (selection.current === selectedAtSubmit)
+          restoreManagedAttachments(composerRef.current, attempt.input);
       }
       if (selection.current === selectedAtSubmit)
         setError(failure instanceof Error ? failure.message : String(failure));
@@ -725,7 +768,7 @@ function ManagedSessionsContent({
             : null
           : navigation}
         <section
-          className={`${shellStyles.chatPane} gap-3`}
+          className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
           data-managed-home={home || undefined}
           aria-label={t('managed.conversation')}
         >
@@ -918,6 +961,7 @@ function ManagedSessionsContent({
                 sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
                 loadingTranscript={detail.loading}
                 isResponding={Boolean(active)}
+                activeTurnStartedAt={active ? summary?.admittedAt : undefined}
                 hasOlderHistory={Boolean(detail.olderCursor)}
                 loadingOlderHistory={detail.loadingOlder}
                 onLoadOlderHistory={detail.loadOlder}
@@ -967,6 +1011,10 @@ function ManagedSessionsContent({
                     if (pending.sessionId === sessionId) {
                       setText(pending.text);
                       composerRef.current?.setText(pending.text);
+                      restoreManagedAttachments(
+                        composerRef.current,
+                        pending.input,
+                      );
                     }
                     composerCommit.current = undefined;
                     setError(undefined);
@@ -991,6 +1039,12 @@ function ManagedSessionsContent({
             >
               <ToolApproval
                 request={pendingApproval}
+                planExecutionMode={
+                  approvals.action?.toolName === 'exit_plan_mode' &&
+                  approvals.action.turnId === detail.summary?.activeTurnId
+                    ? detail.summary?.approvalMode
+                    : undefined
+                }
                 variant="floating"
                 keyboardActive={false}
                 // Answering needs the Session's owner or a Workspace
@@ -1105,16 +1159,25 @@ function ManagedSessionsContent({
                 }
                 composerInputVersion={0}
                 onInputTextChange={setText}
-                onSubmit={(value, _images, _files, commit) => {
-                  void submit(value, commit);
+                onSubmit={(value, images, files, commit) => {
+                  void submit(value, commit, images, files);
                   return false;
                 }}
                 commands={[]}
                 workspaceFeaturesEnabled={false}
-                attachmentsEnabled={false}
+                attachmentsEnabled={
+                  summary?.capabilities.inputAttachments === true
+                }
                 visibleToolbarActions={
                   interactive
                     ? [
+                        ...(summary?.capabilities.inputAttachments ||
+                        summary?.planModeSupported
+                          ? ['addMenu' as const]
+                          : []),
+                        ...(summary?.planModeSupported || summary?.planMode
+                          ? ['plan' as const]
+                          : []),
                         ...(summary?.approvalMode
                           ? ['approvalMode' as const]
                           : []),
@@ -1157,6 +1220,7 @@ function ManagedSessionsContent({
                         if (
                           !interactive ||
                           busy ||
+                          encoding.current ||
                           pendingRef.current ||
                           active ||
                           pendingApproval ||
@@ -1175,6 +1239,26 @@ function ManagedSessionsContent({
                 contextUsageKnown={contextUsageKnown}
                 contextUsageAlwaysVisible={Boolean(sessionId)}
                 currentMode={summary?.approvalMode ?? ''}
+                planMode={summary?.planMode === true}
+                onTogglePlan={
+                  summary?.planModeSupported && summary.approvalMode
+                    ? () => {
+                        if (
+                          !busy &&
+                          !encoding.current &&
+                          !active &&
+                          !pendingApproval &&
+                          !pendingRef.current &&
+                          !cwd.isBlocked() &&
+                          !modelChange.isBlocked()
+                        )
+                          void approvalChange.submit(
+                            summary.approvalMode!,
+                            !summary.planMode,
+                          );
+                      }
+                    : undefined
+                }
                 availableModes={
                   approvalChange.options?.availableApprovalModes ??
                   (summary?.approvalMode ? [summary.approvalMode] : [])
@@ -1202,6 +1286,7 @@ function ManagedSessionsContent({
                         if (
                           !interactive ||
                           busy ||
+                          encoding.current ||
                           pendingRef.current ||
                           active ||
                           pendingApproval ||

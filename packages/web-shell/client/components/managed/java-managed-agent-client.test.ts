@@ -23,6 +23,61 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('uses authorized Workspace registration POST routes without putting credentials in request bodies', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer short-lived' }),
+      credentials: 'include',
+      fetch: fetchImpl,
+    });
+    const abort = new AbortController();
+    await client.listRuntimeNodes(abort.signal);
+    await client.checkWorkspaceDirectory(
+      { nodeId: 'mac', path: '/project' },
+      abort.signal,
+    );
+    await client.registerWorkspace(
+      {
+        nodeId: 'mac',
+        path: '/project',
+        displayName: 'Project',
+        idempotencyKey: 'original',
+      },
+      abort.signal,
+    );
+    await client.getWorkspaceOperation('operation-a', abort.signal);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://product.example/gateway/api/agent/web-shell/v1/runtime-nodes/query',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/check-directory',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/register',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/operations/get',
+    ]);
+    expect(
+      fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      {},
+      { nodeId: 'mac', path: '/project' },
+      {
+        nodeId: 'mac',
+        path: '/project',
+        displayName: 'Project',
+        idempotencyKey: 'original',
+      },
+      { operationId: 'operation-a' },
+    ]);
+    for (const [, request] of fetchImpl.mock.calls) {
+      expect(request?.method).toBe('POST');
+      expect(request?.credentials).toBe('include');
+      expect(request?.signal).toBe(abort.signal);
+      expect(new Headers(request?.headers).get('authorization')).toBe(
+        'Bearer short-lived',
+      );
+    }
+  });
+
   it('queries and changes Session models using authenticated cancellable POSTs', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

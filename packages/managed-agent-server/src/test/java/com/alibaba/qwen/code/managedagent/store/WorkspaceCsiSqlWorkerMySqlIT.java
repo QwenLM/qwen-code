@@ -109,7 +109,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             var provisioner = mock(RuntimeProvisioner.class);
             var placement = new AtomicReference<RuntimeResourceHandle>();
             when(provisioner.kind()).thenReturn("kubernetes-workspace");
-            when(provisioner.createRequest(any(), any())).thenReturn(request);
+            when(provisioner.createRequest(any(), any(), any())).thenReturn(request);
             doAnswer(call -> CompletableFuture.completedFuture(placement.get()))
                     .when(provisioner).ensureResource(any(), any(), any());
             doAnswer(call -> CompletableFuture.completedFuture(WorkspaceCsiRuntimeIdentity.lease(binding.getProvisionSeed(),

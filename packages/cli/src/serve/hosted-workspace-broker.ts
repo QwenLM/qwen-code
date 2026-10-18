@@ -19,6 +19,7 @@ import type {
   ToolResultCapture,
   ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
@@ -642,11 +643,16 @@ export class HostedWorkspaceBroker {
    * Read-only execution state. Only a definitive not-found resolves to
    * undefined; an unknown outcome is not proof that execution stopped, and a
    * terminally abandoned record reaches the caller as the distinct
-   * `abandoned` state rather than folding into that sentinel.
+   * `abandoned` state rather than folding into that sentinel. A settled
+   * record also names its result's execution status.
    */
-  async status(
-    id: string,
-  ): Promise<{ state: HostedBrokerExecutionState } | undefined> {
+  async status(id: string): Promise<
+    | {
+        state: HostedBrokerExecutionState;
+        executionStatus?: string;
+      }
+    | undefined
+  > {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
@@ -678,7 +684,84 @@ export class HostedWorkspaceBroker {
       !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
     )
       throw new Error('Runtime execution outcome is unknown.');
-    return { state: state as HostedBrokerExecutionState };
+    const result = status['result'];
+    const executionStatus =
+      state === 'settled' &&
+      typeof result === 'object' &&
+      result !== null &&
+      typeof (result as Record<string, unknown>)['executionStatus'] === 'string'
+        ? ((result as Record<string, unknown>)['executionStatus'] as string)
+        : undefined;
+    return {
+      state: state as HostedBrokerExecutionState,
+      ...(executionStatus === undefined ? {} : { executionStatus }),
+    };
+  }
+
+  async readSettledShellResult(
+    id: string,
+  ): Promise<
+    { bindingGeneration: string; result: ToolResultEnvelope } | undefined
+  > {
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+    } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 404 &&
+        cause.code === 'runtime_execution_not_found'
+      )
+        return undefined;
+      throw cause;
+    }
+    const generation = response['bindingGeneration'];
+    const bindingId = response['runtimeBindingId'];
+    const status = object(response['status']);
+    if (
+      response['protocolVersion'] !== 1 ||
+      response['harnessSessionId'] !== this.identity.harnessSessionId ||
+      response['runtimeSessionId'] !== this.identity.runtimeSessionId ||
+      response['executionCallId'] !== id ||
+      typeof bindingId !== 'string' ||
+      !bindingId ||
+      typeof generation !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(generation) ||
+      BigInt(generation) > 2n ** 63n - 1n ||
+      status['state'] !== 'settled'
+    ) {
+      throw new Error(
+        'Original Shell result is not settled under its binding.',
+      );
+    }
+    const result = object(status['result']);
+    if (!('capture' in result)) {
+      const error = 'error' in result ? object(result['error']) : undefined;
+      if (
+        Object.keys(result).some(
+          (key) => !['executionStatus', 'responseParts', 'error'].includes(key),
+        ) ||
+        typeof result['executionStatus'] !== 'string' ||
+        !['success', 'error', 'cancelled', 'not_started'].includes(
+          result['executionStatus'],
+        ) ||
+        !Array.isArray(result['responseParts']) ||
+        (error &&
+          (Object.keys(error).some(
+            (key) => !['message', 'type'].includes(key),
+          ) ||
+            typeof error['message'] !== 'string' ||
+            !error['message'] ||
+            ('type' in error &&
+              (typeof error['type'] !== 'string' || !error['type']))))
+      )
+        throw new Error('Legacy Shell result is invalid.');
+      return undefined;
+    }
+    return {
+      bindingGeneration: generation,
+      result: parseToolResultEnvelope(result),
+    };
   }
 
   /**
