@@ -96,8 +96,10 @@ relay 先让 Harness 作答，再不带回包地关闭连接，也就是提交�
   `createOrLoad` 时用 `loadExisting = session.harnessBootId() != null`。automation 各动作
   走的是 `attachment(…, true)`，永远只 load。没有输入就创建的 Session 从未在 Harness 上
   创建过，于是 load 回答 `404 managed_session_not_found`，建 automation 也就以这个错误码
-  失败。夹具让每个 Session 先跑一个 Turn。修连接器还需要像 Turn 路径那样记录 Harness
-  boot id，所以不放进这个只含测试的切片，单独报告。
+  失败。夹具曾经让每个 Session 先跑一个 Turn。修连接器还需要像 Turn 路径那样记录 Harness
+  boot id，所以当时不放进这个只含测试的切片，单独报告（#14548）。该修复让各动作对从未
+  挂接的 Session 走 create 并在 Session 级绑定 boot id，热身 Turn 已移除，下面每个用例都
+  直接在从未跑过 Turn 的 Session 上建定义；`create-reply` 用例钉住 boot id 绑定。
 
 ## 变异见证
 
