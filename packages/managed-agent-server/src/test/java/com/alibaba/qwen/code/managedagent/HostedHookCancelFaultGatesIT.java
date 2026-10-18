@@ -633,7 +633,7 @@ class HostedHookCancelFaultGatesIT {
         Path destination = Files.createDirectories(Path.of("target/failsafe-reports/hosted-hook-fault-evidence", tenant));
         System.out.println("HOSTED_HOOK_FAULT_EVIDENCE " + destination.toAbsolutePath());
         json.writeValue(destination.resolve("model-requests.json").toFile(), modelRequests);
-        for (String name : List.of("processes.jsonl", "harness-1.log", "harness-2.log")) {
+        for (String name : List.of("processes.jsonl", "harness-1.log", "harness-2.log", "proxy.log")) {
             Path source = temporary.resolve(name);
             if (Files.exists(source)) {
                 Files.copy(source, destination.resolve(source.getFileName()));
