@@ -429,9 +429,12 @@
                                  fork moves to 5218 s and the Verify
                                  step to 100 minutes. The FG13d
                                  worker-stop cancel cell (issue #14449)
-                                 adds 150 s: the healthy sum becomes
-                                 4758 s, so the fork moves to 5368 s. -->
-                            <forkedProcessTimeoutInSeconds>5368</forkedProcessTimeoutInSeconds>
+                                 adds 150 s, and the dropped-reply cancel
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 4908 s, so the fork
+                                 moves to 5518 s and the Verify step to
+                                 105 minutes. -->
+                            <forkedProcessTimeoutInSeconds>5518</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
