@@ -411,11 +411,11 @@
                                  fork moves to 4499 s. The FG12c MCP
                                  restart matrix (HostedMcpRestartFault
                                  GatesIT, five process-kill cases)
-                                 measures ~26 s healthy locally (~52 s
+                                 measures ~49 s healthy locally (~98 s
                                  budgeted at 2x): the healthy sum
-                                 becomes 3915 s, so the fork moves to
-                                 4525 s. -->
-                            <forkedProcessTimeoutInSeconds>4525</forkedProcessTimeoutInSeconds>
+                                 becomes 3938 s, so the fork moves to
+                                 4548 s. -->
+                            <forkedProcessTimeoutInSeconds>4548</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

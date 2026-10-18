@@ -43,7 +43,7 @@ Spring/Broker 重启两格（空闲，以及 `drained` 之前的 release 窗口�
 
 ## 预算
 
-新增 `Hosted*IT` 类要在同一 diff 重钉六处 fork 预算：类 `@Timeout` 上限、`hostedForkHealthySeconds`、CI fork 值与字面钉点、本地 profile、workflow 步骤注释、artifact 路径（见 `hosted-fork-budget-remeasure-duty`）。FG12c 五格在 JDK 21 + MariaDB 10.11 上实测 26 s 健康耗时（2× 预算约 52 s），`hostedForkHealthySeconds` 由 3889 升至 3915，CI fork 由 4499 升至 4525；本地 `hosted-mcp-gates` profile 已用 `**/HostedMcp*IT.java` 家族通配。
+新增 `Hosted*IT` 类要在同一 diff 重钉六处 fork 预算：类 `@Timeout` 上限、`hostedForkHealthySeconds`、CI fork 值与字面钉点、本地 profile、workflow 步骤注释、artifact 路径（见 `hosted-fork-budget-remeasure-duty`）。FG12c 五格在 JDK 21 + MariaDB 10.11 上实测 49 s 健康耗时（2× 预算约 98 s），`hostedForkHealthySeconds` 由 3889 升至 3938，CI fork 由 4499 升至 4548；本地 `hosted-mcp-gates` profile 已用 `**/HostedMcp*IT.java` 家族通配。
 
 ## 验收
 

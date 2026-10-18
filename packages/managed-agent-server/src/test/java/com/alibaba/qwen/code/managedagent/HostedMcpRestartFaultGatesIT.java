@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -172,11 +173,16 @@ class HostedMcpRestartFaultGatesIT {
                         + "/mcp/configurations", Map.of("operationId",
                         configuration, "expectedRevision", 1, "server",
                         mcpPin(2)), session, 202));
-        waitFor(() -> assertThat(configuration(session.id())
-                .path("configRevision").asInt()).isEqualTo(2));
-        assertThat(configuration(session.id()).path("run").path("execution")
-                .asText()).as("configure must be in dispatch_started")
-                .isEqualTo("dispatch_started");
+        waitFor(() -> {
+            JsonNode record = configuration(session.id());
+            assertThat(record.path("configRevision").asInt()).isEqualTo(2);
+            assertThat(record.path("run").path("execution").asText())
+                    .as("configure must be in dispatch_started")
+                    .isEqualTo("dispatch_started");
+            assertThat(controls("mcp-configure")).anyMatch(call ->
+                    configuration.equals(call.operationId())
+                            && call.status() == 0);
+        });
         killHarness();
         releaseControl();
         await().atMost(Duration.ofSeconds(60))
@@ -219,7 +225,19 @@ class HostedMcpRestartFaultGatesIT {
         killHarness();
         SessionRef reloaded = reload(session);
         pending.cancel(true);
-        lookup(reloaded, operation);
+        HttpResponse<String> held = rawStatus(reloaded, operation);
+        assertThat(held.statusCode()).isIn(200, 503);
+        if (held.statusCode() == 200) {
+            JsonNode body = json.readTree(held.body());
+            assertThat(body.path("state").asText())
+                    .as("a held read must never look settled")
+                    .isIn("running", "recovery_blocked", "outcome_unknown");
+        }
+        JsonNode heldRecord = operations(session.id()).getLast();
+        assertThat(heldRecord.path("run").path("execution").asText())
+                .isIn("dispatch_started", "outcome_unknown");
+        assertThat(heldRecord.path("run").path("state").asText())
+                .isNotEqualTo("settled");
         assertThat(controls("mcp-invoke")).hasSize(1);
         assertThat(controls("mcp-status")).anyMatch(call -> operation
                 .equals(call.operationId()));
@@ -227,6 +245,20 @@ class HostedMcpRestartFaultGatesIT {
         writeRelease();
         waitFor(() -> assertThat(effects("resource_read"))
                 .containsExactly("ext://hold"));
+        await().atMost(Duration.ofSeconds(60)).untilAsserted(() -> {
+            HttpResponse<String> settled = rawStatus(reloaded, operation);
+            assertThat(settled.statusCode()).isEqualTo(200);
+            assertThat(json.readTree(settled.body()).path("state").asText())
+                    .isEqualTo("settled");
+        });
+        JsonNode finalRecord = operations(session.id()).getLast();
+        assertThat(finalRecord.path("run").path("state").asText())
+                .isEqualTo("settled");
+        assertThat(finalRecord.path("resultRef").isNull()).isFalse();
+        JsonNode result = published(session.id(),
+                finalRecord.path("resultRef"));
+        assertThat(result.path("response").path("contents").get(0)
+                .path("text").asText()).isEqualTo("EXT_HELD");
     }
 
     @Test
@@ -234,18 +266,29 @@ class HostedMcpRestartFaultGatesIT {
     void workerKillWhileIdleNeverMintsAFreshOwnerOnMySql() throws Exception {
         SessionRef session = createSession();
         baseline(session);
-        long worker = workerPid();
-        kill(worker);
+        JsonNode identity = configuration(session.id()).path("run")
+                .path("runtime");
+        assertThat(identity.isObject())
+                .as("the baseline must record a Runtime identity").isTrue();
+        kill(workerPid());
         waitFor(() -> assertThat(fixtureEvents("mcp.exit"))
                 .as("the stdio fixture exits on worker stdin EOF")
                 .hasSize(1));
         assertThat(ProcessHandle.of(fixturePid()).map(
                 ProcessHandle::isAlive).orElse(false)).isFalse();
+        // Drive the same Session again: the dead generation must refuse the
+        // recovery instead of being re-minted into a fresh owner.
+        assertThat(promptRaw(session, "FG12C_RECOVER_IDLE").statusCode())
+                .isIn(202, 409, 503);
+        JsonNode after = configuration(session.id());
+        assertThat(after.path("run").path("runtime"))
+                .as("the replacement keeps the original generation")
+                .isEqualTo(identity);
+        assertThat(after.path("run").path("state").asText())
+                .isEqualTo("settled");
         assertThat(fixtureEvents("mcp.start"))
                 .as("no fresh Runtime generation starts a second server")
                 .hasSize(1);
-        assertThat(configuration(session.id()).path("run").path("state")
-                .asText()).isEqualTo("settled");
     }
 
     @Test
@@ -409,6 +452,22 @@ class HostedMcpRestartFaultGatesIT {
                 .map(event -> event.path("value").asText()).toList();
     }
 
+    private JsonNode published(String session, JsonNode ref) {
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        String body = jdbc.queryForObject(
+                "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
+                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " AND tenant_id = ? AND session_id = ?",
+                String.class, scope, ref.path("resourceId").asText(), tenant,
+                session);
+        assertThat(body).as("published response body").isNotBlank();
+        try {
+            return json.readTree(body);
+        } catch (IOException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private List<ProxyCall> controls(String kind) {
         return proxyCalls.stream().filter(call -> kind.equals(call.kind()))
                 .toList();
@@ -420,35 +479,30 @@ class HostedMcpRestartFaultGatesIT {
         return found.getLast();
     }
 
-    private void lookup(SessionRef session, String operationId) {
+    private void triggerTurn(SessionRef session) {
         try {
-            harnessRequest("GET", "/session/" + session.id()
-                    + "/mcp/operations/" + operationId, null,
-                    session.clientId(), 200);
-        } catch (AssertionError refused) {
-            // A recovery-blocked lookup may answer 503; the wire sequence
-            // still carries the status control this case asserts on.
+            assertThat(promptRaw(session, "FG12C_RECOVER").statusCode())
+                    .isIn(202, 409, 503);
         } catch (Exception failed) {
             throw new IllegalStateException(failed);
         }
     }
 
-    private void triggerTurn(SessionRef session) {
+    private HttpResponse<String> promptRaw(SessionRef session, String text)
+            throws Exception {
         List<Map<String, Object>> prompt = List.of(
-                Map.of("type", "text", "text", "FG12C_RECOVER"));
-        try {
-            String payload = json.writeValueAsString(prompt);
-            harnessRequest("POST", "/session/" + session.id() + "/prompt",
-                    Map.of("promptId", uuid(), "prompt", prompt,
-                            "payloadDigest",
-                            "sha256:" + DigestUtils.sha256Hex(payload)),
-                    session.clientId(), 202);
-        } catch (AssertionError refused) {
-            // The replacement may refuse the turn while the configuration
-            // is still recovering; initialize has already issued the lookup.
-        } catch (Exception failed) {
-            throw new IllegalStateException(failed);
-        }
+                Map.of("type", "text", "text", text));
+        String payload = json.writeValueAsString(prompt);
+        Map<String, Object> body = Map.of("promptId", uuid(), "prompt", prompt,
+                "payloadDigest", "sha256:" + DigestUtils.sha256Hex(payload));
+        return rawRequest("POST", "/session/" + session.id() + "/prompt",
+                json.writeValueAsString(body), session.clientId());
+    }
+
+    private HttpResponse<String> rawStatus(SessionRef session,
+            String operationId) throws Exception {
+        return rawRequest("GET", "/session/" + session.id()
+                + "/mcp/operations/" + operationId, null, session.clientId());
     }
 
     private String uuid() {
@@ -522,16 +576,26 @@ class HostedMcpRestartFaultGatesIT {
 
     private HttpResponse<String> rawRequest(String method, String path,
             String payload) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(
+        return rawRequest(method, path, payload, null);
+    }
+
+    private HttpResponse<String> rawRequest(String method, String path,
+            String payload, String clientId) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(
                 "http://127.0.0.1:" + harnessPort + path))
                 .timeout(Duration.ofSeconds(30))
                 .header("Authorization", "Bearer " + TOKEN)
                 .header("X-Qwen-Harness-Protocol-Version", "1")
                 .header("X-Qwen-Harness-Boot-Id", bootId)
                 .header("Content-Type", "application/json")
-                .method(method, HttpRequest.BodyPublishers.ofString(payload))
-                .build();
-        return http.send(request, HttpResponse.BodyHandlers.ofString());
+                .method(method, payload == null
+                        ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(payload));
+        if (clientId != null) {
+            builder.header("X-Qwen-Client-Id", clientId);
+        }
+        return http.send(builder.build(),
+                HttpResponse.BodyHandlers.ofString());
     }
 
     private JsonNode privateRequest(String method, String path, Object body,
