@@ -408,8 +408,14 @@
                                  locally on macOS JDK 21 + MariaDB
                                  10.11 (~15 s budgeted at 2x): the
                                  healthy sum becomes 3889 s, so the
-                                 fork moves to 4499 s. -->
-                            <forkedProcessTimeoutInSeconds>4499</forkedProcessTimeoutInSeconds>
+                                 fork moves to 4499 s. The FG13c Hook
+                                 owner-restart cells (three cases,
+                                 issue #14449) are budgeted at 300 s
+                                 inside the same envelope: the healthy
+                                 sum becomes 4189 s, so the fork moves
+                                 to 4799 s and the Verify step to 95
+                                 minutes. -->
+                            <forkedProcessTimeoutInSeconds>4799</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

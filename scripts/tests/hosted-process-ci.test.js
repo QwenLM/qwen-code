@@ -411,9 +411,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (90 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (95 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 170, 185],
+    ['hosted-harness-mysql', 175, 190],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -589,12 +589,14 @@ describe('Hosted real-process gates', () => {
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
       // to 90 minutes; slice 3 (FG10d) brings it to ~247 s, so the fork
       // moves to 4484, still inside those 90 minutes; the FG12a MCP
-      // reply-loss letter adds ~15 s, so the fork moves to 4499):
+      // reply-loss letter adds ~15 s, so the fork moves to 4499; the FG13c
+      // Hook owner-restart cells add three cases budgeted at 300 s, so the
+      // fork moves to 4799 and the Verify step to 95 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4499);
+        expect(forkSeconds).toBe(4799);
       }
     },
   );
@@ -625,10 +627,12 @@ describe('Hosted real-process gates', () => {
   // ~15s budgeted at 2x raises it to 3889s. On the lane (run 39087108383
   // at a029896eff, FG10d's head, before FG12a) the nineteen classes then
   // in the fork ran 3085s from the first class's start to the last
-  // class's end.
+  // class's end. The FG13c Hook owner-restart cells (issue #14449, three
+  // cases) are budgeted at 300s until the lane measures them, so the
+  // healthy sum becomes 4189s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 3889;
+  const hostedForkHealthySeconds = 4189;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -693,6 +697,7 @@ describe('Hosted real-process gates', () => {
       'HostedConcurrentTurnBurstMySqlIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHookFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
