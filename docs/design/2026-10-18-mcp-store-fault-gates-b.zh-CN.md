@@ -24,7 +24,7 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_config
 | `store-reject-settled`            | 响应资源发布之后的 settled 提交                      | failed commit 回滚暂存的 response/catalog 行；测试先从 durable 状态 dispose/reopen authority（保持原 operation/runtime pins）再驱动后续 turn/close；恰好一次查询；没有第二次 read/get；副作用计数 1 |
 | `store-reject-releasing`          | release 派发之前的 `releasing` 提交                  | 下一次 detach 用同一 id **首次派发** `${configurationId}:release`；没有第二次 configure/invoke                                                                                                      |
 | `store-reject-drained`            | `drained` 提交                                       | Broker owner 与 storage holder 都保留；不伪造 drain 回执                                                                                                                                            |
-| `store-reject-released`           | owner release 之后的 `released` 提交                 | 记录保持 `drained`；下一次 detach 重发 owner release；断言其幂等；该格在 MySQL 8.x 上为绿，钉住这一顺序                                                                                              |
+| `store-reject-released`           | owner release 之后的 `released` 提交                 | 记录保持 `drained`；下一次 detach 重发 owner release；断言其幂等；该格在 MySQL 8.x 上为绿，钉住这一顺序                                                                                             |
 | `store-reject-reload-chain`       | 上述任一拒绝后重试并重载                             | 每个 id 只有一条逻辑记录链；没有重复的 configuration 记录；重试 revision 不是被拒状态的重复                                                                                                         |
 
 ## 决策
