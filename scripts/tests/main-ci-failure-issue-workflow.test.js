@@ -7,6 +7,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -131,13 +132,13 @@ describe('main CI failure issue workflow', () => {
     const destination = jobs.analyze.steps.find(
       (step) => step.id === 'destination',
     );
-    const resolve = (prs, overrides = {}) => {
+    const resolve = (prs, overrides = {}, ghScript) => {
       const tmp = mkdtempSync(join(tmpdir(), 'java-ci-destination-'));
       try {
         writeFileSync(join(tmp, 'pulls.json'), JSON.stringify(prs));
         writeFileSync(
           join(tmp, 'gh'),
-          '#!/usr/bin/env bash\ncat "${RUNNER_TEMP}/pulls.json"\n',
+          ghScript ?? '#!/usr/bin/env bash\ncat "${RUNNER_TEMP}/pulls.json"\n',
         );
         chmodSync(join(tmp, 'gh'), 0o755);
         const output = join(tmp, 'output');
@@ -154,6 +155,9 @@ describe('main CI failure issue workflow', () => {
               REPO: 'QwenLM/qwen-code',
               EVENT_NAME: 'pull_request_review',
               HEAD_BRANCH: 'ci/java',
+              // An approval run records the BASE repository here even when
+              // the PR head lives in a fork; the step no longer consults it,
+              // and the fork cases below keep passing it to document that.
               HEAD_REPO: 'QwenLM/qwen-code',
               HEAD_SHA: 'tested-head',
               ...overrides,
@@ -161,7 +165,10 @@ describe('main CI failure issue workflow', () => {
           },
         );
         expect(result.status, result.stderr).toBe(0);
-        return readFileSync(output, 'utf8');
+        return {
+          output: existsSync(output) ? readFileSync(output, 'utf8') : '',
+          stdout: result.stdout,
+        };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
@@ -175,36 +182,106 @@ describe('main CI failure issue workflow', () => {
     });
 
     it('reports an approval failure with no workflow_run pull_requests association', () => {
-      expect(resolve([pr()])).toBe('pr_number=14472\nfile_issue=false\n');
+      const resolved = resolve([pr()]);
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.stdout).not.toContain('::warning::');
+    });
+    it('resolves a fork approval run, which records the base repository as its head repository', () => {
+      // On a pull_request_review run head_repository is the BASE repository
+      // even when the PR head lives in a fork, so a listing filter derived
+      // from it finds nothing; the exact head SHA qualifies the PR instead.
+      // Measured against the live API on 2026-10-17: 21 of the 60 most
+      // recent Managed Agent gate approval runs are fork PRs.
+      const resolved = resolve([
+        pr({
+          head: {
+            sha: 'tested-head',
+            repo: { full_name: 'CanReader/qwen-code' },
+          },
+        }),
+      ]);
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
     it('also files an issue when the failed PR already merged', () => {
-      expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })])).toBe(
+      expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })]).output).toBe(
         'pr_number=14472\nfile_issue=true\n',
       );
     });
-    it('does not report a superseded head or a PR from a different source repository', () => {
+    it('does not report a superseded head, wherever the same-named branch lives', () => {
+      // The exact head SHA qualifies the PR: a branch whose head is another
+      // commit must not attract the comment meant for this run's commit —
+      // including a same-named branch on an unrelated fork.
+      for (const repo of ['QwenLM/qwen-code', 'someone/qwen-code']) {
+        const resolved = resolve([
+          pr({ head: { sha: 'new-head', repo: { full_name: repo } } }),
+        ]);
+        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.stdout).toContain('::warning::');
+      }
+    });
+    it('does not report a PR closed without merging', () => {
+      // The listing widened to state=all so a merged PR resolves; a
+      // closed-unmerged PR satisfies every other term but must not be handed
+      // a permanent bot comment.
+      const closed = resolve([pr({ state: 'closed' })]);
+      expect(closed.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(closed.stdout).toContain('::warning::');
       expect(
-        resolve([
-          pr({
-            head: { sha: 'new-head', repo: { full_name: 'QwenLM/qwen-code' } },
-          }),
-        ]),
-      ).toBe('pr_number=\nfile_issue=false\n');
-      expect(
-        resolve([
+        resolve([pr({ state: 'closed', merged_at: '2026-10-17T16:15:57Z' })])
+          .output,
+      ).toBe('pr_number=14472\nfile_issue=true\n');
+    });
+    it('never files an issue for a contributor-triggered run, even on a main-named branch', () => {
+      // A fork PR can be opened from the contributor's own main branch
+      // (managed-agent-gate.yml accepts it); the event allow-list in the
+      // first arm is the only thing routing such a run to the PR instead of
+      // to a main-regression issue for unmerged code.
+      const resolved = resolve(
+        [
           pr({
             head: {
               sha: 'tested-head',
               repo: { full_name: 'someone/qwen-code' },
             },
           }),
-        ]),
-      ).toBe('pr_number=\nfile_issue=false\n');
+        ],
+        {
+          EVENT_NAME: 'pull_request',
+          HEAD_BRANCH: 'main',
+          HEAD_REPO: 'someone/qwen-code',
+        },
+      );
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
     it('files a main dispatch failure without a PR', () => {
-      expect(
-        resolve([], { EVENT_NAME: 'workflow_dispatch', HEAD_BRANCH: 'main' }),
-      ).toBe('pr_number=\nfile_issue=true\n');
+      const resolved = resolve([], {
+        EVENT_NAME: 'workflow_dispatch',
+        HEAD_BRANCH: 'main',
+      });
+      expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+      expect(resolved.stdout).not.toContain('::warning::');
+    });
+    it('warns and reports nothing when the run resolves to no destination', () => {
+      // A manual dispatch on a branch with no open PR is admitted and then
+      // dropped; the warning keeps the miss distinguishable from "correctly
+      // nothing to report".
+      const resolved = resolve([], {
+        EVENT_NAME: 'workflow_dispatch',
+        HEAD_BRANCH: 'ci/java-experiment',
+      });
+      expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(resolved.stdout).toContain('::warning::');
+    });
+    it('degrades to no destination when the PR listing fails', () => {
+      // The lookup must fail soft like its neighbouring reads: a transient
+      // API error aborting this step would fail the analyze job and lose
+      // BOTH the PR comment and the issue for a real failure.
+      for (const body of ['{"message": "Bad credentials"}', '']) {
+        const gh = `#!/usr/bin/env bash\nprintf '%s' '${body}'\nexit 1\n`;
+        const resolved = resolve([], {}, gh);
+        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.stdout).toContain('::warning::');
+      }
     });
   });
 
@@ -386,6 +463,15 @@ describe('main CI failure issue workflow', () => {
       // leaves the rerun unreachable and this wiring green only by accident.
       expect(String(rerunJob.if)).toContain(
         "needs.analyze.outputs.infra_only == 'true'",
+      );
+      // The rerun holds actions: write while infra_only is classified from
+      // check-run annotation text — text a fork's own steps print — so it is
+      // gated to the destinations that file (main runs and merged PRs). An
+      // open PR's infra death is left for its author to retrigger, and the
+      // classifier's output never reaches the write token on an untrusted
+      // run.
+      expect(String(rerunJob.if)).toContain(
+        "needs.analyze.outputs.file_issue == 'true'",
       );
     });
 
@@ -594,6 +680,85 @@ describe('main CI failure issue workflow', () => {
       const condition = String(jobs.report_pr.if);
       expect(condition).toContain("needs.analyze.result == 'success'");
       expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
+    });
+  });
+
+  describe('file or update the autofix issue', () => {
+    const issueStep = jobs.file_issue.steps.find((step) => step.id === 'issue');
+    const runStep = (overrides, ghScript) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-issue-'));
+      try {
+        writeFileSync(join(tmp, 'gh'), ghScript);
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const output = join(tmp, 'output');
+        writeFileSync(output, '');
+        const result = spawnSync(
+          'bash',
+          ['-eo', 'pipefail', '-c', issueStep.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${tmp}:${process.env.PATH}`,
+              RUNNER_TEMP: tmp,
+              GITHUB_OUTPUT: output,
+              GH_TOKEN: 'fake',
+              REPO: 'QwenLM/qwen-code',
+              EXISTING_ISSUE: '',
+              ISSUE_TITLE: 'Main CI failed: SDK Java — FooTest.bar',
+              ISSUE_BODY: 'body',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              BUG_LABEL: 'type/bug',
+              READY_FOR_AGENT_LABEL: 'status/ready-for-agent',
+              AUTOFIX_APPROVED_LABEL: 'autofix/approved',
+              ...overrides,
+            },
+          },
+        );
+        return { result, output: readFileSync(output, 'utf8') };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+    // Only the route edit fails: a renamed label or a non-collaborator
+    // assignee makes gh issue edit exit non-zero while the create and the
+    // body edit succeed.
+    const routeEditFails = [
+      '#!/usr/bin/env bash',
+      'if [[ "$*" == *--add-label* ]]; then exit 1; fi',
+      'if [[ "$*" == *create* ]]; then',
+      '  echo "https://github.com/QwenLM/qwen-code/issues/14500"',
+      'fi',
+    ].join('\n');
+
+    it('publishes the issue url even when the autofix route edit fails', () => {
+      // bash -e aborts the step on the failed edit; the output must already
+      // be written, or report_pr posts its comment without the tracking
+      // link and nothing ever restores it.
+      const created = runStep({}, routeEditFails);
+      expect(created.result.status).toBe(1);
+      expect(created.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/14500',
+      );
+      const existing = runStep({ EXISTING_ISSUE: '14499' }, routeEditFails);
+      expect(existing.result.status).toBe(1);
+      expect(existing.output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/14499',
+      );
+    });
+
+    it('creates, routes and publishes the url when nothing fails', () => {
+      const allSucceed = [
+        '#!/usr/bin/env bash',
+        'if [[ "$*" == *create* ]]; then',
+        '  echo "https://github.com/QwenLM/qwen-code/issues/14500"',
+        'fi',
+      ].join('\n');
+      const { result, output } = runStep({}, allSucceed);
+      expect(result.status, result.stderr).toBe(0);
+      expect(output).toContain(
+        'issue_url=https://github.com/QwenLM/qwen-code/issues/14500',
+      );
     });
   });
 

@@ -82,21 +82,37 @@ jobs:
           EVENT_NAME: '${{ github.event.workflow_run.event }}'
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
-          HEAD_REPO: '${{ github.event.workflow_run.head_repository.full_name }}'
         run: |-
           set -euo pipefail
           pr_number=''
           file_issue=false
-          if [[ "${HEAD_BRANCH}" == 'main' && "${EVENT_NAME}" != 'pull_request' && "${EVENT_NAME}" != 'pull_request_review' ]]; then
+          # An allow-list, not "main and not a PR event": an event admitted
+          # to the job later defaults to the PR lookup, never to filing a
+          # main-regression issue for an unmerged head.
+          if [[ "${HEAD_BRANCH}" == 'main' && ( "${EVENT_NAME}" == 'push' || "${EVENT_NAME}" == 'schedule' || "${EVENT_NAME}" == 'workflow_dispatch' ) ]]; then
             file_issue=true
           else
-            # workflow_run.pull_requests can be empty, including on approval runs.
-            pr="$(gh api --method GET "repos/${REPO}/pulls" \
-              -f state=all -f head="${HEAD_REPO%%/*}:${HEAD_BRANCH}" -f per_page=100 --paginate \
-              | jq -sc --arg sha "${HEAD_SHA}" --arg source "${HEAD_REPO}" --arg repo "${REPO}" \
-                'add | map(select(.head.sha == $sha and .head.repo.full_name == $source and .base.repo.full_name == $repo and .base.ref == "main")) | .[0] // {}')"
+            # workflow_run.pull_requests can be empty, including on approval
+            # runs, and an approval run records the BASE repository as its
+            # head_repository even when the PR head lives in a fork, so an
+            # owner:branch head= filter derived from it can never find a
+            # fork's PR. The exact head SHA qualifies instead: a same-named
+            # branch on an unrelated fork carries a different one.
+            if ! pr="$(
+              gh api --method GET "repos/${REPO}/pulls" \
+                -f state=all -f per_page=100 --paginate \
+                | jq -sc --arg sha "${HEAD_SHA}" --arg repo "${REPO}" \
+                  'add // [] | map(select(.head.sha == $sha and .base.repo.full_name == $repo and .base.ref == "main" and (.state != "closed" or .merged_at != null))) | .[0] // {}'
+            )"; then
+              # Fail soft like the neighbouring reads: a transient listing
+              # error must cost this report, not the whole analyze job.
+              pr='{}'
+            fi
             pr_number="$(jq -r '.number // empty' <<< "${pr}")"
             file_issue="$(jq -r '.merged_at != null' <<< "${pr}")"
+          fi
+          if [[ -z "${pr_number}" && "${file_issue}" != 'true' ]]; then
+            echo "::warning::The admitted ${EVENT_NAME} run on ${HEAD_BRANCH} resolved to no PR and no issue; nothing will be reported."
           fi
           echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
           echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"
@@ -316,10 +332,15 @@ jobs:
   # its failed jobs once (analyze gates this to attempt 1) and file nothing;
   # if the break is real or the pool stays sick, the rerun's own completion
   # re-enters this workflow at attempt 2 and the issue is filed then.
+  # The rerun holds actions: write while infra_only is classified from
+  # check-run annotation text — text a fork's own steps print — so it runs
+  # only for destinations that file (main runs and merged PRs). An open PR's
+  # infra death is left for its author to retrigger, and the classifier's
+  # output never reaches the write token on an untrusted run.
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
-    if: "${{ needs.analyze.outputs.infra_only == 'true' }}"
+    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -379,13 +400,16 @@ jobs:
           body_file="${RUNNER_TEMP}/issue-body.md"
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
 
+          # issue_url is written before the route edit on both paths: under
+          # bash -e a failed label or assignee edit aborts the step, and the
+          # PR comment must still find the tracking-issue link.
           if [[ -n "${EXISTING_ISSUE}" ]]; then
             gh issue edit "${EXISTING_ISSUE}" \
               --repo "${REPO}" \
               --body-file "${body_file}"
             echo "Recorded this run on issue #${EXISTING_ISSUE}."
-            apply_autofix_route "${EXISTING_ISSUE}"
             echo "issue_url=https://github.com/${REPO}/issues/${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"
+            apply_autofix_route "${EXISTING_ISSUE}"
             exit 0
           fi
 
@@ -395,8 +419,8 @@ jobs:
               --title "${ISSUE_TITLE}" \
               --body-file "${body_file}"
           )"
-          apply_autofix_route "${issue_url}"
           echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT}"
+          apply_autofix_route "${issue_url}"
 
   report_pr:
     name: 'Report Java CI failure on the PR'
