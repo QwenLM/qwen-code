@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -40,7 +41,10 @@ class HostedWorkspaceRecoveryWorkerIT {
 
     @TempDir private Path temporary;
 
+    // The Hosted*IT classes share one fork, budgeted by each case's
+    // ceiling; every wait below is bounded in seconds.
     @Test
+    @Timeout(120)
     void realWorkerAndSpringSqlRecoverSavedHolderAfterSyntheticReboot() throws Exception {
         Path bundle = Path.of(System.getProperty("qwen.runtime.worker.bundle", "../../dist/cli.js"))
                 .toAbsolutePath().normalize();
