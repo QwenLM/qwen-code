@@ -427,15 +427,18 @@
                                  + MySQL 8.4.6 (~170 s budgeted at 2x):
                                  the healthy sum becomes 4608 s, so the
                                  fork moves to 5218 s and the Verify
-                                 step to 100 minutes. FG11b's
-                                 Spring-side store faults, a second
-                                 method of the same class (six cases on
-                                 one minute boundary), measure
-                                 30.8-64.5 s (~130 s budgeted at 2x):
-                                 the healthy sum becomes 4738 s, so the
-                                 fork moves to 5348 s, which the Verify
-                                 step's 100 minutes still wrap. -->
-                            <forkedProcessTimeoutInSeconds>5348</forkedProcessTimeoutInSeconds>
+                                 step to 100 minutes. The FG13d
+                                 worker-stop cancel cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 4758 s, so the fork moves to 5368 s.
+                                 FG11b's Spring-side store faults, a
+                                 second method of the automation class
+                                 (six cases on one minute boundary),
+                                 measure 30.8-64.5 s (~130 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 4888 s, so the fork moves to 5498 s
+                                 and the Verify step to 105 minutes. -->
+                            <forkedProcessTimeoutInSeconds>5498</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

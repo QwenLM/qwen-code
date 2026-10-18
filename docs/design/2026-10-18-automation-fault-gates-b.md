@@ -120,9 +120,11 @@ removes both layers.
 `fg11bStoreFaultsNeverFireTwiceOnMySql` measured 30.8 s, 64.5 s and 64.1 s locally on
 JDK 21 + MySQL 8.4.6. Most of the spread is the wait for the next minute
 boundary. It is budgeted at about 130 s (2× the heaviest run), composed onto
-`main`'s fork budget at push time: the healthy sum moves from 4608 s to
-4738 s and the fork from 5218 s to 5348 s. Fork + 600 s = 5948 s stays
-inside the Verify step's 100 minutes, so no step or job ceiling moves.
+`main`'s fork budget at push time. On top of `main` after #14541 the
+healthy sum moves from 4758 s to 4888 s and the fork from 5368 s to
+5498 s. Fork + 600 s = 6098 s outgrows the Verify step's 100 minutes, so
+the step moves to 105 minutes and the job ceiling from 195 to 200 (steps
+185, plus 13 for the uncapped setup, plus 2).
 
 ## Acceptance
 

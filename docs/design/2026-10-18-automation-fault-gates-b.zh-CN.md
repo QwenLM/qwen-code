@@ -99,8 +99,9 @@ outcome 会挡住这次 fire。b3 同时去掉了这两层。
 
 本地在 JDK 21 + MySQL 8.4.6 上，`fg11bStoreFaultsNeverFireTwiceOnMySql` 测得 30.8 s、64.5 s 和 64.1 s。
 差异主要来自等待下一个整分钟边界。预算约 130 s（最重一次的 2 倍），在推送时叠加到
-`main` 的 fork 预算上：健康总和从 4608 s 调到 4738 s，fork 从 5218 s 调到 5348 s。fork + 600 s =
-5948 s 仍在 Verify step 的 100 分钟以内，所以 step 和 job 的上限都不用调整。
+`main` 的 fork 预算上。叠加在 #14541 之后的 `main` 上，健康总和从 4758 s 调到 4888 s，fork 从
+5368 s 调到 5498 s。fork + 600 s = 6098 s 超出了 Verify step 的 100 分钟，所以该 step 调到 105 分钟，
+job 上限从 195 调到 200（各 step 合计 185，加上未设上限的准备步骤 13，再加 2）。
 
 ## 验收
 
