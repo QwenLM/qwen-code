@@ -16,6 +16,7 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
+  isAlreadyTruncated,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
@@ -99,7 +100,26 @@ type TextSlot = {
   field: 'text' | 'output' | 'error';
   text: string;
   protectedPrefix?: string;
+  /**
+   * A `<persisted-output>` envelope carries the only handle to its spilled
+   * artifact as ordinary inline text, so slicing it anywhere mid-pointer
+   * orphans the artifact for the rest of the session. `fitText` slices
+   * 1/5 head : 4/5 tail without pointer awareness, and `persistedOutputFiles`
+   * only travels with entries the tool layer finalized — a send-boundary
+   * synthetic entry has none. Recover the envelope's `Full output saved to:`
+   * path here and route it through `fitText`'s pointer header, whose existing
+   * rule keeps the path atomic: delivered whole, or dropped in favour of the
+   * bare notice — never shipped as a partial string.
+   */
+  envelopePointer?: string;
 };
+
+/** The `Full output saved to: <path>` handle of a tool-layer spill envelope. */
+function envelopePointerOf(text: string): string | undefined {
+  if (!isAlreadyTruncated(text) || !text.startsWith('<persisted-output>'))
+    return undefined;
+  return /Full output saved to: (\S+)/.exec(text)?.[1];
+}
 
 function isBudgetExemptOutputName(name: string | undefined): boolean {
   const canonical = canonicalToolName(name ?? '');
@@ -148,11 +168,13 @@ function collectTextSlots(
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex];
       if (includeTopLevelText && typeof part.text === 'string') {
+        const envelopePointer = envelopePointerOf(part.text);
         slots.push({
           entryIndex,
           partIndex,
           field: 'text',
           text: part.text,
+          ...(envelopePointer ? { envelopePointer } : {}),
         });
       }
       const response = part.functionResponse?.response;
@@ -174,12 +196,14 @@ function collectTextSlots(
           ? output.slice(protectedPrefix.length)
           : output;
         if (budgetedOutput.length > 0) {
+          const envelopePointer = envelopePointerOf(budgetedOutput);
           slots.push({
             entryIndex,
             partIndex,
             field: 'output',
             text: budgetedOutput,
             ...(protectedPrefix ? { protectedPrefix } : {}),
+            ...(envelopePointer ? { envelopePointer } : {}),
           });
         }
       }
@@ -313,10 +337,15 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
+    // An envelope slot renders its own inline pointer through `fitText`'s
+    // header so the send boundary keeps the artifact path atomic; genuine
+    // entry-level artifacts still win when no envelope rides the text.
     const replacement = fitText(
       slot.text,
       allocations[index],
-      entry.persistedOutputFiles,
+      slot.envelopePointer !== undefined
+        ? [slot.envelopePointer]
+        : entry.persistedOutputFiles,
     );
 
     if (slot.field === 'text') {

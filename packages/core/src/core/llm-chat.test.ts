@@ -12572,6 +12572,65 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBeLessThanOrEqual(1_333);
     });
 
+    // Regression (review R12-1): a pressure cut that reaches a
+    // `<persisted-output>` envelope must keep its artifact path atomic —
+    // the whole path, or no path at all — never a string severed mid-way.
+    it('keeps spill pointers atomic when the pressure cut reaches an envelope', async () => {
+      // 8 slots sharing ~2.1k chars ≈ 266 each: above the pointer header's
+      // own length, so every envelope survives with its path intact.
+      await reportUsage(849_000);
+      await sendDrain(
+        Array.from({ length: 8 }, (_, n) =>
+          fnResponse(
+            'shell',
+            { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
+            `spilled-${n}`,
+          ),
+        ),
+        'second',
+      );
+      const outputs = resultOutputs(1);
+      expect(outputs).toHaveLength(8);
+      for (const [n, output] of outputs.entries()) {
+        const path = `/home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log`;
+        // The intact path survives — delivered by the envelope's own pointer
+        // header even though the preview text around it was cut.
+        expect(output.includes(path)).toBe(true);
+        // The headroom budget is still honoured: every slot was shortened.
+        expect(output.length).toBeLessThan(20_000);
+      }
+    });
+
+    it('lets the pointer header give way whole rather than ship a partial path', async () => {
+      // 8 slots sharing ~5.3k chars ≈ 660 each: the plain head/tail slice
+      // would land smack inside the pointer line (character ~131), so this
+      // band is exactly where a partial `shell_a…` fragment would ship.
+      await reportUsage(848_000);
+      await sendDrain(
+        Array.from({ length: 8 }, (_, n) =>
+          fnResponse(
+            'shell',
+            { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
+            `spilled-${n}`,
+          ),
+        ),
+        'second',
+      );
+      const outputs = resultOutputs(1);
+      expect(outputs).toHaveLength(8);
+      for (const [n, output] of outputs.entries()) {
+        // Every surviving pointer fragment — header or preview — is exactly
+        // this slot's complete path; nothing severed mid-string.
+        const stems = output.match(/shell_[a-z0-9._-]*/g) ?? [];
+        for (const stem of stems) {
+          expect(stem).toBe(`shell_${'a'.repeat(12)}${n}.log`);
+        }
+        // The notice, when present, is complete.
+        if (output.includes('Tool output truncated'))
+          expect(output.startsWith('Tool output truncated.')).toBe(true);
+      }
+    });
+
     it('charges media before sharing the remaining headroom between previews', async () => {
       const stat = { dev: 1, ino: 100 } as Stats;
       vi.mocked(fsPromises.stat).mockResolvedValue(stat);
@@ -12615,6 +12674,61 @@ describe('LlmChat', async () => {
         vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
           ?.precomputedEffectiveTokens,
       ).toBeLessThan(850_000);
+    });
+
+    // Regression (review R12-2): a forked chat cuts its own history, so the
+    // per-path cache disarm must not be wrapped in the fork guard — otherwise
+    // the shared cache keeps a stale resident claim for text only the cut
+    // version survives in the fork. Cache-global and registry-level clears
+    // stay non-fork only.
+    it('a forked chat disarms its own cut read entries without touching shared or registry state', async () => {
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      const markAllReadsEvictedFromHistory = vi.fn();
+      const clear = vi.fn();
+      const clearLoadedSkills = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        markReadEvictedFromHistory,
+        markAllReadsEvictedFromHistory,
+        clear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn(() => ({ clearLoadedSkills })),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [fnCall('read_file', { file_path: 'big.ts' }, 'read-1')],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      chat.isForkedChat = true;
+      await sendDrain(
+        [
+          {
+            functionResponse: {
+              id: 'read-1',
+              name: 'read_file',
+              response: { output: 'x'.repeat(20_000) },
+            },
+          },
+          result(),
+        ],
+        'second',
+      );
+      // The pressure cut happened on the fork's own history:
+      expect(resultChars(1)).toBeLessThan(20_000);
+      // …and the shared cache was told exactly once, per path — never
+      // blanket-cleared, never silently left stale:
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
+      expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
     });
 
     it('keeps a small-window send below auto instead of restoring the static output', async () => {

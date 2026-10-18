@@ -3425,10 +3425,12 @@ export class LlmChat {
             return name === ToolNames.TOOL_CALL || FILE_PATH_TOOLS.has(name);
           });
           // Keep unresolvable reads resident by preserving their actual text;
-          // normal compaction owns this batch before any recovery artifact is written.
+          // normal compaction owns this batch before any recovery artifact is
+          // written. A forked chat gets the same preserve: an entry it cannot
+          // identify cannot be disarmed without a cache-global operation on
+          // the shared cache, so it must not cut that entry either.
           const guarded =
-            (unresolvedRead || (hookRetargetPossible && cutRead)) &&
-            !this.isForkedChat
+            unresolvedRead || (hookRetargetPossible && cutRead)
               ? entries
               : await finalizeToolResponses(
                   this.config,
@@ -3451,34 +3453,48 @@ export class LlmChat {
             // results are still resident has to be told — the same invalidation
             // `tryCompress` does for the same reason. A forked chat shares the
             // parent's cache and skill tracking while holding only a copy of a
-            // history slice, so this send-boundary cut must not clear either.
-            if (!this.isForkedChat) {
-              if (paths.length || unresolvedRead) {
-                const fileReadCache = this.config.getFileReadCache();
-                const stats = await Promise.all(
-                  paths.map((p) => fs.promises.stat(p).catch(() => undefined)),
-                );
+            // history slice: it disarms exactly the entries its own cut
+            // invalidated (per-path, with `invalidateByPath` as the fallback),
+            // and leaves the cache-global invalidations and the registry-level
+            // skill clear to the chat that owns the whole history — either
+            // would evict reads still resident in the parent.
+            if (paths.length || unresolvedRead) {
+              const fileReadCache = this.config.getFileReadCache();
+              const stats = await Promise.all(
+                paths.map((p) => fs.promises.stat(p).catch(() => undefined)),
+              );
+              if (this.isForkedChat) {
+                for (let i = 0; i < paths.length; i++) {
+                  const stat = stats[i];
+                  if (!stat || !fileReadCache.markReadEvictedFromHistory(stat))
+                    fileReadCache.invalidateByPath(paths[i]);
+                }
+              } else {
                 for (const stat of stats) {
                   if (!stat || !fileReadCache.markReadEvictedFromHistory(stat))
                     unresolvedRead = true;
                 }
                 if (unresolvedRead)
                   fileReadCache.markAllReadsEvictedFromHistory();
-                if (paths.length > 0) {
-                  try {
-                    await this.config
-                      .getExecutionEnvironment?.()
-                      ?.invalidateReadCache(paths);
-                  } catch (error) {
-                    // Only `clear()` moves the generation the worker re-syncs on.
-                    fileReadCache.clear();
-                    debugLogger.warn(
-                      'Execution cache invalidation after tool-output shrink failed',
-                      error,
-                    );
-                  }
+              }
+              if (paths.length > 0) {
+                try {
+                  await this.config
+                    .getExecutionEnvironment?.()
+                    ?.invalidateReadCache(paths);
+                } catch (error) {
+                  // Only `clear()` moves the generation the worker re-syncs on,
+                  // and it is cache-global: a fork shares the parent's cache,
+                  // so it arms nothing and warns instead of clearing.
+                  if (!this.isForkedChat) fileReadCache.clear();
+                  debugLogger.warn(
+                    'Execution cache invalidation after tool-output shrink failed',
+                    error,
+                  );
                 }
               }
+            }
+            if (!this.isForkedChat) {
               clearLoadedSkillTracking(
                 this.config.getToolRegistry(),
                 'send-boundary tool-output shrink',
