@@ -406,15 +406,18 @@ export interface DaemonClientOptions {
   fetch?: typeof globalThis.fetch;
   /**
    * Per-call request timeout in milliseconds. Applied to short-lived
-   * methods (`health`, `capabilities`, `createOrAttachSession`,
-   * `listWorkspaceSessions`, read-only status routes, `setSessionModel`,
-   * `cancel`, `respondToPermission`) so an unresponsive daemon doesn't block
-   * callers indefinitely. **NOT** applied to `prompt()` — model + tool
-   * turns can take minutes, so prompt explicitly bypasses
-   * `fetchTimeoutMs`; cancellation is via the optional `signal` arg.
+   * methods (`health`, `capabilities`, `listWorkspaceSessions`, read-only
+   * status routes, `setSessionModel`, `cancel`, `respondToPermission`) so an
+   * unresponsive daemon doesn't block callers indefinitely. **NOT** applied
+   * to `prompt()` — model + tool turns can take minutes, so prompt explicitly
+   * bypasses `fetchTimeoutMs`; cancellation is via the optional `signal` arg.
    * Streaming (`subscribeEvents`) is similarly excluded for the
    * long-lived SSE body, though it does apply `fetchTimeoutMs` to the
    * initial connect phase (request → headers received).
+   * Routes that wait on an ACP child handshake (`createOrAttachSession`,
+   * `resetWorktreeSession`, session restore) size themselves from the
+   * daemon's advertised session budget instead, and use this value only when
+   * it is set explicitly.
    * Defaults to 30s. Set to `0` or `Infinity` to disable.
    */
   fetchTimeoutMs?: number;
@@ -4235,12 +4238,14 @@ export class DaemonClient {
 
   /**
    * Deadline for a request the daemon answers only after an ACP child
-   * handshake: load/resume, create, and worktree reset all block on that
-   * handshake and are bounded by the daemon's own session budget. The daemon
-   * advertises that budget as `limits.sessionRestoreTimeoutMs`, derived from
-   * its initialize timeout unless an operator pins a restore budget, so the
-   * derived deadline covers a slow spawn the generic request deadline would
-   * abandon mid-flight.
+   * handshake, sized from `limits.sessionRestoreTimeoutMs`. That field is the
+   * restore knob: the daemon derives it from its initialize timeout, but an
+   * operator may pin it lower, so for a spawn it hints at the handshake cost
+   * rather than bounding it. A client that creates before ever reading
+   * capabilities has no advertised value to size from and falls back to
+   * `DEFAULT_SESSION_RESTORE_TIMEOUT_MS`. Restore uses the result as-is;
+   * create and worktree reset go through `resolveSessionSpawnTimeoutMs`, which
+   * floors it.
    */
   private resolveSessionOperationTimeoutMs(): number {
     if (this.hasExplicitFetchTimeout) {
