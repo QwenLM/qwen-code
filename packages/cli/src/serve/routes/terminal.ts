@@ -345,6 +345,13 @@ export function createTerminalWsHandler(
       }
       if (snapshot.failed) {
         cleanup();
+        // The registry keeps a failed session's buffer for exactly this
+        // replay; route it through the same backpressure guard as the
+        // exited path below.
+        if (!sendOutput(ws, snapshot.output)) {
+          ws.close(1013, 'Terminal output backpressure');
+          return;
+        }
         sendControl(ws, {
           type: 'error',
           message: snapshot.failureMessage ?? 'Terminal failed',

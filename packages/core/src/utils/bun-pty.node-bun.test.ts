@@ -200,12 +200,14 @@ console.log(
 );
 `;
 
-// The paused-exit fixture is the automated P1/P2 regression: a child that
-// exits (or is cancelled) while the backend is paused must still deliver
-// onExit exactly once, close the master fd, and — because the fixture never
-// calls process.exit on its success path — leave the host event loop free to
+// The paused-exit fixture is the P1/P2 regression: a child that exits (or
+// is cancelled) while the backend is paused must still deliver onExit
+// exactly once, close the master fd, and — because the fixture never calls
+// process.exit on its success path — leave the host event loop free to
 // drain. The same fixture runs under both interpreters: under Bun through
 // the qwen-bun-pty backend, under Node through the wrapper it must match.
+// No CI lane provisions a Bun binary today, so the Bun leg only runs where
+// one is installed (BUN_TEST_BIN); the Node leg runs everywhere.
 const pausedExitFixtureSource = `
 import * as fs from 'node:fs';
 import { loadPty } from ${JSON.stringify(getPtyDistPath)};
@@ -217,7 +219,7 @@ if (!result.impl) {
 }
 const pty = result.impl.module.spawn(
   '/bin/sh',
-  ['-c', 'echo READY; sleep 0.3; echo TAIL_AFTER; exit 7'],
+  ['-c', 'echo READY; sleep 1; echo TAIL_AFTER; exit 7'],
   { cols: 80, rows: 24, cwd: process.cwd(), env: process.env },
 );
 let output = '';
@@ -229,12 +231,23 @@ const deadline = Date.now() + 15_000;
 while (!output.includes('READY') && Date.now() < deadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
 }
+if (!output.includes('READY')) {
+  console.error('never saw READY before the deadline — cannot pause in time');
+  process.exit(1);
+}
 pty.pause();
 while (exits === 0 && Date.now() < deadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
 }
 if (exits !== 1) {
   console.error('expected exactly one exit event, got ' + exits);
+  process.exit(1);
+}
+// Paused-ness oracle: the tail the child writes a second before exiting is
+// held while paused and discarded with the hold, so it is never delivered.
+// Without this check the fixture passes even with pty.pause() deleted.
+if (output.includes('TAIL_AFTER')) {
+  console.error('tail was delivered — no pause was ever in effect');
   process.exit(1);
 }
 let fdState = 'OPEN';
@@ -252,9 +265,10 @@ console.log(
 );
 `;
 
-// The toggle fixture is the automated F1 regression: pause/resume toggles
-// with no gap between them land on top of in-flight master-fd reads, and the
-// full stream must come out byte-exact and line-complete on every runtime.
+// The toggle fixture is the F1 regression: pause/resume toggles with no gap
+// between them land on top of in-flight master-fd reads, and the full stream
+// must come out byte-exact and line-complete on every runtime. As above, the
+// Bun leg runs only where a Bun binary is installed.
 const toggleFixtureSource = `
 import { loadPty } from ${JSON.stringify(getPtyDistPath)};
 

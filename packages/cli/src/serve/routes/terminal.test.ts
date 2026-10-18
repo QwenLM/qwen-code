@@ -263,11 +263,26 @@ describe('terminal WebSocket route', () => {
 
   it('surfaces a backend resource failure as an error frame and a non-retryable close', async () => {
     const registry = registryWithSnapshot(undefined);
+    // First read misses (the create path); the second lands on the live
+    // session, so the failure below is delivered to an attached socket
+    // instead of racing a 'Session unavailable' teardown.
+    vi.mocked(registry.readSnapshot)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValue({
+        output: '',
+        exited: false,
+        workspaceCwd: '/workspace',
+      });
     let failure: ((message: string) => void) | undefined;
+    const detachFailure = vi.fn(() => {
+      failure = undefined;
+    });
     vi.mocked(registry.addFailureListener).mockImplementationOnce(
       (_terminalId, listener) => {
         failure = listener;
-        return vi.fn();
+        // The real disposer unregisters the listener, so a route that
+        // detaches before delivery can no longer be driven by this test.
+        return detachFailure;
       },
     );
     const ws = new FakeWebSocket();
@@ -281,6 +296,13 @@ describe('terminal WebSocket route', () => {
     expect(ws.sent).toContain(
       '\x00{"type":"error","message":"qwen-bun-pty resource limit reached"}',
     );
+    expect(ws.sent).not.toContain(
+      '\x00{"type":"error","message":"Session unavailable"}',
+    );
+    // Delivery runs cleanup: the listener is detached and the socket closes
+    // exactly once, with the non-retryable code.
+    expect(detachFailure).toHaveBeenCalledOnce();
+    expect(ws.close).toHaveBeenCalledTimes(1);
     expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal failed');
     // The backend already killed the child: the session is not released by
     // signalling it again — detach only, like the exit path.
@@ -302,8 +324,15 @@ describe('terminal WebSocket route', () => {
       request,
     );
 
-    expect(ws.sent).toContain(
-      '\x00{"type":"error","message":"resource limit reached"}',
+    // The retained scrollback is replayed before the failure frame, the
+    // same way the exited path replays it.
+    expect(sentOutput(ws)).toEqual(['held\r\n']);
+    const errorFrame =
+      '\x00{"type":"error","message":"resource limit reached"}';
+    const errorIndex = ws.sent.indexOf(errorFrame);
+    expect(errorIndex).toBeGreaterThan(-1);
+    expect(ws.sent.findIndex((data) => Buffer.isBuffer(data))).toBeLessThan(
+      errorIndex,
     );
     expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal failed');
   });

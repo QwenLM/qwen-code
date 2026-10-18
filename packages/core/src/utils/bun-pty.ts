@@ -103,7 +103,6 @@ export type PtyLimitCode =
 export type PtyLimitKind =
   | 'paused-hold-per-pty'
   | 'paused-hold-process'
-  | 'paused-hold-segments'
   | 'write-queue-per-pty'
   | 'write-queue-process'
   | 'active-pty-count';
@@ -132,13 +131,14 @@ export class PtyLimitError extends Error {
       `qwen-bun-pty resource limit reached (${details.limitKind}, limit ${details.limit}` +
         `${details.pid !== undefined ? `, pid ${details.pid}` : ''}): ` +
         (details.code === 'QWEN_PTY_ACTIVE_LIMIT'
-          ? 'no free pty slot in this process'
-          : `${details.acceptedBytes} bytes accepted`) +
-        '; the pty was terminated with an explicit failure instead of growing ' +
-        'without bound' +
-        (details.hasUndeliveredData
-          ? '; undelivered output was discarded'
-          : ''),
+          ? // A refusal happens before anything exists: no termination tail.
+            'no free pty slot in this process; no pty was spawned'
+          : `${details.acceptedBytes} bytes accepted` +
+            '; the pty was terminated with an explicit failure instead of ' +
+            'growing without bound' +
+            (details.hasUndeliveredData
+              ? '; undelivered output was discarded'
+              : '')),
     );
     this.name = 'PtyLimitError';
     this.code = details.code;
@@ -257,10 +257,9 @@ const EXIT_DRAIN_TIMEOUT_MS = 500;
 // Bounded pause hold. While paused the pump keeps reading at full speed (see
 // the header: reading is what makes exits of children with undrained output
 // observable), so paused output accumulates in memory. The hold is capped —
-// per-pty bytes, process-wide bytes, and a segment-count cap so many tiny
-// buffers cannot dodge the byte budget through per-Buffer overhead. Hitting a
-// cap terminates the pty with an explicit structured error: nothing is
-// dropped silently, and pause is never released automatically.
+// per-pty bytes and process-wide bytes. Hitting a cap terminates the pty
+// with an explicit structured error: nothing is dropped silently, and pause
+// is never released automatically.
 const DEFAULT_PAUSED_HOLD_BYTES = 4 * 1024 * 1024;
 const DEFAULT_WRITE_QUEUE_BYTES = 1024 * 1024;
 // Paused data is coalesced into fixed-size blocks instead of retaining one
@@ -270,7 +269,6 @@ const DEFAULT_WRITE_QUEUE_BYTES = 1024 * 1024;
 // the byte budget. Fixed blocks keep real memory within the charged data
 // bytes plus one partial block, whatever the child's write pattern is.
 const PAUSED_HOLD_BLOCK_BYTES = 64 * 1024;
-const MIN_PAUSED_HOLD_BLOCKS = 8;
 
 // A resource-limit termination gives the child process tree this long to exit
 // on SIGTERM before SIGKILL finishes the job.
@@ -347,7 +345,9 @@ export function spawn(
   const { addon, helperPath } = loadNativeAddon();
   const cwd = options.cwd || process.cwd();
   const env = { ...(options.env ?? process.env) };
-  if (options.env === process.env) {
+  // The wrapper sanitizes whenever the resolved env IS process.env — an
+  // explicit pass-through or the default when the caller omits the option.
+  if (options.env === undefined || options.env === process.env) {
     sanitizeEnv(env);
   }
   const name = options.name || env['TERM'] || DEFAULT_NAME;
@@ -359,7 +359,7 @@ export function spawn(
       code: 'QWEN_PTY_ACTIVE_LIMIT',
       limitKind: 'active-pty-count',
       limit: processPtyBudget.maxActivePtys,
-      acceptedBytes: budget.activePtys,
+      acceptedBytes: 0,
       hasUndeliveredData: false,
     });
   }
@@ -394,7 +394,6 @@ export class BunPtyProcess extends EventEmitter {
   private readonly encoding: string | null;
   private readonly readBuffer = Buffer.alloc(READ_BUFFER_BYTES);
   private readonly limits: Required<BunPtyLimits>;
-  private readonly maxPausedHoldBlocks: number;
   private paused = false;
   private readonly pausedBlocks: Buffer[] = [];
   private pausedFill = 0;
@@ -449,10 +448,6 @@ export class BunPtyProcess extends EventEmitter {
       writeQueueBytes:
         options.limits?.writeQueueBytes ?? DEFAULT_WRITE_QUEUE_BYTES,
     };
-    this.maxPausedHoldBlocks = Math.max(
-      MIN_PAUSED_HOLD_BLOCKS,
-      Math.ceil(this.limits.pausedHoldBytes / PAUSED_HOLD_BLOCK_BYTES) + 1,
-    );
     this.decoder =
       encoding === null ? null : new StringDecoder(encoding as BufferEncoding);
     this.encoding = encoding;
@@ -759,19 +754,6 @@ export class BunPtyProcess extends EventEmitter {
       );
       return;
     }
-    if (this.pausedBlocks.length + 1 > this.maxPausedHoldBlocks) {
-      this.terminateResourceFailure(
-        new PtyLimitError({
-          code: 'QWEN_PTY_OUTPUT_LIMIT',
-          limitKind: 'paused-hold-segments',
-          limit: this.maxPausedHoldBlocks,
-          acceptedBytes: this.pausedBytes,
-          hasUndeliveredData: true,
-          pid: this.pid,
-        }),
-      );
-      return;
-    }
     this.pausedBytes += chunk.byteLength;
     budget.pausedHoldBytes += chunk.byteLength;
     let src = chunk;
@@ -855,12 +837,22 @@ export class BunPtyProcess extends EventEmitter {
       this.retryTimer = null;
     }
     if (this.pendingExit) {
+      // The native exit was already observed and reaped — waitpid fired and
+      // only the trailing-output drain was still pending — so there is no
+      // live leader to signal (the pid may already be recycled). Deliver the
+      // parked real exit alongside the structured failure instead of
+      // discarding it into diagnostics-only, and skip the signal volley.
+      const { exitCode, signal } = this.pendingExit;
       clearTimeout(this.pendingExit.timer);
-      this.nativeExitRecord = {
-        exitCode: this.pendingExit.exitCode,
-        signal: this.pendingExit.signal,
-      };
+      this.nativeExitRecord = { exitCode, signal };
       this.pendingExit = null;
+      this.discardPausedHold();
+      this.clearWriteQueue();
+      this.closeFd();
+      this.finishOutput();
+      this.fireExit(exitCode, signal);
+      this.reportError(error);
+      return;
     }
     this.discardPausedHold();
     this.clearWriteQueue();

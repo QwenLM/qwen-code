@@ -16,7 +16,7 @@
  */
 
 import * as fs from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_CONCURRENT_WEB_TERMINALS } from '../services/web-terminal-registry.js';
 import {
   getPtyBudgetStats,
@@ -141,6 +141,37 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
     pty.write('echo $((21+21))\n');
     expect(await waitFor(() => output.includes('42'))).toBe(true);
     pty.kill();
+  }, 20_000);
+
+  it('sanitizes the inherited environment only when it comes from process.env', async () => {
+    process.env['TMUX'] = '/tmp/tmux-1000/default,1234,0';
+    try {
+      // No env option: the resolved env IS process.env, so the wrapper's
+      // sanitization applies and the child must not see TMUX.
+      const pty = spawn('/bin/sh', [
+        '-c',
+        'printf "TMUX=[%s]" "${TMUX-unset}"',
+      ]);
+      let output = '';
+      pty.onData((data) => (output += data));
+      expect(await waitFor(() => output.includes('TMUX=[unset]'))).toBe(true);
+      pty.kill();
+
+      // A caller-built env object is passed through untouched.
+      const custom = spawn(
+        '/bin/sh',
+        ['-c', 'printf "TMUX=[%s]" "${TMUX-unset}"'],
+        { env: { ...process.env, TMUX: 'kept' } },
+      );
+      let customOutput = '';
+      custom.onData((data) => (customOutput += data));
+      expect(await waitFor(() => customOutput.includes('TMUX=[kept]'))).toBe(
+        true,
+      );
+      custom.kill();
+    } finally {
+      delete process.env['TMUX'];
+    }
   }, 20_000);
 
   it('resizes the terminal the child observes', async () => {
@@ -366,6 +397,23 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
 describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
   type Spawned = ReturnType<typeof spawn>;
 
+  // Failure isolation: a test that aborts before its happy-path kill must
+  // not leak a live child, an admission slot, or a charged hold into the
+  // next case.
+  const live: Spawned[] = [];
+  const track = (pty: Spawned): Spawned => {
+    live.push(pty);
+    return pty;
+  };
+  afterEach(async () => {
+    for (const pty of live.splice(0)) pty.kill();
+    await waitFor(
+      () =>
+        getPtyBudgetStats().activePtys === 0 &&
+        getPtyBudgetStats().pausedHoldBytes === 0,
+    );
+  });
+
   const nextError = (pty: Spawned): { errors: PtyLimitError[] } => {
     const errors: PtyLimitError[] = [];
     pty.on('error', (error: Error) => {
@@ -396,9 +444,11 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
 
   it('terminates with an explicit error when a paused flood passes the per-pty hold cap', async () => {
     const LIMIT = 128 * 1024;
-    const pty = spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30'], {
-      limits: { pausedHoldBytes: LIMIT },
-    });
+    const pty = track(
+      spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30'], {
+        limits: { pausedHoldBytes: LIMIT },
+      }),
+    );
     const { errors } = nextError(pty);
     let exits = 0;
     pty.onExit(() => {
@@ -448,10 +498,12 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
   it('holds a flood under the cap byte-exact and stays alive until resume', async () => {
     const LINES = 8000;
     const LIMIT = 512 * 1024;
-    const pty = spawn(
-      '/bin/sh',
-      ['-c', `awk 'BEGIN{for(i=0;i<${LINES};i++)print "K" i}'; sleep 30`],
-      { limits: { pausedHoldBytes: LIMIT } },
+    const pty = track(
+      spawn(
+        '/bin/sh',
+        ['-c', `awk 'BEGIN{for(i=0;i<${LINES};i++)print "K" i}'; sleep 30`],
+        { limits: { pausedHoldBytes: LIMIT } },
+      ),
     );
     const { errors } = nextError(pty);
     let output = '';
@@ -484,10 +536,12 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
 
       // A floods ~100 KB of master bytes (ONLCR included) and parks there,
       // well under the 160 KB global cap.
-      const a = spawn('/bin/sh', [
-        '-c',
-        'awk \'BEGIN{for(i=0;i<15000;i++)print "A" i}\'; sleep 30',
-      ]);
+      const a = track(
+        spawn('/bin/sh', [
+          '-c',
+          'awk \'BEGIN{for(i=0;i<15000;i++)print "A" i}\'; sleep 30',
+        ]),
+      );
       const aErrors = nextError(a);
       let aOutput = '';
       a.onData((data) => {
@@ -499,7 +553,9 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       ).toBe(true);
 
       // B floods megabytes: the shared cap, not B's own per-pty cap, ends it.
-      const b = spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30']);
+      const b = track(
+        spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30']),
+      );
       const bErrors = nextError(b);
       b.onData(() => {});
       b.pause();
@@ -524,9 +580,11 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
 
   it('terminates with an explicit error when queued writes pass the cap', async () => {
     const LIMIT = 64 * 1024;
-    const pty = spawn('/bin/sh', ['-c', 'sleep 30'], {
-      limits: { writeQueueBytes: LIMIT },
-    });
+    const pty = track(
+      spawn('/bin/sh', ['-c', 'sleep 30'], {
+        limits: { writeQueueBytes: LIMIT },
+      }),
+    );
     const { errors } = nextError(pty);
     let exits = 0;
     pty.onExit(() => {
@@ -559,6 +617,43 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     expect(exits).toBe(0);
   }, 20_000);
 
+  it('delivers the reaped exit and skips the signal volley when a limit trips after the native exit', async () => {
+    // A grandchild holding the slave parks the observed exit inside the
+    // drain window (the HUP trap keeps it alive past the session leader's
+    // exit — Linux SIGHUPs the foreground group when the leader dies). A
+    // write-queue trip in that window must not signal the reaped pid (it
+    // may be recycled) and must not discard the real exit.
+    const killSpy = vi.spyOn(process, 'kill');
+    const pty = track(
+      spawn('/bin/sh', ['-c', 'trap "" HUP; sleep 30 & exit 3'], {
+        limits: { writeQueueBytes: 4096 },
+      }),
+    );
+    const { errors } = nextError(pty);
+    let exit: { exitCode: number; signal?: number } | undefined;
+    pty.onExit((e) => (exit = e));
+    try {
+      expect(await waitForChildGone(pty)).toBe(true);
+      killSpy.mockClear();
+
+      pty.write(Buffer.alloc(8192));
+
+      expect(errors.length).toBe(1);
+      expect(errors[0]!.code).toBe('QWEN_PTY_WRITE_LIMIT');
+      // The real terminal status is delivered, not overwritten by the limit.
+      expect(await waitFor(() => exit !== undefined)).toBe(true);
+      expect(exit!.exitCode).toBe(3);
+      expect(pty.stats.nativeExitRecord).toEqual({ exitCode: 3, signal: 0 });
+      // No SIGTERM/SIGKILL at the reaped pid or its group — not even the
+      // deferred safety net (this wait outlasts RESOURCE_KILL_GRACE_MS).
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(await waitForFdClosed(pty)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+    }
+  }, 20_000);
+
   it('leaves spawn headroom over the web-terminal admission cap', () => {
     // A full house of legitimate web terminals must not exhaust the
     // process-wide pty budget and starve the shell tool's spawns.
@@ -573,7 +668,7 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     try {
       expect(getPtyBudgetStats().activePtys).toBe(0);
 
-      const first = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const first = track(spawn('/bin/sh', ['-c', 'sleep 30']));
       let caught: unknown;
       try {
         spawn('/bin/sh', ['-c', 'sleep 30']);
@@ -585,13 +680,19 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       expect(limitError.code).toBe('QWEN_PTY_ACTIVE_LIMIT');
       expect(limitError.limitKind).toBe('active-pty-count');
       expect(limitError.limit).toBe(1);
+      // A refusal spawns nothing: the message must not claim a pty was
+      // terminated, and acceptedBytes stays a byte count — zero here — not
+      // a live-pty count.
+      expect(limitError.message).toContain('no pty was spawned');
+      expect(limitError.message).not.toContain('terminated');
+      expect(limitError.acceptedBytes).toBe(0);
 
       first.kill();
       expect(await waitFor(() => getPtyBudgetStats().activePtys === 0)).toBe(
         true,
       );
 
-      const second = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const second = track(spawn('/bin/sh', ['-c', 'sleep 30']));
       expect(second.pid).toBeGreaterThan(0);
       second.kill();
       expect(await waitFor(() => getPtyBudgetStats().activePtys === 0)).toBe(
@@ -607,10 +708,12 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     expect(baseline.pausedHoldBytes).toBe(0);
     expect(baseline.writeQueueBytes).toBe(0);
 
-    const pty = spawn('/bin/sh', [
-      '-c',
-      'awk \'BEGIN{for(i=0;i<15000;i++)print "O" i}\'; sleep 30',
-    ]);
+    const pty = track(
+      spawn('/bin/sh', [
+        '-c',
+        'awk \'BEGIN{for(i=0;i<15000;i++)print "O" i}\'; sleep 30',
+      ]),
+    );
     pty.pause();
     expect(
       await waitFor(() => getPtyBudgetStats().pausedHoldBytes >= 50_000),
@@ -729,6 +832,56 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
     }
   });
 
+  it('enforces the process-wide write-queue budget across ptys', () => {
+    const disarm = armFsCapture();
+    const original = processPtyBudget.totalWriteQueueBytes;
+    processPtyBudget.totalWriteQueueBytes = 96 * 1024;
+    try {
+      const a = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const b = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const aErrors: Error[] = [];
+      a.on('error', (error: Error) => aErrors.push(error));
+      const bErrors: Error[] = [];
+      b.on('error', (error: Error) => bErrors.push(error));
+
+      // The capture holds every fs.write open, so queued bytes stay charged:
+      // A parks 64 KiB under its own per-pty cap, and B's growth past the
+      // shared 96 KiB total terminates B only.
+      const chunk = Buffer.alloc(4096, 0x57);
+      for (let i = 0; i < 16; i += 1) a.write(chunk);
+      expect(aErrors).toHaveLength(0);
+      expect(getPtyBudgetStats().writeQueueBytes).toBe(64 * 1024);
+
+      for (let i = 0; i < 16; i += 1) b.write(chunk);
+      expect(bErrors).toHaveLength(1);
+      const error = bErrors[0] as PtyLimitError;
+      expect(error.code).toBe('QWEN_PTY_WRITE_LIMIT');
+      expect(error.limitKind).toBe('write-queue-process');
+      expect(error.limit).toBe(96 * 1024);
+      expect(a.stats.resourceFailed).toBe(false);
+      expect(getPtyBudgetStats().writeQueueBytes).toBe(64 * 1024);
+
+      // Settle the held writes, then the held reads, so both fds close.
+      for (const held of fsCapture.writes.splice(0)) {
+        held.callback(
+          Object.assign(new Error('write EIO'), { code: 'EIO' }),
+          0,
+        );
+      }
+      for (const held of fsCapture.reads.splice(0)) {
+        held.callback(eio(), 0);
+      }
+      expect(getPtyBudgetStats().writeQueueBytes).toBe(0);
+      expectFdClosed(a);
+      expectFdClosed(b);
+      a.kill();
+      b.kill();
+    } finally {
+      disarm();
+      processPtyBudget.totalWriteQueueBytes = original;
+    }
+  });
+
   it('keeps pumping when a data-listener failure is re-thrown by an error listener', () => {
     const disarm = armFsCapture();
     try {
@@ -748,13 +901,15 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
         throw error;
       });
 
-      // The data listener throws on the first chunk; reportError re-emits
-      // through the throwing error listener. The pump must still re-arm —
-      // otherwise output stalls forever and no exit is ever detected.
+      // The data listener throws on the first chunk; reportListenerError
+      // contains the error listener's re-throw (no throw escapes the fs
+      // callback), the failure is still reported, and the pump still
+      // re-arms — otherwise output stalls forever and no exit is ever
+      // detected.
       expect(fsCapture.reads).toHaveLength(1);
       expect(() =>
         deliverOutput(fsCapture.reads.shift()!, 'chunk-one'),
-      ).toThrow(/data listener boom/);
+      ).not.toThrow();
       expect(reported).toHaveLength(1);
       expect(fsCapture.reads).toHaveLength(1);
       expect(pty.stats.readInFlight).toBe(true);
