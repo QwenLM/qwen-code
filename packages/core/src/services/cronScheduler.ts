@@ -1019,13 +1019,13 @@ export class CronScheduler {
       if (!existing) durableJobCount++;
     }
 
+    const nowMinuteMs = now - (now % 60_000);
     // Stamp catch-up jobs with the current minute before delivery so the
     // tick loop can't fire a matched minute at or before the catch-up
     // (processJob skips slots <= lastFiredAt). The stamp is persisted at
     // delivery; until then it's memory-only, so a dropped buffer just
     // means a later enable re-detects the catch-up from disk.
     if (catchUpIds.length > 0) {
-      const nowMinuteMs = now - (now % 60_000);
       for (const id of catchUpIds) {
         const job = this.jobs.get(id);
         if (job) job.lastFiredAt = nowMinuteMs;
@@ -1039,11 +1039,19 @@ export class CronScheduler {
       this.fireOrBuffer({ kind: 'catch-up', ids: catchUpIds });
     }
     if (finalTasks.length > 0) {
+      // A final job is rebuilt from the task record, so the lastFiredAt it
+      // carries is the *previous* fire (or null). Stamp this one the way
+      // catch-up does: CronFire documents lastFiredAt as the minute of this
+      // fire, and the consumer renders it as "Triggered at" — or, left
+      // undefined, falls back to its own clock at delivery, which a buffered
+      // fire makes arbitrarily late.
       this.fireOrBuffer({
         kind: 'final',
-        jobs: finalTasks.map((t) =>
-          durableTaskToJob(t, this.recurringMaxAgeMs),
-        ),
+        jobs: finalTasks.map((t) => {
+          const job = durableTaskToJob(t, this.recurringMaxAgeMs);
+          job.lastFiredAt = nowMinuteMs;
+          return job;
+        }),
       });
     }
   }
