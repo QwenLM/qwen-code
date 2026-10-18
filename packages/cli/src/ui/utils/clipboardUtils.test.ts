@@ -563,6 +563,17 @@ describe('clipboardUtils', () => {
         reads: ['UTF8_STRING', 'STRING'],
       },
       {
+        // ICCCM leaves the advertisement order to the selection owner; the
+        // legacy STRING atom is Latin-1, so a co-offered UTF-8 representation
+        // of the same selection is always the better read.
+        name: 'prefers a UTF-8 offer over the legacy STRING atom listed before it',
+        tool: 'xclip',
+        types: ['TARGETS', 'STRING', 'UTF8_STRING'],
+        payloads: { STRING: 'latin', UTF8_STRING: 'utf8' },
+        expected: 'utf8',
+        reads: ['UTF8_STRING'],
+      },
+      {
         name: 'asks for nothing when the clipboard holds only an image',
         tool: 'wl-paste',
         types: ['image/png'],
@@ -606,6 +617,17 @@ describe('clipboardUtils', () => {
         reads: ['text/plain'],
       },
       {
+        // A blank-line copy reads as only the line terminator: that is
+        // nothing to paste, not a reason to keep looking at the same
+        // selection's markup.
+        name: 'returns nothing for a terminator-only plain read instead of falling through to markup',
+        tool: 'wl-paste',
+        types: ['text/plain', 'text/html'],
+        payloads: { 'text/plain': '\n', 'text/html': '<b>markup</b>' },
+        expected: null,
+        reads: ['text/plain'],
+      },
+      {
         name: 'keeps looking when a uri-list offer holds only comment lines',
         tool: 'wl-paste',
         types: ['text/uri-list', 'text/html'],
@@ -627,6 +649,23 @@ describe('clipboardUtils', () => {
 
       await expect(readClipboardText()).resolves.toBe(testCase.expected);
       expect(requestedTypes()).toEqual(testCase.reads);
+    });
+
+    it('decodes a legacy STRING offer as Latin-1 when UTF-8 decoding fails', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        const requested = args[args.indexOf('-t') + 1];
+        if (requested === 'TARGETS') {
+          return createMockChild('STRING\n', 0);
+        }
+        // ICCCM defines STRING as Latin-1: 'café' on the wire is 63 61 66 E9,
+        // which a UTF-8 decode would corrupt into U+FFFD.
+        return createChunkedMockChild([Buffer.from('caf\u00e9', 'latin1')]);
+      });
+
+      await expect(readClipboardText()).resolves.toBe('caf\u00e9');
+      expect(requestedTypes()).toEqual(['STRING']);
     });
 
     it('decodes stdout as one byte stream when a chunk splits a character', async () => {

@@ -497,6 +497,15 @@ const PLAIN_TEXT_TYPES = new Set([
   'text',
 ]);
 
+/**
+ * Fidelity order inside the plain tier. ICCCM leaves the advertisement order
+ * to the selection owner, but `STRING` is Latin-1 and `TEXT` is compound text
+ * while the rest carry UTF-8, so the legacy atoms are read only when no UTF-8
+ * offer was made — otherwise a Latin-1 payload would win the tier and be
+ * decoded with the wrong codec.
+ */
+const PLAIN_TIER_ORDER = ['text/plain', 'utf8_string', 'string', 'text'];
+
 /** Selection bookkeeping properties, which are never content. */
 const BOOKKEEPING_TYPES = new Set([
   'targets',
@@ -508,12 +517,17 @@ const BOOKKEEPING_TYPES = new Set([
   'version',
 ]);
 
+/** Type name without parameters or case: `Text/Plain;charset=UTF-8` → `text/plain`. */
+function baseTypeName(name: string): string {
+  return name.trim().toLowerCase().split(';')[0].trim();
+}
+
 /**
  * Classify a reported type, ignoring parameters
  * (`text/plain;charset=utf-8` is plain text) and letter case.
  */
 function classifyClipboardType(name: string): ClipboardTextTier | null {
-  const base = name.trim().toLowerCase().split(';')[0].trim();
+  const base = baseTypeName(name);
   if (BOOKKEEPING_TYPES.has(base)) {
     return null;
   }
@@ -550,6 +564,7 @@ const READ_DISCARDED_FOR_SIZE: unique symbol = Symbol('readDiscardedForSize');
 async function readStdout(
   command: string,
   args: string[],
+  latin1Fallback = false,
 ): Promise<string | typeof READ_DISCARDED_FOR_SIZE> {
   return new Promise((resolve) => {
     let child;
@@ -617,7 +632,17 @@ async function readStdout(
     });
     child.on('close', (code) => {
       if (code === 0) {
-        done(Buffer.concat(chunks).toString('utf8'));
+        const bytes = Buffer.concat(chunks);
+        let text = bytes.toString('utf8');
+        // ICCCM STRING is Latin-1 (and TEXT its compound-text sibling): a
+        // UTF-8 decode that produced replacement characters means the owner
+        // sent the legacy encoding, so those offers retry as Latin-1. A
+        // well-formed UTF-8 payload never yields U+FFFD here, so the common
+        // case — xclip answering STRING with raw UTF-8 — never retries.
+        if (latin1Fallback && text.includes('\uFFFD')) {
+          text = bytes.toString('latin1');
+        }
+        done(text);
       } else {
         debugLogger.debug(
           `${command} ${args.join(' ')} exited with code ${code}`,
@@ -805,8 +830,21 @@ export async function readClipboardText(): Promise<string | null> {
 
   const offers = await listClipboardTypes(tool);
   for (const tier of ['plain', 'other'] as const) {
-    for (const type of offers.filter((offer) => offer.tier === tier)) {
-      const result = await readStdout(tool, clipboardReadArgs(tool, type.raw));
+    const tierOffers = offers.filter((offer) => offer.tier === tier);
+    if (tier === 'plain') {
+      tierOffers.sort(
+        (a, b) =>
+          PLAIN_TIER_ORDER.indexOf(baseTypeName(a.raw)) -
+          PLAIN_TIER_ORDER.indexOf(baseTypeName(b.raw)),
+      );
+    }
+    for (const type of tierOffers) {
+      const base = baseTypeName(type.raw);
+      const result = await readStdout(
+        tool,
+        clipboardReadArgs(tool, type.raw),
+        base === 'string' || base === 'text',
+      );
       if (result === READ_DISCARDED_FOR_SIZE) {
         // Every remaining offer is another conversion of the same oversized
         // content, so it would breach the same cap — stop rather than read
@@ -824,13 +862,17 @@ export async function readClipboardText(): Promise<string | null> {
         .replace(/\r\n/g, '\n')
         .replace(/\r/g, '\n')
         .replace(/\n+$/, '');
-      const converted =
-        type.raw.trim().toLowerCase().split(';')[0].trim() === 'text/uri-list'
-          ? uriListToPaths(text)
-          : text;
-      // A uri-list of only comment lines converts to nothing; keep looking.
+      const isUriList = base === 'text/uri-list';
+      const converted = isUriList ? uriListToPaths(text) : text;
       if (converted === '') {
-        continue;
+        // A uri-list of only comment lines converts to nothing; keep looking.
+        // Any other successful read that normalized away held only line
+        // terminators — a blank-line copy. That is nothing to paste, not a
+        // reason to trade the selection for its own text/html markup.
+        if (isUriList) {
+          continue;
+        }
+        return null;
       }
 
       // A whitespace-only read means there is nothing to paste — returning

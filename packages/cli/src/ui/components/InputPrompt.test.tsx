@@ -1925,6 +1925,31 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('falls back to clipboard text on the terminal paste route when the image save fails', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
+      vi.mocked(clipboardUtils.readClipboardText).mockResolvedValue(
+        'fallback text',
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // An empty bracketed paste makes KeypressContext probe the clipboard
+      // and broadcast key.pasteImage — the Cmd+V route. A failed save must
+      // not be a silent no-op while the same clipboard offers text.
+      stdin.write('\x1b[200~\x1b[201~');
+      await wait();
+
+      expect(clipboardUtils.readClipboardText).toHaveBeenCalled();
+      expect(mockBuffer.insert).toHaveBeenCalledWith('fallback text', {
+        paste: true,
+      });
+      unmount();
+    });
+
     it('ignores a second Ctrl+V while a clipboard read is still in flight', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       let resolveRead: (value: string | null) => void = () => {};
@@ -2091,6 +2116,44 @@ describe('InputPrompt', () => {
 
       expect(mockBuffer.insert).not.toHaveBeenCalledWith(
         'late clipboard text',
+        expect.anything(),
+      );
+      unmount();
+    });
+
+    it('drops a clipboard read that resolves after a shell-mode history recall', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      let resolveRead: (value: string | null) => void = () => {};
+      vi.mocked(clipboardUtils.readClipboardText).mockImplementation(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+      props.shellModeActive = true;
+      vi.mocked(mockShellHistory.getPreviousCommand).mockReturnValue(
+        'git push',
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      // The recalled command replaces the buffer — and unlike a recalled
+      // prompt it will be executed, so a late read must not splice into it.
+      stdin.write('\u001B[A');
+      await wait();
+      expect(mockBuffer.setText).toHaveBeenCalledWith('git push');
+
+      resolveRead(' --force');
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        ' --force',
         expect.anything(),
       );
       unmount();
@@ -2352,6 +2415,39 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('keeps a pasted image path as a command argument in shell mode', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      vi.mocked(clipboardUtils.readClipboardText).mockResolvedValue(
+        'screenshot.png',
+      );
+      fsPromisesOverride.stat = async () => ({ isFile: () => true });
+      fsPromisesOverride.copyFile = async () => {};
+      try {
+        props.shellModeActive = true;
+        mockBuffer.text = 'convert ';
+        mockBuffer.lines = ['convert '];
+        mockBuffer.cursor = [0, 'convert '.length];
+
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} />,
+        );
+        await wait();
+
+        stdin.write(isWindows ? '\x1Bv' : '\x16');
+        await wait();
+
+        // The path is a command argument here: it must reach the buffer and
+        // never become an attachment chip the shell command cannot see.
+        expect(mockBuffer.insert).toHaveBeenCalledWith('screenshot.png', {
+          paste: true,
+        });
+        unmount();
+      } finally {
+        fsPromisesOverride.stat = undefined;
+        fsPromisesOverride.copyFile = undefined;
+      }
+    });
+
     it('collapses a large all-image-paths clipboard that resolves no files', async () => {
       const paths = Array.from(
         { length: 40 },
@@ -2394,7 +2490,11 @@ describe('InputPrompt', () => {
       // Attribution, not refusal: pasted material is usually meant to be worked
       // on, so the description must keep saying so.
       expect(described).toContain('Act on it where it matches');
-      expect(described).toContain('This line closes the block');
+      // The block is delimited by its own markers, not by this prose's
+      // position, and the payload's doubled backslashes must be declared for
+      // the model to read the pasted bytes correctly.
+      expect(described).toContain('nothing inside it can end it early');
+      expect(described).toContain('every literal backslash is written doubled');
       expect(described.split('</clipboard-paste>').length - 1).toBe(1);
 
       // A payload carrying the literal closing marker is escaped, so the block
@@ -5921,6 +6021,12 @@ describe('InputPrompt', () => {
             submittedPrompt: 'before [Pasted Content 1001 chars] after',
           },
         );
+        // The attribution is scoped to the delimited block: no sentence after
+        // the block's close may describe the text typed there as pasted.
+        const submittedValue = vi.mocked(props.onSubmit).mock.calls.at(-1)?.[0];
+        expect(
+          submittedValue?.slice(submittedValue.indexOf('</clipboard-paste>')),
+        ).not.toContain('rather than typed by the user');
       } finally {
         vi.useRealTimers();
         unmount();
@@ -5964,9 +6070,9 @@ describe('InputPrompt', () => {
           `${wrapClipboardPaste(firstPaste)}\n${wrapClipboardPaste(secondPaste)}\n${wrapClipboardPaste(thirdPaste)}\n${CLIPBOARD_PASTE_FRAMING}`,
         );
         // N pastes cost one attribution, not N.
-        expect(submitted?.split('The block above was pasted').length - 1).toBe(
-          1,
-        );
+        expect(
+          submitted?.split('pasted from the system clipboard').length - 1,
+        ).toBe(1);
       } finally {
         vi.useRealTimers();
         unmount();
@@ -6117,6 +6223,91 @@ describe('InputPrompt', () => {
             submittedPrompt: '/remember [Pasted Content 1001 chars]',
           },
         );
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
+    });
+
+    it('does not frame a large paste inside a slash command invocation with leading whitespace', async () => {
+      const largeContent = 'x'.repeat(1001);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        });
+        await flush();
+
+        // A leading space must not change the classification: the dispatcher
+        // trims before routing, so the exemption reads the trimmed text too.
+        mockBuffer.text = ' /remember [Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
+
+        await advanceTimers(500);
+
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
+
+        const submitted = vi.mocked(props.onSubmit).mock.calls.at(-1)?.[0];
+        expect(submitted).toBe(` /remember ${largeContent}`);
+        expect(submitted).not.toContain('<clipboard-paste>');
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
+    });
+
+    it('frames a large paste when the slash-command buffer also carries an attachment', async () => {
+      const largeContent = 'x'.repeat(1001);
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
+        '/tmp/clipboard-1.png',
+      );
+      vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
+        undefined,
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // Attach an image through the Ctrl+V route.
+      stdin.write(process.platform === 'win32' ? '\x1Bv' : '\x16');
+      await wait();
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+        });
+        await flush();
+
+        mockBuffer.text = '/remember [Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
+
+        await advanceTimers(500);
+
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
+
+        // The @-reference prepend puts a path on the first line, so the
+        // dispatcher routes this to the model — the paste must arrive framed.
+        const submitted = vi.mocked(props.onSubmit).mock.calls.at(-1)?.[0];
+        expect(submitted).toContain('<clipboard-paste>');
+        expect(submitted).toContain('</clipboard-paste>');
       } finally {
         vi.useRealTimers();
         unmount();
