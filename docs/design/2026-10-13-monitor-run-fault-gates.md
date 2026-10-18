@@ -91,21 +91,29 @@ their turn and hold a Runtime across turns:
    row); FG9/FG10 are coverage-driven and land after this round's practice
    is proven. This design covers FG8a–FG8f and nothing else.
 
-2. **Three landing slices, ordered by in-flight overlap.** Three open PRs
-   are changing the exact semantics FG8 would pin; writing against them now
-   would gate a moving contract. The slices land in this order, each its
-   own PR in the FG6 shape:
+2. **Slices, ordered by in-flight overlap and delivery state.** Slice 1
+   landed (#14120). Slice 2 is one PR delivering FG8a, FG8b, FG8d and the
+   deferred FG8e `cursor-expired-resync` case: its prerequisites #14021 and
+   #13918 have both merged, so the letters no longer gate a moving contract.
+   FG8c stays deferred — #13986 rewrites the cold-load held-set backfill it
+   pins and remains in review, so writing FG8c first means writing it twice;
+   it lands on its own after #13986, tracked on #14163.
 
-   | Slice | Letters              | Waits for                                                                                          | Why                                                                                                                                     |
-   | ----- | -------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-   | 1     | **FG8e, FG8f**       | nothing                                                                                            | SSE streams and the output manifest/capture delivery chain are untouched by all three in-flight PRs.                                    |
-   | 2     | **FG8a**             | **#14021** (settle never-started background dispatches in the live turn)                           | The background-dispatch reply-loss arm pins the settlement semantics #14021 is writing. #14021 is small (+173/-65); waiting is cheap.   |
-   | 3     | **FG8b, FG8c, FG8d** | **#13986** (restart-proof the held-Runtime drain) and **#13918** (tenant-wide InnoDB guard convoy) | #13986 rewrites the cold-load held-set backfill FG8c/FG8d pin; #13918 rewrites the store-failure error-code taxonomy FG8b would assert. |
+   | Slice | Letters                                   | Prerequisites           | Status             |
+   | ----- | ----------------------------------------- | ----------------------- | ------------------ |
+   | 1     | **FG8e, FG8f**                            | —                       | delivered (#14120) |
+   | 2     | **FG8a, FG8b, FG8d** + deferred FG8e case | #14021, #13918 (merged) | this PR            |
+   | 3     | **FG8c**                                  | #13986 (in review)      | deferred           |
 
    The gate ledger below specifies all six letters so the round is reviewable
    as one design; each slice's PR implements its letters and marks them
    delivered here. A letter's injection points and assertions are re-verified
-   against the merged prerequisites when its slice lands.
+   against the merged prerequisites when its slice lands: slice 2 reads
+   #14021's cancellation-barrier / `:process`-ledger never-started proof and
+   #13918's store-failure taxonomy as its ground contract. FG8d carries no
+   cross-restart case — its release arms gate the live-run routine/drain
+   split, which #13986 does not move; the issue tracker's adjudication
+   (#14163) unblocked FG8d on precisely that reading.
 
 3. **One IT class; no Spring kill.** FG8c kills the packaged Harness, the
    managed worker, and the background process itself — never the Spring
@@ -153,12 +161,47 @@ means the OS held exactly one physical process for the dispatch — the
 `:process` row's uniqueness is the SQL proof, and the worker/registry side
 carries the process identity.
 
-### FG8a — lost replies (slice 2, after #14021)
+### FG8a — lost replies (slice 2, this PR)
 
-The driver embeds a reverse proxy in front of the broker and store
-listeners; a lose-once fault forwards the request, consumes the committed
-upstream response, then destroys the reply. The Harness re-drives from its
-persisted state by the original execution identity.
+The wire points, verified against the merged tree at slice-2 landing. A
+reply-drop always means the lose-once proxy forwards the request,
+consumes the committed upstream response, then destroys the reply
+socket — and the gate first asserts the drop actually fired (its
+counter) before reading ground truth.
+
+- `dispatch-reply`: the dispatch reply
+  (`POST /executions/{id}:start`) dropped after `admitBackgroundProcess`
+  committed the `<executionCallId>:process` ledger row inside the same
+  handler. The CLI answers a lost start reply with status reads by the
+  original execution identity and never starts another invocation
+  (`hosted-workspace-broker.ts` `executeV3`; a re-driven `:start` on the
+  in-flight execution is server-side idempotent once dispatch is
+  recorded). A duplicate admission identity is where 409
+  `runtime_execution_conflict` would spawn nothing — the gate asserts
+  one `:process` row and one physical process either way.
+- `monitor-stop-reply`: the `:control` reply whose body carries
+  `kind: 'monitor-stop'`, dropped after the worker's `exited` answer
+  settled the `:process` row. The CLI-side record parks
+  (`recovery_blocked` / `runtime_lost` / `outcome_unknown`) and later
+  consumes the worker's real exit evidence through the monitor fan-out;
+  the CLI never re-issues the stop — the honesty being gated is that the
+  parked record settles from physical evidence, not from the unproven
+  answer. Exactly one physical terminate reaches the worker.
+- `capture-commit-reply`: the `/tool-results:publish` reply of a
+  committed page envelope (`kind: managed-tool-result-page`). The
+  content-addressed re-drive lands one envelope and one manifest
+  advance, no duplicated bytes; the resources and the manifest walk are
+  the ground truth.
+- `observation-advance-reply`: the journal-commit reply of a
+  `commitMonitorRun` operation (command id
+  `${monitorId}:${revision + 1}`), dropped after it committed. The store
+  client's bounded uncertain-error retry re-drives the same command id
+  and the server dedupes by request identity, so `observationSequence` /
+  `notifiedThrough` land exactly on the committed values, never beyond
+  the observed tail.
+
+The Harness re-drives from its persisted state by the original execution
+identity.
 
 | Case                        | Injection                                                                        | Expect                                                                                                                                                                                        |
 | --------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -167,12 +210,29 @@ persisted state by the original execution identity.
 | `capture-commit-reply`      | Drop a capture-page commit reply after the envelope persisted                    | The publisher's re-drive is idempotent: one page envelope, the manifest advances once, no duplicated bytes                                                                                    |
 | `observation-advance-reply` | Drop a monitor observation advance reply after it committed                      | `observationSequence` / `notifiedThrough` stay behind rather than skipping ahead; the re-drive lands them on the committed values, never beyond the observed tail                             |
 
-### FG8b — store failures (slice 3, after #13918)
+### FG8b — store failures (slice 2, this PR)
 
 Test-only SQL triggers, tenant- and table-scoped, installed and dropped per
 case like FG6b/FG7b, `SIGNAL SQLSTATE` text `FG8B_<case>` asserted in the
 captured Spring output. The error codes these cases assert are the post-#13918
 taxonomy.
+
+The store-failure rows sit in `ma_tool_execution` (the invocation row,
+then the `<executionCallId>:process` ledger row — written in that order
+before any dispatch) and the Session Store publication chain
+(`ma_resource` rows of kind `managed-tool-result-{content,page,manifest}`,
+committed through `POST /tool-results:publish` and the journal commit
+endpoints). One-shot `BEFORE INSERT` triggers scoped to the case tenant
+carry the `FG8B_<case>` marker; post-#13918, a trigger-failed insert
+surfaces as a failure the client's bounded uncertain-error handling
+re-drives by the original identity. Each case is therefore two halves
+like FG7b: (i) the trigger fires once, its marker is read from the
+captured Spring output, and JDBC ground truth shows the blocked commit —
+the zero-OS-effect / blocked-state assertions of the table below, with
+no second admission attempted; (ii) the trigger is dropped and the case
+is driven again, proving the honest landing happens exactly once — the
+producer's progress log and the model call count both stay at one, so
+nothing was re-executed.
 
 | Case                    | Injection                                                                 | Expect                                                                                                                                     |
 | ----------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -181,7 +241,7 @@ taxonomy.
 | `manifest-commit`       | One-shot trigger fails the output-manifest commit                         | The run blocks without re-executing; the capture's durable prefix stays readable and byte-identical                                        |
 | `page-envelope-commit`  | One-shot trigger fails a page-envelope commit after the manifest names it | The Artifact read chain never resolves to a manifest whose page envelopes were not persisted: the read refuses, the manifest is not served |
 
-### FG8c — process crashes (slice 3, after #13986)
+### FG8c — process crashes (slice 3, deferred to after #13986)
 
 POSIX-only. The IT owns the Harness child process and signals the worker and
 the background process by pid. Cold-load assertions read the #13361
@@ -196,7 +256,33 @@ branch-tagged 409 arms (decision 4b).
 | `process-kill`          | SIGKILL the background process itself                                  | The record settles from real exit evidence (or stays honestly unknown); never a fabricated `exited`                                                                                 |
 | `generation-remint`     | Restart the broker generation behind an unsettled run                  | The dead generation answers `runtime_broker_runtime_lost`; it is never silently re-minted; the run stays blocked                                                                    |
 
-### FG8d — cancellation and drain (slice 3, after #13986)
+### FG8d — cancellation and drain (slice 2, this PR)
+
+The wire points, verified at slice-2 landing. The driver cancels through
+the public surface (`POST /v1/agents/sessions/{id}/events`,
+`agent.session.cancel`) and drives the release arms through the broker
+proxy itself (`POST /tool-sessions/{id}:release`, body without or with
+`drain: true`; the probe exposes the case's broker-side runtime session
+identity so the verbs reach the right tool session).
+
+- `cancel-before-start`: the broker proxy holds the dispatch reply, the
+  driver cancels during the hold, then releases it — #14021's
+  cancellation barrier proves never-started by the `:process` row's
+  absence; zero OS effects (no row, no process, no capture
+  registration) is the gate.
+- `cancel-status-unavailable`: for the case window the broker proxy
+  answers the status `GET /executions/{id}` with 409
+  `runtime_broker_execution_unknown`; the cancel is recorded, no
+  terminal event is fabricated, and honesty lands once status reads
+  again.
+- `cancel-reply-lost`: the proxy drops one `:cancel` reply after it
+  committed; the re-driven cancel answers the committed state unchanged
+  and one terminal record results.
+- `routine-release-refusal` and `drain-release` each run their own live
+  background run: the routine arm refuses (409 `runtime_session_held`;
+  ground truth proves nothing was stopped and `progress.txt` keeps
+  advancing) and the drain arm issues the stop (settled `cancelled` /
+  `stop_requested` with `stopRequested: true`, never `exited`).
 
 | Case                        | Injection                                                 | Expect                                                                                                                                                                     |
 | --------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -207,7 +293,7 @@ branch-tagged 409 arms (decision 4b).
 | `routine-release-refusal`   | Routine (non-drain) release against a live background run | 409 `runtime_session_held`; nothing is stopped; the run keeps progressing                                                                                                  |
 | `drain-release`             | Drain release against the same run                        | The drain arm issues the stop; the run settles `cancelled` / `stop_requested` with `stopRequested: true`; what cannot be proven stopped answers 409 `runtime_session_busy` |
 
-### FG8e — SSE gap (slice 1, this PR)
+### FG8e — SSE gap (slice 1, delivered by #14120; cursor-expired-resync lands in slice 2)
 
 The public and WebShell streams are served by the in-JVM Spring; the client
 aborts and resumes are the injection, so this letter needs no proxy. A
@@ -226,11 +312,17 @@ is never vacuous against a history-dropping endpoint.
 | `webshell-monitor-resume` | Same over the WebShell stream                                        | Same assertions                                                                                                                          |
 | `cursor-expired-resync`   | Resume with a cursor older than the replay window                    | A single `agent.session.resync_required` frame, then close; no fabricated replay                                                         |
 
-`cursor-expired-resync` is deferred out of the slice-1 letter: the replay
-floor only advances when a session snapshot lands, so an honestly expired
-cursor needs the replay-floor mechanics driven to that point first; the
-case lands with slice 2, and its mutation (2 below) moves with it. The
-shipped FG8e letter covers the four abort/resume cases.
+`cursor-expired-resync` lands with slice 2 (this PR). An honestly expired
+cursor needs the replay floor moved past the cursor first, and slice 2
+drives that deterministically without any wire fault: the session carries
+its committed backlog, the case first lands a session snapshot covering
+the cursor, the probe advances `ma_event_stream.replay_floor_sequence`
+past the resume cursor through the store bean (the advance clamps to the
+snapshot's covered sequence), and the resumed observer asserts exactly
+one `agent.session.resync_required` frame — which carries no event id —
+naming the floor and the snapshot horizon, then the stream closes. Its
+mutation (2 below) moved with the case. The four abort/resume cases stay
+as slice 1 shipped them.
 
 A fixture note that cost a flake: the 60 s events poll/heartbeat interval
 (which forces the live hub to carry delivery) can hold a WebShell resume
@@ -246,7 +338,7 @@ quota stop's kill is the only way out. A natural exit closes the scope,
 and its cancel write races the quota settle, flipping the record to
 `stop_requested` instead of `max_events` (observed twice on the lane).
 
-### FG8f — output delivery (slice 1, this PR)
+### FG8f — output delivery (slice 1, delivered by #14120)
 
 The publisher lives inside the Harness process, so "kill the publisher" is a
 Harness kill scoped to output assertions only — Runtime-hold restoration
@@ -364,9 +456,9 @@ the merged #14021 / #13986 / #13918 semantics when they land.
 
 1. FG8e — the public replay's cursor tiebreak weakened to include the
    cursor row: `public-run-resume` red (duplicate at the resume boundary).
-2. Deferred with its case: FG8e — the expired-cursor branch streaming from
-   sequence 0 instead of answering `resync_required`:
-   `cursor-expired-resync` red. Lands with slice 2.
+2. FG8e — the expired-cursor branch streaming from sequence 0 instead of
+   answering `resync_required`: `cursor-expired-resync` red. Lands with
+   slice 2 (this PR).
 3. FG8e — the WebShell replay window off by one at the `afterSequence`
    boundary: `webshell-run-resume` red (gap or duplicate at the boundary).
 4. FG8f — the resume watermark dropped to 0 (resume re-arms only once the
@@ -384,14 +476,30 @@ the merged #14021 / #13986 / #13918 semantics when they land.
    the gate-side recomputation finds no committed row at ordinal 0 while
    the unaccounted rows sit in the store.
 
-Planned, refined at slice landing: FG8a — re-admit keyed by a fresh
-identity instead of the original `executionCallId` (`dispatch-reply` red);
-FG8b — the invocation commit proceeding without its `:process` row
-(`invocation-commit` red at the zero-OS-effects assertion); FG8c — cold
-load treating an unsettled background run as clean (`harness-kill-dispatch`
-red); FG8d — the routine release arm draining instead of refusing
-(`routine-release-refusal` red), and the settle projection mapping a
-platform stop to `exited` (`cancel-during-capture` red).
+Slice 2 refines the planned mutations against the merged prerequisites:
+
+7. FG8a — the uncertain-start path minting a fresh execution identity
+   instead of resolving by the in-flight original: `dispatch-reply`
+   red — two invocation identities (and their `:process` rows, their
+   physical processes) where the gate demands exactly one of each.
+8. FG8a — the parked monitor record settling from the unproven answer
+   the reply loss left behind instead of waiting for the worker's real
+   exit evidence: `monitor-stop-reply` red.
+9. FG8b — the invocation admission proceeding to dispatch without its
+   `:process` row: `invocation-commit` red at the zero-OS-effects
+   assertion (admit → dispatch no longer implies the ledger).
+10. FG8b — a failed manifest commit re-executing the capture instead of
+    re-driving it by the original identity: `manifest-commit` red (a
+    second model call or a second producer gate run).
+11. FG8d — the routine release arm draining instead of refusing:
+    `routine-release-refusal` red (release returns without 409
+    `runtime_session_held` and the run is stopped).
+12. FG8d — the settle projection mapping a platform stop to `exited`:
+    `cancel-during-capture` red.
+
+Moved with its letter to slice 3: cold load treating an unsettled
+background run as clean (`harness-kill-dispatch` red), refined against
+the merged #13986 semantics when the letter lands.
 
 ## Validation and acceptance
 
@@ -402,7 +510,13 @@ platform stop to `exited` (`cancel-during-capture` red).
   marker and kill marker observed — per-letter selectors working, and the
   happy path green without any injection.
 - Every slice-1 mutation above individually red; source restored; the gate
-  green again. Slices 2/3 repeat the procedure for their mutations.
+  green again. Slice 2 repeats the procedure for mutations 2 and 7–12 —
+  every case again firing its declared fault: drop counters, the
+  `FG8B_<case>` markers in the captured Spring output, the cancel answers,
+  and, for `cursor-expired-resync`, the probe's floor-advance return read
+  back over JDBC. The lane evidence rides the manual sdk-java.yml dispatch
+  with the re-measured fork / Verify / job budgets pinned the same
+  change, following the slice-1 precedent.
 - `hosted-process-ci.test.js` green with any moved budgets, and
   `check-failsafe-reports.js hosted` satisfied after a full lane run.
 - Two consecutive clean open-ended and reverse audit rounds per AGENTS.md.

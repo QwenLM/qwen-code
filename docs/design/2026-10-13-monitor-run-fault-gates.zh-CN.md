@@ -27,15 +27,15 @@ Issue #14054 是 #12380 的下一个 F 阶段切片：为 FG7 合入之后被启
 
 1. **只做 FG8；FG9/FG10 是各自的跟踪 issue。** triage 裁定：FG8 有一个已观测到的缺陷（#13896）和一条书面义务（#13856 的 G6 行）；FG9/FG10 是覆盖驱动的，在本轮做法被验证之后落地。本设计覆盖 FG8a–FG8f，仅此而已。
 
-2. **三片落地，按在飞交叠面排序。** 三个开着的 PR 正在改 FG8 要钉住的语义；现在对着它们写等于钉一个正在动的契约。各片按此顺序落地，各自一个 PR，沿用 FG6 形态：
+2. **分片，按在飞交叠面与交付状态。** 片 1 已合入（#14120）。片 2 是单个 PR，交付 FG8a、FG8b、FG8d 与暂缓的 FG8e `cursor-expired-resync` 用例：其前置 #14021 与 #13918 均已合入，这些字母不再钉一个正在动的契约。FG8c 保持暂缓 —— #13986 在重写它要钉住的冷加载 held-set 回填且仍在评审，先写等于写两遍；在 #13986 合入后单独落地，由 #14163 跟踪。
 
-   | 片  | 字母                 | 等待                                                                                    | 原因                                                                                                   |
-   | --- | -------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-   | 1   | **FG8e、FG8f**       | 无                                                                                      | SSE 流与 output manifest/capture 投递链不被三个在飞 PR 触碰。                                          |
-   | 2   | **FG8a**             | **#14021**（在活 turn 内结算从未启动的后台派发）                                        | background-dispatch 应答丢失臂钉住的正是 #14021 在写的结算语义。#14021 很小（+173/-65），等待成本低。  |
-   | 3   | **FG8b、FG8c、FG8d** | **#13986**（held-Runtime drain 义务重启可证）与 **#13918**（租户级 InnoDB 守卫 convoy） | #13986 在改 FG8c/FG8d 要钉的冷加载 held-set 回填；#13918 在重写 FG8b 要断言的存储故障错误码 taxonomy。 |
+   | 片  | 字母                                    | 前置                     | 状态             |
+   | --- | --------------------------------------- | ------------------------ | ---------------- |
+   | 1   | **FG8e、FG8f**                          | —                        | 已交付（#14120） |
+   | 2   | **FG8a、FG8b、FG8d** + 暂缓的 FG8e 用例 | #14021、#13918（已合入） | 本 PR            |
+   | 3   | **FG8c**                                | #13986（评审中）         | 暂缓             |
 
-   下面的门禁账本完整写明六封信，让这一轮可以作为一份设计被评审；每片的 PR 实现自己的字母并在此标记为已交付。各字母的注入点与断言点在其片落地时会对着已合入的前置重新核实。
+   下面的门禁账本完整写明六封信，让这一轮可以作为一份设计被评审；每片的 PR 实现自己的字母并在此标记为已交付。各字母的注入点与断言点在其片落地时会对着已合入的前置重新核实：片 2 把 #14021 的 cancellation barrier 与 `:process` 台账的 never-started 证明、以及 #13918 的存储故障 taxonomy 当作它的地面契约来读。FG8d 不含跨重启用例 —— 它的释放臂钉住的是活跃 run 的 routine/drain 拆分，#13986 不动这块；issue 跟踪者的裁定（#14163）正是按此读法放行 FG8d。
 
 3. **一个 IT 类；不杀 Spring。** FG8c 杀的是打包 Harness、managed worker 与后台进程自身 —— 从不杀 Spring 控制面 —— 所以 FG7c 的子 JVM fixture（`HostedChannelCrashFixtureMain`）不必要。六封信全部住在 `HostedMonitorRunFaultGatesIT`，in-JVM Spring，按字母选择器 `-Dqwen.fg8a.case` … `-Dqwen.fg8f.case`，共享 `HostedMonitorRunGateSupport`。POSIX 信号把崩溃用例限制在 Linux/macOS，与 FG6c/FG7c 相同。
 
@@ -47,9 +47,16 @@ Issue #14054 是 #12380 的下一个 F 阶段切片：为 FG7 合入之后被启
 
 Ground truth 是对执行台账（`:process` 行）、monitor/child-run 记录表、output manifest 与 page-envelope 表、Session Store journal，以及被捕获的 Spring 与 Harness 日志的 JDBC 查询。每个 case 先断言故障确实点火：代理 drop 计数与 `FG8B_<case>` SQLException marker（FG8a/b）、kill marker（FG8c）、cancel 应答的标记位（FG8d）、被中止流的未读证明（FG8e）、publisher 的水位/回执证据（FG8f）。`one process` 始终表示该派发在 OS 上恰好持有一个物理进程 —— `:process` 行的唯一性是 SQL 证明，worker/registry 侧携带进程身份。
 
-### FG8a —— 应答丢失（片 2，待 #14021）
+### FG8a —— 应答丢失（片 2，本 PR）
 
-driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转发请求、消费已提交的上游应答、然后销毁该应答。Harness 凭其持久化状态按原执行身份重驱。
+wire 注入点在片 2 落地时对着合入后的树核实。丢应答恒为：lose-once 代理转发请求、消费已提交的上游应答、然后销毁应答 socket —— 并且门禁在读地面真相之前先断言丢弃确实点火（drop 计数）。
+
+- `dispatch-reply`：派发应答（`POST /executions/{id}:start`），在 `admitBackgroundProcess` 于同一 handler 内提交 `<executionCallId>:process` ledger 行之后丢弃。CLI 对丢失的 `:start` 应答按原执行身份读状态，绝不另起一次 invocation（`hosted-workspace-broker.ts` `executeV3`；对在飞 execution 重驱 `:start` 在派发落库后是服务端幂等的）。重复准入身份才是 409 `runtime_execution_conflict` 并且什么都不启动 —— 门禁断言恰一行 `:process` 与一个物理进程。
+- `monitor-stop-reply`：body 含 `kind: 'monitor-stop'` 的 `:control` 应答，在 worker 的 `exited` 应答把 `:process` 行结算之后丢弃。CLI 侧记录转入 park（`recovery_blocked` / `runtime_lost` / `outcome_unknown`），随后经 monitor fan-out 消费 worker 的真实退出证据；CLI 绝不重发该 stop —— 被门禁的是 park 的记录凭物理证据结算，而不是凭未被证实的应答。worker 恰好收到一次物理 terminate。
+- `capture-commit-reply`：一笔已提交页信封（`kind: managed-tool-result-page`）的 `/tool-results:publish` 应答。内容寻址的重驱落一个 envelope、manifest 推进一次、无重复字节；资源行与 manifest 走查是地面真相。
+- `observation-advance-reply`：一笔 `commitMonitorRun` 操作（command id `${monitorId}:${revision + 1}`）的 journal commit 应答，在提交之后丢弃。store client 有界的不确定错误重试按同一 command id 重驱、服务端按请求身份去重，所以 `observationSequence` / `notifiedThrough` 恰好落在已提交的值上，绝不越过已观测的尾部。
+
+Harness 凭其持久化状态按原执行身份重驱。
 
 | 用例                        | 注入                                               | 期望                                                                                                                                     |
 | --------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -58,9 +65,11 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 | `capture-commit-reply`      | 在 envelope 持久化后丢弃一次 capture page 提交应答 | publisher 的重驱幂等：一个 page envelope，manifest 推进一次，无重复字节                                                                  |
 | `observation-advance-reply` | 在一次观测推进提交后丢弃其应答                     | `observationSequence` / `notifiedThrough` 落在后面而不是往前跳；重驱把它们落在已提交的值上，绝不越过已观测的尾部                         |
 
-### FG8b —— 存储故障（片 3，待 #13918）
+### FG8b —— 存储故障（片 2，本 PR）
 
 测试专用 SQL trigger，按租户与表限定范围，像 FG6b/FG7b 一样按 case 安装与拆除，`SIGNAL SQLSTATE` 文本 `FG8B_<case>` 在被捕获的 Spring 输出里断言。这些用例断言的错误码是 #13918 之后的 taxonomy。
+
+存储故障行落在 `ma_tool_execution`（invocation 行，然后是 `<executionCallId>:process` ledger 行 —— 按此次序、在一切派发之前写入）与 Session Store 发布链（`ma_resource` 的 `managed-tool-result-{content,page,manifest}` 行，经 `POST /tool-results:publish` 与 journal commit 端点提交）。一次性 `BEFORE INSERT` trigger 按 case 租户限定并携带 `FG8B_<case>` marker；#13918 之后，被 trigger 打失败的 INSERT 以失败呈现，客户端有界的不确定错误处理按原身份重驱。因此每个用例都像 FG7b 一样是两截：(i) trigger 点火一次，读取其 marker，JDBC 地面真相显示被阻塞的提交 —— 下表的零 OS 副作用 / 阻塞态断言，且无第二次准入尝试；(ii) 拆除 trigger 后再驱动该用例，证明诚实落库恰好发生一次 —— 生产者进度日志与模型调用计数都停在 1，所以没有任何东西被重执行。
 
 | 用例                    | 注入                                                | 期望                                                                                              |
 | ----------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -69,7 +78,7 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 | `manifest-commit`       | 一次性 trigger 让 output manifest 提交失败          | 该 run 阻塞而不重执行；capture 的已持久前缀保持可读且逐字节相同                                   |
 | `page-envelope-commit`  | 在 manifest 命名某个 page envelope 后让它的提交失败 | Artifact 读链绝不解析到一个其 page envelopes 未被持久化的 manifest：读取被拒绝，manifest 不被提供 |
 
-### FG8c —— 进程崩溃（片 3，待 #13986）
+### FG8c —— 进程崩溃（片 3，顺延至 #13986 之后）
 
 仅 POSIX。IT 拥有 Harness 子进程，并按 pid 向 worker 与后台进程发信号。冷加载断言读 #13361 的分支标签 409 臂（决定 4b）。
 
@@ -82,7 +91,14 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 | `process-kill`          | SIGKILL 后台进程自身                         | 记录凭真实退出证据结算（或诚实地保持未知）；绝不伪造 `exited`                                                                    |
 | `generation-remint`     | 在一个未结算 run 背后重启 broker generation  | 死掉的 generation 答 `runtime_broker_runtime_lost`；绝不静默重铸；该 run 保持阻塞                                                |
 
-### FG8d —— 取消与 drain（片 3，待 #13986）
+### FG8d —— 取消与 drain（片 2，本 PR）
+
+wire 注入点在片 2 落地时核实。driver 经公开面取消（`POST /v1/agents/sessions/{id}/events`，`agent.session.cancel`），并亲自经 broker 代理驱动 release 两臂（`POST /tool-sessions/{id}:release`，body 不带或带 `drain: true`；probe 暴露该 case 的 broker 侧 runtime session 身份，使这些动词抵达正确的 tool session）。
+
+- `cancel-before-start`：broker 代理扣住派发应答，driver 在扣留期间取消，然后放行 —— #14021 的 cancellation barrier 凭 `:process` 行的缺位证明从未启动；零 OS 副作用（无行、无进程、无 capture 注册）是门禁。
+- `cancel-status-unavailable`：在 case 窗口内 broker 代理由对状态 `GET /executions/{id}` 答 409 `runtime_broker_execution_unknown`；取消被记录，不伪造终态事件，状态恢复可读后诚实落地。
+- `cancel-reply-lost`：代理在一笔 `:cancel` 提交之后丢弃其应答；重驱的取消原样回答已提交的状态，结果是一条终态记录。
+- `routine-release-refusal` 与 `drain-release` 各自运行自己的活跃后台 run：例行臂拒绝（409 `runtime_session_held`；地面真相证明任何东西都未被停止，`progress.txt` 继续推进），drain 臂发出停止（结算 `cancelled` / `stop_requested` 且带 `stopRequested: true`，绝不为 `exited`）。
 
 | 用例                        | 注入                                     | 期望                                                                                                                                 |
 | --------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -93,7 +109,7 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 | `routine-release-refusal`   | 对活跃后台 run 做例行（非 drain）release | 409 `runtime_session_held`；不停任何东西；该 run 继续推进                                                                            |
 | `drain-release`             | 对同一个 run 做 drain release            | drain 臂发出停止；该 run 结算 `cancelled` / `stop_requested` 且带 `stopRequested: true`；无法证明已停的答 409 `runtime_session_busy` |
 
-### FG8e —— SSE 断流（片 1，本 PR）
+### FG8e —— SSE 断流（片 1，#14120 交付；cursor-expired-resync 随片 2 落地）
 
 公开流与 WebShell 流由 in-JVM Spring 提供；客户端的中止与续传就是注入，所以本信不需要代理。一个后台 run 与一次 monitor 观测提供在飞的事件流量。每个用例中止流后，先在断连期间推进能力 —— 先释放 gate；run 字母的积压是一条 post-gap prompt，因为没有调度器时退出通知是静默的 —— 并且只在 JDBC 证明有越过游标的已提交事件之后才重连，所以面对丢历史的端点，重放绝不会空转通过。
 
@@ -105,11 +121,11 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 | `webshell-monitor-resume` | 在 WebShell 流上做同样注入                           | 同样的断言                                                                           |
 | `cursor-expired-resync`   | 以早于重放窗口的游标续传                             | 单帧 `agent.session.resync_required`，然后关闭；无伪造重放                           |
 
-`cursor-expired-resync` 暂缓、不进片 1 的字母：重放地板只有会话快照落地才会前移，所以一个诚实的过期游标需要先把重放地板机制驱动到那个点；该用例随片 2 落地，它的变异（下面的第 2 条）一并移动。本次交付的 FG8e 字母覆盖四个中止/续传用例。
+`cursor-expired-resync` 随片 2 落地（本 PR）。一个诚实的过期游标需要先把重放地板移过该游标，片 2 不用任何 wire 故障、以确定性方式驱动：会话携带其已提交积压，用例先落一条覆盖该游标的会话快照，probe 经 store bean 把 `ma_event_stream.replay_floor_sequence` 前移过续传游标（前移钳制到快照的覆盖序号），然后续传的 observer 断言恰好一帧 `agent.session.resync_required` —— 该帧不带事件 id —— 点名地板与快照视界，然后流关闭。它的变异（下面的第 2 条）随用例移动。四个中止/续传用例保持片 1 的原样。
 
 一条付出了一个 flake 的 fixture 教训：60 s 的事件轮询/心跳间隔（为强制 live hub 承载投递而设）可把 WebShell 续传压住一个完整轮询周期，而 monitor watch 的空闲窗口必须长过它 —— 空闲超时设 30 s 时，watch 在断流中途把顶在门边的生产者空闲杀掉，用例就吊死在一扇永不再开的门上。watch 以 `idle_timeout_ms` = 180 s 运行。同一轮询也限制续传 observer 追平已提交台账的速度 —— 在重放读取与 relay 停止之间提交的行要晚一个轮询周期才到，所以追平等待设为 120 s，长过两个周期。第二条纪律：monitor producer 绝不自然退出 —— 打过最后一个 mark 后空转，配额停表的 kill 是唯一出路。自然退出会关闭作用域，其 cancel 写入与配额结算赛跑，胜出时把记录翻折成 `stop_requested` 而不是 `max_events`（lane 上实测两次）。
 
-### FG8f —— 输出投递（片 1，本 PR）
+### FG8f —— 输出投递（片 1，#14120 交付）
 
 publisher 住在 Harness 进程内，所以「杀掉 publisher」是一次只断言输出侧事实的 Harness kill —— 跨 Harness 重启的 Runtime hold 恢复是 #13986 正在动的地面，属于片 3 的 FG8c（那里的 `harness-kill-capture` 断言恢复侧；这里只钉输出侧）。
 
@@ -136,19 +152,28 @@ publisher 住在 Harness 进程内，所以「杀掉 publisher」是一次只断
 每个变异单独应用、证明恰好把它自己的门禁打红、然后回滚，沿用 FG6/FG7 记录在案的手动程序。下面的片 1 变异随本设计一起提交；片 2 与片 3 在落地时对着已合入的 #14021 / #13986 / #13918 语义细化自己的变异。
 
 1. FG8e —— 公开流重放的游标 tiebreak 被削弱为包含游标行：`public-run-resume` 红（续传边界处重复）。
-2. 随用例一并暂缓：FG8e —— 过期游标分支从序列 0 起播而不是回答 `resync_required`：`cursor-expired-resync` 红。随片 2 落地。
+2. FG8e —— 过期游标分支从序列 0 起播而不是回答 `resync_required`：`cursor-expired-resync` 红。随片 2 落地（本 PR）。
 3. FG8e —— WebShell 重放窗口在 `afterSequence` 边界差一：`webshell-run-resume` 红（边界处缺失或重复）。
 4. FG8f —— 恢复水位降为 0（resume 只在缓冲完全排空后才重新武装）：`in-flight-cap` 红 —— 生产者停摆后的第一个块要等整批滞留积压全部提交才会落地，恢复时点的已提交数因此到达停摆点而不是停在它后面。
 5. FG8f —— journal 提交的重试铸了新的事务身份而非重驱原事务：`receipt-drop-after-watermark` 红（重驱的结算提交与已落库的原提交冲突，记录永不结算）。
 6. FG8f —— 内容寻址的段资源身份偏离既定推导（`[captureId, streamId, ordinal]` 多出第四项）：`publisher-kill-mid-capture` 红在前缀走查上 —— 门侧按正确推导在序号 0 处找不到已提交行，而未清算的行就在 store 里。
 
-计划在片落地时细化：FG8a —— 重新准入用新身份而非原 `executionCallId`（`dispatch-reply` 红）；FG8b —— invocation 提交在没有 `:process` 行的情况下继续（`invocation-commit` 红在零 OS 副作用断言上）；FG8c —— 冷加载把未结算的后台 run 当成干净（`harness-kill-dispatch` 红）；FG8d —— 例行 release 臂变成 drain 而非拒绝（`routine-release-refusal` 红），以及结算投影把平台停止映射成 `exited`（`cancel-during-capture` 红）。
+片 2 对着已合入的前置细化既定变异：
+
+7. FG8a —— 不确定的启动路径铸了新的执行身份而非按在飞原身份解决：`dispatch-reply` 红 —— 门禁要求恰一处的地方出现两个 invocation 身份（及其 `:process` 行、其物理进程）。
+8. FG8a —— park 的 monitor 记录凭应答丢失留下的未证实应答结算，而不是等待 worker 的真实退出证据：`monitor-stop-reply` 红。
+9. FG8b —— invocation 准入在没有 `:process` 行的情况下继续派发：`invocation-commit` 红在零 OS 副作用断言上（准入 → 派发不再蕴含台账）。
+10. FG8b —— 失败的 manifest 提交重执行 capture 而不是按原身份重驱：`manifest-commit` 红（第二个模型调用或第二次生产者过门）。
+11. FG8d —— 例行 release 臂变成 drain 而非拒绝：`routine-release-refusal` 红（release 不带 409 `runtime_session_held` 返回，且该 run 被停掉）。
+12. FG8d —— 结算投影把平台停止映射成 `exited`：`cancel-during-capture` 红。
+
+随 FG8c 移到片 3：冷加载把未结算的后台 run 当成干净（`harness-kill-dispatch` 红），在该字母落地时对着合入后的 #13986 语义细化。
 
 ## 验证与验收
 
 - `npm run build && npm run typecheck`；driver 的 ESLint 干净；模块 surefire 套件绿。
 - 新类在本地 MySQL/MariaDB 上全绿（CI lane 是 MySQL 8.4）：每个用例点燃其声明的故障 —— 每个 drop 计数、`FG8B_*` marker 与 kill marker 都被观测到 —— 按字母选择器可用，且无任何注入时顺利路径绿。
-- 上述每个片 1 变异各自变红；源码还原；门禁复绿。片 2/3 对自己的变异重复该程序。
+- 上述每个片 1 变异各自变红；源码还原；门禁复绿。片 2 对变异 2 与 7–12 重复该程序 —— 每个用例再次点燃其声明的故障：drop 计数、被捕获的 Spring 输出里的 `FG8B_<case>` marker、cancel 应答，以及 `cursor-expired-resync` 的 probe 地板前移返回值经 JDBC 回读。lane 证据走 sdk-java.yml 的手动 dispatch，重测的 fork / Verify / job 预算在同一变更内钉住，沿用片 1 先例。
 - `hosted-process-ci.test.js` 在预算变动后绿，且整 lane 跑完后 `check-failsafe-reports.js hosted` 满足。
 - 按 AGENTS.md 做两轮连续干净的开放式与反向审计。
 - 本设计双语落地；交付台账按片记录 FG8 行；在 #14054 上留一条评论记录分片与每片的交付，并点名决定 5 的两个伴随项（`team_state` / `team_task` 存储折叠，以及了结或重新命名 #13598 的 mcp/hook/schedule/automation 审计），让跟踪 issue 反映已确定的形态。
