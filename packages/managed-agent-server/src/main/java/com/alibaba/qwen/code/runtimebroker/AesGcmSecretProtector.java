@@ -1,5 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONWriter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -14,6 +19,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 /** AES-256-GCM protector for Runtime seed credentials. */
 public final class AesGcmSecretProtector implements SecretProtector {
+    private static final Logger LOGGER = LoggerFactory.getLogger(AesGcmSecretProtector.class);
     private static final byte FORMAT_VERSION = 1;
     private static final int IV_BYTES = 12;
     private static final int TAG_BITS = 128;
@@ -41,13 +47,15 @@ public final class AesGcmSecretProtector implements SecretProtector {
             String configuredId = BrokerValues.requireId(id, "keyId");
             if (bytes == null || bytes.length != 32) {
                 throw new IllegalArgumentException("AES-GCM key "
-                        + configuredId + " must contain 32 bytes");
+                        + JSON.toJSONString(configuredId, JSONWriter.Feature.EscapeNoneAscii)
+                        + " must contain 32 bytes");
             }
             configured.put(configuredId,
                     new SecretKeySpec(bytes.clone(), "AES"));
         });
         this.keys = Map.copyOf(configured);
         this.random = random;
+        LOGGER.info("Runtime credential key ring: {}", keyRingDescription());
     }
 
     public static AesGcmSecretProtector fromBase64(String keyId,
@@ -77,12 +85,15 @@ public final class AesGcmSecretProtector implements SecretProtector {
     private static byte[] decodeKey(String keyId, String encodedKey) {
         if (encodedKey == null || encodedKey.isBlank()) {
             throw new IllegalArgumentException(
-                    "encodedKey for key " + keyId + " is required");
+                    "encodedKey for key "
+                            + JSON.toJSONString(keyId, JSONWriter.Feature.EscapeNoneAscii)
+                            + " is required");
         }
         try {
             return Base64.getDecoder().decode(encodedKey);
         } catch (IllegalArgumentException exception) {
-            throw new IllegalArgumentException("encodedKey for key " + keyId
+            throw new IllegalArgumentException("encodedKey for key "
+                    + JSON.toJSONString(keyId, JSONWriter.Feature.EscapeNoneAscii)
                     + " must be valid base64", exception);
         }
     }
@@ -117,7 +128,9 @@ public final class AesGcmSecretProtector implements SecretProtector {
         SecretKey key = keys.get(protectedSecret.getKeyId());
         if (key == null) {
             throw new IllegalStateException(
-                    "Runtime credential key is unavailable");
+                    "Runtime credential key is unavailable: requested="
+                            + JSON.toJSONString(protectedSecret.getKeyId(), JSONWriter.Feature.EscapeNoneAscii)
+                            + ", " + keyRingDescription());
         }
         byte[] encoded;
         try {
@@ -154,6 +167,12 @@ public final class AesGcmSecretProtector implements SecretProtector {
             throw new IllegalArgumentException("plaintext is required");
         }
         return plaintext.clone();
+    }
+
+    private String keyRingDescription() {
+        return "active=" + JSON.toJSONString(activeKeyId, JSONWriter.Feature.EscapeNoneAscii)
+                + ", configured=" + JSON.toJSONString(keys.keySet().stream().sorted().toList(),
+                        JSONWriter.Feature.EscapeNoneAscii);
     }
 
     private static Map<String, byte[]> singleKey(String keyId,
