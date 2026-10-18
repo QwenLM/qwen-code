@@ -135,17 +135,18 @@ class ProviderRuntimeTransportTest {
 
     @Test
     void preservesRecognizedProviderErrorReasonsAndStatusWithoutTreatingRefusalAsNotStarted() {
-        for (Map.Entry<String, Integer> failure : Map.of(
-                "managed_runtime_tool_invalid", 400,
-                "managed_runtime_provider_invalid", 400,
-                "managed_runtime_identity_conflict", 409,
-                "managed_context_unavailable", 409,
-                "managed_context_conflict", 409,
-                "managed_runtime_provider_operation_failed", 409,
-                "managed_runtime_provider_incompatible", 409,
-                "managed_runtime_owner_hold_pending", 409,
-                "managed_runtime_provider_too_large", 413,
-                "managed_runtime_provider_unsupported", 501).entrySet()) {
+        for (Map.Entry<String, Integer> failure : Map.ofEntries(
+                Map.entry("managed_runtime_tool_invalid", 400),
+                Map.entry("managed_runtime_provider_invalid", 400),
+                Map.entry("managed_runtime_identity_conflict", 409),
+                Map.entry("managed_context_unavailable", 409),
+                Map.entry("managed_context_conflict", 409),
+                Map.entry("managed_runtime_provider_operation_failed", 409),
+                Map.entry("managed_runtime_provider_incompatible", 409),
+                Map.entry("managed_runtime_owner_hold_pending", 409),
+                Map.entry("managed_runtime_release_timeout", 409),
+                Map.entry("managed_runtime_provider_too_large", 413),
+                Map.entry("managed_runtime_provider_unsupported", 501)).entrySet()) {
             status = failure.getValue();
             response = body -> Map.of("code", failure.getKey(), "error", "Specific provider reason.");
             CompletionException exception = assertThrows(CompletionException.class,
@@ -154,7 +155,10 @@ class ProviderRuntimeTransportTest {
             assertEquals(status, error.getStatusCode());
             assertEquals(failure.getKey(), error.getCode());
             assertEquals("Specific provider reason.", error.getMessage());
-            assertEquals(false, error.isRetryable());
+            assertEquals(
+                    "managed_runtime_owner_hold_pending".equals(failure.getKey())
+                            || "managed_runtime_release_timeout".equals(failure.getKey()),
+                    error.isRetryable());
         }
     }
 
