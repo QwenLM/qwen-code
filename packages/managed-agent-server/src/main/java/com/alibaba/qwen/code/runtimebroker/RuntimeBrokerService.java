@@ -599,19 +599,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             : CompletableFuture.completedFuture(receipt);
                 }).thenCompose(receipt -> releaseRetiredHolders(draining, renewal)
                         .thenApply(ignored -> receipt)).thenAccept(receipt -> {
-                    if (authority != null) {
-                        bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
-                    }
-                    var current = renewal.stopAndGet();
-                    if (current != null && authority != null) {
-                        current = current.withLifecycleAuthority(authority);
-                    }
-                    if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
-                            .withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
-                        throw unavailable("runtime_close_claim_pending", "Drain completion was fenced");
-                    }
-                    liveBindings.remove(draining.getBindingId());
-                });
+                            if (authority != null) {
+                                bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
+                            }
+                            var current = renewal.stopAndGet();
+                            if (current != null && authority != null) {
+                                current = current.withLifecycleAuthority(authority);
+                            }
+                            if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
+                                    .withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
+                                throw unavailable("runtime_close_claim_pending", "Drain completion was fenced");
+                            }
+                            liveBindings.remove(draining.getBindingId());
+                        });
         });
         return result.toCompletableFuture().orTimeout(operationDeadlineMillis(), TimeUnit.MILLISECONDS)
                 .whenComplete((ignored, error) -> {
