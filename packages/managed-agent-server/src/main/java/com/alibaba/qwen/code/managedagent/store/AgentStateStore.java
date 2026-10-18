@@ -163,6 +163,20 @@ public interface AgentStateStore {
         throw new UnsupportedOperationException("Approval mode selection is unavailable");
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String approvalMode, boolean approvalSelectionSupported,
+            Boolean planMode, boolean planModeSupported) {
+        if (Boolean.TRUE.equals(planMode)) {
+            throw new UnsupportedOperationException("Plan mode is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection,
+                approvalMode, approvalSelectionSupported);
+    }
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 
@@ -594,6 +608,8 @@ public interface AgentStateStore {
     default Map<String, WebShellApprovalSelection> findApprovalSelections(
             String tenantId, List<String> sessionIds) { return Map.of(); }
 
+    default boolean supportsPlanMode(SessionRecord session) { return false; }
+
     default Set<String> findApprovalOwners(String tenantId, String actorId,
             List<String> sessionIds) { return Set.of(); }
 
@@ -605,6 +621,16 @@ public interface AgentStateStore {
 
     default WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
             String promptId) { return null; }
+
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean planMode, boolean planModeSupported) {
+        if (planMode != null) {
+            throw new UnsupportedOperationException("Plan mode is unavailable");
+        }
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported);
+    }
 
     default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
             String promptId) { return null; }
