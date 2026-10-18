@@ -10672,10 +10672,14 @@ class QwenAgent implements Agent {
                   'The permission rules could not be reloaded for a workspace change.',
                 );
               }
+              const scope =
+                params['scope'] === 'user'
+                  ? SettingScope.User
+                  : SettingScope.Workspace;
               this.syncLivePermissionManagers(
                 before,
                 readPermissionRuleSet(this.settings.merged),
-                SettingScope.Workspace,
+                scope,
                 changeCwd,
                 true,
               );

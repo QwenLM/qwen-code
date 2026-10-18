@@ -4071,7 +4071,7 @@ export function createSessionControlPlane(
           kind: 'permissions',
           tightening: true,
           persistedByControl: true,
-          payload: {},
+          payload: { scope: params?.['scope'] },
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceReload:
         return {
