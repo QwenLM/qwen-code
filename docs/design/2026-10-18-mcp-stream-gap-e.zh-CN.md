@@ -13,7 +13,7 @@ issue #14447 列出公开/WebShell 事件流在长 MCP 工具调用与配置替�
 - 公开流是 `GET /v1/agents/sessions/{sessionId}/events`，由 `ManagedEventStreamService` 提供，用 `Last-Event-ID` / `after` 续传。
 - WebShell 流是 `POST /api/agent/web-shell/v1/events/stream`，`afterSequence` 在 body 里，没有 `Last-Event-ID` 头。两条路由不是同一机制。
 - 两条流都从 Spring event store（`ma_public_event` / 事件记录）重放，不是 Harness journal；Harness 的 `/session/:id/events` 是第三条路由。
-- MCP 原始操作 fixture（`ext://hold`）不产生 turn/tool 事件。lane 确实有模型驱动的 turn：`HostedExtensionsIT.modelReply()` 为发现的 MCP 工具发出 `tool_calls`，并通过公开事件 API 提交 turn；FG12c rig 也启动本地模型服务并驱动 baseline prompt。FG12c stub 只流 `FG12_DONE`，所以工具调用需要 `HostedExtensionsIT` 路径，或让 stub 发出 tool call。
+- MCP 原始操作 fixture（`ext://hold`）不产生 turn/tool 事件。lane 确实有模型驱动的 turn：`HostedExtensionsIT.modelReply()` 为发现的 MCP 工具发出 `tool_calls`，并通过公开事件 API 提交 turn；FG12c rig 也启动本地模型服务并驱动 baseline prompt。`HostedMcpRestartFaultGatesIT.modelReply()`（FG12c）发的是 `FG12C_DONE`；`HostedMcpReplyLossIT`（FG12a）发的是 `FG12_DONE`。两个 stub 都不发 `tool_calls`；`HostedExtensionsIT.modelReply()` 才发，所以工具调用需要该路径，或让 stub 发出 tool call。
 
 ## 账本
 

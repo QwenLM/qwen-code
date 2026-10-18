@@ -29,7 +29,7 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的 `mcp_config
 
 ## 决策
 
-1. **用测试 store wrapper 在真实事务内注入。** 在 Broker 事务 store 外包一层 `@TestConfiguration` wrapper，按 phase 抛错。MySQL trigger 被否决：行上无法识别 phase，而且已发布的 blob 在事务之外。
+1. **用测试 store wrapper 在真实事务内注入。** 在 Broker 事务 store 外包一层 `@TestConfiguration` wrapper，按 phase 抛错。MySQL trigger 被否决：行上无法识别 phase。
 2. **同一 phase 的所有重试都失败。** HTTP 客户端会重试 5xx；wrapper 保持失败直到测试清除 phase，用例记录尝试次数。
 3. **settled 失败要驱动，不会自愈。** 失败从 `install()`/`accept()` 抛出；测试必须驱动一次后续 turn 或 close；代理 wire 必须只有原 id 上一条 `mcp-status`，没有第二次 invoke。persistent 500 会耗尽 HTTP 提交重试并触发 `ManagedSessionAuthority` 的 write-failure latch；之后的命令都抛 `ManagedSessionWritesStoppedError`。测试必须先按原 operation/runtime pins 从 durable session store dispose/reopen authority，再驱动恢复 turn 或 lifecycle reconciliation。
 4. **内存暂存不等于持久发布。** `HttpManagedSessionResourceStore.publish()` 只在内存暂存字节；`commitResources()` 把字节嵌入事务，服务端在同一事务里插入 `ma_resource` 行。settled 提交失败会回滚新 response/catalog 行；只有更早提交的资源（intent 时的 arguments）保留。

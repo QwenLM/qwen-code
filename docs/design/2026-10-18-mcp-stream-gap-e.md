@@ -13,7 +13,7 @@ A standalone gate around the raw operation observes no events; the lane's model/
 - The public stream is `GET /v1/agents/sessions/{sessionId}/events`, served by `ManagedEventStreamService`; it resumes with `Last-Event-ID` / `after`.
 - The WebShell stream is `POST /api/agent/web-shell/v1/events/stream`, with `afterSequence` in the body; it has no `Last-Event-ID` header. The two routes are not one mechanism.
 - Both streams replay the Spring event store (`ma_public_event` / event records), not the Harness journal. The Harness `/session/:id/events` is a third route.
-- The MCP raw-operation fixture (`ext://hold`) produces no turn/tool events. The lane does have model-driven turns: `HostedExtensionsIT.modelReply()` emits `tool_calls` for the discovered MCP tool and submits turns through the public events API; the FG12c rig starts a local model server and drives a baseline prompt. The FG12c stub only streams `FG12_DONE`, so a tool call needs the `HostedExtensionsIT` path or a stub that emits one.
+- The MCP raw-operation fixture (`ext://hold`) produces no turn/tool events. The lane does have model-driven turns: `HostedExtensionsIT.modelReply()` emits `tool_calls` for the discovered MCP tool and submits turns through the public events API; the FG12c rig starts a local model server and drives a baseline prompt. `HostedMcpRestartFaultGatesIT.modelReply()` (FG12c) emits `FG12C_DONE`; `HostedMcpReplyLossIT` (FG12a) emits `FG12_DONE`. Neither stub emits `tool_calls`; `HostedExtensionsIT.modelReply()` does, so a tool call needs that path or a stub that emits one.
 
 ## Ledger
 
