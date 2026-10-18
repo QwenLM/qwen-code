@@ -86,7 +86,7 @@ final class ManagedProjectionResourceCollector {
                                         String id = (String) candidate.get("snapshot_id");
                                         ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                                                 jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-                                        if (ManagedLegacySessionGuard.isPrivateBounded(
+                                        if (ManagedLegacySessionGuard.isPrivate(
                                                 jdbc, tenant, session)) {
                                             return false;
                                         }
@@ -149,7 +149,7 @@ final class ManagedProjectionResourceCollector {
     private boolean collect(String tenant, String session, String key) {
         ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                 jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        if (ManagedLegacySessionGuard.isPrivateBounded(jdbc, tenant, session)) {
+        if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
             return false;
         }
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);

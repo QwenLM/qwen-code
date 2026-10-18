@@ -354,16 +354,13 @@ publication 车道在到达 `lockPublicationWriter` 之前就已触租户守卫�
 首次获取现均以同一逐语句上界运行并共享 `tenant_guard_contended` 映射。见
 证：`ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`。
 
-#14393 的 A.3 后续给快照过期、投影正文回收、工具结果 claim/结算与
-Session 资源 claim/page 的首次 publication CAS 获取加界。它们仍在根行
-物化之前检查 CSI，并使用局部的 5 秒检查变体；普通调用方保留原有的 10 秒
-检查与仅死锁映射。生命周期协议的完成路径先有界获取 placement、再获取
-CAS，随后对公开 Session/event-stream 的加锁读取也加界，并保留已有的更短
-语句超时。超时以 `503 tenant_guard_contended` 返回，当前事务回滚，不会
-认证完成、推进 claim 或回收游标。现有重试与 lease 规则保持不变，包括
-生命周期协调器的有限重试预算。此处限定这些获取点，不表示后续所有语句
-或整个操作具有 5 秒总期限。见证：
-`ManagedSessionGuardConvoyIT#heldLifecycleGuardsBoundCompletion`。
+#14393 的 A.3 后续仅为原文列出的快照过期、投影正文回收、工具结果
+claim/结算、Session 资源 claim/page 和生命周期完成入口的首次 publication
+CAS 获取加界。超时使用既有 `503 tenant_guard_contended` 映射并回滚当前事务。
+CSI 检查、placement 和 Session/event-stream 等待保持原有行为；这不代表
+整次操作具有总时间上限。生命周期 publication 入口见证：
+`ManagedSessionGuardConvoyIT#heldPublicationGuardBoundsLifecycleCompletion`。
+collector 入口的运行见证仍待补齐。
 
 ### F3. writer 获取保持 placement 先于 drain 栅栏
 

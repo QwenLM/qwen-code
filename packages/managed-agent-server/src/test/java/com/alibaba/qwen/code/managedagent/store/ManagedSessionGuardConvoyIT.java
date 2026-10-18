@@ -578,7 +578,7 @@ class ManagedSessionGuardConvoyIT {
     }
 
     @Test
-    void heldLifecycleGuardsBoundCompletion() throws Exception {
+    void heldPublicationGuardBoundsLifecycleCompletion() throws Exception {
         var fixture = new WorkspaceLifecycleStoreTest.Fixture(source);
         String operationId = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
                 "tenant", fixture.session, StoreModels.OperationKind.CLOSE, "owner", "a".repeat(64),
@@ -589,26 +589,16 @@ class ManagedSessionGuardConvoyIT {
         assertThat(effects.path("neverInitialized").asBoolean()).isTrue();
         var before = fixture.store.findOperation("tenant", fixture.session, operationId).orElseThrow();
         var manager = new DataSourceTransactionManager(source);
-        for (String boundary : List.of("placement", "publication", "stream")) {
-            var hold = manager.getTransaction(new DefaultTransactionDefinition());
-            try {
-                switch (boundary) {
-                    case "placement" -> WorkspaceLifecycleStore.lockPlacement(fixture.jdbc, "tenant");
-                    case "publication" -> ToolPublicationRetentionStore.lockTenant(fixture.jdbc, "tenant");
-                    case "stream" -> fixture.jdbc.queryForList(
-                            "SELECT stream_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
-                                    + " AND stream_kind = 'SESSION' AND stream_id = X'' FOR UPDATE",
-                            "tenant", fixture.session);
-                    default -> throw new IllegalStateException(boundary);
-                }
-                assertFastGuardFailure(() -> fixture.transactions.execute(ignored -> fixture.store.completeOperation(
-                        "tenant", fixture.session, operationId, "worker", operation.claimGeneration(), true)));
-                assertThat(fixture.store.findOperation("tenant", fixture.session, operationId).orElseThrow())
-                        .as(boundary).isEqualTo(before);
-                assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSING");
-            } finally {
-                manager.rollback(hold);
-            }
+        var hold = manager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            ToolPublicationRetentionStore.lockTenant(fixture.jdbc, "tenant");
+            assertFastGuardFailure(() -> fixture.transactions.execute(ignored -> fixture.store.completeOperation(
+                    "tenant", fixture.session, operationId, "worker", operation.claimGeneration(), true)));
+            assertThat(fixture.store.findOperation("tenant", fixture.session, operationId).orElseThrow())
+                    .isEqualTo(before);
+            assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSING");
+        } finally {
+            manager.rollback(hold);
         }
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation(
                 "tenant", fixture.session, operationId, "worker", operation.claimGeneration(), true))).isTrue();

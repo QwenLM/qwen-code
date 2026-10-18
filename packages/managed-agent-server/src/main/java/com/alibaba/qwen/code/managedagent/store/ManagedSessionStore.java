@@ -255,15 +255,8 @@ public class ManagedSessionStore {
     }
 
     static void lockBounded(Runnable lock) {
-        lockBoundedResult(() -> {
-            lock.run();
-            return null;
-        });
-    }
-
-    static <T> T lockBoundedResult(Supplier<T> lock) {
         try {
-            return lock.get();
+            lock.run();
         } catch (PessimisticLockingFailureException | QueryTimeoutException error) {
             throw guardContended();
         }

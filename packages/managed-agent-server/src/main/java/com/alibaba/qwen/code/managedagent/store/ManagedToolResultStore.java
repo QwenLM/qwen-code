@@ -341,7 +341,7 @@ public class ManagedToolResultStore {
                                 String session = (String) candidate.get("session_id");
                                 ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                                         jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-                                if (ManagedLegacySessionGuard.isPrivateBounded(jdbc, tenant, session)) {
+                                if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     continue;
                                 }
                                 ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
@@ -436,7 +436,7 @@ public class ManagedToolResultStore {
                             String session = (String) rows.getFirst().get("session_id");
                             ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                                     jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-                            if (ManagedLegacySessionGuard.isPrivateBounded(jdbc, tenant, session)) {
+                            if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                 return false;
                             }
                             ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);

@@ -424,20 +424,15 @@ acquisitions on the apply/admission/receipt lanes and the lease opener
 `tenant_guard_contended` mapping. Witness:
 `ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`.
 
-The A.3 follow-up in #14393 bounds the first publication CAS acquisition in
-snapshot expiry, projection-body collection, tool-result claim/settlement,
-and Session-resource claim/page. Their CSI check stays before root
-materialization and uses a local five-second variant; ordinary callers retain
-the existing ten-second check and deadlock-only mapping. Lifecycle-protocol
-completion bounds placement before CAS and the subsequent public
-Session/event-stream locking read, preserving a shorter configured statement
-timeout. A timeout answers `503 tenant_guard_contended` and rolls back the
-current transaction without certifying completion or advancing a claim or
-collection cursor. The existing retry/lease rules remain in force, including
-the lifecycle coordinator's finite retry budget. This is a bound on those
-acquisitions, not a five-second deadline for every later statement or the
-whole operation. Witness:
-`ManagedSessionGuardConvoyIT#heldLifecycleGuardsBoundCompletion`.
+The A.3 follow-up in #14393 bounds only the first publication CAS acquisition
+at the reported snapshot expiry, projection-body collection, tool-result
+claim/settlement, Session-resource claim/page and lifecycle completion sites.
+A timeout uses the existing `503 tenant_guard_contended` mapping and rolls
+back the current transaction. CSI checks, placement and Session/event-stream
+waits retain their existing behavior; this does not bound a whole operation.
+Lifecycle publication-entry witness:
+`ManagedSessionGuardConvoyIT#heldPublicationGuardBoundsLifecycleCompletion`.
+Collector-entry runtime witnesses remain pending.
 
 ### F3. Writer acquisition keeps placement before the drain fence
 
