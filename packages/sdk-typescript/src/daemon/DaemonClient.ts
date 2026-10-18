@@ -3366,6 +3366,10 @@ export class DaemonClient {
         }
         return session;
       },
+      // Creating a session waits for the ACP child handshake, exactly like a
+      // restore: charging it to the generic request deadline abandons a spawn
+      // the daemon still completes.
+      this.resolveSessionOperationTimeoutMs(),
     );
   }
 
@@ -3731,6 +3735,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonSession;
       },
+      this.resolveSessionOperationTimeoutMs(),
     );
   }
 
@@ -4224,6 +4229,19 @@ export class DaemonClient {
       }
       return perRequestTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : perRequestTimeoutMs;
     }
+    return this.resolveSessionOperationTimeoutMs();
+  }
+
+  /**
+   * Deadline for a request the daemon answers only after an ACP child
+   * handshake: load/resume, create, and worktree reset all block on that
+   * handshake and are bounded by the daemon's own session budget. The daemon
+   * advertises that budget as `limits.sessionRestoreTimeoutMs`, derived from
+   * its initialize timeout unless an operator pins a restore budget, so the
+   * derived deadline covers a slow spawn the generic request deadline would
+   * abandon mid-flight.
+   */
+  private resolveSessionOperationTimeoutMs(): number {
     if (this.hasExplicitFetchTimeout) {
       return this.fetchTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : this.fetchTimeoutMs;
     }
