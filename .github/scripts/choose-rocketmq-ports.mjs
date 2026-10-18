@@ -31,6 +31,7 @@ for (const name of [
     const server = await bind(0);
     held.push(server);
     const port = server.address().port;
+    if (name === 'RMQ_BROKER_PORT' && (port < 3 || port > 65534)) continue;
     const companions =
       name === 'RMQ_BROKER_PORT'
         ? await Promise.all([bind(port - 2), bind(port + 1)])

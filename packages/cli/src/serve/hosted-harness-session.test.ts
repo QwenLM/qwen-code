@@ -4979,6 +4979,151 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }, 45_000);
 
+  it('has the reconcile route itself repair a crash the pump left blocked', async () => {
+    const inputId = await prewriteAutomationParkedWakeSession();
+    mockBrokerBroker();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    } as never);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    // The pump's one aftermath pass loses its lease release, which leaves
+    // the Session blocked with the crashed input pending. From then on the
+    // test parks every kick (a live pump would retry), so only the route's
+    // own repair branch can finish the aftermath. In 'repairs through the
+    // reconcile route while blocked, and reports once consumed' the pump
+    // settles it instead, and the route only reports.
+    let brokerDown = true;
+    let pumpLive = true;
+    let parkedKicks = 0;
+    const releases: string[] = [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+      async () => {
+        releases.push(brokerDown ? 'refused' : 'released');
+        if (brokerDown) {
+          pumpLive = false;
+          throw new TypeError('Runtime Broker release lost to a 503');
+        }
+      },
+    );
+    const kick = HostedMonitorWakeScheduler.prototype.kick;
+    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+      function (this: HostedMonitorWakeScheduler) {
+        if (pumpLive) kick.call(this);
+        else parkedKicks += 1;
+      },
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const status = async () =>
+      (await authorize(supertest(server).get(`/session/${SESSION_ID}/status`)))
+        .body as { recoveryBlocked: boolean; hasActivePrompt: boolean };
+    const settledTurns = async () =>
+      (
+        await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        )
+      ).events.filter(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
+      ).length;
+    const reconcile = () =>
+      authorize(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      ).send({
+        operationId: randomUUID(),
+        kind: 'reconcile_run',
+        scheduleId: AUTOMATION_ID,
+        occurrenceKey: AUTOMATION_SLOT,
+      });
+    await vi.waitFor(
+      async () => {
+        expect(releases).toEqual(['refused']);
+        expect((await status()).recoveryBlocked).toBe(true);
+        // The pump arms its retry only after the pass's settle-verify
+        // read: a parked retry kick means that pass is over.
+        expect(parkedKicks).toBeGreaterThan(0);
+      },
+      { timeout: 15_000 },
+    );
+    expect(await settledTurns()).toBe(0);
+    // A route pass that loses its release too repairs nothing: the block
+    // and the input stay. The run already failed in the pump's pass.
+    const refused = await reconcile();
+    expect(refused.status).toBe(202);
+    expect(refused.body.repaired).toBe(false);
+    expect(refused.body.run).toMatchObject({
+      state: 'failed',
+      execution: 'outcome_unknown',
+    });
+    expect(releases).toEqual(['refused', 'refused']);
+    expect((await status()).recoveryBlocked).toBe(true);
+    expect(await settledTurns()).toBe(0);
+    brokerDown = false;
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    let releaseConsume!: () => void;
+    let consumeEntered!: () => void;
+    const consuming = new Promise<void>((resolve) => {
+      releaseConsume = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      consumeEntered = resolve;
+    });
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      function (this: ManagedSessionRecordSink, record) {
+        if (record.type === 'system' && record.subtype === 'turn_result') {
+          consumeEntered();
+          return consuming.then(() => originalWrite.call(this, record));
+        }
+        return originalWrite.call(this, record);
+      },
+    );
+    const repairing = reconcile().then((response) => response);
+    // A route that skips the repair answers without ever consuming.
+    expect(
+      await Promise.race([
+        entered.then(() => 'consuming'),
+        repairing.then(() => 'answered'),
+      ]),
+    ).toBe('consuming');
+    // Mid-repair the route holds the turn slot, which a live pump would
+    // read as busy.
+    expect((await status()).hasActivePrompt).toBe(true);
+    releaseConsume();
+    const repaired = await repairing;
+    expect(repaired.status).toBe(202);
+    expect(repaired.body.repaired).toBe(true);
+    expect(releases).toEqual(['refused', 'refused', 'released']);
+    expect(await status()).toMatchObject({
+      recoveryBlocked: false,
+      hasActivePrompt: false,
+    });
+    expect(await settledTurns()).toBe(1);
+    // Consumed: a further reconcile only reports the settled run.
+    const reported = await reconcile();
+    expect(reported.status).toBe(202);
+    expect(reported.body.repaired).toBe(false);
+    expect(reported.body.run).toMatchObject({
+      state: 'failed',
+      execution: 'outcome_unknown',
+    });
+    expect(releases).toEqual(['refused', 'refused', 'released']);
+    expect(await settledTurns()).toBe(1);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  }, 45_000);
+
   it('treats a reconcile over a consumed crash as a settled-run replay', async () => {
     await prewriteAutomationSession();
     const server = await app();

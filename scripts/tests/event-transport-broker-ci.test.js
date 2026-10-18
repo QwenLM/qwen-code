@@ -154,6 +154,89 @@ describe('EventTransport broker gates CI', () => {
     }
   });
 
+  it('reselects a broker port when its HA companion exceeds the TCP range', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rmq-port-boundary-'));
+    try {
+      const preload = join(dir, 'boundary.mjs');
+      const observed = join(dir, 'observed');
+      writeFileSync(
+        preload,
+        `import net from 'node:net';
+import { writeFileSync } from 'node:fs';
+const createServer = net.createServer;
+const candidates = [41000, 42000, 43000, 65535, 44000];
+const allocated = [];
+const held = new Set();
+net.createServer = (...args) => {
+  const server = createServer(...args);
+  const listen = server.listen;
+  let selected;
+  server.listen = function (port, host, callback) {
+    if (port < 0 || port > 65535) return listen.call(this, port, host, callback);
+    selected = port === 0 ? candidates.shift() : port;
+    if (selected === undefined) throw new Error('Candidate sequence exhausted');
+    if (port === 0) allocated.push(selected);
+    if (held.has(selected)) {
+      queueMicrotask(() => server.emit('error', new Error('Port in use')));
+    } else {
+      held.add(selected);
+      queueMicrotask(callback);
+    }
+    return server;
+  };
+  server.address = () => ({ port: selected });
+  server.close = () => {
+    held.delete(selected);
+    return server;
+  };
+  return server;
+};
+process.on('exit', () => writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ allocated, held: [...held] })));
+`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        ['--import', preload, '.github/scripts/choose-rocketmq-ports.mjs'],
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      const reservation = JSON.parse(readFileSync(observed, 'utf8'));
+      expect(reservation.allocated).toEqual([
+        41000, 42000, 43000, 65535, 44000,
+      ]);
+      expect(reservation.held).toEqual([]);
+      const chosen = Object.fromEntries(
+        result.stdout
+          .trim()
+          .split('\n')
+          .map((line) => line.split('=')),
+      );
+      expect(Object.keys(chosen).sort()).toEqual(
+        [
+          'RMQ_NAMESRV_PORT',
+          'RMQ_BROKER_PORT',
+          'RMQ_PROXY_GRPC_PORT',
+          'RMQ_PROXY_REMOTING_PORT',
+        ].sort(),
+      );
+      const ports = Object.values(chosen).map(Number);
+      expect(new Set(ports).size).toBe(4);
+      for (const port of ports) {
+        expect(Number.isInteger(port)).toBe(true);
+        expect(port).toBeGreaterThanOrEqual(1);
+        expect(port).toBeLessThanOrEqual(65535);
+      }
+      const broker = Number(chosen.RMQ_BROKER_PORT);
+      expect(broker).toBe(44000);
+      expect(broker - 2).toBeGreaterThanOrEqual(1);
+      expect(broker + 1).toBeLessThanOrEqual(65535);
+      expect(ports).not.toContain(broker - 2);
+      expect(ports).not.toContain(broker + 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('still runs the gate on its only live triggers', () => {
     // Keep both daily coverage and the release caller after leaving PR CI.
     expect(Object.keys(workflow.on).sort()).toEqual([
