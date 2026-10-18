@@ -62,6 +62,17 @@ describe('Codex source preview', () => {
       '/synthetic/beta',
     ]);
   });
+  it('splits a memory file at its shallowest heading depth', () => {
+    const preview = previewSource(
+      source('## Alpha\nAlpha-only fact.\n## Beta\nBeta-only fact.'),
+    );
+    expect(preview.sections.map((section) => section.title)).toEqual([
+      'Alpha',
+      'Beta',
+    ]);
+    expect(preview.sections[0].content).toContain('Alpha-only fact.');
+    expect(preview.sections[1].content).not.toContain('Alpha-only fact.');
+  });
   it('leaves unknown and conflicting scopes unassigned', () => {
     const preview = previewSource(
       source(
@@ -125,6 +136,21 @@ describe('Codex source preview', () => {
       }),
     ).toThrow();
   });
+  it.each(['rollout_summaries/会话 记录.md', 'rollout_summaries/a b.md'])(
+    'rejects the admitted-but-undiscoverable rollout name %s',
+    (name) => {
+      expect(() =>
+        validateSource({
+          version: 1,
+          source: 'codex',
+          files: [
+            { path: 'MEMORY.md', content: '# Topic\ncwd: /x\nFact.' },
+            { path: name, content: '# Detail\nFact.' },
+          ],
+        }),
+      ).toThrow('Only memory Markdown');
+    },
+  );
   it('warns missing references and excludes unrelated supporting files', () => {
     const preview = previewSource({
       version: 1,

@@ -72,7 +72,9 @@ export function validSourcePath(value: string): boolean {
       .split('/')
       .every((part) => part !== '' && part !== '.' && part !== '..') &&
     (/^(?:MEMORY|memory_summary)\.md$/.test(value) ||
-      /^rollout_summaries\/[^/]+\.md$/.test(value))
+      // Keep in lockstep with the rollout reference discovery regex below:
+      // a name outside this class is admitted but never discovered.
+      /^rollout_summaries\/[\w.-]+\.md$/.test(value))
   );
 }
 export function validateSource(value: unknown): ImportSource {
@@ -222,10 +224,11 @@ export function previewSource(input: unknown): ImportPreview {
           /\bcwd\s*[=:]/i.test(heading.preface),
       )
       .map((heading) => heading.depth);
+    const minDepth = headings.length
+      ? Math.min(...headings.map((h) => h.depth))
+      : 1;
     const depth = Math.max(
-      file.path === 'memory_summary.md'
-        ? 2
-        : Math.min(...headings.map((h) => h.depth), 1),
+      file.path === 'memory_summary.md' ? 2 : minDepth,
       ...scopedDepths,
     );
     const boundaries = headings.filter((heading) => heading.depth <= depth);

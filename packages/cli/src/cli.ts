@@ -427,6 +427,18 @@ function printMcpHelp(): void {
   writeStdoutLine(lines.join('\n'));
 }
 
+function printMemoryHelp(): void {
+  const lines = [
+    'Usage: qwen memory <command>',
+    '',
+    'Preview and import external memories',
+    '',
+    'Commands:',
+    '  qwen memory import codex  Preview Codex memory; explicitly confirm selected sections to consolidate',
+  ];
+  writeStdoutLine(lines.join('\n'));
+}
+
 async function printBootstrapVersion(): Promise<void> {
   if (process.env['CLI_VERSION']) {
     writeStdoutLine(process.env['CLI_VERSION']);
@@ -455,6 +467,43 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
+    .version(false)
+    .help()
+    .alias('h', 'help')
+    .strict()
+    .strictCommands()
+    .demandCommand(1, 'You need at least one command before continuing.')
+    .fail((message: string | null, error: Error | undefined, yargs: Argv) => {
+      writeStderrLine(message || error?.message || 'Unknown argument error');
+      yargs.showHelp();
+      process.exitCode = 1;
+    })
+    .exitProcess(false);
+
+  if (hasFlag(argv.slice(2), '--help', '-h')) {
+    await parseYargsHelp(parser, argv);
+    return;
+  }
+
+  await parseYargsCommand(parser, argv);
+}
+
+async function runMemoryFastPath(rawArgv: readonly string[]): Promise<void> {
+  const argv: readonly string[] = normalizeServeFastPathArgv(rawArgv);
+  const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
+  if (!hasSubcommand) {
+    printMemoryHelp();
+    return;
+  }
+
+  const [{ default: yargsInstance }, { memoryCommand }] = await Promise.all([
+    import('yargs'),
+    import('./commands/memory.js'),
+  ]);
+
+  const parser = yargsInstance([])
+    .scriptName('qwen')
+    .command(memoryCommand)
     .version(false)
     .help()
     .alias('h', 'help')
@@ -599,18 +648,7 @@ export async function runCliEntry(
       return;
     }
   } else if (route === 'memory') {
-    const [{ default: yargs }, { memoryCommand }] = await Promise.all([
-      import('yargs'),
-      import('./commands/memory.js'),
-    ]);
-    await yargs(argv)
-      .scriptName('qwen')
-      .command(memoryCommand)
-      .demandCommand(1)
-      .strict()
-      .help()
-      .version(false)
-      .parseAsync();
+    await runMemoryFastPath(argv);
     return;
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);

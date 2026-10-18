@@ -23,6 +23,22 @@ function readMetadata(file: string): string {
   }
 }
 
+// A recorded metadata path (commondir, gitdir backlink) may name a directory
+// that no longer exists — git still considers a moved worktree valid. Resolve
+// to the real path when possible, but keep the unresolved path otherwise so
+// the registration check below reaches its own diagnostic instead of leaking
+// a raw ENOENT. Never ACCEPT an unresolvable backlink: the equality check
+// against the real .git path is what stops a copied .git file from inheriting
+// another repository's imported-memory identity.
+function resolveMetadataPath(base: string, target: string): string {
+  const resolved = path.resolve(base, target);
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
 export function memoryImportRepositoryIdentity(projectRoot: string): string {
   let current = fs.realpathSync(projectRoot);
   while (true) {
@@ -45,8 +61,9 @@ export function memoryImportRepositoryIdentity(projectRoot: string): string {
       const commonDirectory = fs.realpathSync(
         path.resolve(directory, readMetadata(common)),
       );
-      const backlink = fs.realpathSync(
-        path.resolve(directory, readMetadata(path.join(directory, 'gitdir'))),
+      const backlink = resolveMetadataPath(
+        directory,
+        readMetadata(path.join(directory, 'gitdir')),
       );
       if (
         backlink !== fs.realpathSync(git) ||

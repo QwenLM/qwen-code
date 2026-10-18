@@ -103,6 +103,83 @@ it('shares imported knowledge across linked worktrees while ordinary memory and 
   });
 });
 
+it('reports a moved linked worktree with its own diagnostic instead of a raw ENOENT', async () => {
+  const main = path.join(root, 'main');
+  const linked = path.join(root, 'linked');
+  const moved = path.join(root, 'moved');
+  const home = path.join(root, 'home');
+  await Promise.all([main, home].map((dir) => fs.mkdir(dir)));
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, {
+      cwd,
+      env: { PATH: process.env['PATH'], HOME: home, GIT_CONFIG_NOSYSTEM: '1' },
+      stdio: 'pipe',
+    });
+  git(main, 'init');
+  git(
+    main,
+    '-c',
+    'user.name=Synthetic',
+    '-c',
+    'user.email=synthetic@example.invalid',
+    'commit',
+    '--allow-empty',
+    '-m',
+    'fixture',
+  );
+  git(main, 'worktree', 'add', '-b', 'linked', linked);
+  // Git still considers the worktree valid after the move; the recorded
+  // gitdir backlink is stale, so resolution must reach the registration
+  // diagnostic rather than leaking a raw ENOENT.
+  await fs.rename(linked, moved);
+  expect(() => getImportedProjectMemoryRoot(moved)).toThrow(
+    'Invalid linked worktree registration',
+  );
+});
+
+it('warns once when imported project memory becomes unavailable to recall', async () => {
+  const main = path.join(root, 'main');
+  const linked = path.join(root, 'linked');
+  const moved = path.join(root, 'moved');
+  const home = path.join(root, 'home');
+  const runtime = path.join(root, 'runtime');
+  await Promise.all([main, home].map((dir) => fs.mkdir(dir)));
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, {
+      cwd,
+      env: { PATH: process.env['PATH'], HOME: home, GIT_CONFIG_NOSYSTEM: '1' },
+      stdio: 'pipe',
+    });
+  git(main, 'init');
+  git(
+    main,
+    '-c',
+    'user.name=Synthetic',
+    '-c',
+    'user.email=synthetic@example.invalid',
+    'commit',
+    '--allow-empty',
+    '-m',
+    'fixture',
+  );
+  git(main, 'worktree', 'add', '-b', 'linked', linked);
+  await fs.rename(linked, moved);
+  await fs.mkdir(path.join(runtime, 'imported-project-memory'), {
+    recursive: true,
+  });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  await Storage.runWithResolvedRuntimeBaseDir(runtime, async () => {
+    const roots = getProjectAutoMemoryRoots(moved, true);
+    expect(
+      roots.some((entry) => entry.includes('imported-project-memory')),
+    ).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('git worktree repair');
+    getProjectAutoMemoryRoots(moved, true);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
 it('avoids Git walks without imports and memoizes identities independently of runtime', async () => {
   const project = path.join(root, 'project');
   const runtime = path.join(root, 'runtime');

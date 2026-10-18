@@ -62,6 +62,36 @@ it('rejects a repeated --source instead of importing the default directory', asy
   ).rejects.toThrow(/single --source/);
 });
 
+it('resolves the flushed write when the reader has already left (EPIPE)', async () => {
+  const directory = await codexDir();
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+    chunk: unknown,
+    a?: unknown,
+    b?: unknown,
+  ) => {
+    const callback = (typeof a === 'function' ? a : b) as
+      | ((error?: Error) => void)
+      | undefined;
+    if (callback) {
+      const error = new Error('write EPIPE') as NodeJS.ErrnoException;
+      error.code = 'EPIPE';
+      callback(error);
+    }
+    return true;
+  }) as typeof process.stdout.write);
+  try {
+    // A departed reader must not turn an already-committed result into an
+    // exit-1 crash: the EPIPE write resolves instead of rejecting.
+    await yargs(['memory', 'import', 'codex', '--source', directory, '--json'])
+      .command(memoryCommand)
+      .exitProcess(false)
+      .fail(fail)
+      .parseAsync();
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 it('flushes the --json preview envelope before completing', async () => {
   const directory = await codexDir();
   const callbacks: Array<() => void> = [];

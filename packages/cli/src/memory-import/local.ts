@@ -28,11 +28,21 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     throw new Error(
       'Memory import requires a trusted workspace with managed memory enabled.',
     );
+  // Resolve through the config the way the canonical headless path does
+  // (validateNonInteractiveAuth), never env-first, and enforce the pinned
+  // auth type before any model spend.
   const authType =
-    getAuthTypeFromEnv() ?? settings.merged.security?.auth?.selectedType;
+    config.getModelsConfig().getCurrentAuthType() ??
+    settings.merged.security?.auth?.selectedType ??
+    getAuthTypeFromEnv();
   if (!authType)
     throw new Error(
       'Configure Qwen model authentication before confirmed import. Offline preview does not require authentication.',
+    );
+  const enforcedType = settings.merged.security?.auth?.enforcedType;
+  if (enforcedType && enforcedType !== authType)
+    throw new Error(
+      `The configured auth type is ${enforcedType}, but the current auth type is ${authType}. Please re-authenticate with the correct type.`,
     );
   await config.refreshAuth(authType, true);
   return new MemoryImportService({

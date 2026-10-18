@@ -437,10 +437,14 @@ export class MemoryImportService {
     for (const id of (await fs.readdir(root)).filter((id) =>
       /^[a-f0-9]{64}$/.test(id),
     )) {
+      // Isolate a damaged batch: one unreadable task must not stop the
+      // recovery of its siblings. The damaged batch stays on disk for an
+      // explicit retry/status call to report.
       const task = await this.readState<StoredTask>(
         path.join(this.taskDir(id), 'task.json'),
-      );
-      if (task.status === 'running' || task.status === 'queued') this.kick(id);
+      ).catch(() => undefined);
+      if (task && (task.status === 'running' || task.status === 'queued'))
+        this.kick(id);
     }
   }
   async list(): Promise<ImportTask[]> {
@@ -451,8 +455,12 @@ export class MemoryImportService {
     const result: ImportTask[] = [];
     for (const id of (await fs.readdir(root)).filter((id) =>
       /^[a-f0-9]{64}$/.test(id),
-    ))
-      result.push(await this.get(id));
+    )) {
+      // Skip a damaged batch rather than failing the whole listing; its
+      // explicit status call still reports the storage failure.
+      const task = await this.get(id).catch(() => undefined);
+      if (task) result.push(task);
+    }
     return result.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async get(id: string): Promise<ImportTask> {
@@ -492,7 +500,10 @@ export class MemoryImportService {
 
   async retry(id: string): Promise<ImportTask> {
     await this.prepare();
-    if (this.workers.has(id)) return this.get(id);
+    // A worker registered by submit() or a previous retry is still running:
+    // wait for it instead of returning early, otherwise explicit retry loses
+    // the race and failed items stay unpromoted.
+    await this.workers.get(id);
     const dir = this.taskDir(id);
     const result = await this.locked(dir, async () => {
       const task = await this.readState<StoredTask>(

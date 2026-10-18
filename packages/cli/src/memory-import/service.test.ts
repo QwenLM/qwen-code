@@ -12,7 +12,7 @@ import { scanAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/structu
 import { getImportedProjectMemoryRoot } from '@qwen-code/qwen-code-core/memory/import-paths.js';
 import { getUserAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { MemoryImportService } from './service.js';
-import { previewSource } from './source.js';
+import { digest, previewSource } from './source.js';
 import type {
   MemoryImportProposal,
   MemoryImportModelInput,
@@ -231,6 +231,33 @@ describe('durable memory import', () => {
       const second = service();
       await second.retry(task.id);
       expect((await second.idle(task.id)).items[0].status).toBe('added');
+    }));
+  it('retries failed items even while the submit worker is still registered', () =>
+    context(async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let calls = 0;
+      const propose = vi.fn(async (): Promise<MemoryImportProposal> => {
+        calls++;
+        if (calls === 1) {
+          await gate;
+          throw new Error('model unavailable');
+        }
+        return { decision: 'new', reason: 'new', documents: [doc] };
+      });
+      const svc = service(propose);
+      const task = await svc.submit(source, selection(), 'race');
+      // The first worker is blocked inside propose; an explicit retry issued
+      // now must wait it out, reset the failed item and run again rather
+      // than returning early with the failure still pending.
+      const retrying = svc.retry(task.id);
+      release();
+      const retried = await retrying;
+      const done = await svc.idle(retried.id);
+      expect(done.items[0].status).toBe('added');
+      expect(propose).toHaveBeenCalledTimes(2);
     }));
   it('cancels before publication and supports explicit retry', () =>
     context(async () => {
@@ -727,6 +754,28 @@ describe('bounded project batches', () => {
       const done = await svc.idle(task.id);
       expect(done.items[0].status).toBe('added');
       expect(done.items[0]).not.toHaveProperty('reason');
+    }));
+  it('isolates a damaged batch directory from listing and recovery', () =>
+    context(async () => {
+      const svc = service();
+      const task = await svc.submit(source, selection(), 'healthy');
+      await svc.idle(task.id);
+      const ownerState = path.join(
+        runtime,
+        'memory-import',
+        'batches',
+        digest(path.resolve(project)),
+      );
+      const damagedId = 'f'.repeat(64);
+      await fs.mkdir(path.join(ownerState, damagedId), { recursive: true });
+      await fs.writeFile(
+        path.join(ownerState, damagedId, 'task.json'),
+        'not json',
+      );
+      await expect(svc.list()).resolves.toHaveLength(1);
+      await expect(svc.recover()).resolves.toBeUndefined();
+      // The damaged batch itself still reports its storage failure.
+      await expect(svc.get(damagedId)).rejects.toThrow();
     }));
   it('refuses to recover batches once the runtime sits inside a Git checkout', () =>
     context(async () => {

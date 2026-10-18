@@ -46,6 +46,8 @@ const mocks = vi.hoisted(() => ({
   initCpuProfiler: vi.fn(),
   mcpHandler: vi.fn(),
   mcpBuilder: vi.fn(),
+  memoryHandler: vi.fn(),
+  memoryImportHandler: vi.fn(),
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
   mcpRemoveHandler: vi.fn(),
@@ -130,6 +132,24 @@ vi.mock('./commands/mcp.js', () => ({
         .demandCommand(1, 'You need at least one command before continuing.');
     },
     handler: mocks.mcpHandler,
+  },
+}));
+
+vi.mock('./commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory',
+    describe: 'Preview and import external memories',
+    builder: (yargs: Argv) =>
+      yargs
+        .command({
+          command: 'import codex',
+          describe:
+            'Preview Codex memory; explicitly confirm selected sections to consolidate',
+          handler: mocks.memoryImportHandler,
+        })
+        .demandCommand(1, 'You need at least one command before continuing.')
+        .version(false),
+    handler: mocks.memoryHandler,
   },
 }));
 
@@ -1044,6 +1064,37 @@ describe('runCliEntry', () => {
     expect(stderr.join('')).toContain('Not enough non-option arguments');
     expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
     expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints memory help to stdout and exits 0 when no subcommand is given', async () => {
+    await runCliEntry(['memory']);
+
+    expect(stdout.join('')).toContain('Usage: qwen memory <command>');
+    expect(stdout.join('')).toContain('qwen memory import codex');
+    expect(stderr.join('')).toBe('');
+    expect(process.exitCode).toBeUndefined();
+    expect(mocks.memoryHandler).not.toHaveBeenCalled();
+    expect(mocks.memoryImportHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints memory help for the -h alias without loading the full CLI', async () => {
+    await runCliEntry(['memory', '-h']);
+
+    expect(stdout.join('')).toContain('Usage: qwen memory <command>');
+    expect(stderr.join('')).toBe('');
+    expect(process.exitCode).toBeUndefined();
+    expect(mocks.memoryHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('executes memory subcommands through the fast path', async () => {
+    await runCliEntry(['memory', 'import', 'codex']);
+
+    expect(mocks.memoryImportHandler).toHaveBeenCalledTimes(1);
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
   it('prints the version instead of executing mcp remove on version argv', async () => {

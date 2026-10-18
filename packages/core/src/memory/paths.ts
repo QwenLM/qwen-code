@@ -90,6 +90,7 @@ const _autoMemoryRootCache = new Map<string, string>();
 const _teamAutoMemoryRootCache = new Map<string, string>();
 
 let warnedUnknownMemoryProjectScope = false;
+let warnedImportedMemoryIdentityLost = false;
 
 /**
  * Resolve QWEN_CODE_MEMORY_PROJECT_SCOPE. Only "workspace" (after trimming and
@@ -169,6 +170,7 @@ export function clearAutoMemoryRootCache(): void {
   clearMemoryImportIdentityCache();
   _teamAutoMemoryRootCache.clear();
   warnedUnknownMemoryProjectScope = false;
+  warnedImportedMemoryIdentityLost = false;
 }
 
 /**
@@ -213,8 +215,19 @@ export function getProjectAutoMemoryRoots(
     try {
       const imported = getImportedProjectMemoryRoot(projectRoot);
       if (fs.existsSync(imported)) roots.push(imported);
-    } catch {
-      // Invalid Git metadata must not redirect recall into another repository.
+    } catch (error) {
+      // Invalid Git metadata must not redirect recall into another
+      // repository, but silently dropping every imported document is not
+      // acceptable either: surface the cause once so the user can repair it.
+      if (!warnedImportedMemoryIdentityLost) {
+        warnedImportedMemoryIdentityLost = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[qwen-code] Imported project memory is unavailable for this repository: ${
+            error instanceof Error ? error.message : String(error)
+          } If a linked worktree was moved, run \`git worktree repair\`.`,
+        );
+      }
     }
   }
   return roots;

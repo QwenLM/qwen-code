@@ -11,12 +11,17 @@ import { previewSource, readLocalSource } from '../memory-import/source.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
 
 // The JSON envelopes are the result of this command; exiting on an
-// unflushed async write truncates them on a pipe.
+// unflushed async write truncates them on a pipe. A reader that left
+// (EPIPE) must not fail an already-committed import: the write is lost
+// with the reader, so resolve it instead of rejecting.
 const writeStdoutLineFlushed = (message: string): Promise<void> =>
   new Promise((resolve, reject) =>
     process.stdout.write(
       message.endsWith('\n') ? message : `${message}\n`,
-      (error) => (error ? reject(error) : resolve()),
+      (error) =>
+        error && (error as NodeJS.ErrnoException).code !== 'EPIPE'
+          ? reject(error)
+          : resolve(),
     ),
   );
 
