@@ -93,7 +93,7 @@ Harness 凭其持久化状态按原执行身份重驱。
 
 ### FG8d —— 取消与 drain（片 2，本 PR）
 
-wire 注入点在片 2 落地时核实。driver 经公开面取消（`POST /v1/agents/sessions/{id}/events`，`agent.session.cancel`），并亲自经 broker 代理驱动 release 两臂（`POST /tool-sessions/{id}:release`，body 不带或带 `drain: true`；probe 暴露该 case 的 broker 侧 runtime session 身份，使这些动词抵达正确的 tool session）。
+wire 注入点在片 2 落地时核实。FG8a 的 monitor-stop 用例经公开面取消（`POST /v1/agents/sessions/{id}/events`，`agent.session.cancel`），抵达 park 等待的同一条 terminate 路径。FG8d 的后台 shell 取消各臂用平台自己的动词：`cancel-before-start`（在派发扣留中发出）与 `cancel-reply-lost` 走 broker `:cancel`；`cancel-during-capture` 与 `cancel-status-unavailable` 走 `shell-terminate` 控制调用 —— drain 臂够到的同一个动词 —— 因为启动 turn 早已结算，而对活跃后台进程的裸 `:cancel` 会被拒（「A background process settles only on stop evidence」）。release 两臂由 driver 亲自经 broker 代理发出（`POST /tool-sessions/{id}:release`，body 不带或带 `drain: true`；probe 暴露该 case 的 broker 侧 runtime session 身份，使这些动词抵达正确的 tool session）。
 
 - `cancel-before-start`：broker 代理扣住派发应答，driver 在扣留期间取消，然后放行 —— #14021 的 cancellation barrier 凭 `:process` 行的缺位证明从未启动；零 OS 副作用（无行、无进程、无 capture 注册）是门禁。
 - `cancel-status-unavailable`：在 case 窗口内 broker 代理由对状态 `GET /executions/{id}` 答 409 `runtime_broker_execution_unknown`；取消被记录，不伪造终态事件，状态恢复可读后诚实落地。

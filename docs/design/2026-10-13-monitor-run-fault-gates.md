@@ -258,12 +258,21 @@ branch-tagged 409 arms (decision 4b).
 
 ### FG8d — cancellation and drain (slice 2, this PR)
 
-The wire points, verified at slice-2 landing. The driver cancels through
-the public surface (`POST /v1/agents/sessions/{id}/events`,
-`agent.session.cancel`) and drives the release arms through the broker
-proxy itself (`POST /tool-sessions/{id}:release`, body without or with
-`drain: true`; the probe exposes the case's broker-side runtime session
-identity so the verbs reach the right tool session).
+The wire points, verified at slice-2 landing. FG8a's monitor-stop case
+cancels through the public surface (`POST /v1/agents/sessions/{id}/events`,
+`agent.session.cancel`), which reaches the same terminate path the
+parked record waits on. FG8d's background-shell cancel arms use the
+platform's own verbs: a broker `:cancel` for `cancel-before-start`
+(issued mid dispatch-hold) and for `cancel-reply-lost`, and a
+`shell-terminate` control call — the same verb the drain arm reaches
+for — for `cancel-during-capture` and `cancel-status-unavailable`,
+because the launch turn has already settled, and a plain `:cancel`
+against a live background process is refused ("A background process
+settles only on stop evidence"). The release arms are issued by the
+driver itself through the broker proxy (`POST /tool-sessions/{id}:release`,
+body without or with `drain: true`; the probe exposes the case's
+broker-side runtime session identity so the verbs reach the right tool
+session).
 
 - `cancel-before-start`: the broker proxy holds the dispatch reply, the
   driver cancels during the hold, then releases it — #14021's
