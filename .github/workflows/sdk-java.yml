@@ -687,11 +687,13 @@ jobs:
     # FG11b slice 2 to 5643 s, still inside them, and the event-stream
     # liveness gates to 6083 s, which moves Verify to 115 minutes; the
     # FG13d dropped-reply cancel cell adds 150 s and moves the fork to
-    # 6233 s, still inside those 115 minutes, so Verify wraps its fork +
-    # 600 s plus margin; the Broker fault gates keep 10, and admission plus
-    # O4 keep per-fork ceilings) plus ~13 minutes for the uncapped setup
-    # steps (Checkout.. cgroup delegation, the report checks): 208 + 2. The
-    # failover arms run in hosted-failover-e2e.
+    # 6233 s; the FG11c Harness-crash method (144.8 s measured) is budgeted
+    # at 550 s, so the fork moves to 6773 s and Verify to 125 minutes, and
+    # Verify wraps its fork + 600 s plus margin; the Broker fault gates
+    # keep 10, and admission plus O4 keep per-fork ceilings) plus ~13
+    # minutes for the uncapped setup steps (Checkout.. cgroup delegation,
+    # the report checks): 218 + 2. The failover arms run in
+    # hosted-failover-e2e.
     timeout-minutes: 220
     services:
       mysql:
@@ -781,7 +783,7 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 6233 s, so the step wraps to fork + 600 s plus margin.
+        # 6773 s, so the step wraps to fork + 600 s plus margin.
         timeout-minutes: 125
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'

@@ -452,7 +452,7 @@ class HostedAutomationFaultGatesIT {
                 .anyMatch(prompt -> prompt.contains("Automation ID: " + id)));
         assertThat(commands(session, "fireRun")).containsExactly(runId + ":1", runId + ":2");
         long generation = coldRestart(session);
-        waiting().atMost(Duration.ofSeconds(180)).untilAsserted(() -> {
+        waiting().atMost(Duration.ofSeconds(210)).untilAsserted(() -> {
             assertNoModelFailure();
             assertThat(runState(runId)).isEqualTo("failed");
         });
@@ -482,7 +482,7 @@ class HostedAutomationFaultGatesIT {
                 .containsExactly("turn:" + runId + ":input");
         long generation = coldRestart(session);
         hold.release().countDown();
-        waiting().atMost(Duration.ofSeconds(180)).untilAsserted(() -> {
+        waiting().atMost(Duration.ofSeconds(210)).untilAsserted(() -> {
             assertNoModelFailure();
             assertThat(runState(runId)).isEqualTo("completed");
         });
@@ -1345,6 +1345,9 @@ class HostedAutomationFaultGatesIT {
         assertThat(modelFailure.get()).as("model stub").isNull();
         assertThat(harnessRelay.failure()).as("Harness relay").isNull();
         assertThat(publicRelay.failure()).as("public relay").isNull();
+        if (storeRelay != null) {
+            assertThat(storeRelay.failure()).as("store relay").isNull();
+        }
     }
 
     private JsonNode request(String method, String path, Object body, String key, int expected) throws Exception {

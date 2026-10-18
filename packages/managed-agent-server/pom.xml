@@ -457,7 +457,11 @@
                                  dropped-reply cancel cell (issue
                                  #14449) adds 150 s: the healthy sum
                                  becomes 5623 s, so the fork moves to
-                                 6233 s, still inside those 115
+                                 6233 s. The FG11c Harness-crash method
+                                 (three cases, 144.8 s measured) is
+                                 budgeted at 550 s: the healthy sum
+                                 becomes 6173 s, so the fork moves to
+                                 6773 s, which moves Verify to 125
                                  minutes. -->
                             <forkedProcessTimeoutInSeconds>6773</forkedProcessTimeoutInSeconds>
                         </configuration>
