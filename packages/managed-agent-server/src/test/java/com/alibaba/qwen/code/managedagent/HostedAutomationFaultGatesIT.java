@@ -20,6 +20,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -81,6 +82,8 @@ class HostedAutomationFaultGatesIT {
     // Fronts Spring for the public-reply case: the Idempotency-Key whose 202 it drops once.
     private HostedLifecycleRelay publicRelay;
     private final AtomicReference<String> publicDrop = new AtomicReference<>();
+    // Parks the scanner while the clock-bound cases set up.
+    private CountDownLatch scannerHold;
     private Process harness;
     private Path decoy;
     private String node;
@@ -95,10 +98,15 @@ class HostedAutomationFaultGatesIT {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         boot();
         // The clock-bound cases arm first and settle on the next minute boundary, while the
-        // others run against their own Sessions in the meantime.
+        // others run against their own Sessions in the meantime. The scanner's only thread is
+        // parked until all three are armed, so no slot fires before its fault is in place or its
+        // held run is live; a boundary that passes meanwhile is still timely when it lets go.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
         Clocked scheduled = selected("scheduled-fire-reply") ? scheduledFireReply() : null;
         Clocked reconcile = selected("reconcile-reply") ? reconcileReply() : null;
         Clocked retire = selected("retire-reply") ? retireReply() : null;
+        scannerHold.countDown();
         if (selected("create-reply")) {
             createReply();
         }
@@ -331,19 +339,23 @@ class HostedAutomationFaultGatesIT {
         return ids.size() == 1;
     }
 
-    // One occurrence, one run chain: its two fire revisions and its settle committed once,
-    // one accepted input, one model Turn, and every fire the Harness saw for it named the same
-    // occurrence.
+    // One occurrence, one run chain: the fires the Harness saw for it (the dropped one and its
+    // re-drive), its two fire revisions and its settle committed once, one accepted input and
+    // one model Turn. Everything is scoped to this occurrence: a later slot of an every-minute
+    // definition, due while the other cases run, is a run of its own.
     private void assertOneRun(String session, String scheduleId, String runId, String occurrenceKey,
             int fires) throws Exception {
         waiting().atMost(Duration.ofSeconds(60)).until(() -> "completed".equals(runState(runId)));
-        assertThat(operations).filteredOn(operation -> scheduleId.equals(operation.scheduleId())
-                && "fire_run".equals(operation.kind())).extracting(Operation::occurrenceKey)
-                .containsExactly(java.util.Collections.nCopies(fires, occurrenceKey).toArray(String[]::new));
-        assertThat(commands(session, "fireRun")).containsExactly(runId + ":1", runId + ":2");
-        assertThat(commands(session, "settleRun")).containsExactly(runId + ":3");
+        var fired = operations.stream().filter(operation -> scheduleId.equals(operation.scheduleId())
+                && "fire_run".equals(operation.kind()) && occurrenceKey.equals(operation.occurrenceKey())).toList();
+        assertThat(fired).as("fires of %s", occurrenceKey).hasSize(fires);
+        assertThat(fired).filteredOn(Operation::dropped).hasSize(1);
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":1", runId + ":2");
+        assertThat(commands(session, "settleRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":3");
         assertThat(recordRevision(session, "automation_run", runId)).isEqualTo(3);
-        assertThat(events(session, "input.accepted")).filteredOn(event -> event.startsWith("arun_"))
+        assertThat(events(session, "input.accepted")).filteredOn(event -> event.startsWith(runId + ":"))
                 .containsExactly(runId + ":input:accepted");
         assertThat(events(session, "turn.settled")).filteredOn(event -> event.contains(runId))
                 .containsExactly("turn:" + runId + ":input");
@@ -703,6 +715,9 @@ class HostedAutomationFaultGatesIT {
     @AfterEach
     void stop() throws Exception {
         heldModel.countDown();
+        if (scannerHold != null) {
+            scannerHold.countDown();
+        }
         Throwable failure = null;
         List<org.junit.jupiter.api.function.Executable> cleanup = List.of(
                 this::writeEvidence,

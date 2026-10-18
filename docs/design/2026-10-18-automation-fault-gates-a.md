@@ -99,8 +99,20 @@ Turn first (see Findings).
 
 The three clock-bound cases (`scheduled-fire-reply`, `reconcile-reply`,
 `retire-reply`) use an every-minute cron. They arm first and are settled
-last, so they share one minute boundary while the other cases run. The
-class runs one case alone with `-Dqwen.fg11a.case=<case>`.
+last, so they share one minute boundary while the other cases run.
+
+- While they set up, `SchedulerHold` parks the only thread of
+  `managedAutomationScheduler`. No slot can fire before its fault is
+  armed or before the held manual run is live; manual runs fire on the
+  request thread and are unaffected. A boundary that passes during the
+  hold is still within the late tolerance when the scanner resumes.
+- Their exactly-once checks are scoped to the occurrence under test:
+  its fires, its run's commands, its input, its `turn.settled` and its
+  model prompt. A later slot of the same every-minute definition, due
+  while the other cases run on a slow runner, is a legitimate run of its
+  own.
+
+The class runs one case alone with `-Dqwen.fg11a.case=<case>`.
 
 ## Findings
 
@@ -138,7 +150,7 @@ The class measured 46.3 s, 85.0 s, 57.1 s and 67.0 s locally on JDK 21 +
 MySQL 8.4.6. Most of the spread is the wait for the next minute boundary.
 It is budgeted at about 170 s (2× the heaviest run). The shared fork's
 healthy sum and its timeout move by that amount, composed onto `main`'s
-values at push time; the Verify step's 90 minutes still wrap the fork.
+values at push time; the Verify step's 95 minutes still wrap the fork.
 
 ## Acceptance
 
@@ -147,6 +159,9 @@ values at push time; the Verify step's 90 minutes still wrap the fork.
   witness red before merge.
 - `scripts/tests/hosted-process-ci.test.js` green, with the class in the
   pinned list and the fork budget composed.
+- The eight cases share one `@Test`, so a first red names one case and
+  the cases after it never run. Read a red per case: re-run each with
+  `-Dqwen.fg11a.case=<case>` rather than taking the others as passed.
 - This design ships in both languages with matching structure.
 
 ## Open questions

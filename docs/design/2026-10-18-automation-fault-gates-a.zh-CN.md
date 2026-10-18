@@ -79,8 +79,16 @@ relay 先让 Harness 作答，再不带回包地关闭连接，也就是提交�
 每个用例使用自己的 public Workspace Session。Session 先跑一个 Turn（见"发现"）。
 
 三个依赖时钟的用例（`scheduled-fire-reply`、`reconcile-reply`、`retire-reply`）使用每分钟
-触发的 cron。它们最先布置、最后落定，从而在其他用例运行期间共用同一个整分钟边界。用
-`-Dqwen.fg11a.case=<case>` 可以只跑其中一个用例。
+触发的 cron。它们最先布置、最后落定，从而在其他用例运行期间共用同一个整分钟边界。
+
+- 它们准备期间，`SchedulerHold` 挂住 `managedAutomationScheduler` 唯一的线程。任何时隙都
+  不可能在它的故障布置好之前、或被挂住的手动 run 上线之前触发；手动 run 在请求线程上 fire，
+  不受影响。挂住期间经过的整分钟边界，在扫描器恢复时仍处在迟到容忍范围内。
+- 它们的"恰好一次"检查都限定在被测 occurrence 上：它的 fire、它的 run 的命令、它的输入、
+  它的 `turn.settled` 和它的模型 prompt。慢 runner 上其他用例运行期间到期的、同一个每分钟
+  定义的后续时隙，是它自己的合法 run。
+
+用 `-Dqwen.fg11a.case=<case>` 可以只跑其中一个用例。
 
 ## 发现
 
@@ -111,13 +119,15 @@ relay 先让 Harness 作答，再不带回包地关闭连接，也就是提交�
 
 本地在 JDK 21 + MySQL 8.4.6 上，这个类测得 46.3 s、85.0 s、57.1 s 和 67.0 s。差异主要来自等待
 下一个整分钟边界。预算约 170 s（最重一次的 2 倍）。共享 fork 的健康总和与超时都按这个量
-调整，在推送时叠加到 `main` 当时的数值上；Verify step 的 90 分钟仍然包得住 fork。
+调整，在推送时叠加到 `main` 当时的数值上；Verify step 的 95 分钟仍然包得住 fork。
 
 ## 验收
 
 - `mvn -DskipTests test-compile checkstyle:check` 无报错。
 - 这个类在本地 JDK 21 + MySQL 8.4.6 上通过，且合入前每个变异见证都已确认变红。
 - `scripts/tests/hosted-process-ci.test.js` 通过：该类已加入钉住的列表，fork 预算已叠加。
+- 八个用例共用一个 `@Test`，所以第一个红灯只指出一个用例，它之后的用例根本不会运行。要按用例
+  解读红灯：用 `-Dqwen.fg11a.case=<case>` 逐个重跑，而不是把其他用例当作已通过。
 - 本设计以两种语言发布，结构一致。
 
 ## 未决问题
