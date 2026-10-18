@@ -97,6 +97,12 @@ describe('Maven transfer failure classification', () => {
     },
   );
 
+  it.each([0, 5])('accepts a payload BOM at log line %s', (index) => {
+    const lines = stepLog([...outage, exit]).split('\n');
+    lines[index] = lines[index].replace('\t2026-', '\t\uFEFF2026-');
+    expect(isMavenTransferFailure(job, lines.join('\n'))).toBe(true);
+  });
+
   it.each([
     'status code: 401',
     'status code: 403',
@@ -165,6 +171,11 @@ describe('Maven transfer failure classification', () => {
     expect(isMavenTransferFailure(job, stepLog(lines))).toBe(false);
   });
 
+  it('does not hide an action error before a transfer failure', () => {
+    const lines = ['##[error]Assertion failed', ...outage, exit];
+    expect(isMavenTransferFailure(job, stepLog(lines))).toBe(false);
+  });
+
   it('requires every failed step, including logs gh can silently omit', () => {
     const multiStepJob = {
       ...job,
@@ -225,6 +236,133 @@ describe('Maven transfer failure classification', () => {
       isMavenTransferFailure(
         { ...job, steps: [job.steps[1], job.steps[1]] },
         stepLog([...outage, exit]),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('Whole-job gh log fallback', () => {
+  const time = (second) => `2026-10-18T02:03:${second}Z`;
+  const timedJob = {
+    ...job,
+    steps: [
+      {
+        ...job.steps[0],
+        started_at: time('00'),
+        completed_at: time('01'),
+      },
+      {
+        ...job.steps[1],
+        started_at: time('02'),
+        completed_at: time('05'),
+      },
+      {
+        name: 'Post Checkout',
+        conclusion: 'success',
+        started_at: time('06'),
+        completed_at: time('07'),
+      },
+    ],
+  };
+  const unknownLog = (lines, second = '04') =>
+    stepLog(lines, 'UNKNOWN STEP').replaceAll('02:03:04.', `02:03:${second}.`);
+  const failedLog = unknownLog([...outage, exit]);
+  const wholeLog = [
+    unknownLog(['\uFEFFCheckout complete'], '00'),
+    failedLog,
+    unknownLog(['Post job cleanup.'], '06'),
+  ].join('\n');
+
+  it('uses API step times when the failed output has exactly one owner', () => {
+    expect(isMavenTransferFailure(timedJob, wholeLog)).toBe(true);
+    expect(
+      isMavenTransferFailure(
+        timedJob,
+        wholeLog.replaceAll('\t2026-', '\t\uFEFF2026-'),
+      ),
+    ).toBe(true);
+  });
+
+  it('includes fractional timestamps in the API completion second', () => {
+    expect(
+      isMavenTransferFailure(timedJob, unknownLog([...outage, exit], '05')),
+    ).toBe(true);
+  });
+
+  it.each(['started_at', 'completed_at'])(
+    'requires valid %s metadata even for successful steps',
+    (field) => {
+      for (const value of [undefined, null, 'invalid', time('09')]) {
+        const steps = timedJob.steps.map((step) => ({ ...step }));
+        steps[2][field] = value;
+        if (field === 'completed_at' && value === time('09')) {
+          steps[2].started_at = time('10');
+        }
+        expect(isMavenTransferFailure({ ...timedJob, steps }, wholeLog)).toBe(
+          false,
+        );
+      }
+    },
+  );
+
+  it.each([0, 2])('rejects a shared second with adjacent step %s', (index) => {
+    const steps = timedJob.steps.map((step) => ({ ...step }));
+    steps[index].started_at = time('04');
+    steps[index].completed_at = time('04');
+    expect(isMavenTransferFailure({ ...timedJob, steps }, wholeLog)).toBe(
+      false,
+    );
+  });
+
+  it('does not omit ambiguous errors before uniquely owned Maven output', () => {
+    const steps = timedJob.steps.map((step) => ({ ...step }));
+    steps[0].completed_at = time('02');
+    const log = `${unknownLog([compilationError], '02')}\n${wholeLog}`;
+    expect(isMavenTransferFailure({ ...timedJob, steps }, log)).toBe(false);
+  });
+
+  it('does not borrow a continued Maven failure for a failed action', () => {
+    const steps = timedJob.steps.map((step) => ({ ...step }));
+    steps[1].conclusion = 'success';
+    steps[2].conclusion = 'failure';
+    expect(
+      isMavenTransferFailure(
+        { ...timedJob, steps },
+        `${failedLog}\n${unknownLog(['##[error]Action failed'], '06')}`,
+      ),
+    ).toBe(false);
+  });
+
+  it('requires evidence for every failed step', () => {
+    const steps = timedJob.steps.map((step) => ({ ...step }));
+    steps[2].conclusion = 'failure';
+    expect(isMavenTransferFailure({ ...timedJob, steps }, failedLog)).toBe(
+      false,
+    );
+    expect(
+      isMavenTransferFailure(
+        { ...timedJob, steps },
+        `${failedLog}\n${unknownLog([...outage, exit], '06')}`,
+      ),
+    ).toBe(true);
+  });
+
+  it('ignores skipped steps with no execution times', () => {
+    const steps = [
+      ...timedJob.steps,
+      { name: 'Skipped tests', conclusion: 'skipped' },
+    ];
+    expect(isMavenTransferFailure({ ...timedJob, steps }, wholeLog)).toBe(true);
+  });
+
+  it('rejects mixed attribution and an exit outside the failed time window', () => {
+    expect(
+      isMavenTransferFailure(timedJob, `${wholeLog}\n${stepLog([exit])}`),
+    ).toBe(false);
+    expect(
+      isMavenTransferFailure(
+        timedJob,
+        `${unknownLog(outage)}\n${unknownLog([exit], '06')}`,
       ),
     ).toBe(false);
   });

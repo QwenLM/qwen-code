@@ -563,6 +563,38 @@ describe('main CI failure issue workflow', () => {
       ).toContain('infra_only=true');
     });
 
+    it.each([false, true])(
+      'checks whole-job BOM logs against step time boundaries (overlap: %s)',
+      (overlap) => {
+        const job = javaJob();
+        const intervals = [
+          ['00', '01'],
+          ['02', '20'],
+          [overlap ? '20' : '21', '22'],
+        ];
+        job.steps.forEach((step, index) => {
+          step.started_at = `2026-10-17T15:34:${intervals[index][0]}Z`;
+          step.completed_at = `2026-10-17T15:34:${intervals[index][1]}Z`;
+        });
+        const log = [
+          stepLog(job, 'UNKNOWN STEP', ['Preparing job']).replaceAll(
+            '15:34:20.',
+            '15:34:00.',
+          ),
+          stepLog(job, 'UNKNOWN STEP', mavenFailure()),
+          stepLog(job, 'UNKNOWN STEP', ['Post job cleanup.']).replaceAll(
+            '15:34:20.',
+            '15:34:21.',
+          ),
+        ]
+          .join('')
+          .replaceAll('\t2026-', '\t\uFEFF2026-');
+        expect(
+          classify([job], genericAnnotation, { logs: { 1001: log } }),
+        ).toContain(`infra_only=${!overlap}`);
+      },
+    );
+
     it.each([
       'status: 401 Unauthorized',
       'status: 403 Forbidden',

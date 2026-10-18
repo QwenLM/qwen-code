@@ -10,7 +10,9 @@ import { pathToFileURL } from 'node:url';
 // gh may render Maven's ESC bytes as the printable sequence ^[.
 // eslint-disable-next-line no-control-regex -- Also accept raw ANSI colour codes.
 const ANSI = /(?:\u001B|\^\[)\[[0-9;?]*[A-Za-z]/g;
-const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z /;
+const TIMESTAMP = /^\uFEFF?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) /;
+const STEP_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const FAILED_EXIT = /^##\[error\]Process completed with exit code [1-9]\d*\.$/;
 const TRANSIENT_TRANSFER =
   /^\[ERROR\] .*Could not transfer artifact\b.*(?:status(?: code)?[: =]+(?:502|503|504)\b|Transfer failed for https?:\/\/\S+ (?:502|503|504)\b|(?:connect(?:ion)?|read) timed out\b|connection reset\b)/i;
 const MAVEN_FOOTER =
@@ -18,11 +20,7 @@ const MAVEN_FOOTER =
 
 function isTransientMavenFailure(lines) {
   const output = lines.filter((line) => line.trim());
-  if (
-    !/^##\[error\]Process completed with exit code [1-9]\d*\.$/.test(
-      output.at(-1) ?? '',
-    )
-  ) {
+  if (!FAILED_EXIT.test(output.at(-1) ?? '')) {
     return false;
   }
   const failure = output.lastIndexOf('[INFO] BUILD FAILURE');
@@ -30,9 +28,10 @@ function isTransientMavenFailure(lines) {
   if (
     output.some(
       (line) =>
-        line.startsWith('[ERROR]') &&
-        !TRANSIENT_TRANSFER.test(line) &&
-        !MAVEN_FOOTER.test(line),
+        (line.startsWith('[ERROR]') &&
+          !TRANSIENT_TRANSFER.test(line) &&
+          !MAVEN_FOOTER.test(line)) ||
+        (line.startsWith('##[error]') && !FAILED_EXIT.test(line)),
     )
   ) {
     return false;
@@ -74,19 +73,56 @@ export function isMavenTransferFailure(job, logText) {
   const logs = new Map(failedSteps.map((step) => [step.name, []]));
   if (!failedSteps.length || logs.size !== failedSteps.length) return false;
 
+  let unknownSteps;
+  let windows;
   for (const rawLine of logText.split('\n')) {
     if (!rawLine.trim()) continue;
     const [jobName, stepName, ...rest] = rawLine.replace(ANSI, '').split('\t');
     const text = rest.join('\t');
-    if (
-      jobName !== job.name ||
-      stepName === 'UNKNOWN STEP' ||
-      !logs.has(stepName) ||
-      !TIMESTAMP.test(text)
-    ) {
+    const timestamp = text.match(TIMESTAMP);
+    const unknown = stepName === 'UNKNOWN STEP';
+    unknownSteps ??= unknown;
+    if (jobName !== job.name || !timestamp || unknownSteps !== unknown) {
       return false;
     }
-    logs.get(stepName).push(text.replace(TIMESTAMP, '').trimEnd());
+    let owner = stepName;
+    if (unknown) {
+      if (!windows) {
+        windows = job.steps
+          .filter((step) => step.conclusion !== 'skipped')
+          .map((step) => ({
+            step,
+            start: STEP_TIME.test(step.started_at)
+              ? Date.parse(step.started_at)
+              : NaN,
+            end: STEP_TIME.test(step.completed_at)
+              ? Date.parse(step.completed_at) + 1000
+              : NaN,
+          }));
+        if (
+          windows.some(
+            ({ start, end }) =>
+              !Number.isFinite(start) || !Number.isFinite(end) || start >= end,
+          )
+        ) {
+          return false;
+        }
+      }
+      const time = Date.parse(timestamp[1]);
+      if (!Number.isFinite(time)) return false;
+      // API times have second precision. Include the entire completion second
+      // and never assign shared boundary output to a failed step by guesswork.
+      const candidates = windows.filter(
+        ({ start, end }) => time >= start && time < end,
+      );
+      if (!candidates.some(({ step }) => step.conclusion === 'failure')) {
+        continue;
+      }
+      if (candidates.length !== 1) return false;
+      owner = candidates[0].step.name;
+    }
+    if (!logs.has(owner)) return false;
+    logs.get(owner).push(text.slice(timestamp[0].length).trimEnd());
   }
   // gh can silently omit a missing step log even when its command succeeds.
   return [...logs.values()].every(isTransientMavenFailure);
