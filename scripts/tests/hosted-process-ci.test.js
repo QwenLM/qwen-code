@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (100 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (102 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 180, 195],
+    ['hosted-harness-mysql', 182, 195],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -600,12 +600,15 @@ describe('Hosted real-process gates', () => {
       // two cases budgeted at 200 s, so the fork moves to 5048; the FG11a
       // automation lost-reply letter adds ~170 s, so the fork moves to 5218
       // and the Verify step to 100 minutes; the FG13d worker-stop cancel
-      // cell adds 150 s, so the fork moves to 5368):
+      // cell adds 150 s, so the fork moves to 5368; the FG12b store-failure
+      // class measures 49.0 s locally on JDK 21 + MariaDB (~100 s budgeted
+      // at 2x), so the fork moves to 5468 and the Verify step to 102
+      // minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(5368);
+        expect(forkSeconds).toBe(5468);
       }
     },
   );
@@ -645,10 +648,11 @@ describe('Hosted real-process gates', () => {
   // sharing one minute boundary) measures 46.3-85.0s locally on JDK 21 +
   // MySQL 8.4.6 across four acceptance runs (~170s budgeted at 2x), so it
   // becomes 4608s; the FG13d worker-stop cancel cell adds 150s, so it
-  // becomes 4758s.
+  // becomes 4758s; the FG12b store-failure class measures 49.0s locally on
+  // JDK 21 + MariaDB (~100s budgeted at 2x), so it becomes 4858s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4758;
+  const hostedForkHealthySeconds = 4858;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

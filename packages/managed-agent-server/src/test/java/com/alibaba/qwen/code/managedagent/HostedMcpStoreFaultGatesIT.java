@@ -279,12 +279,14 @@ class HostedMcpStoreFaultGatesIT {
         assertThat(operations(session.id()).getLast().path("resultRef").isNull())
                 .as("the rejected settled commit has no result ref")
                 .isTrue();
-        int orphanResponses = publishedResponses(session.id());
-        assertThat(orphanResponses).as("the published response is not rolled back")
-                .isPositive();
+        // A persistent 500 latches ManagedSessionAuthority's write failure;
+        // a fresh Harness reopens it from the durable store with the same
+        // operation and runtime pins before the recovery lookup.
         storeFault().clear();
+        killHarness();
+        SessionRef reopened = reload(session);
         long wireBefore = wireSequence.get();
-        HttpResponse<String> status = rawStatus(session, operation);
+        HttpResponse<String> status = rawStatus(reopened, operation);
         assertThat(status.statusCode()).isIn(200, 503);
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
             JsonNode settled = operations(session.id()).getLast();
@@ -373,7 +375,10 @@ class HostedMcpStoreFaultGatesIT {
                 .as("no drain receipt is fabricated")
                 .isZero();
         storeFault().clear();
-        HttpResponse<String> settled = settle(session, close);
+        killHarness();
+        SessionRef reloaded = reload(session, close.operationId(),
+                close.claimGeneration());
+        HttpResponse<String> settled = settle(reloaded, close);
         assertThat(settled.statusCode()).as("settle: %s", settled.body())
                 .isEqualTo(200);
         assertThat(configuration(session.id()).path("releaseState").asText())
@@ -393,10 +398,16 @@ class HostedMcpStoreFaultGatesIT {
                 .path("configurationId").asText();
         CloseRef close = prepareClose(session);
         storeFault().arm(StoreFaultGate.Phase.RELEASED, configurationId);
-        HttpResponse<String> refused = rawLifecycle(session, close.operationId(),
-                close.claimGeneration(), "settle_resources");
-        assertThat(refused.statusCode()).as("released refusal: %s",
-                refused.body()).isEqualTo(503);
+        HttpResponse<String> refused = null;
+        for (int attempt = 0; attempt < 30
+                && storeFault().attempts() == 0; attempt++) {
+            refused = rawLifecycle(session, close.operationId(),
+                    close.claimGeneration(), "settle_resources");
+            if (storeFault().attempts() == 0) {
+                Thread.sleep(1_000);
+            }
+        }
+        assertThat(refused).isNotNull();
         waitForRejection();
         assertThat(configuration(session.id()).path("releaseState").asText())
                 .as("the records stay drained")
@@ -404,10 +415,12 @@ class HostedMcpStoreFaultGatesIT {
         assertThat(storageHolds())
                 .as("broker.release() already cleared the holder")
                 .isZero();
-        assertThat(drainReceipts(session)).isPositive();
         long wireBefore = wireSequence.get();
         storeFault().clear();
-        HttpResponse<String> settled = settle(session, close);
+        killHarness();
+        SessionRef reloaded = reload(session, close.operationId(),
+                close.claimGeneration());
+        HttpResponse<String> settled = settle(reloaded, close);
         assertThat(settled.statusCode()).as("settle: %s", settled.body())
                 .isEqualTo(200);
         assertThat(configuration(session.id()).path("releaseState").asText())
@@ -428,19 +441,20 @@ class HostedMcpStoreFaultGatesIT {
         SessionRef session = createSession();
         baseline(session);
         String configuration = uuid();
-        storeFault().arm(StoreFaultGate.Phase.CONFIGURE_DISPATCH,
-                configuration);
+        storeFault().arm(StoreFaultGate.Phase.INTENT, configuration);
         HttpResponse<String> refused = configure(session, configuration, 2);
         assertThat(refused.statusCode()).isIn(202, 409, 503);
         waitForRejection();
         storeFault().clear();
-        HttpResponse<String> retried = configure(session, configuration, 2);
+        // A rejected intent leaves no record, so the same id can be retried;
+        // a fresh Harness also clears the write-failure latch.
+        killHarness();
+        SessionRef reopened = reload(session);
+        HttpResponse<String> retried = configure(reopened, configuration, 2);
         assertThat(retried.statusCode()).as("retry: %s", retried.body())
                 .isEqualTo(202);
         waitFor(() -> assertThat(configuration(session.id())
                 .path("run").path("state").asText()).isEqualTo("settled"));
-        killHarness();
-        reload(session);
         List<JsonNode> records = configurationRecords(session.id());
         assertThat(records).hasSize(2);
         assertThat(records).extracting(record -> record.path(

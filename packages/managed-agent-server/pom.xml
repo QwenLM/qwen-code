@@ -430,8 +430,14 @@
                                  step to 100 minutes. The FG13d
                                  worker-stop cancel cell (issue #14449)
                                  adds 150 s: the healthy sum becomes
-                                 4758 s, so the fork moves to 5368 s. -->
-                            <forkedProcessTimeoutInSeconds>5368</forkedProcessTimeoutInSeconds>
+                                 4758 s, so the fork moves to 5368 s.
+                                 The FG12b store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases) measures 49.0 s locally on JDK 21
+                                 + MariaDB (~100 s budgeted at 2x): the
+                                 healthy sum becomes 4858 s, so the fork
+                                 moves to 5468 s. -->
+                            <forkedProcessTimeoutInSeconds>5468</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
