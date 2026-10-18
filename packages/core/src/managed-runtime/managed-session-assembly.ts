@@ -31,25 +31,53 @@ const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
  * Keeps the installed activation's horizon ahead of a reader while the worker
  * is alive. The install stamps a fixed expiry, so without renewal a session
  * that outlives its lease reads as abandoned behind a live writer lock.
- * Renewal failures are retried on the next tick: a durable write failure
- * already fences new appends, so the timer only logs.
+ *
+ * A stopped writer cannot renew again, and a persistent failure repeats the
+ * same rejection every interval for the rest of the process's life, so both
+ * end the loop. Three consecutive failures span one full lease
+ * (`leaseDurationMs / 3` per attempt), which is the point at which the
+ * activation can no longer be kept ahead of a reader anyway.
  */
+const MAX_RENEWAL_FAILURES = 3;
+
 function startActivationRenewal(
   authority: LocalManagedSessionAuthority,
   leaseDurationMs: number,
 ): { stop: () => void } {
   const intervalMs = Math.max(Math.floor(leaseDurationMs / 3), 1);
+  let failures = 0;
+  let stopped = false;
   const timer = setInterval(() => {
-    authority.renewActivation({ leaseDurationMs }).catch((error: unknown) => {
-      debugLogger.debug(
-        'Managed Session activation renewal failed',
-        describeRenewalError(error),
-      );
-    });
+    authority.renewActivation({ leaseDurationMs }).then(
+      () => {
+        if (!stopped) failures = 0;
+      },
+      (error: unknown) => {
+        if (stopped) return;
+        failures += 1;
+        debugLogger.debug(
+          'Managed Session activation renewal failed',
+          describeRenewalError(error),
+        );
+        if (authority.writesStopped || failures >= MAX_RENEWAL_FAILURES) {
+          debugLogger.warn(
+            'Managed Session activation renewal stopped',
+            authority.writesStopped
+              ? 'the writer stopped accepting appends'
+              : `${failures} consecutive failures`,
+          );
+          stopped = true;
+          clearInterval(timer);
+        }
+      },
+    );
   }, intervalMs);
   timer.unref();
   return {
-    stop: () => clearInterval(timer),
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+    },
   };
 }
 

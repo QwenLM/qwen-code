@@ -364,6 +364,48 @@ describe('managed session assembly', () => {
     }
   });
 
+  it('stops renewal after three consecutive failures', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValue(new Error('append failed'));
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(renew).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(3);
+    } finally {
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('stops renewal as soon as the writer stops accepting appends', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValue(new Error('append failed'));
+    const stopped = vi
+      .spyOn(session.authority, 'writesStopped', 'get')
+      .mockReturnValue(true);
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      stopped.mockRestore();
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
   it('seals with the commit proof and reopens through a certified takeover', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);
