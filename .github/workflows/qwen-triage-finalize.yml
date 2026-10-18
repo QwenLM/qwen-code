@@ -33,7 +33,7 @@ on:
     workflows:
       - 'Qwen Code CI'
       - 'Qwen Autofix'
-      - 'SDK Java'
+      - 'Managed Agent gate'
       - 'SDK Python'
       - 'Serve A/B'
       - 'Web-shell Visuals'

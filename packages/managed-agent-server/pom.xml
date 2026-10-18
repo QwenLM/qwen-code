@@ -384,8 +384,26 @@
                                  3380 s healthy sum no longer fits
                                  3600 s, so the fork moves to 3990 s and
                                  the Verify step to 80 minutes to keep
-                                 its 600 s wrap plus margin. -->
-                            <forkedProcessTimeoutInSeconds>3990</forkedProcessTimeoutInSeconds>
+                                 its 600 s wrap plus margin. The FG10b
+                                 and FG10f workflow relay letters
+                                 (HostedWorkflowRelayFaultGatesIT,
+                                 81.6–81.7 s healthy locally, ~165 s
+                                 budgeted at 2×) raise the healthy sum to
+                                 3545 s, so the fork moves to 4155 s and
+                                 the Verify step to 85 minutes. Their
+                                 slice 2 (FG10c, FG10e) brings the class
+                                 to four letters measuring 181.2–181.6 s
+                                 (~363 s budgeted at 2×): the healthy sum
+                                 becomes 3743 s, so the fork moves to
+                                 4353 s and the Verify step to 90
+                                 minutes. Slice 3 (FG10d, the process
+                                 crash) brings the class to five
+                                 letters measuring 246.1–246.8 s (~494 s
+                                 budgeted at 2×): the healthy sum
+                                 becomes 3874 s and the fork 4484 s,
+                                 which the Verify step's 90 minutes
+                                 still wrap. -->
+                            <forkedProcessTimeoutInSeconds>4484</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -518,10 +536,12 @@
                 <configuration>
                     <includes><include>**/HostedWorkflow*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's letters are independent fixtures
-                         sharing one fork: each letter's @Timeout ceiling
-                         (600 s) plus the healthy runtime must fit, the
-                         per-ceiling relation the CI profile pins. -->
+                    <!-- Both workflow classes' letters (FG10a's driver
+                         class and the FG10b–f relay class) are
+                         independent fixtures sharing one fork: each
+                         letter's @Timeout ceiling (600 s) plus the
+                         healthy runtime must fit, the per-ceiling
+                         relation the CI profile pins. -->
                     <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>

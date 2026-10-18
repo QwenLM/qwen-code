@@ -2669,7 +2669,7 @@ describe('recoverHostedRuntimeTurn', () => {
   );
 
   it.each([false, true])(
-    'refuses cancellation when an execution outcome is unknown (afterCancel=%s)',
+    'attempts cancellation but refuses a persistently unknown outcome (afterCancel=%s)',
     async (afterCancel) => {
       await parkAtAwaitRuntime();
       const status = vi
@@ -2691,7 +2691,7 @@ describe('recoverHostedRuntimeTurn', () => {
             brokerOptions,
           }),
         ).rejects.toThrow('Runtime execution outcome is unknown.');
-        expect(cancel).toHaveBeenCalledTimes(afterCancel ? 1 : 0);
+        expect(cancel).toHaveBeenCalledTimes(1);
         expect(release).not.toHaveBeenCalled();
         const authorization =
           await replacement.authority.harnessRunAuthorization();
@@ -2705,6 +2705,38 @@ describe('recoverHostedRuntimeTurn', () => {
       }
     },
   );
+
+  it('cancels an unknown execution only after its original Runtime proves a terminal stop', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'unknown' })
+      .mockResolvedValueOnce({ state: 'cancel_requested' })
+      .mockResolvedValue({ state: 'settled' });
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
+    const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+    const replacement = await open('boot-2', false);
+    try {
+      const stopped = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(cancel).toHaveBeenCalledExactlyOnceWith(EXECUTION_ID);
+      expect(stopped.unobserved.size).toBe(0);
+      expect(execute).not.toHaveBeenCalled();
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved: stopped.unobserved,
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
 
   it('accepts a terminally abandoned record as cancellation-complete', async () => {
     await parkAtAwaitRuntime();
@@ -3175,16 +3207,18 @@ describe('recoverHostedRuntimeTurn', () => {
   });
 
   it('carries an execution whose pre-cancel read answers unknown into the retry', async () => {
-    // R10-2: the pre-cancel `unknown` throw is a terminal exit too — the
-    // id must land in the caller's carry before the throw, or the retry
+    // The id must land in the caller's carry before the throw, or the retry
     // reads the reclaimed record as already-stopped and certifies a
     // cancellation nobody witnessed.
     await parkAtAwaitRuntime();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
       .mockResolvedValueOnce({ state: 'unknown' })
+      .mockResolvedValueOnce({ state: 'unknown' })
       // Attempt 2: the Broker reclaimed the record.
       .mockResolvedValue(undefined);
-    const cancel = vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel');
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
     const replacement = await open('boot-2', false);
     try {
       const carried = new Set<string>();
@@ -3197,7 +3231,7 @@ describe('recoverHostedRuntimeTurn', () => {
         }),
       ).rejects.toThrow('Runtime execution outcome is unknown.');
       expect([...carried]).toEqual([EXECUTION_ID]);
-      expect(cancel).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalledExactlyOnceWith(EXECUTION_ID);
       const retry = await stopParkedRuntimeExecutions({
         session: replacement,
         promptId: PROMPT_ID,

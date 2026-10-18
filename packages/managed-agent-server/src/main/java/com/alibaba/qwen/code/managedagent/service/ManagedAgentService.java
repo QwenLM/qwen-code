@@ -113,6 +113,7 @@ public class ManagedAgentService {
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
     private RuntimeWarmer runtimeWarmer;
+    private JavaDurableAdmission javaDurableAdmission;
     private ManagedAgentProperties.Dispatch renameDispatch = new ManagedAgentProperties.Dispatch();
     private Clock renameClock = Clock.systemUTC();
 
@@ -127,6 +128,14 @@ public class ManagedAgentService {
         this.runtimeWarmer = runtimeWarmer;
     }
 
+    // D7-3: present only when the deployment enables the java_durable
+    // admission profile (JavaDurableAdmissionConfiguration); null keeps
+    // every admission on its harness_confirmed response.
+    @Autowired(required = false)
+    void setJavaDurableAdmission(JavaDurableAdmission javaDurableAdmission) {
+        this.javaDurableAdmission = javaDurableAdmission;
+    }
+
     private boolean supportsClose(SessionRecord session) {
         if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
             return false;
@@ -136,8 +145,15 @@ public class ManagedAgentService {
     }
 
     private boolean hasActions(SessionRecord session) {
+        // Preserve Action readback when a selected custom Session loses execution support.
         return session.workspace() != null && session.deletedAt() == null
-                && ((WorkspaceToolProfiles.supportsApprovalSelection(session) && harness.supportsApprovalSelection()) || !"yolo".equals(session.approvalMode()));
+                && ((WorkspaceToolProfiles.supportsApprovalSelection(session)
+                && (session.agentDefinitionDigest() != null || supportsApprovalSelection(session))) || !"yolo".equals(session.approvalMode()));
+    }
+
+    private boolean supportsApprovalSelection(SessionRecord session) {
+        return harness.supportsApprovalSelection()
+                && (session.agentDefinitionDigest() == null || harness.supportsAgentDefinitionApprovalSelection());
     }
 
     private BooleanSupplier artifactReadsEnabled = () -> false;
@@ -273,7 +289,7 @@ public class ManagedAgentService {
         validateIdempotencyKey(key);
         String digest = digests.digest(Map.of("sessionId", sessionId, "mode", mode, "expectedRevision", expectedRevision));
         return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
-                expectedRevision, harness.supportsApprovalSelection());
+                expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection());
     }
 
     private static void requireModelActor(String actorId) {
@@ -486,6 +502,20 @@ public class ManagedAgentService {
     public CommandAdmission submitTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
+        return submitTurn(tenantId, actorId, idempotencyKey, sessionId,
+                blocks, null);
+    }
+
+    /**
+     * Admits a Turn input. An admission that asks for the java_durable
+     * profile (D7-3) is answered with the submit_input operation it saved,
+     * as the profile reports it; the request digest leaves the profile out,
+     * so a retry under the key replays the same command in either view.
+     */
+    public CommandAdmission submitTurn(String tenantId, String actorId,
+            String idempotencyKey, String sessionId,
+            List<InputBlock> blocks, String admissionProfile) {
+        boolean durable = requireAdmissionProfile(admissionProfile);
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
@@ -510,8 +540,9 @@ public class ManagedAgentService {
         Admission replay = replayForCreator(tenantId, SUBMIT,
                 idempotencyKey, requestDigest, session, actorId);
         if (replay != null) {
+            CommandAdmission body = response(tenantId, replay, durable);
             dispatch(tenantId, replay, session.workspace() != null);
-            return response(replay);
+            return body;
         }
         // A fresh key against a tombstone answers 404, as every other
         // Session read does; only the recorded outcome above survives the
@@ -535,12 +566,24 @@ public class ManagedAgentService {
         }
         requireReplayedAdmission(tenantId, SUBMIT, idempotencyKey, admission,
                 session, actorId);
+        // Built before the dispatcher runs, so the body reports the
+        // operation as its admission saved it.
+        CommandAdmission body = response(tenantId, admission, durable);
         dispatch(tenantId, admission, session.workspace() != null);
-        return response(admission);
+        return body;
     }
 
     public CommandAdmission cancelTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId, String turnId) {
+        return cancelTurn(tenantId, actorId, idempotencyKey, sessionId,
+                turnId, null);
+    }
+
+    /** Admits a Turn cancel; the profile works as for submitTurn. */
+    public CommandAdmission cancelTurn(String tenantId, String actorId,
+            String idempotencyKey, String sessionId, String turnId,
+            String admissionProfile) {
+        boolean durable = requireAdmissionProfile(admissionProfile);
         validateIdempotencyKey(idempotencyKey);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
@@ -555,8 +598,9 @@ public class ManagedAgentService {
         Admission replay = replayForCreator(tenantId, CANCEL,
                 idempotencyKey, requestDigest, session, actorId);
         if (replay != null) {
+            CommandAdmission body = response(tenantId, replay, durable);
             dispatch(tenantId, replay, session.workspace() != null);
-            return response(replay);
+            return body;
         }
         requireVisibleSession(session);
         requireCancellerShape(session, actorId);
@@ -571,13 +615,14 @@ public class ManagedAgentService {
         }
         requireReplayedAdmission(tenantId, CANCEL, idempotencyKey, admission,
                 session, actorId);
+        CommandAdmission body = response(tenantId, admission, durable);
         if (admission.commandEffect()) {
             coordinator.cancel(tenantId, admission.sessionId(),
                     admission.turnId());
         } else {
             dispatch(tenantId, admission, session.workspace() != null);
         }
-        return response(admission);
+        return body;
     }
 
     /**
@@ -1070,7 +1115,8 @@ public class ManagedAgentService {
                         visible,
                         hasActions(session), close, keep, keep,
                         visible && supportsDelete(session, retention),
-                        foregroundShell(session)),
+                        foregroundShell(session),
+                        javaDurableAdmission == null ? null : visible),
                 publicWorkspace(session));
     }
 
@@ -1094,6 +1140,9 @@ public class ManagedAgentService {
         Map<String, WebShellApprovalSelection> approvalSelections = store.findApprovalSelections(tenantId, approvalIds);
         Set<String> approvalOwners = store.findApprovalOwners(tenantId, actorId, approvalIds);
         boolean approvalSupported = !approvalIds.isEmpty() && harness.supportsApprovalSelection();
+        boolean definitionApprovalSupported = approvalSupported
+                && sessions.stream().anyMatch(session -> session.agentDefinitionDigest() != null)
+                && harness.supportsAgentDefinitionApprovalSelection();
         Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
@@ -1139,7 +1188,9 @@ public class ManagedAgentService {
                         mayChangeCwd(session, grants, executable),
                         modelContexts.get(session.sessionId()),
                         modelSelections.get(session.sessionId()), modelSelectionSupported,
-                        approvalSelections.get(session.sessionId()), approvalSupported && approvalOwners.contains(session.sessionId())))
+                        approvalSelections.get(session.sessionId()), approvalSupported
+                                && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
+                                && approvalOwners.contains(session.sessionId())))
                 .toList();
     }
 
@@ -1169,7 +1220,7 @@ public class ManagedAgentService {
         boolean close = visible && supportsClose(session);
         boolean keep = visible && retention;
         boolean approvalExecutable = approvalSelection == null || approvalSelection.revision() == 0
-                || harness.supportsApprovalSelection();
+                || supportsApprovalSelection(session);
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -1191,7 +1242,8 @@ public class ManagedAgentService {
                         visible && supportsDelete(session, retention),
                         mayChangeCwd && approvalExecutable, foregroundShell(session),
                         visible && modelSelectionSupported && mayChangeCwd,
-                        visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session))),
+                        visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session)),
+                        javaDurableAdmission == null ? null : visible),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),
@@ -1213,7 +1265,7 @@ public class ManagedAgentService {
         }
         return session.deletedAt() == null && store.workspaceFilesEnabled() && store.workspaceShellEnabled()
                 && WorkspaceToolProfiles.supportsApprovalMode(session.approvalMode())
-                && (!"yolo".equals(session.approvalMode()) || harness.supportsApprovalSelection());
+                && (!"yolo".equals(session.approvalMode()) || supportsApprovalSelection(session));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -1993,6 +2045,41 @@ public class ManagedAgentService {
     private static CommandAdmission response(Admission admission) {
         return new CommandAdmission(admission.sessionId(),
                 admission.turnId(), "accepted", admission.replayed());
+    }
+
+    /**
+     * D7-3: whether an admission asked for the java_durable profile. Asking
+     * for it on a deployment without the profile is refused before anything
+     * is read or written, rather than answered with harness_confirmed
+     * semantics the caller did not ask for.
+     */
+    private boolean requireAdmissionProfile(String admissionProfile) {
+        if (!JavaDurableAdmission.JAVA_DURABLE.equals(admissionProfile)) {
+            return false;
+        }
+        if (javaDurableAdmission == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "unsupported_feature",
+                    "java_durable admission is not enabled on this deployment.");
+        }
+        return true;
+    }
+
+    /**
+     * The java_durable view names the command's operation with its latest
+     * stage and state; a command recorded before D7-1 saved operations
+     * keeps the legacy body.
+     */
+    private CommandAdmission response(String tenantId, Admission admission,
+            boolean durable) {
+        JavaDurableAdmission.Operation operation = durable
+                ? javaDurableAdmission.operation(tenantId, admission) : null;
+        if (operation == null) {
+            return response(admission);
+        }
+        return new CommandAdmission(admission.sessionId(), admission.turnId(),
+                "accepted", admission.replayed(), operation.operationId(),
+                operation.admissionStage(), operation.deliveryState());
     }
 
     private record SessionCursor(long createdAt, String sessionId) {
