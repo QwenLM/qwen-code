@@ -424,6 +424,18 @@ acquisitions on the apply/admission/receipt lanes and the lease opener
 `tenant_guard_contended` mapping. Witness:
 `ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`.
 
+After acquiring the tenant row, `lockSessionHead` also bounds the root UPSERT,
+root locking read and head locking read to five seconds per statement. These
+waits share the `tenant_guard_contended` mapping, including lock-wait timeout
+1205, so one Session's writer cannot hold the publication guard for the database's
+default lock-wait window. Existing shorter statement or transaction timeouts
+remain shorter. The ordinary root-only writer path keeps its existing wait
+settings and deadlock mapping. The witness
+`ManagedSessionGuardConvoyIT#heldSessionRowsBoundRetentionReads` checks held root
+and head rows and successful reads after release. This covers #14393 A.2;
+producer/dispatch placement and earlier lifecycle acquisitions remain separate
+work under #14393 A.1/A.3.
+
 ### F3. Writer acquisition keeps placement before the drain fence
 
 With the ordinary branch of `checkLifecycleWriter` early-returned,
