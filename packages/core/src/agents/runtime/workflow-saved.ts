@@ -364,8 +364,9 @@ async function savedCandidate(
 
 async function listSnapshot(
   snapshot: WorkflowSnapshot,
-): Promise<SavedWorkflowEntry[]> {
+): Promise<{ entries: SavedWorkflowEntry[]; unavailable: string[] }> {
   const byName = new Map<string, SavedWorkflowEntry>();
+  const unavailable: string[] = [];
   for (const workflow of snapshot.extensions) {
     byName.set(workflow.name, {
       name: workflow.name,
@@ -380,28 +381,40 @@ async function listSnapshot(
     });
   }
   for (const root of snapshot.saved) {
-    if (!(await checkedRoot(root)).real) continue;
-    let files: string[];
     try {
-      files = await fs.readdir(root.dir);
-    } catch (error) {
-      if (isMissing(error)) continue;
-      throw new Error(`workflow directory '${root.dir}': ${String(error)}`);
-    }
-    for (const file of files) {
-      if (!file.endsWith('.js')) continue;
-      const name = file.slice(0, -3);
-      const candidate = await savedCandidate(root, name);
-      if (candidate && !byName.has(name)) {
-        byName.set(name, {
-          name,
-          scriptPath: candidate,
-          source: root.source!,
-        });
+      if (!(await checkedRoot(root)).real) continue;
+      let files: string[];
+      try {
+        files = await fs.readdir(root.dir);
+      } catch (error) {
+        if (isMissing(error)) continue;
+        throw error;
       }
+      for (const file of files) {
+        if (!file.endsWith('.js')) continue;
+        const name = file.slice(0, -3);
+        const candidate = await savedCandidate(root, name);
+        if (candidate && !byName.has(name)) {
+          byName.set(name, {
+            name,
+            scriptPath: candidate,
+            source: root.source!,
+          });
+        }
+      }
+    } catch (error) {
+      const diagnostic = `workflow directory '${root.dir}': ${String(error)}`;
+      unavailable.push(diagnostic);
+      debugLogger.warn(`Could not list ${diagnostic}`);
+      // Commands may execute listed paths directly. Do not expose farther
+      // namesakes when this root's contents could not be determined.
+      break;
     }
   }
-  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    entries: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    unavailable,
+  };
 }
 
 async function outsideRoots(
@@ -620,7 +633,8 @@ async function readWorkflowFile(
 export async function listSavedWorkflows(
   config: Config,
 ): Promise<SavedWorkflowEntry[]> {
-  return listSnapshot(await workflowSnapshot(config));
+  const { entries } = await listSnapshot(await workflowSnapshot(config));
+  return entries;
 }
 
 /** Hex characters of the SHA-256 kept by {@link computeWorkflowScriptDigest}. */
@@ -718,9 +732,13 @@ export async function resolveSavedWorkflowScript(
       }
     }
   }
-  const available = (await listSnapshot(snapshot)).map((entry) => entry.name);
+  const { entries, unavailable } = await listSnapshot(snapshot);
+  const available = entries.map((entry) => entry.name);
+  const diagnostic = unavailable.length
+    ? ` Listing incomplete: ${unavailable.join('; ')}.`
+    : '';
   throw new Error(
-    `workflow('${name}'): no workflow with that name. Available: ${available.length ? available.join(', ') : '(none)'}.`,
+    `workflow('${name}'): no workflow with that name. Available: ${available.length ? available.join(', ') : '(none)'}.${diagnostic}`,
   );
 }
 

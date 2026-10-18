@@ -5,6 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { promises as fs } from 'node:fs';
 import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -419,6 +420,83 @@ describe('SavedWorkflowLoader', () => {
     );
     expect(cmds).toEqual([]);
   });
+
+  it.each(['project', 'user'])(
+    'R1-1: an inaccessible %s root preserves extensions without exposing farther executable namesakes',
+    async (brokenScope) => {
+      const directory = await realpath(
+        await mkdtemp(path.join(tmpdir(), 'qwen-workflow-list-')),
+      );
+      const target = path.join(directory, 'project');
+      const project = path.join(target, '.qwen', 'workflows');
+      const user = path.join(directory, 'user');
+      const extensionFile = path.join(directory, 'extension', 'check.js');
+      const userDirectory = vi
+        .spyOn(Storage, 'getUserWorkflowsDir')
+        .mockReturnValue(user);
+      const lstat = fs.lstat.bind(fs);
+      const rootProbe = vi.spyOn(fs, 'lstat');
+      try {
+        for (const dir of [project, user, path.dirname(extensionFile)]) {
+          await mkdir(dir, { recursive: true });
+        }
+        await writeFile(path.join(project, 'local.js'), 'return "LOCAL";');
+        await writeFile(path.join(user, 'mine.js'), 'return "USER";');
+        await writeFile(path.join(project, 'shared.js'), 'return "NEAR";');
+        await writeFile(path.join(user, 'shared.js'), 'return "FAR";');
+        await writeFile(extensionFile, 'return "EXTENSION";');
+        const config = makeConfig({
+          storage: new Storage(target),
+          getTargetDir: () => target,
+          getActiveExtensions: () => [
+            {
+              workflows: [
+                {
+                  name: 'audit:check',
+                  extensionName: 'audit',
+                  description: 'Check',
+                  scriptPath: extensionFile,
+                },
+              ],
+            },
+          ],
+        });
+        const unavailable = brokenScope === 'project' ? project : user;
+        rootProbe.mockImplementation(((file, ...args) =>
+          String(file) === unavailable
+            ? Promise.reject(
+                Object.assign(new Error('root EACCES'), { code: 'EACCES' }),
+              )
+            : lstat(file, ...args)) as typeof fs.lstat);
+        listMock.mockImplementation(listRealSavedWorkflows);
+
+        const commands = await new SavedWorkflowLoader(config).loadCommands(
+          signal,
+        );
+        expect(commands.map((command) => command.name)).toEqual([
+          'audit:check',
+          ...(brokenScope === 'user' ? ['local', 'shared'] : []),
+        ]);
+        const invocation = await commands[0].action!(ctx, '');
+        expect(invocation).toMatchObject({
+          type: 'tool',
+          toolArgs: { scriptPath: extensionFile },
+        });
+        expect(
+          (
+            await resolveSavedWorkflowScript(
+              { scriptPath: extensionFile },
+              config,
+            )
+          ).script,
+        ).toBe('return "EXTENSION";');
+      } finally {
+        rootProbe.mockRestore();
+        userDirectory.mockRestore();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('returns [] when the signal aborts during enumeration', async () => {
     listMock.mockResolvedValue([entry()]);

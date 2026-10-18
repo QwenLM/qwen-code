@@ -1075,7 +1075,7 @@ describe('workflow-saved — local ancestor discovery', () => {
     ).rejects.toThrow(/selected file vanished/);
   });
 
-  it('C07: listing errors are actionable, while a nearest named hit ignores farther I/O', async () => {
+  it('C07: listing skips an unreadable root, while a nearest named hit ignores farther I/O', async () => {
     await writeWorkflow(workflows(target), 'shared', "return 'TARGET';");
     const far = workflows(repo);
     await writeWorkflow(far, 'far', 'return 2;');
@@ -1090,7 +1090,9 @@ describe('workflow-saved — local ancestor discovery', () => {
     expect((await resolveSavedWorkflowScript('shared', config())).script).toBe(
       "return 'TARGET';",
     );
-    await expect(listSavedWorkflows(config())).rejects.toThrow(/far EIO/);
+    expect(
+      (await listSavedWorkflows(config())).map((entry) => entry.name),
+    ).toEqual(['shared']);
   });
 
   it('C08: target .qwen cannot launder an untrusted ancestor for reads or saves', async () => {
@@ -1357,6 +1359,141 @@ describe('workflow-saved — local ancestor discovery', () => {
     expect(trust).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['root', 'readdir', 'candidate', 'vanished-candidate'])(
+    'R1-1: a %s listing error preserves extension and nearer entries without exposing farther namesakes',
+    async (failure) => {
+      const broken = workflows(path.dirname(target));
+      const brokenFile = path.join(broken, 'broken.js');
+      const extensionFile = path.join(base, 'extension', 'check.js');
+      await put(brokenFile, 'return "BROKEN";');
+      await writeWorkflow(workflows(repo), 'broken', 'return "FAR";');
+      await put(extensionFile, 'return "EXTENSION";');
+      await writeWorkflow(workflows(target), 'local', 'return "LOCAL";');
+      await writeWorkflow(
+        Storage.getUserWorkflowsDir(),
+        'mine',
+        'return "USER";',
+      );
+      const cfg = {
+        ...config(),
+        getActiveExtensions: () => [
+          {
+            workflows: [
+              {
+                name: 'audit:check',
+                extensionName: 'audit',
+                description: 'Check',
+                scriptPath: extensionFile,
+              },
+            ],
+          },
+        ],
+      } as unknown as Config;
+      const error = Object.assign(new Error('listing EACCES'), {
+        code: 'EACCES',
+      });
+      const lstat = fs.lstat.bind(fs);
+      vi.spyOn(fs, 'lstat').mockImplementation(((file, ...args) => {
+        if (
+          (failure === 'root' && String(file) === broken) ||
+          (failure === 'candidate' && String(file) === brokenFile)
+        ) {
+          return Promise.reject(error);
+        }
+        return lstat(file, ...args);
+      }) as typeof fs.lstat);
+      const readdir = fs.readdir.bind(fs);
+      vi.spyOn(fs, 'readdir').mockImplementation(((dir, ...args) =>
+        failure === 'readdir' && String(dir) === broken
+          ? Promise.reject(error)
+          : Reflect.apply(readdir, fs, [dir, ...args])) as typeof fs.readdir);
+      const realpath = fs.realpath.bind(fs);
+      vi.spyOn(fs, 'realpath').mockImplementation(((file, ...args) =>
+        failure === 'vanished-candidate' && String(file) === brokenFile
+          ? Promise.reject(
+              Object.assign(new Error('selected candidate vanished'), {
+                code: 'ENOENT',
+              }),
+            )
+          : Reflect.apply(realpath, fs, [
+              file,
+              ...args,
+            ])) as typeof fs.realpath);
+
+      expect(
+        (await listSavedWorkflows(cfg)).map((entry) => entry.name),
+      ).toEqual(['audit:check', 'local']);
+      expect(
+        (await resolveSavedWorkflowScript('audit:check', cfg)).script,
+      ).toBe('return "EXTENSION";');
+    },
+  );
+
+  it.each(['missing', 'audit:missing'])(
+    'R1-1: %s keeps its not-found message and available names when only enumeration fails',
+    async (name) => {
+      const broken = workflows(path.dirname(target));
+      await writeWorkflow(broken, 'hidden', 'return "HIDDEN";');
+      await writeWorkflow(workflows(target), 'local', 'return "LOCAL";');
+      await writeWorkflow(
+        Storage.getUserWorkflowsDir(),
+        'mine',
+        'return "USER";',
+      );
+      const readdir = fs.readdir.bind(fs);
+      vi.spyOn(fs, 'readdir').mockImplementation(((dir, ...args) =>
+        String(dir) === broken
+          ? Promise.reject(
+              Object.assign(new Error('listing EACCES'), { code: 'EACCES' }),
+            )
+          : Reflect.apply(readdir, fs, [dir, ...args])) as typeof fs.readdir);
+
+      const error = await resolveSavedWorkflowScript(name, config()).catch(
+        (error: unknown) => error,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        `workflow('${name}'): no workflow with that name. Available: local.`,
+      );
+      expect((error as Error).message).toContain(broken);
+      expect((error as Error).message).toContain('EACCES');
+      expect(trust).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('R1-1: an unreadable nearer root still refuses a farther namesake instead of falling back', async () => {
+    const broken = workflows(path.dirname(target));
+    await writeWorkflow(broken, 'shared', 'return "NEAR";');
+    await writeWorkflow(workflows(repo), 'shared', 'return "FAR";');
+    await writeWorkflow(
+      Storage.getUserWorkflowsDir(),
+      'shared',
+      'return "USER";',
+    );
+    const lstat = fs.lstat.bind(fs);
+    const probe = vi
+      .spyOn(fs, 'lstat')
+      .mockImplementation(((file, ...args) =>
+        String(file) === broken
+          ? Promise.reject(
+              Object.assign(new Error('near root EACCES'), { code: 'EACCES' }),
+            )
+          : lstat(file, ...args)) as typeof fs.lstat);
+
+    await expect(
+      resolveSavedWorkflowScript('shared', config()),
+    ).rejects.toThrow('near root EACCES');
+    expect(
+      probe.mock.calls.some(
+        ([file]) => String(file) === path.join(workflows(repo), 'shared.js'),
+      ),
+    ).toBe(false);
+    await expect(
+      resolveSavedWorkflowScript('missing', config()),
+    ).rejects.toThrow('near root EACCES');
+    await fs.access(path.join(workflows(repo), 'shared.js'));
+  });
+
   it('C06: a target beneath an ancestor workflow directory retains its own name and path admission', async () => {
     target = path.join(workflows(repo), 'editor');
     await fs.mkdir(target, { recursive: true });
@@ -1578,7 +1715,9 @@ describe('workflow-saved — local ancestor discovery', () => {
       expect(
         (await resolveSavedWorkflowScript('audit:check', cfg)).script,
       ).toBe('return 3;');
-      await expect(listSavedWorkflows(cfg)).rejects.toThrow('root EACCES');
+      expect(
+        (await listSavedWorkflows(cfg)).map((entry) => entry.name),
+      ).toEqual(['audit:check', ...(brokenScope === 'user' ? ['local'] : [])]);
       await expect(
         resolveSavedWorkflowScript(
           brokenScope === 'project' ? 'local' : 'user',
