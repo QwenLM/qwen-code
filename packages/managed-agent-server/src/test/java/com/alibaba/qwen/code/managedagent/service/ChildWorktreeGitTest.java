@@ -804,6 +804,79 @@ class ChildWorktreeGitTest {
     }
 
     @Test
+    void aResumeThatOwesNothingPaysNoDeletionProbe() throws Exception {
+        var repository = git.open(root, "project");
+        String base = git.snapshot(root, repository, project, null);
+        git.create(root, repository, "c1", base);
+        Path child = root.resolve(ChildWorktreeGit.CONTAINER + "/c1");
+        Files.delete(child.resolve("keep.txt"));
+        write(child, "f.txt", "child edit\n");
+        var merge = git.merge(root, repository, base, git.result(root, repository, "c1", base));
+        assertThat(merge.clean()).isTrue();
+        git.apply(root, repository, merge.parentTree(), merge.mergedTree());
+        // The parent untracks the deleted content, and the resume owes
+        // nothing: a probe against HEAD is never owed either.
+        plain(project, "rm", "-q", "--cached", "-f", "keep.txt");
+        plain(project, "commit", "-qm", "untrack keep.txt");
+        String head = plain(project, "rev-parse", "HEAD");
+        Path probe = temp.resolve("probe-log");
+        Path shim = script("probe-git",
+                "case \" $*\" in *\"diff-tree\"*\"" + head + "\"*) echo probe >> '" + probe
+                        + "'; exit 128;; esac\nexec git \"$@\"");
+        var probing = new ChildWorktreeGit(shim.toString(), Duration.ofSeconds(60));
+        try {
+            probing.apply(root, repository, merge.parentTree(), merge.mergedTree());
+        } finally {
+            probing.close();
+        }
+
+        assertThat(probe).doesNotExist();
+        assertThat(project.resolve("keep.txt")).doesNotExist();
+        assertThat(project.resolve("f.txt")).hasContent("child edit");
+    }
+
+    @Test
+    void aResumedWriteIgnoresAnAlreadyLandedDeletionTheParentStoppedKeeping() throws Exception {
+        var repository = git.open(root, "project");
+        String base = git.snapshot(root, repository, project, null);
+        git.create(root, repository, "c1", base);
+        Path child = root.resolve(ChildWorktreeGit.CONTAINER + "/c1");
+        Files.delete(child.resolve("keep.txt"));
+        write(child, "f.txt", "child edit\n");
+        var merge = git.merge(root, repository, base, git.result(root, repository, "c1", base));
+        assertThat(merge.clean()).isTrue();
+        // The deletion landed before the attempt stopped, and the parent
+        // then untracked the content the merge relied on HEAD for; the
+        // resume owes only the edit and must not diverge on the deletion.
+        Files.delete(project.resolve("keep.txt"));
+        plain(project, "rm", "-q", "--cached", "-f", "keep.txt");
+        plain(project, "commit", "-qm", "untrack keep.txt");
+
+        git.apply(root, repository, merge.parentTree(), merge.mergedTree());
+
+        assertThat(project.resolve("keep.txt")).doesNotExist();
+        assertThat(project.resolve("f.txt")).hasContent("child edit");
+    }
+
+    @Test
+    void aDeletionLandsWhenTheParentOnlyChangedTheMode() throws Exception {
+        var repository = git.open(root, "project");
+        String base = git.snapshot(root, repository, project, null);
+        git.create(root, repository, "c1", base);
+        Path child = root.resolve(ChildWorktreeGit.CONTAINER + "/c1");
+        Files.delete(child.resolve("keep.txt"));
+        var merge = git.merge(root, repository, base, git.result(root, repository, "c1", base));
+        assertThat(merge.clean()).isTrue();
+        // HEAD still keeps the content; only the mode at the path moved.
+        plain(project, "update-index", "--chmod=+x", "keep.txt");
+        plain(project, "commit", "-qm", "chmod +x keep.txt");
+
+        git.apply(root, repository, merge.parentTree(), merge.mergedTree());
+
+        assertThat(project.resolve("keep.txt")).doesNotExist();
+    }
+
+    @Test
     void aTrackedFileTheMergeTurnsIntoADirectoryLands() throws Exception {
         var repository = git.open(root, "project");
         String base = git.snapshot(root, repository, project, null);

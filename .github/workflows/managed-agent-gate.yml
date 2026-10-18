@@ -1,0 +1,312 @@
+name: 'Managed Agent gate'
+
+# Design: docs/design/2026-10-16-managed-agent-gate.md. The required check is
+# the `Managed Agent gate` job below; every other job here is advisory.
+on:
+  pull_request:
+    branches: ['main']
+  pull_request_review:
+    types: ['submitted']
+  push:
+    branches: ['main']
+  merge_group:
+
+permissions:
+  contents: 'read'
+
+# One group per pull request, so a push that supersedes an in-flight approval
+# run cancels it: that run would otherwise keep going for ~125 minutes and then
+# report a head branch protection no longer reads. cancel-in-progress is a
+# property of the incoming run and stays true only for pull_request, so a second
+# approval queues behind the first full run and then finds it through the
+# deduplication below instead of starting another. A group keeps one pending
+# run and a newcomer cancels it whatever cancel-in-progress says, so a review
+# that is not an approval gets a group of its own and cannot cancel an
+# approval run waiting there. Main pushes stay keyed per commit.
+concurrency:
+  group: >-
+    managed-agent-gate-${{ github.event_name == 'pull_request_review' &&
+    github.event.review.state != 'approved' &&
+    format('review-{0}', github.event.review.id) ||
+    github.event.pull_request.number ||
+    github.event_name == 'push' && github.sha ||
+    github.ref }}
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+
+jobs:
+  scope:
+    name: 'Select the Managed Agent tier'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 10
+    permissions:
+      actions: 'read'
+      checks: 'read'
+      contents: 'read'
+    outputs:
+      sha: '${{ steps.paths.outputs.sha }}'
+      tier: '${{ steps.tier.outputs.tier }}'
+      touched: '${{ steps.paths.outputs.touched }}'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      # Pull request and review events check out the test merge commit, whose
+      # first parent is the base, so the diff is the PR's own change set.
+      - name: 'Match the changed paths'
+        id: 'paths'
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          PUSH_BEFORE: '${{ github.event.before }}'
+          MERGE_GROUP_BASE: '${{ github.event.merge_group.base_sha }}'
+        run: |-
+          set -euo pipefail
+          case "${EVENT_NAME}" in
+            push) base="${PUSH_BEFORE}" ;;
+            merge_group) base="${MERGE_GROUP_BASE}" ;;
+            *) base="$(git rev-parse HEAD^1)" ;;
+          esac
+          if [[ "${base}" =~ ^0+$ ]]; then
+            touched=true
+          else
+            git fetch --no-tags --depth=1 origin "${base}"
+            # quotePath off: git's default octal-quoted rendering of a
+            # non-ASCII path matches none of the matcher's ^-anchored
+            # patterns and would fail this classification open.
+            touched="$(git -c core.quotePath=false diff --name-only --no-renames "${base}" HEAD | node .github/scripts/managed-agent-gate-scope.mjs)"
+          fi
+          echo "touched=${touched}" >> "${GITHUB_OUTPUT}"
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      # The full suite runs once per head commit, on its first approval:
+      # dismissed stale approvals mean that approval follows the last push.
+      # A later approval reruns it only if no earlier approval run passed.
+      - name: 'Choose the tier'
+        id: 'tier'
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          TOUCHED: '${{ steps.paths.outputs.touched }}'
+          REVIEW_STATE: '${{ github.event.review.state }}'
+          REVIEW_AUTHOR_ASSOCIATION: '${{ github.event.review.author_association }}'
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          RUN_ID: '${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          tier=none
+          if [[ "${TOUCHED}" == 'true' ]]; then
+            case "${EVENT_NAME}" in
+              pull_request | push | merge_group) tier=fast ;;
+              pull_request_review)
+                # A maintainer's approval only. qwen-triage-finalize.yml watches
+                # this workflow and posts a deferred APPROVE once a PR's checks
+                # land green, so an ungated check lets the gate's own fast tier
+                # buy the most expensive run in the repository with no human
+                # involved. An empty association fails closed the same way.
+                if [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
+                  ' OWNER MEMBER COLLABORATOR ' == *" ${REVIEW_AUTHOR_ASSOCIATION} "* ]]; then
+                  tier=full
+                  urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&per_page=100" \
+                    --jq '.check_runs[] | select(.status != "completed" or .conclusion == "success") | .details_url')"
+                  for run in $({ grep -oE '/runs/[0-9]+/' <<< "${urls}" || true; } | tr -dc '0-9\n' | sort -u); do
+                    [[ "${run}" == "${RUN_ID}" ]] && continue
+                    IFS=$'\t' read -r event prs <<< "$(gh api "repos/${REPO}/actions/runs/${run}" --jq '[.event, ([.pull_requests[].number] | map(tostring) | join(" "))] | @tsv')"
+                    # A passing check of the required name covers this head
+                    # only when it came from THIS pull request's review run
+                    # whose callee actually ran: another PR's review run on
+                    # the shared head sha and a run that reported without a
+                    # suite both ran no Java lane.
+                    [[ "${event}" == 'pull_request_review' ]] || continue
+                    [[ " ${prs} " == *" ${PR_NUMBER} "* ]] || continue
+                    [[ "$(gh api "repos/${REPO}/actions/runs/${run}/jobs?per_page=100" --jq '[.jobs[].name | startswith("SDK Java (full)")] | any')" == 'true' ]] || continue
+                    echo "Run ${run} already covers ${HEAD_SHA}."
+                    tier=none
+                    break
+                  done
+                fi
+                ;;
+            esac
+          fi
+          echo "tier=${tier}" >> "${GITHUB_OUTPUT}"
+
+  suite:
+    name: 'SDK Java (${{ needs.scope.outputs.tier }})'
+    needs: 'scope'
+    if: "${{ needs.scope.outputs.tier != 'none' }}"
+    permissions:
+      contents: 'read'
+    uses: './.github/workflows/sdk-java.yml'
+    with:
+      ref: '${{ needs.scope.outputs.sha }}'
+      tier: '${{ needs.scope.outputs.tier }}'
+
+  # Only a full run, an unaffected change, or a push/merge group reports the
+  # required name. A touched pull request therefore shows the required check
+  # as expected until its first approval's full run reports it; the most
+  # recently updated check of a name is the one branch protection reads.
+  gate:
+    name: >-
+      ${{ (needs.scope.outputs.tier == 'full' || needs.scope.outputs.touched != 'true' ||
+      (github.event_name != 'pull_request' && github.event_name != 'pull_request_review')) && 'Managed Agent gate' ||
+      needs.scope.outputs.tier == 'fast' && 'Managed Agent fast tier' || 'Managed Agent review (no full run)' }}
+    needs:
+      - 'scope'
+      - 'suite'
+    if: '${{ always() }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    steps:
+      - name: 'Report the tier result'
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          SCOPE_RESULT: '${{ needs.scope.result }}'
+          SUITE_RESULT: '${{ needs.suite.result }}'
+          TIER: '${{ needs.scope.outputs.tier }}'
+          TOUCHED: '${{ needs.scope.outputs.touched }}'
+        run: |-
+          set -euo pipefail
+          if [[ "${SCOPE_RESULT}" != 'success' ]]; then
+            echo "::error::Tier selection ${SCOPE_RESULT}."
+            exit 1
+          fi
+          if [[ "${TIER}" == 'none' ]]; then
+            if [[ "${TOUCHED}" == 'true' ]]; then
+              echo 'No full run for this review: not an approval, or an earlier approval run already covers this head.'
+            else
+              echo 'No Managed Agent paths changed.'
+            fi
+            exit 0
+          fi
+          if [[ "${SUITE_RESULT}" != 'success' ]]; then
+            if [[ "${TIER}" == 'fast' && "${EVENT_NAME}" == 'pull_request' && "${SUITE_RESULT}" == 'cancelled' ]]; then
+              # A superseding push cancels the in-flight fast tier: this check
+              # then means "replaced by a newer run", not "broken". Only the
+              # pull request arm cancels in progress, and only the fast tier
+              # may soften: a cancelled full run stays red so the next
+              # approval retries the suite instead of deduping against it.
+              echo "::warning::The fast tier was cancelled, superseded by a newer push."
+              exit 0
+            fi
+            echo "::error::The ${TIER} tier ${SUITE_RESULT}."
+            exit 1
+          fi
+          if [[ "${TIER}" == 'fast' ]]; then
+            echo 'Fast tier passed. On a pull request the full suite runs on the first approval of this head.'
+          fi

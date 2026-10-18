@@ -312,6 +312,13 @@
             <id>hosted-harness-mysql</id>
             <build>
                 <plugins>
+                    <!-- The H2 unit suite is mysql-integration's; repeating it
+                         in each Hosted job step cost ~11 min apiece. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration><skipTests>true</skipTests></configuration>
+                    </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-failsafe-plugin</artifactId>
@@ -353,8 +360,50 @@
                                  lane-measured 3600 s fork already covers
                                  them: one 600 s ceiling plus the
                                  re-derived healthy runtime still fits
-                                 with headroom. -->
-                            <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
+                                 with headroom. Its slice 2 (FG9d, FG9e)
+                                 brings the class to four letters
+                                 measuring 308–314 s healthy locally on
+                                 JDK 21 + MySQL 8.4 (~534 s budgeted at
+                                 the same 1.7×), which the same fork
+                                 still covers. The FG8c process-crash
+                                 letter (seven cases, 144 s healthy
+                                 locally on a fresh MySQL 8.4.6) rides
+                                 inside the same envelope. The FG10a
+                                 workflow digest letter
+                                 (HostedWorkflowFaultGatesIT: four
+                                 cases, 15.9–16.2 s healthy locally on
+                                 macOS JDK 26 + MySQL 8.4.6 across four
+                                 acceptance runs, ~33 s budgeted at
+                                 2×) joins the same fork. The FG9 slice
+                                 3 letters (FG9b store failures, FG9c
+                                 Harness crashes) bring that class to
+                                 six letters measuring 528–557 s
+                                 (~950 s budgeted, ~416 s over slice
+                                 2's): with FG8c and FG10a inside it,
+                                 one 600 s ceiling plus the re-derived
+                                 3380 s healthy sum no longer fits
+                                 3600 s, so the fork moves to 3990 s and
+                                 the Verify step to 80 minutes to keep
+                                 its 600 s wrap plus margin. The FG10b
+                                 and FG10f workflow relay letters
+                                 (HostedWorkflowRelayFaultGatesIT,
+                                 81.6–81.7 s healthy locally, ~165 s
+                                 budgeted at 2×) raise the healthy sum to
+                                 3545 s, so the fork moves to 4155 s and
+                                 the Verify step to 85 minutes. Their
+                                 slice 2 (FG10c, FG10e) brings the class
+                                 to four letters measuring 181.2–181.6 s
+                                 (~363 s budgeted at 2×): the healthy sum
+                                 becomes 3743 s, so the fork moves to
+                                 4353 s and the Verify step to 90
+                                 minutes. Slice 3 (FG10d, the process
+                                 crash) brings the class to five
+                                 letters measuring 246.1–246.8 s (~494 s
+                                 budgeted at 2×): the healthy sum
+                                 becomes 3874 s and the fork 4484 s,
+                                 which the Verify step's 90 minutes
+                                 still wrap. -->
+                            <forkedProcessTimeoutInSeconds>4484</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -371,6 +420,10 @@
         <profile>
             <id>hosted-harness-gates</id>
             <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>
@@ -436,8 +489,9 @@
                 <configuration>
                     <includes><include>**/HostedMonitorRun*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <!-- The class's five letters (fg8e/fg8f/fg8a/fg8b/fg8d)
-                         are independent fixtures sharing one fork: each
+                    <!-- The class's six letters (fg8e/fg8f/fg8a/fg8b/fg8d
+                         and fg8c) are independent fixtures sharing one
+                         fork: each
                          letter's @Timeout ceiling (600 s) plus the healthy
                          runtime must fit, the per-ceiling relation the CI
                          profile pins. Fork measured on the lane (run
@@ -461,7 +515,7 @@
                     <!-- The FG9 letters are independent fixtures sharing
                          one fork — each letter boots its own Spring,
                          Harness, and proxies on its own tenant prefix,
-                         so a stall in one letter leaves the other
+                         so a stall in one letter leaves the others
                          running — like the FG8 letters' shape. The
                          per-ceiling relation is pinned against the
                          hosted-harness-mysql lane's fork budget (the
@@ -474,8 +528,32 @@
             </plugin></plugins></build>
         </profile>
         <profile>
+            <id>hosted-workflow-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedWorkflow*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Both workflow classes' letters (FG10a's driver
+                         class and the FG10b–f relay class) are
+                         independent fixtures sharing one fork: each
+                         letter's @Timeout ceiling (600 s) plus the
+                         healthy runtime must fit, the per-ceiling
+                         relation the CI profile pins. -->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>o4-mysql-gates</id>
             <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>

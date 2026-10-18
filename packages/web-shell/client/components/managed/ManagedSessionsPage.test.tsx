@@ -301,7 +301,7 @@ describe('ManagedSessionsPage', () => {
         'contextUsage',
       ]);
       expect(container.textContent).toContain(
-        'Approval mode is fixed for this task',
+        'This session does not support changing its approval policy',
       );
       await render('s1', 'en', provider, undefined, false);
       expect(mocks.editorProps?.visibleToolbarActions).toEqual([]);
@@ -314,7 +314,7 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.availableModes).toEqual([]);
     expect(mocks.editorProps?.visibleToolbarActions).toEqual(['contextUsage']);
     expect(container.textContent).not.toContain(
-      'Approval mode is fixed for this task',
+      'This session does not support changing its approval policy',
     );
   });
 
@@ -406,78 +406,82 @@ describe('ManagedSessionsPage', () => {
     mocks.client.getSession.mockImplementation(async () => current());
   }
 
-  it('switches approval after readback while preserving the draft and excluding same-frame send and model changes', async () => {
-    let session = switchableSession({
-      approvalMode: 'default',
-      initialApprovalMode: 'default',
-      approvalRevision: 0,
-      capabilities: {
-        canSend: true,
-        canCancel: false,
-        workspaceTurns: true,
-        modelChange: true,
-        approvalModeChange: true,
-      },
-    });
-    modelApi(() => session);
-    let acknowledge!: (value: {
-      sessionId: string;
-      approvalMode: 'yolo';
-      approvalRevision: number;
-      replayed: boolean;
-    }) => void;
-    provider.approvalChange = {
-      queryOptions: vi.fn(async () => ({
-        supported: true,
-        approvalMode: session.approvalMode!,
-        approvalRevision: session.approvalRevision!,
-        availableApprovalModes: ['default', 'auto-edit', 'yolo'],
-      })),
-      submit: vi.fn(
-        () =>
-          new Promise((resolve) => {
-            acknowledge = resolve;
-          }),
-      ),
-    };
-    await render('s1');
-    await input('Keep the approval draft');
-    expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
-    expect(mocks.editorProps?.availableModes).toEqual([
-      'default',
-      'auto-edit',
-      'yolo',
-    ]);
-    const send = mocks.editorProps!.onSubmit;
-    const model = mocks.editorProps!.onSelectModel!;
-    await act(async () => {
-      mocks.editorProps!.onSelectMode!('yolo');
-      send('Keep the approval draft', undefined, undefined, vi.fn());
-      model('B');
-      await flush();
-    });
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
-    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
-    expect(mocks.editorProps?.currentMode).toBe('default');
-    expect(mocks.editorProps?.modeControlsDisabled).toBe(true);
-    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
-    session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
-    await act(async () => {
-      acknowledge({
-        sessionId: 's1',
-        approvalMode: 'yolo',
-        approvalRevision: 1,
-        replayed: false,
+  it.each(['qwen-code', `agent_${'a'.repeat(32)}`])(
+    'switches approval for %s after readback while preserving the draft and excluding same-frame send and model changes',
+    async (agentId) => {
+      let session = switchableSession({
+        agentId,
+        approvalMode: 'default',
+        initialApprovalMode: 'default',
+        approvalRevision: 0,
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          workspaceTurns: true,
+          modelChange: true,
+          approvalModeChange: true,
+        },
       });
-      await flush();
-    });
-    expect(mocks.editorProps?.currentMode).toBe('yolo');
-    expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
-    expect(container.querySelector('textarea')?.value).toBe(
-      'Keep the approval draft',
-    );
-    expect(mocks.commitAccepted).not.toHaveBeenCalled();
-  });
+      modelApi(() => session);
+      let acknowledge!: (value: {
+        sessionId: string;
+        approvalMode: 'yolo';
+        approvalRevision: number;
+        replayed: boolean;
+      }) => void;
+      provider.approvalChange = {
+        queryOptions: vi.fn(async () => ({
+          supported: true,
+          approvalMode: session.approvalMode!,
+          approvalRevision: session.approvalRevision!,
+          availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        })),
+        submit: vi.fn(
+          () =>
+            new Promise((resolve) => {
+              acknowledge = resolve;
+            }),
+        ),
+      };
+      await render('s1');
+      await input('Keep the approval draft');
+      expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
+      expect(mocks.editorProps?.availableModes).toEqual([
+        'default',
+        'auto-edit',
+        'yolo',
+      ]);
+      const send = mocks.editorProps!.onSubmit;
+      const model = mocks.editorProps!.onSelectModel!;
+      await act(async () => {
+        mocks.editorProps!.onSelectMode!('yolo');
+        send('Keep the approval draft', undefined, undefined, vi.fn());
+        model('B');
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+      expect(mocks.editorProps?.currentMode).toBe('default');
+      expect(mocks.editorProps?.modeControlsDisabled).toBe(true);
+      expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+      session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
+      await act(async () => {
+        acknowledge({
+          sessionId: 's1',
+          approvalMode: 'yolo',
+          approvalRevision: 1,
+          replayed: false,
+        });
+        await flush();
+      });
+      expect(mocks.editorProps?.currentMode).toBe('yolo');
+      expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
+      expect(container.querySelector('textarea')?.value).toBe(
+        'Keep the approval draft',
+      );
+      expect(mocks.commitAccepted).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['agent_running', 'cancelling'] as const)(
     'refuses approval callbacks during a %s Turn',
@@ -855,7 +859,7 @@ describe('ManagedSessionsPage', () => {
           .find((button) => button.textContent === text)!
           .click();
       });
-    await click('Child Agent tasks');
+    await click('Session tasks');
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     await render('s1', 'en', provider, undefined, false);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -882,7 +886,7 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).toContain(
       'Cancellation result is unconfirmed.',
     );
-    expect(document.activeElement?.textContent).toBe('Child Agent tasks');
+    expect(document.activeElement?.textContent).toBe('Session tasks');
   });
 
   it.each([false, true])(
@@ -931,7 +935,7 @@ describe('ManagedSessionsPage', () => {
             .click();
           await flush();
         });
-      await click('Child Agent tasks');
+      await click('Session tasks');
       if (detail) {
         await click('Child Agent · 01234567');
         expect(document.body.textContent).toContain('Back to tasks');
@@ -970,7 +974,7 @@ describe('ManagedSessionsPage', () => {
       tasks: { list: vi.fn(), get: vi.fn(), listEvents: vi.fn() },
     };
     await render('s1');
-    expect(container.textContent).not.toContain('Child Agent tasks');
+    expect(container.textContent).not.toContain('Session tasks');
     expect(container.textContent).not.toContain('Resume task cancellation');
     expect(provider.tasks!.list).not.toHaveBeenCalled();
   });

@@ -86,6 +86,7 @@ import {
   type ManagedSessionLifecycleAuthority,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
+  ManagedSessionCloseError,
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -134,7 +135,11 @@ import {
   readHostedAgentInstructions,
   type HostedAgentDefinition,
 } from './hosted-agent-definition.js';
-import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import {
+  HostedModelRoundLimitError,
+  runHostedHarnessTextTurn,
+} from './hosted-harness-model.js';
+import { hostedToolProgress } from './hosted-tool-progress.js';
 import {
   HostedSkillCatalog,
   readHostedSkills,
@@ -414,6 +419,7 @@ interface HostedSession {
    * here; other recovery blocks keep naming themselves at the caller. */
   recoveryReason?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
+  foregroundOnly?: boolean;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
   // The record funnel of a publication-mode turn's background Shells and
@@ -1147,6 +1153,8 @@ export async function settleCrashedWakeTurnAftermath(params: {
                 cwd,
                 promptId: turnId,
                 unobserved: carried,
+                broker,
+                shell: session.shell,
               });
               // A settle that could not verify the park journaled nothing:
               // the release and the terminal record must not build on it —
@@ -2641,6 +2649,16 @@ async function eventEnvelope(
 }> {
   const sessionId =
     session.managed.authority.sessionHeader.sessionKey.sessionId;
+  const progress = await hostedToolProgress(session.managed, event);
+  if (progress && event.kind !== 'message.committed') {
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'session_update',
+      promptId: progress.promptId,
+      data: { sessionId, update: progress.update },
+    };
+  }
   if (event.kind === 'message.delta') {
     const text = event.payload['text'];
     const turnId = event.payload['turnId'];
@@ -2723,7 +2741,11 @@ async function eventEnvelope(
           ...(message.daemonPromptId
             ? { promptId: message.daemonPromptId }
             : {}),
-          data: { sessionId, record: message },
+          data: {
+            sessionId,
+            record: message,
+            ...(progress ? { update: progress.update } : {}),
+          },
         };
       }
       return {
@@ -2765,6 +2787,7 @@ async function eventEnvelope(
       event.payload['stopReason'] === 'model_unavailable';
     const storeUnavailable =
       event.payload['stopReason'] === 'managed_session_store_unavailable';
+    const roundLimit = event.payload['stopReason'] === 'model_round_limit';
     return {
       v: 1,
       id: event.sequence,
@@ -2779,10 +2802,14 @@ async function eventEnvelope(
             ? 'model_unavailable'
             : storeUnavailable
               ? 'managed_session_store_unavailable'
-              : 'hosted_turn_failed',
+              : roundLimit
+                ? 'hosted_turn_limit_exceeded'
+                : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
-          : 'Hosted Harness turn failed.',
+          : roundLimit
+            ? 'The Hosted Harness Turn reached its configured model round limit.'
+            : 'Hosted Harness turn failed.',
       },
     };
   }
@@ -3185,6 +3212,7 @@ async function executeHostedTurn(
                   hooks: session.hooks,
                   skills: session.skills,
                   profile: session.toolProfile,
+                  foregroundOnly: session.foregroundOnly,
                   context: workspaceContext,
                   childRuns: session.childRuns,
                   monitors: session.monitors,
@@ -3316,6 +3344,11 @@ async function executeHostedTurn(
             stopReason = 'model_unavailable';
           if (
             stopReason === 'error' &&
+            cause instanceof HostedModelRoundLimitError
+          )
+            stopReason = 'model_round_limit';
+          if (
+            stopReason === 'error' &&
             cause instanceof WorkflowStartCancelledError
           ) {
             // A registry-side cancel while the workflow start is held
@@ -3436,7 +3469,7 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): void {
+): { owns: (id: string) => boolean } {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
   // daemon owns them and stops them at shutdown.
@@ -3546,6 +3579,29 @@ export function registerHostedHarnessSessionRoutes(
     }
     let toolProfile = body?.['toolProfile'];
     let captureBytes = body?.['captureBytes'];
+    const requestedForegroundOnly = body?.['foregroundOnly'];
+    let foregroundOnly = requestedForegroundOnly === true;
+    if (
+      requestedForegroundOnly !== undefined &&
+      typeof requestedForegroundOnly !== 'boolean'
+    ) {
+      error(res, 400, 'invalid_hosted_foreground_only');
+      return;
+    }
+    if (
+      foregroundOnly &&
+      ((toolProfile !== undefined &&
+        toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        toolProfile !== 'hosted-workspace-shell/1') ||
+        (create && toolProfile === undefined) ||
+        body?.['mcpServers'] !== undefined ||
+        body?.['hookCatalog'] !== undefined ||
+        body?.['childWorkspaces'] === true ||
+        body?.['lineage'] !== undefined)
+    ) {
+      error(res, 400, 'hosted_tool_profile_unavailable');
+      return;
+    }
     if (
       (agentDefinition?.skillsRef !== undefined &&
         (!toolProfile || !brokerOptions)) ||
@@ -3671,6 +3727,26 @@ export function registerHostedHarnessSessionRoutes(
     const stopMessages = body?.['stopMessages'] === true;
     const childWorkspaces = body?.['childWorkspaces'] === true;
     const childSnapshots = childWorkspaces && body?.['childSnapshots'] === true;
+    if (
+      resident &&
+      requestedForegroundOnly !== undefined &&
+      (resident.foregroundOnly === true) !== foregroundOnly
+    ) {
+      error(res, 409, 'hosted_tool_profile_conflict');
+      return;
+    }
+    if (
+      resident?.foregroundOnly &&
+      (childWorkspaces ||
+        mcpServers !== undefined ||
+        hookCatalog !== undefined ||
+        (toolProfile !== undefined &&
+          toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          toolProfile !== 'hosted-workspace-shell/1'))
+    ) {
+      error(res, 409, 'hosted_tool_profile_conflict');
+      return;
+    }
     if (
       resident &&
       !create &&
@@ -4302,6 +4378,7 @@ export function registerHostedHarnessSessionRoutes(
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
+                  ...(foregroundOnly ? { foregroundOnly: true } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
                   ...(hookCatalog ? { hookCatalog } : {}),
                   ...(isHostedWorkspaceShellProfile(toolProfile)
@@ -4382,6 +4459,17 @@ export function registerHostedHarnessSessionRoutes(
       }
       const savedProfile = definition?.['toolProfile'];
       if (
+        (definition?.['foregroundOnly'] !== undefined &&
+          typeof definition['foregroundOnly'] !== 'boolean') ||
+        (requestedForegroundOnly !== undefined &&
+          foregroundOnly !== (definition?.['foregroundOnly'] === true))
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      foregroundOnly = definition?.['foregroundOnly'] === true;
+      if (
         !create &&
         toolProfile === undefined &&
         isHostedWorkspaceProfile(savedProfile)
@@ -4417,6 +4505,13 @@ export function registerHostedHarnessSessionRoutes(
         captureBytes = definition?.['captureBytes'];
       const workspaceProfile = isHostedWorkspaceProfile(toolProfile);
       if (
+        (foregroundOnly &&
+          ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+            toolProfile !== 'hosted-workspace-shell/1') ||
+            mcpServers !== undefined ||
+            hookCatalog !== undefined ||
+            childWorkspaces ||
+            definition?.['lineage'] !== undefined)) ||
         ((hookCatalog !== undefined || skills !== undefined) &&
           (!toolProfile || !brokerOptions)) ||
         (toolProfile !== undefined &&
@@ -4462,6 +4557,7 @@ export function registerHostedHarnessSessionRoutes(
         ...(childWorkspaces ? { childWorkspaces: true } : {}),
         ...(childSnapshots ? { childSnapshots: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
+        ...(foregroundOnly ? { foregroundOnly: true } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined
           ? {
@@ -4469,10 +4565,14 @@ export function registerHostedHarnessSessionRoutes(
                 owner: stores.publication,
                 captureBytes: captureBytes as number,
               },
-              backgroundLane: {
-                resources: stores.toolResultResources,
-                assertWritable: stores.assertWritable,
-              },
+              ...(!foregroundOnly
+                ? {
+                    backgroundLane: {
+                      resources: stores.toolResultResources,
+                      assertWritable: stores.assertWritable,
+                    },
+                  }
+                : {}),
             }
           : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
@@ -4525,7 +4625,7 @@ export function registerHostedHarnessSessionRoutes(
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
         );
-      if (session.toolProfile && brokerOptions) {
+      if (!foregroundOnly && session.toolProfile && brokerOptions) {
         session.childRuns = new HostedChildRunSession(
           {
             authority: session.managed.authority,
@@ -4605,6 +4705,7 @@ export function registerHostedHarnessSessionRoutes(
       // ensureMemberPlanMode at tool-turn construction — the first committed
       // input may not exist yet while the Session assembles on create.
       if (
+        !foregroundOnly &&
         session.toolProfile &&
         brokerOptions &&
         (session.shell || session.backgroundLane)
@@ -4813,6 +4914,7 @@ export function registerHostedHarnessSessionRoutes(
                     promptId: turn.turnId,
                     brokerOptions,
                     toolProfile: session.toolProfile !== undefined,
+                    shell: session.shell,
                     carryUnobservedInto: carried,
                     children: session.childAgents,
                     consume: (childRunId) =>
@@ -5829,9 +5931,20 @@ export function registerHostedHarnessSessionRoutes(
           brokerOptions,
           !!committedModelOutput,
         );
-    } catch (cause) {
+    } catch (thrown) {
       await managed?.close().catch(() => undefined);
       await stores.close().catch(() => undefined);
+      // A refusal's close that failed both to release the activation and to
+      // seal the writer rejects with both. The seal failure says what the
+      // writer was left as, so the answer is classified on it: a fenced
+      // writer must still answer its self-healing 409, not the generic 503.
+      if (thrown instanceof ManagedSessionCloseError) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} close failed during open: ${sanitizeDaemonLogLine(String(thrown))}`,
+        );
+      }
+      const cause =
+        thrown instanceof ManagedSessionCloseError ? thrown.sealError : thrown;
       if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
       } else if (
@@ -6171,14 +6284,21 @@ export function registerHostedHarnessSessionRoutes(
       );
       if (
         approvalSelection &&
-        (session.agentDefinition ||
-          !session.approval ||
-          ![
-            'hosted-workspace-files/1',
-            'hosted-workspace-shell/1',
-            'hosted-workspace-files/2',
-            'hosted-workspace-shell/2',
-          ].includes(session.toolProfile ?? '') ||
+        (!session.approval ||
+          !(
+            session.agentDefinition
+              ? [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-shell/2',
+                ]
+              : [
+                  'hosted-workspace-files/1',
+                  'hosted-workspace-shell/1',
+                  'hosted-workspace-files/2',
+                  'hosted-workspace-shell/2',
+                ]
+          ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
             approvalSelection.mode !== session.approval.mode))
       )
@@ -7455,6 +7575,37 @@ export function registerHostedHarnessSessionRoutes(
           case 'cancel':
             await children.requestStop(childRunId);
             break;
+          case 'recovery_blocked': {
+            // #14387: the relay's honest settlement for a child whose
+            // Harness generation was lost mid-run — the outcome stays
+            // unwitnessed, so the record blocks instead of failing. Only
+            // the lost-Runtime reason is admitted.
+            const reason = body?.['reason'];
+            const blockedChildSessionId = body?.['childSessionId'];
+            if (
+              reason !== 'runtime_lost' ||
+              !(
+                blockedChildSessionId === null ||
+                blockedChildSessionId === undefined ||
+                typeof blockedChildSessionId === 'string'
+              )
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.settleRecoveryBlocked(childRunId, {
+              reason,
+              ...(typeof blockedChildSessionId === 'string'
+                ? { childSessionId: blockedChildSessionId }
+                : {}),
+            });
+            // The blocked settlement of a background child is a committed
+            // notification — kick the parent like the accept arm does, or
+            // an idle Session's scheduler (which exits on an empty next())
+            // never delivers it. Fires on a replay too: the kick is the
+            // delivery, idempotent by the scheduler's own dedupe.
+            session.monitorWake?.kick();
+            break;
+          }
           case 'close_scope': {
             const started = body?.['started'];
             const childSessionId = body?.['childSessionId'];
@@ -8386,6 +8537,7 @@ export function registerHostedHarnessSessionRoutes(
             mcp: session.mcp,
             skills: session.skills,
             profile: session.toolProfile,
+            foregroundOnly: session.foregroundOnly,
             context: workspaceContext,
             childRuns: session.childRuns,
             monitors: session.monitors,
@@ -8931,6 +9083,7 @@ export function registerHostedHarnessSessionRoutes(
       // their journal entry must stay honest (no stop was observed), on the
       // first settle and on a compensating retry alike.
       let unobserved: ReadonlySet<string> | undefined;
+      let broker: HostedWorkspaceBroker | undefined;
       try {
         // The phase-shape invariants decide the two settlement shapes
         // outright (R1-51): the agent wait's park names outstanding runs
@@ -8938,7 +9091,6 @@ export function registerHostedHarnessSessionRoutes(
         // the round pairs off — while no group means the Runtime park.
         const agentWait = cancelRunnable.checkpoint.agentWait;
         const commandWait = cancelRunnable.checkpoint.commandWait;
-        let broker: HostedWorkspaceBroker | undefined;
         if (commandWait !== null) {
           // H4e-b3's own mirror of the agent-wait cancellation: the
           // outstanding command runs answer by what their journal
@@ -9044,6 +9196,8 @@ export function registerHostedHarnessSessionRoutes(
               cwd: session.cwd,
               promptId,
               unobserved,
+              broker,
+              shell: session.shell,
             });
             if (settleOutcome === 'not-runnable')
               throw new Error(
@@ -9113,12 +9267,13 @@ export function registerHostedHarnessSessionRoutes(
         // runtime_session_busy while an execution is active. An agent wait
         // never held one — its recovery acquires nothing (acquiredRuntime
         // false), so there is no lease to hand back here.
+        const releaseBroker = broker;
         const handedBack =
-          broker === undefined ||
+          releaseBroker === undefined ||
           (session.mcp &&
-            broker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
+            releaseBroker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
             ? false
-            : await broker.release().then(
+            : await releaseBroker.release().then(
                 () => true,
                 (cause: unknown) => {
                   if (releaseIsSatisfied(cause)) return true;
@@ -9126,7 +9281,7 @@ export function registerHostedHarnessSessionRoutes(
                   // not refuse an answered cancellation. Leave the lease
                   // owed; later replays and the session close retry it.
                   writeStderrLineSafe(
-                    `qwen serve: Hosted Harness release of recovered Runtime ${broker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
+                    `qwen serve: Hosted Harness release of recovered Runtime ${releaseBroker.runtimeSessionId} failed after the cancellation settled: ${String(cause)}`,
                   );
                   return false;
                 },
@@ -9172,6 +9327,8 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             promptId,
             unobserved,
+            broker,
+            shell: session.shell,
           }).then(
             // A noop is completion here — the identity already moved past
             // this settle — but a not-runnable read proves nothing, so it
@@ -10312,4 +10469,10 @@ export function registerHostedHarnessSessionRoutes(
   app.delete('/session/:id', (req, res) => {
     void close(req, res, true);
   });
+  return {
+    owns: (id) =>
+      [...sessions.keys(), ...opening].some(
+        (candidate) => candidate.toLowerCase() === id.toLowerCase(),
+      ),
+  };
 }

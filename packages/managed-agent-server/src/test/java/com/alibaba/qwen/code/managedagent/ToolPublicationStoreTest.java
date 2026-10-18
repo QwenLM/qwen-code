@@ -1,5 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
@@ -27,6 +31,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,6 +39,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
@@ -2389,9 +2396,217 @@ class ToolPublicationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isEqualTo(1);
         jdbc.update("DELETE FROM ma_output_capture");
         store = newStore(ALLOCATION - 1, 1);
-        assertThatThrownBy(this::reserve).hasMessageContaining("capacity exhausted");
+        assertRefused(this::reserve, true, "tenant_bytes");
         store = newStore(ALLOCATION, 1);
         assertThat(reserve().path("captureBytes").asLong()).isEqualTo(CAPTURE_BYTES);
+    }
+
+    @Test
+    void refusesEachExhaustedLimitWithItsOwnCode() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION - 1, 10));
+        assertRefused(this::reserve, true, "tenant_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(this::reserve, true, "session_bytes");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isZero();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 1));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "active_captures");
+        // A fenced capture stops counting, so the refused reservation now fits.
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    @Test
+    void namesTheByteLimitWhenTheCaptureSlotsAreFullToo() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 1));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        // The Session's bytes and its one slot are both taken by an open
+        // capture: the byte limit is named, and it is retryable, because the
+        // capture gives both back when it ends.
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    @Test
+    void refusesWithoutRetryOnlyWhenUsedBytesAloneFillTheLimit() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        // One byte of the open capture is used: only that byte outlives it.
+        jdbc.update("UPDATE ma_output_capture SET capture_used_bytes = 1");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION + 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "session_bytes");
+        // A finished capture keeps everything it used until its Session is
+        // collected: nothing about it frees on its own.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "session_bytes");
+    }
+
+    @Test
+    void anotherSessionsOpenCaptureDoesNotFreeThisSessionsRetainedBytes() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN);
+        // The first capture finished here with everything used; the second
+        // is still open but now belongs to another Session of the tenant.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL,"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes WHERE publication_id = ?",
+                "pub-1".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("UPDATE ma_output_capture SET scope_key = ? WHERE publication_id = ?", "f".repeat(64),
+                "pub-2".getBytes(StandardCharsets.UTF_8));
+        // The tenant fails first, and its open capture could make room
+        // there; the Session's used bytes still leave none.
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 3 * ALLOCATION - 1, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "session_bytes");
+    }
+
+    @Test
+    void anotherSessionsUsedBytesDoNotFillThisSessionsLimit() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        ObjectNode firstRequest = request("reserve");
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN);
+        // The first capture finished with everything used, in another Session
+        // of the tenant; this Session holds only the second, still open.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL, scope_key = ?,"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = admission_held_bytes WHERE publication_id = ?", "f".repeat(64),
+                "pub-1".getBytes(StandardCharsets.UTF_8));
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(firstRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+    }
+
+    @Test
+    void anUnreferencedAdmissionDoesNotCountAsRetained() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        // Finished and fenced with its output fully used, but not yet
+        // referenced: the receipt still gives back the admission it did not use.
+        jdbc.update("UPDATE ma_output_capture SET state = 'FENCED', expires_at = NULL, producer_phase = 'FINISHED',"
+                + " capture_used_bytes = capture_held_bytes, producer_used_bytes = producer_held_bytes,"
+                + " admission_used_bytes = 100");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        jdbc.update("UPDATE ma_output_capture SET producer_phase = 'REFERENCED',"
+                + " admission_held_bytes = admission_used_bytes");
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    @Test
+    void logsEachRefusalWithWhatItWeighed() {
+        Logger log = (Logger) LoggerFactory.getLogger(ToolPublicationStore.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        log.addAppender(logged);
+        try {
+            ObjectNode second = addSecondExecution();
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+            reserve();
+            Map<String, Object> keys = jdbc.queryForMap("SELECT tenant_key, scope_key FROM ma_output_capture");
+            // Distinct numbers: the capture holds 10 bytes less than an
+            // allocation, has used 3, and now belongs to another Session.
+            jdbc.update("UPDATE ma_output_capture SET capture_held_bytes = capture_held_bytes - 10,"
+                    + " capture_used_bytes = 3, scope_key = ?", "f".repeat(64));
+            ObjectNode secondRequest = request("reserve");
+            secondRequest.set("binding", second);
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION + 5, 10));
+            assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "tenant_bytes");
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION + 2, 10));
+            assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), true, "tenant_bytes");
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 1));
+            assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "active_captures");
+            String identity = " tenant=" + keys.get("tenant_key") + " scope=" + keys.get("scope_key");
+            String held = " held=" + (ALLOCATION - 10) + " used=3 requested=" + ALLOCATION;
+            assertThat(logged.list).extracting(ILoggingEvent::getFormattedMessage).containsExactly(
+                    "Tool publication reservation refused limit=tenant_bytes retained=false" + identity + held
+                            + " allowed=" + (ALLOCATION + 5),
+                    "Tool publication reservation refused limit=tenant_bytes retained=true" + identity + held
+                            + " allowed=" + (ALLOCATION + 2),
+                    "Tool publication reservation refused limit=active_captures retained=false" + identity
+                            + " held=1 used=0 requested=1 allowed=1");
+            assertThat(logged.list).extracting(ILoggingEvent::getLevel).containsOnly(Level.WARN);
+        } finally {
+            log.detachAppender(logged);
+        }
+    }
+
+    @Test
+    void eachByteLimitChargesItsOwnSum() {
+        ObjectNode second = addSecondExecution();
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        // Hand the first capture to another Session of the same tenant: the
+        // tenant still carries its bytes, this Session no longer does.
+        jdbc.update("UPDATE ma_output_capture SET scope_key = ?", "f".repeat(64));
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, ALLOCATION, 10));
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "tenant_bytes");
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        assertThat(store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText())
+                .isEqualTo("OPEN");
+    }
+
+    private static void assertRefused(ThrowingCallable reservation, boolean retained, String limit) {
+        assertThatThrownBy(reservation).isInstanceOfSatisfying(ApiException.class,
+                error -> assertRefusal(error, retained, limit));
+    }
+
+    // A refusal that used bytes alone cause is a 409; any other is a 429.
+    private static void assertRefusal(ApiException error, boolean retained, String limit) {
+        assertThat(error.getStatus()).isEqualTo(retained ? HttpStatus.CONFLICT : HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(error.getCode()).isEqualTo(retained ? "managed_tool_publication_retention_exhausted"
+                : "managed_tool_publication_capacity_exhausted");
+        assertThat(error.getMessage()).isEqualTo("Tool publication reservation refused at the " + limit + " limit");
+        assertThat(error.getDetails()).isEqualTo(Map.of("limit", limit));
     }
 
     @Test
@@ -2468,7 +2683,8 @@ class ToolPublicationStoreTest {
             outcomes = List.of(one.get(), two.get());
         }
         assertThat(outcomes.stream().filter(JsonNode.class::isInstance).count()).isEqualTo(1);
-        assertThat(outcomes.stream().filter(IllegalArgumentException.class::isInstance).count()).isEqualTo(1);
+        assertThat(outcomes).filteredOn(ApiException.class::isInstance).singleElement()
+                .satisfies(error -> assertRefusal((ApiException) error, false, "tenant_bytes"));
         String winner = jdbc.queryForObject("SELECT publication_id FROM ma_output_capture", String.class);
         ObjectNode loser = "pub-1".equals(winner) ? secondRequest : firstRequest;
         ObjectNode fence = request("fence").put("publicationId", winner);
@@ -2487,7 +2703,7 @@ class ToolPublicationStoreTest {
         start.await();
         try {
             return store.apply(request, WRITER_TOKEN, PUBLICATION_TOKEN);
-        } catch (IllegalArgumentException error) {
+        } catch (ApiException error) {
             return error;
         }
     }

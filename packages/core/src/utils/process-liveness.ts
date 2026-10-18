@@ -57,8 +57,14 @@ export function isPidAlive(pid: number): boolean {
  * carries it; `Z` is the one state that means "no longer running".
  * Unreadable `/proc` degrades to "not a zombie" — the conservative
  * direction, since the sweep only ever acts on a positive answer.
+ *
+ * Exported for callers that cannot use {@link isPidAlive} because they owe
+ * their own caller a third answer: `isPidAlive` folds "could not tell" into
+ * "dead", and for a runtime-status probe that would report a live session as
+ * gone. Such a caller keeps its own `unknown` branch and asks only this one
+ * question on the paths where `kill(pid, 0)` established that the pid exists.
  */
-function isZombie(pid: number): boolean {
+export function isZombie(pid: number): boolean {
   if (process.platform !== 'linux') return false;
   let raw: string;
   try {
