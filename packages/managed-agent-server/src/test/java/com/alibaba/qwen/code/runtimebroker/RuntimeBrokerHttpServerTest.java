@@ -1042,7 +1042,9 @@ class RuntimeBrokerHttpServerTest {
             assertSame(landed, inner.findByExecutionCallId(executionCallId));
             // A permanent invariant violation is not a store outage: it keeps
             // the non-retryable 500 the HTTP layer gives any other failure.
-            outage.set(new IllegalStateException("Tool idempotency hash is invalid"));
+            outage.set(assertThrows(IllegalStateException.class,
+                    () -> new AesGcmSecretProtector("ring-closed-2026", new byte[32])
+                            .unprotect("context", new ProtectedSecret("legacy", "unused"))));
             failingMethod.set("findByIdempotencyKey");
             Map<String, Object> invariantBody = new HashMap<>(body);
             invariantBody.put("requestId", "invariant");
@@ -1052,6 +1054,7 @@ class RuntimeBrokerHttpServerTest {
             var invariantError = JSON.parseObject(invariant.body());
             assertEquals("runtime_broker_internal_error", invariantError.getString("code"));
             assertFalse(invariantError.getBooleanValue("retryable"));
+            assertFalse(invariant.body().contains("ring-closed-2026"));
             // Nothing landed or changed while the store was failing, and the
             // gate intercepted only the intended call on each route.
             assertSame(landed, inner.findByExecutionCallId(executionCallId));
@@ -1059,6 +1062,11 @@ class RuntimeBrokerHttpServerTest {
                     "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId",
                     "findByExecutionCallId", "findOrCreate", "requestCancel", "findByIdempotencyKey"),
                     intercepted);
+            fixture.service.close();
+            HttpResponse<String> closed = fixture.post("/runtimes:warm", Map.of(
+                    "protocolVersion", 1, "requestId", "closed", "harnessSessionId", "harness"));
+            assertEquals(503, closed.statusCode(), closed.body());
+            assertEquals("runtime_broker_closed", JSON.parseObject(closed.body()).getString("code"));
         }
 
         // The private CSI routes reach the same store through the JDBC binding
