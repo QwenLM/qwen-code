@@ -253,6 +253,7 @@ describe('handleResumeSession', () => {
 
   it('revokes tools before init and restores a fresh owner after failed resume rolls back', async () => {
     const { config, calls } = createFakeConfig();
+    Object.assign(config, { isInteractive: () => true });
     const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
     const old = owner.captureToolSignal();
     const syncSession = vi.fn();

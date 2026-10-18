@@ -49,6 +49,12 @@ import {
   type InteractivePendingToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
 export type ScheduleFn = (
@@ -263,12 +269,17 @@ export function useReactToolScheduler(
       signal: AbortSignal,
       modelOverride?: string,
     ) => {
+      const owner = captureHookExecutionOwner(config);
+      const sessionSignal =
+        getInteractiveModSession(config)?.captureToolSignal();
+      if (sessionSignal) signal = AbortSignal.any([signal, sessionSignal]);
       const requests = Array.isArray(request) ? request : [request];
       const isQueuedCancellation = (error: unknown) =>
         signal.aborted &&
         error instanceof Error &&
         error.message === 'Tool call cancelled while in queue.';
       const completeAsCancelled = async () => {
+        if (sessionSignal?.aborted) return;
         const reason =
           '[Operation Cancelled] Reason: Tool call cancelled before execution.';
         const cancelledCalls: CompletedToolCall[] = requests.map(
@@ -302,7 +313,9 @@ export function useReactToolScheduler(
       };
 
       if (!modelOverride?.endsWith('\0')) {
-        void scheduler.schedule(request, signal).catch((error: unknown) => {
+        void runWithHookExecutionOwner(owner, () =>
+          scheduler.schedule(request, signal),
+        ).catch((error: unknown) => {
           if (isQueuedCancellation(error)) {
             void completeAsCancelled().catch((completionError: unknown) => {
               debugLogger.error(
@@ -325,6 +338,7 @@ export function useReactToolScheduler(
       // name the batch it failed to complete.
       void (async () => {
         const completeAsSchedulingError = async (error: unknown) => {
+          if (sessionSignal?.aborted) return;
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)
@@ -382,7 +396,9 @@ export function useReactToolScheduler(
         }
 
         try {
-          await scheduler.schedule(request, signal, runtimeView);
+          await runWithHookExecutionOwner(owner, () =>
+            scheduler.schedule(request, signal, runtimeView),
+          );
         } catch (error) {
           // The busy scheduler rejects a queued request once its signal
           // aborts, which is a cancellation rather than a scheduling failure.

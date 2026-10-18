@@ -856,9 +856,11 @@ export async function* livePromptEvents(
         : [];
     };
 
-    let completed: Array<InteractiveCompletedToolCall & {
-      nativeAttemptsObserved?: boolean;
-    }> = [];
+    let completed: Array<
+      InteractiveCompletedToolCall & {
+        nativeAttemptsObserved?: boolean;
+      }
+    > = [];
     // callIds whose real invocation description already went out (one per
     // call, ink mapToDisplay parity).
     const descriptionSeen = new Set<string>();
@@ -1028,8 +1030,12 @@ export async function* livePromptEvents(
           config
             .getChatRecordingService()
             ?.recordToolResult(final.responseParts, {
-              ...resp,
+              callId: call.request.callId,
               status: call.status,
+              resultDisplay: resp.resultDisplay,
+              error: resp.error,
+              errorType: resp.errorType,
+              executionStatus: resp.executionStatus,
               persistedOutputFiles: final.persistedOutputFiles,
               artifacts: final.artifacts,
             });

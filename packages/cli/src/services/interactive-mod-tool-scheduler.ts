@@ -22,6 +22,7 @@ import {
   modToolRequest,
 } from '@qwen-code/qwen-code-core/mods/tool-execution.js';
 import type { ModToolCheck } from '@qwen-code/qwen-code-core/mods/tool-events.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getInteractiveModSession } from './interactive-mod-session.js';
 
 export type InteractiveCompletedToolCall =
@@ -73,15 +74,19 @@ function logicalCompletion(
   };
 }
 
+const logger = createDebugLogger('INTERACTIVE_MOD_TOOLS');
+
 type NativeOptions = ConstructorParameters<typeof CoreToolScheduler>[0];
 type Options = Omit<
   NativeOptions,
   'onAllToolCallsComplete' | 'onToolCallsUpdate'
 > & {
   onAllToolCallsComplete: (
-    calls: Array<InteractiveCompletedToolCall & {
-      nativeAttemptsObserved?: boolean;
-    }>,
+    calls: Array<
+      InteractiveCompletedToolCall & {
+        nativeAttemptsObserved?: boolean;
+      }
+    >,
   ) => Promise<void>;
   onToolCallsUpdate?: (calls: InteractiveToolCall[]) => void;
   onNativeAttempt?: (call: CompletedToolCall) => Promise<void>;
@@ -91,6 +96,7 @@ type Options = Omit<
 export class InteractiveModToolScheduler {
   private readonly native: CoreToolScheduler;
   private tail: Promise<unknown> = Promise.resolve();
+  private displayOwner?: object;
 
   constructor(private readonly options: Options) {
     this.native = new CoreToolScheduler(options);
@@ -110,6 +116,13 @@ export class InteractiveModToolScheduler {
     const owner = captureHookExecutionOwner(this.options.config);
     const sessionSignal = session.captureToolSignal();
     const active = AbortSignal.any([signal, sessionSignal]);
+    const displayOwner = {};
+    const clearDisplay = () => {
+      if (this.displayOwner !== displayOwner) return;
+      this.displayOwner = undefined;
+      this.options.onToolCallsUpdate?.([]);
+    };
+    sessionSignal.addEventListener('abort', clearDisplay, { once: true });
     let delivered = false;
     const task = this.tail.then(() =>
       runWithHookExecutionOwner(owner, async () => {
@@ -137,9 +150,16 @@ export class InteractiveModToolScheduler {
           request: item,
           nativeAttemptsObserved: true,
         }));
+        const attemptUpdates = new Map<number, InteractiveToolCall[]>();
         const publish = () => {
-          if (!sessionSignal.aborted)
-            this.options.onToolCallsUpdate?.([...calls]);
+          if (!sessionSignal.aborted) {
+            this.displayOwner = displayOwner;
+            this.options.onToolCallsUpdate?.(
+              calls.flatMap(
+                (call, index) => attemptUpdates.get(index) ?? [call],
+              ),
+            );
+          }
         };
         publish();
         for (let index = 0; index < requests.length; index++) {
@@ -154,6 +174,8 @@ export class InteractiveModToolScheduler {
               nativeSignal.throwIfAborted();
               active.throwIfAborted();
               const attemptSignal = AbortSignal.any([active, nativeSignal]);
+              attemptUpdates.delete(index);
+              publish();
               const scheduler = new CoreToolScheduler({
                 ...this.options,
                 chatRecordingService: undefined,
@@ -164,29 +186,40 @@ export class InteractiveModToolScheduler {
                 },
                 onToolCallsUpdate: (updates) => {
                   if (attemptSignal.aborted || !updates.length) return;
-                  const current = updates[0];
-                  if (
-                    current.status === 'success' ||
-                    current.status === 'error' ||
-                    current.status === 'cancelled'
-                  ) {
-                    calls[index] = {
-                      status: 'scheduled',
-                      request: original,
-                      nativeAttemptsObserved: true,
-                    };
-                  } else
-                    calls[index] = { ...current, nativeAttemptsObserved: true };
+                  attemptUpdates.set(
+                    index,
+                    updates.map((current) => {
+                      if (current.request.callId !== nativeRequest.callId)
+                        return current;
+                      if (
+                        current.status === 'success' ||
+                        current.status === 'error' ||
+                        current.status === 'cancelled'
+                      ) {
+                        return {
+                          status: 'scheduled' as const,
+                          request: original,
+                          nativeAttemptsObserved: true,
+                        };
+                      }
+                      return { ...current, nativeAttemptsObserved: true };
+                    }),
+                  );
                   publish();
                 },
                 onAllToolCallsComplete: async (completed) => {
                   last = completed[0];
+                  attemptUpdates.delete(index);
+                  publish();
                   try {
                     if (!sessionSignal.aborted)
                       await this.options.onNativeAttempt?.(last);
                     resolve(last);
                   } catch (error) {
-                    reject(error);
+                    logger.warn(
+                      `Native tool observation failed: ${String(error)}`,
+                    );
+                    resolve(last);
                   }
                 },
               });
@@ -246,6 +279,7 @@ export class InteractiveModToolScheduler {
           publish();
         }
         if (sessionSignal.aborted) return;
+        clearDisplay();
         delivered = true;
         await this.options.onAllToolCallsComplete(
           calls.filter(
@@ -255,11 +289,11 @@ export class InteractiveModToolScheduler {
               call.status === 'cancelled',
           ),
         );
-        this.options.onToolCallsUpdate?.([]);
       }),
     );
     const settled = task.catch(async (error: unknown) => {
       if (delivered || sessionSignal.aborted) throw error;
+      clearDisplay();
       delivered = true;
       await this.options.onAllToolCallsComplete(
         requests.map((item) => ({
@@ -284,9 +318,11 @@ export class InteractiveModToolScheduler {
           },
         })),
       );
-      this.options.onToolCallsUpdate?.([]);
     });
-    this.tail = settled.catch(() => {});
-    return settled;
+    const drained = settled.finally(() => {
+      sessionSignal.removeEventListener('abort', clearDisplay);
+    });
+    this.tail = drained.catch(() => {});
+    return drained;
   }
 }

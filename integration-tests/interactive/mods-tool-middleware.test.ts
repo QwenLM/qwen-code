@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   existsSync,
@@ -73,18 +74,37 @@ const modes: Mode[] = [
 ];
 
 describe.sequential(`Mods model tools (${renderer})`, () => {
-  it.each(modes)(
-    '%s preserves native facts and one final result',
-    async (mode) => {
+  it.each([
+    ...modes.map((mode) => ({ mode, headless: false })),
+    ...(renderer === 'ink'
+      ? (
+          [
+            'rewrite',
+            'deny',
+            'synthetic',
+            'repeat',
+            'replay',
+            'native-deny',
+          ] as Mode[]
+        ).map((mode) => ({ mode, headless: true }))
+      : []),
+  ])(
+    '$mode (headless=$headless) preserves native facts and one final result',
+    async ({ mode, headless }) => {
       const nonce = randomUUID().replaceAll('-', '').slice(0, 12);
-      const scratch = mkdtempSync(join(tmpdir(), `p02a-${renderer}-${mode}-`));
+      const scratch = mkdtempSync(
+        join(
+          tmpdir(),
+          `p02a-${renderer}-${headless ? 'headless-' : ''}${mode}-`,
+        ),
+      );
       const workspace = join(scratch, 'workspace'),
         qwenHome = join(scratch, 'home'),
         runtime = join(scratch, 'runtime');
       const evidence = join(
         repo,
         '.qwen/e2e-tests/p02a-terminal-middleware/author',
-        `${renderer}-${mode}-${nonce}`,
+        `${renderer}-${headless ? 'headless-' : ''}${mode}-${nonce}`,
       );
       for (const directory of [workspace, qwenHome, runtime, evidence])
         mkdirSync(directory, { recursive: true });
@@ -118,7 +138,7 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
       writeFileSync(join(workspace, 'oracle.mjs'), oracle);
       const originalArgs = {
         command: `node oracle.mjs ${nonce} A`,
-        description: `p02a-${mode}-${nonce}`,
+        description: `p02a-tool-${nonce}`,
       };
       const hooks: Record<Mode, string> = {
         rewrite: `on('tool.call', {tool:'run_shell_command'}, ($,e,next)=>next({...e,command:e.command.replace(' A',' B')}));`,
@@ -203,8 +223,10 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
                   : mode === 'withhold'
                     ? `WITHHELD:${nonce}`
                     : mode === 'native-deny'
-                      ? 'denied'
-                      : `ORACLE:${nonce}:A`;
+                      ? 'permission'
+                      : mode === 'timeout'
+                        ? 'cancel'
+                        : `ORACLE:${nonce}:A`;
           if (!text.toLowerCase().includes(expected.toLowerCase()))
             problems.push(`unexpected result: ${text}`);
           const original = messages
@@ -234,6 +256,53 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
       let session: InteractiveSession | undefined;
       let failure: unknown;
       try {
+        if (headless) {
+          const output = await promisify(execFile)(
+            cli,
+            [
+              bundle,
+              '-p',
+              `RUN:${nonce}`,
+              '--auth-type',
+              'openai',
+              '--model',
+              'p02a-fixture',
+              '--openai-base-url',
+              server.baseUrl,
+              '--openai-api-key',
+              'p02a-fixture',
+              '--approval-mode',
+              'default',
+              '--output-format',
+              'json',
+              '--allowed-tools',
+              'run_shell_command',
+            ],
+            { cwd: workspace, env, timeout: 45000, maxBuffer: 8 * 1024 * 1024 },
+          );
+          writeFileSync(join(evidence, 'stdout.json'), output.stdout);
+          writeFileSync(join(evidence, 'stderr.txt'), output.stderr);
+          expect(output.stdout).toContain(`DONE:${nonce}`);
+          expect(problems).toEqual([]);
+          expect(paired).toBe(true);
+          expect(server.requests).toHaveLength(2);
+          const ledger = existsSync(join(workspace, 'oracle.jsonl'))
+            ? readFileSync(join(workspace, 'oracle.jsonl'), 'utf8')
+                .trim()
+                .split('\n')
+                .map((line) => JSON.parse(line))
+            : [];
+          expect(ledger.map((entry) => entry.phase)).toEqual(
+            mode === 'deny' || mode === 'synthetic' || mode === 'native-deny'
+              ? []
+              : mode === 'repeat'
+                ? ['A', 'B']
+                : mode === 'rewrite'
+                  ? ['B']
+                  : ['A'],
+          );
+          return;
+        }
         session = await InteractiveSession.start({
           cols: 160,
           rows: 50,
@@ -269,12 +338,21 @@ describe.sequential(`Mods model tools (${renderer})`, () => {
           expect(existsSync(join(workspace, 'oracle.jsonl'))).toBe(false);
           writeFileSync(join(evidence, 'approval.txt'), await session.screen());
           if (mode === 'timeout') {
+            const approvalStarted = Date.now();
             // Real worker wall clock, rather than advancing only a host fake timer.
             await session.waitForScreen(
-              (screen) => /timeout|timed out|deadline|cancelled/i.test(screen),
+              (screen) =>
+                Date.now() - approvalStarted >= 60000 &&
+                /Mod tool dispatch failed|Tool call cancelled|Mod request timed out|cancelled/i.test(
+                  screen,
+                ),
               '60-second root timeout settles the tool',
               75000,
             );
+            json(join(evidence, 'timeout.json'), {
+              elapsedMs: Date.now() - approvalStarted,
+            });
+            expect(Date.now() - approvalStarted).toBeGreaterThanOrEqual(60000);
             await session.idle(500, 10000);
             session.pressKey('\r');
           } else session.pressKey('\r');

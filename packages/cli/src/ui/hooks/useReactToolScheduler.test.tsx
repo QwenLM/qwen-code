@@ -5,6 +5,9 @@
  */
 // @vitest-environment jsdom
 
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { InteractiveModToolScheduler } from '../../services/interactive-mod-tool-scheduler.js';
+import { getHookExecutionOwner } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
@@ -376,6 +379,62 @@ describe('useReactToolScheduler', () => {
       expect.arrayContaining(['call-1', 'call-2']),
     );
     expect(firstOnComplete).not.toHaveBeenCalled();
+  });
+
+  it('captures session and hook owner before asynchronous full-turn model resolution', async () => {
+    let sessionId = 'old';
+    const generation = new AbortController();
+    let resolveModel!: (value: unknown) => void;
+    const resolution = new Promise((resolve) => {
+      resolveModel = resolve;
+    });
+    const config = {
+      getSessionId: () => sessionId,
+      getHookSystem: () => ({ runtimeId: 'runtime' }),
+      getBaseLlmClient: () => ({ resolveForModel: () => resolution }),
+    } as unknown as Config;
+    const session = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue({
+        captureToolSignal: () => generation.signal,
+      } as unknown as interactiveMods.InteractiveModSession);
+    const schedule = vi
+      .spyOn(InteractiveModToolScheduler.prototype, 'schedule')
+      .mockImplementation(async (_request, active) => {
+        expect(active.aborted).toBe(true);
+        expect(getHookExecutionOwner()?.sessionId).toBe('old');
+      });
+    try {
+      const { result } = renderHook(() =>
+        useReactToolScheduler(
+          async () => {},
+          config,
+          () => undefined,
+          () => {},
+        ),
+      );
+      act(() => {
+        result.current[1](
+          {
+            callId: 'call',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'turn',
+          },
+          new AbortController().signal,
+          'vision\0',
+        );
+      });
+      expect(schedule).not.toHaveBeenCalled();
+      generation.abort();
+      sessionId = 'new';
+      resolveModel({});
+      await waitFor(() => expect(schedule).toHaveBeenCalledOnce());
+    } finally {
+      session.mockRestore();
+      schedule.mockRestore();
+    }
   });
 
   it('resolves the tool registry lazily so a scheduler created before initialize still runs tools', async () => {

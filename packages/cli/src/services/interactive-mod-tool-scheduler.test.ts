@@ -151,8 +151,8 @@ describe('interactive Mod logical scheduler', () => {
   );
   it('waits for ready, real completion and Mod unwind', async () => {
     const startup = deferred();
-      const native = deferred();
-      const unwind = deferred();
+    const native = deferred();
+    const unwind = deferred();
     const test = setup(async (input, next, active) => {
       const result = await next(input, active, check);
       await unwind.promise;
@@ -251,6 +251,7 @@ describe('interactive Mod logical scheduler', () => {
     const run = test.scheduler.schedule(test.request, signal());
     await vi.waitFor(() => expect(mocks.schedule).toHaveBeenCalledOnce());
     test.generation.abort();
+    expect(test.update.mock.lastCall?.[0]).toEqual([]);
     let finished = false;
     void run.then(() => {
       finished = true;
@@ -262,6 +263,31 @@ describe('interactive Mod logical scheduler', () => {
     expect(test.complete).not.toHaveBeenCalled();
     expect(test.observe).not.toHaveBeenCalled();
   });
+  it('retains real execution facts if a physical observer fails', async () => {
+    const test = setup(async (input, next, active) =>
+      next(input, active, check),
+    );
+    test.observe.mockRejectedValue(new Error('refresh failed'));
+    await test.scheduler.schedule(test.request, signal());
+    expect(mocks.schedule).toHaveBeenCalledOnce();
+    expect(test.complete.mock.calls[0][0][0].response.executionStatus).toBe(
+      'success',
+    );
+  });
+
+  it('clears the display before awaiting the model continuation callback', async () => {
+    const continuation = deferred();
+    const test = setup(async () => ({ result: { output: 'synthetic' } }));
+    test.complete.mockImplementation(async () => {
+      await continuation.promise;
+    });
+    const run = test.scheduler.schedule(test.request, signal());
+    await vi.waitFor(() => expect(test.complete).toHaveBeenCalledOnce());
+    expect(test.update.mock.lastCall?.[0]).toEqual([]);
+    continuation.resolve();
+    await run;
+  });
+
   it('preserves one native scheduler for command-only, client and disabled paths', async () => {
     const test = setup();
     await test.scheduler.schedule(test.request, signal());

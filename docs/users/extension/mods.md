@@ -123,7 +123,7 @@ this recovery exception.
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
-| Tools      | In headless sessions only, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                   |
+| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                                       |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
