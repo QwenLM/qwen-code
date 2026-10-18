@@ -16,6 +16,56 @@ function event(
 }
 
 describe('Managed transcript projection', () => {
+  it('retains completed Turn duration when replayed text parts share their Item creation time', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ text: 'check' }] }),
+        event(2, 'assistant_delta', { text: 'Starting' }),
+        event(3, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(4, 'tool_completed', { toolCallId: 'call' }),
+        { ...event(5, 'assistant_delta', { text: 'Finished' }), at: 200 },
+        event(6, 'completed', {}),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0].timestamp).toBe(100);
+    expect(messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'Finished',
+      timestamp: 600,
+      isStreaming: false,
+    });
+  });
+
+  it('keeps the original tool clock through repeated progress and separates commentary', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'assistant_delta', { text: 'Starting' }),
+        event(2, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(3, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(4, 'tool_completed', { toolCallId: 'call' }),
+        event(5, 'assistant_delta', { text: 'Finished' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages.map((message) => message.role)).toEqual([
+      'assistant',
+      'tool_group',
+      'assistant',
+    ]);
+    expect(messages[1]).toMatchObject({
+      tools: [{ startTime: 200, endTime: 400, status: 'completed' }],
+    });
+  });
   it('preserves existing output when a result has no preview or a shorter excerpt', () => {
     const source = { ...result, session_id: 's1', turn_id: 'p1' };
     const output = 'complete output';

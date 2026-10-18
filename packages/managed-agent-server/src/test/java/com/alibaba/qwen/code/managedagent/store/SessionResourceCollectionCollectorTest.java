@@ -132,6 +132,14 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         return op;
     }
 
+    private void childRelayRow(String kind, String state) {
+        long now = ToolPublicationRetentionStore.now(jdbc);
+        jdbc.update(
+                "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'run-1', ?, ?, ?, 'CHILD_RUN', ?, ?, '{}', 'STARTING', ?, ?, ?)",
+                ManagedSchemaKeys.operationKey(OperationKind.valueOf(kind), resScope, ManagedSchemaKeys.key("run-1"), "run-1"),
+                resScope, resScope, kind, tenant, session, ManagedSchemaKeys.key("run-1"), "a".repeat(64), state, now, now);
+    }
+
     private void tombstone(String id, String operation, long time) {
         jdbc.update(
                 "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, retirement_operation_id, retirement_generation, retired_at, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, ?, ?, ?)", tenant, id, ManagedSchemaKeys.key(tenant),
@@ -309,6 +317,33 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 "UPDATE ma_operation SET state = ? WHERE operation_kind = 'WORKSPACE_RECOVERY' AND"
                         + " operation_id = X'6f702d7265636f76657279'",
                 "CAPTURING".equals(state) ? "SEALED" : "VERIFIED");
+        jdbc.update("UPDATE ma_operation SET available_at = 0"
+                + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(rows().getFirst().get("state")).isEqualTo("COLLECTED");
+        assertThat(ledger().get("gc_blocker")).isNull();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"done", "orphaned", "unknown"})
+    void aChildStartHoldsCollectionOnlyUntilTheRelayClassifiesIt(String classification) {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        childRelayRow("CHILD_SESSION_START", "watching");
+        var collector = collector(true, Duration.ZERO);
+        assertThat(collector.runOnce()).isFalse();
+        assertThat(ledger().get("gc_blocker")).isEqualTo("child_start_unresolved");
+        assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
+        // Every classification is terminal: an `unknown` walk (#14165 FG10d) is never rewritten,
+        // so it releases the parent as `done` does, even beside a close a host without close
+        // capability still owes on its own row.
+        jdbc.update("UPDATE ma_operation SET state = ? WHERE operation_kind = 'CHILD_SESSION_START'"
+                + " AND session_scope_key = ?", classification, resScope);
+        if (!"orphaned".equals(classification)) {
+            childRelayRow("CHILD_SESSION_CLOSE", "close_debt");
+        }
         jdbc.update("UPDATE ma_operation SET available_at = 0"
                 + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
         assertThat(collector.runOnce()).isTrue();

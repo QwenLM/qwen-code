@@ -99,8 +99,8 @@ final class AgentDefinitionCompiler {
                         || !toolProfiles.contains(profile)) {
                     throw unsupported("tools");
                 }
-                // A Shell profile always asks (#13271); it may never pair
-                // with yolo once the deployment allowlist opens it.
+                // Shell definitions must start with an asking policy (#13271).
+                // An eligible Session owner may select Full Access later.
                 if (profile.startsWith("hosted-workspace-shell/")
                         && "yolo".equals(approvalMode)) {
                     throw unsupported("tools");
