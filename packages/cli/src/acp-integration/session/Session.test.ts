@@ -39323,21 +39323,11 @@ describe('Session', () => {
       });
       vi.mocked(mockClient.requestPermission)
         .mockReset()
-        .mockImplementation(async (request) => {
-          expect(request.toolCall.rawInput).toEqual({
-            command: 'git reset --hard',
-          });
-          expect(
-            request.options.filter(
-              (option: { kind: string }) => option.kind === 'allow_always',
-            ),
-          ).toEqual([]);
-          return {
-            outcome: {
-              outcome: 'selected',
-              optionId: core.ToolConfirmationOutcome.Cancel,
-            },
-          };
+        .mockResolvedValue({
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.Cancel,
+          },
         });
 
       await session.prompt({
@@ -39345,7 +39335,16 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'run tool' }],
       });
 
+      // Asserted after the turn: a throw inside the client mock would be
+      // taken as a failed request rather than fail the test.
       expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      const [request] = vi.mocked(mockClient.requestPermission).mock.calls[0]!;
+      expect(request.toolCall.rawInput).toEqual({
+        command: 'git reset --hard',
+      });
+      expect(
+        request.options.filter((option) => option.kind === 'allow_always'),
+      ).toEqual([]);
       expect(execute).not.toHaveBeenCalled();
     });
 
@@ -39379,15 +39378,11 @@ describe('Session', () => {
         const permissionHook = vi
           .spyOn(core, 'firePermissionRequestHook')
           .mockResolvedValue({ hasDecision: true, shouldAllow: true });
+        let executedBeforeAnswer = false;
         vi.mocked(mockClient.requestPermission)
           .mockReset()
-          .mockImplementation(async (request) => {
-            expect(execute).not.toHaveBeenCalled();
-            expect(
-              request.options.map(
-                (option: { optionId: string }) => option.optionId,
-              ),
-            ).not.toContain(core.ToolConfirmationOutcome.ProceedAlways);
+          .mockImplementation(async () => {
+            executedBeforeAnswer = execute.mock.calls.length > 0;
             return { outcome: { outcome: 'selected', optionId: answer } };
           });
 
@@ -39396,8 +39391,16 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'run tool' }],
         });
 
+        // Asserted after the turn: a throw inside the client mock would be
+        // taken as a failed request rather than fail the test.
         expect(permissionHook).toHaveBeenCalledOnce();
         expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(executedBeforeAnswer).toBe(false);
+        const [request] = vi.mocked(mockClient.requestPermission).mock
+          .calls[0]!;
+        expect(
+          request.options.filter((option) => option.kind === 'allow_always'),
+        ).toEqual([]);
         expect(generateJson).not.toHaveBeenCalled();
         expect(execute).toHaveBeenCalledTimes(runs);
       },
