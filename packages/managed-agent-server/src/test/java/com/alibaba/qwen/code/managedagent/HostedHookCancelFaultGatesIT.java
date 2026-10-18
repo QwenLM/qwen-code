@@ -148,7 +148,10 @@ class HostedHookCancelFaultGatesIT {
     @Test
     @Timeout(300)
     void fg13dCancelWithStoppedWorkerStaysUnknownAndKeepsTheHoldOnMySql() throws Exception {
-        boot("60000", "60000", "hook-ignore-term");
+        // SIGSTOP freezes the worker, not the fixture's own hold timer, so
+        // the command must hold indefinitely: a finite hold would end while
+        // the two 30 s owner lookups run and kill the child under the test.
+        boot("60000", "-1", "hook-ignore-term");
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
         submit(session, "FG13_CANCEL_STOP");
