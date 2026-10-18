@@ -438,11 +438,18 @@
                                  at 2x): the healthy sum becomes
                                  4888 s, so the fork moves to 5498 s
                                  and the Verify step to 105 minutes.
-                                 The FG13d dropped-reply cancel cell
-                                 (issue #14449) adds 150 s: the healthy
-                                 sum becomes 5038 s, so the fork moves
-                                 to 5648 s. -->
-                            <forkedProcessTimeoutInSeconds>5648</forkedProcessTimeoutInSeconds>
+                                 FG11b slice 2's Harness-side store
+                                 faults, a third method of the class
+                                 (four cases, three cold restarts),
+                                 measure 62.1-72.4 s (~145 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 5033 s, so the fork moves to 5643 s,
+                                 which the Verify step's 105 minutes
+                                 still wrap. The FG13d dropped-reply
+                                 cancel cell (issue #14449) adds 150
+                                 s: the healthy sum becomes 5183 s, so
+                                 the fork moves to 5793 s. -->
+                            <forkedProcessTimeoutInSeconds>5793</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
