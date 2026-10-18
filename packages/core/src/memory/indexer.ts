@@ -200,10 +200,21 @@ function docIndexLine(
   others: ScannedAutoMemoryDocument[] = [],
 ): string {
   const target = encodeIndexPathTarget(doc.relativePath);
+  const description = sanitizeIndexField(doc.description) || doc.type;
+  // Reserve the hook's own bytes before the title takes the line budget. The
+  // title is what yields, and a truncated title otherwise consumes the whole
+  // line: `room` lands below MIN_INDEX_HOOK_CHARS and the hook is dropped — on
+  // exactly the population issue #13910 names, entries whose title is long
+  // relative to their path. Subtracted INSIDE the Math.max, never after it: the
+  // floor is what keeps a starved title from collapsing, and subtracting after
+  // the floor would push those lines back over the cap this fix enforces.
+  const hookReserve =
+    INDEX_HOOK_SEPARATOR.length +
+    Math.min(description.length, MIN_INDEX_HOOK_CHARS);
   // Derived from the encoded target, not the raw path.
   const titleLimit = Math.max(
     MIN_INDEX_TITLE_CHARS,
-    MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - target.length,
+    MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - target.length - hookReserve,
   );
   const title = truncateIndexField(
     sanitizeIndexField(doc.title) || doc.type,
@@ -231,7 +242,6 @@ function docIndexLine(
     link.length -
     suffix.length -
     INDEX_HOOK_SEPARATOR.length;
-  const description = sanitizeIndexField(doc.description) || doc.type;
   // A hook that FITS whole costs nothing beyond its bytes — keep it. Drop the
   // hook only when it would have to be CUT below MIN_INDEX_HOOK_CHARS.
   if (description.length > room && room < MIN_INDEX_HOOK_CHARS) {

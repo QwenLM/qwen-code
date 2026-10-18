@@ -379,8 +379,11 @@ describe('managed auto-memory indexer', () => {
     expect(line).toContain('…');
     // The target is never cut: the link still resolves.
     expect(linkTarget(line)).toBe(relativePath);
-    // The title ate the budget, so the optional hook is dropped.
-    expect(line).not.toContain('—');
+    // The hook is reserved before the title takes the budget, so this entry —
+    // the long-title, short-path population issue #13910 is about — keeps it
+    // even though the title had to be cut.
+    expect(line).toContain('— hook');
+    expect(line.length).toBeLessThanOrEqual(150);
   });
 
   it('keeps a relative path longer than the field cap addressable', () => {
