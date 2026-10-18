@@ -467,8 +467,8 @@ class TaskCancelCoordinatorTest {
 
     @Test
     void aTaskWithoutACancelPathFailsWithoutDelivery() {
-        target.set(new TaskTarget("automation_run", "automation-1",
-                "automation_run", "running", 1, JSON.createObjectNode()));
+        target.set(new TaskTarget("unknown", "unknown-1",
+                "unknown", "running", 1, JSON.createObjectNode()));
         coordinator.dispatch(TENANT, SESSION, OPERATION);
         assertThat(sent).isEmpty();
         assertThat(mockingDetails(broker).getInvocations()).isEmpty();
@@ -476,6 +476,90 @@ class TaskCancelCoordinatorTest {
                 eq(OPERATION), anyString(), eq(1L),
                 eq(TaskCancelOutcome.failed("task_action_unavailable")),
                 eq(0L));
+    }
+
+    private TaskTarget automationRun(String state) {
+        return new TaskTarget("automation_run", "arun_" + "1".repeat(64),
+                "automation_run", state, 2, JSON.createObjectNode()
+                        .put("scheduleId", "asch_" + "1".repeat(32))
+                        .put("occurrenceKey", "manual:original"));
+    }
+
+    private void automationSend() {
+        when(harness.runAutomationOperation(eq(TENANT), eq(SESSION), any()))
+                .thenAnswer(args -> {
+                    sent.add(Map.copyOf(args.getArgument(2)));
+                    if (afterSend.get() != null) {
+                        target.set(afterSend.get());
+                    }
+                    if (harnessFailure.get() != null) {
+                        throw harnessFailure.get();
+                    }
+                    return Map.of("state", "settled");
+                });
+    }
+
+    @Test
+    void anAutomationCancelTargetsOnlyItsOriginalOccurrence() {
+        automationSend();
+        target.set(automationRun("running"));
+        afterSend.set(automationRun("cancelled"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).hasSize(1);
+        assertThat(sent.getFirst()).containsEntry("kind", "cancel_run")
+                .containsEntry("automationRunId", "arun_" + "1".repeat(64))
+                .containsEntry("scheduleId", "asch_" + "1".repeat(32))
+                .containsEntry("occurrenceKey", "manual:original");
+        verify(harness, never()).runChildOperation(any(), any(), any());
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION), eq(OPERATION),
+                anyString(), eq(1L), eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    @Test
+    void anAutomationCancelReadsCommittedProofEvenWhenTheReplyWasLost() {
+        automationSend();
+        target.set(automationRun("running"));
+        afterSend.set(automationRun("cancelled"));
+        harnessFailure.set(new IllegalStateException("reply lost"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION), eq(OPERATION),
+                anyString(), eq(1L), eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    @Test
+    void anAutomationAcknowledgmentAloneIsNotCancellationProof() {
+        automationSend();
+        target.set(automationRun("running"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store, never()).settleTaskCancel(any(), any(), any(), any(),
+                anyLong(), eq(TaskCancelOutcome.completed()), anyLong());
+    }
+
+    @Test
+    void aNaturallySettledAutomationKeepsItsOutcome() {
+        automationSend();
+        target.set(automationRun("running"));
+        afterSend.set(automationRun("completed"));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION), eq(OPERATION),
+                anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")), eq(0L));
+    }
+
+    @Test
+    void aParkedAutomationCancelReconcilesWithoutDelivery() {
+        ParkedOperation parked = new ParkedOperation(TENANT, SESSION,
+                OPERATION, "TASK_CANCEL");
+        when(store.findOperation(TENANT, SESSION, OPERATION))
+                .thenReturn(Optional.of(operation("RECOVERY_BLOCKED", 16)));
+        target.set(automationRun("running"));
+        assertThat(coordinator.read(parked).orElseThrow())
+                .isEqualTo(AcceptanceVerdict.unknown());
+        target.set(automationRun("cancelled"));
+        assertThat(coordinator.read(parked).orElseThrow())
+                .isEqualTo(AcceptanceVerdict.committed());
+        assertThat(sent).isEmpty();
+        verify(harness, never()).runAutomationOperation(any(), any(), any());
     }
 
     // H4f-b: a workflow run rides the same record-first delivery — the
