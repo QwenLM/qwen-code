@@ -429,7 +429,6 @@ describe('qwen serve multi-workspace channel workers', () => {
     await expect(
       primaryServer.sendMessage('/session use review', bobTarget),
     ).resolves.toContain('Selected task "review"');
-    // A cold spawn may legitimately consume all of ACP_INITIALIZE_TIMEOUT_MS above.
   }, 300_000);
 
   it('returns partial startup failures from control and daemon status', async () => {
