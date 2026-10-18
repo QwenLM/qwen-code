@@ -7,7 +7,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Config, deriveConfig } from './config.js';
 import type { ConfigParameters } from './config.js';
-import { AuthType } from '../core/contentGenerator.js';
+import {
+  AuthType,
+  createContentGeneratorConfig,
+} from '../core/contentGenerator.js';
 import { clampOutputTokensToWindow } from '../core/tokenLimits.js';
 import { computeThresholds } from '../services/chatCompressionService.js';
 import { runWithRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
@@ -44,30 +47,50 @@ const makeConfig = (overrides: Partial<ConfigParameters> = {}) =>
 describe('model auto-compaction threshold', () => {
   it('follows model switches without reducing the context window or output budget', async () => {
     const config = makeConfig();
-    for (const [model, ratio, window, auto] of [
-      ['large-window', 0.25, 1_000_000, 250_000],
-      ['small-window', 0.85, 262_144, 222_822.4],
-      ['large-window', 0.25, 1_000_000, 250_000],
+    for (const [model, ratio, window, auto, outputBudget] of [
+      ['large-window', 0.25, 1_000_000, 250_000, 64_000],
+      ['small-window', 0.85, 262_144, 222_822.4, 4_000],
+      ['large-window', 0.25, 1_000_000, 250_000, 64_000],
     ] as const) {
       await config.setModel(model);
+      const generationConfig = createContentGeneratorConfig(
+        config,
+        AuthType.USE_OPENAI,
+        {
+          ...config.getModelsConfig().getGenerationConfig(),
+          apiKey: 'test-key',
+        },
+      );
+      const resolvedWindow = generationConfig.contextWindowSize!;
       expect(config.getAutoCompactThreshold()).toBe(ratio);
+      expect(resolvedWindow).toBe(window);
       expect(
-        config.getModelsConfig().getGenerationConfig().contextWindowSize,
-      ).toBe(window);
-      expect(
-        computeThresholds(window, config.getAutoCompactThreshold()).auto,
+        computeThresholds(
+          resolvedWindow,
+          config.getAutoCompactThreshold(generationConfig),
+        ).auto,
       ).toBe(auto);
-      expect(clampOutputTokensToWindow(64_000, window, 100_000)).toBe(64_000);
+      expect(clampOutputTokensToWindow(64_000, resolvedWindow, 250_000)).toBe(
+        outputBudget,
+      );
     }
   });
 
   it.each([undefined, 0, -0.5, 1.1, Number.NaN, Infinity])(
-    'falls back to the global ratio for model value %s',
-    (autoCompactThreshold) => {
+    'falls back to the global ratio for provider value %s',
+    async (autoCompactThreshold) => {
       const config = makeConfig({
         autoCompactThreshold: 0.6,
-        generationConfig: { autoCompactThreshold },
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'large-window',
+              generationConfig: { autoCompactThreshold },
+            },
+          ],
+        },
       });
+      await config.setModel('large-window');
       expect(config.getAutoCompactThreshold()).toBe(0.6);
     },
   );

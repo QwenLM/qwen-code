@@ -47,8 +47,10 @@ all consumers use that getter.
 
 `LoggingContentGenerator` passes its bound generation config through the
 optional fourth argument of `createContextUsageSnapshot` to the getter. Exact
-route and vision requests without an AsyncLocalStorage override therefore use
-the target model's ratio with the target model's window.
+route and vision requests without an AsyncLocalStorage override therefore
+resolve the ratio from the request's bound config. The snapshot window follows
+the existing resolution and fallback behavior of that config. Correcting an
+inherited session window on a routed request is outside this change's scope.
 
 Switching registered models replaces the override with the destination model's
 value, including an absent value. Derived agents targeting a different auth
@@ -70,7 +72,7 @@ This change does not redesign context-window inference or resolve the broader
 window issues in [#13338](https://github.com/QwenLM/qwen-code/issues/13338) and
 [#13415](https://github.com/QwenLM/qwen-code/issues/13415). It ensures the new
 ratio follows the actual model, and verifies that registered main-model
-switches retain the correct window.
+switches retain their explicitly configured windows.
 
 ## Affected production paths
 
