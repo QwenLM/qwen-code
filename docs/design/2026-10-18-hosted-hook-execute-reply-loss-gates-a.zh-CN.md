@@ -22,9 +22,10 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
 
 ## 用例
 
-| 用例                 | 注入                                                                                     | 期望                                                                                                                                       |
-| -------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `execute-reply-lost` | `PreToolUse` 命令 Hook 运行中；broker 代理在 worker 已接收后丢弃 `hook-execute` 的回复。 | 恰好一次物理调用；重试通过 owner 状态解析同一操作；记录结算 `settled` 且 `outcome=success`；放行结果只到达模型一次；代理日志记录这次丢弃。 |
+| 用例                 | 注入                                                                                     | 期望                                                                                                                                                                 |
+| -------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `execute-reply-lost` | `PreToolUse` 命令 Hook 运行中；broker 代理在 worker 已接收后丢弃 `hook-execute` 的回复。 | 恰好一次物理调用；重试通过 owner 状态解析同一操作；记录结算 `settled` 且 `outcome=success`；放行结果只到达模型一次；代理日志记录这次丢弃。                           |
+| `status-reply-lost`  | 同样的 solo 命令；broker 代理在派发后丢弃一次 `hook-status` 轮询的回复。                 | 丢失的轮询无法证明结束，因此记录先落 `recovery_blocked` / `outcome_unknown`；随后对同一 owner 的轮询把它结算为 `success`，物理调用仍恰好一次，代理日志记录这次丢弃。 |
 
 ## 变异见证
 
@@ -32,12 +33,15 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
 
 - `execute-reply-lost`：破坏派发的 operation-id 幂等，使重试请求启动第二条命令。
   夹具随后报告两次 `hook.call`，一次调用断言失败。
+- `status-reply-lost`：去掉 `fire` 循环里如实记录 unknown 的提交分支（轮询无法
+  证明结束时写 `recovery_blocked` / `outcome_unknown` 的那一支）。记录会停在
+  `running`，状态断言失败。
 
 ## 非目标
 
-FG13a 其余部分——`hook-catalog`、`hook-status`、`hook-cancel`、`dispatch_started`
-与结果提交的 store ack、以及 HTTP Hook 响应丢失——仍留在 #14449。同样不在范围：
-FG13b、FG13e、FG13f、本地非托管 Hook、Windows/macOS，以及 #13133 的设计项。
+FG13a 其余部分——`hook-catalog`、`hook-cancel`、`dispatch_started` 与结果提交的
+store ack、以及 HTTP Hook 响应丢失——仍留在 #14449。同样不在范围：FG13b、
+FG13e、FG13f、本地非托管 Hook、Windows/macOS，以及 #13133 的设计项。
 
 ## 验证
 

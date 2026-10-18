@@ -417,7 +417,7 @@ describe('Hosted real-process gates', () => {
   it.each([
     // Step ceilings today (100 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 185, 200],
+    ['hosted-harness-mysql', 190, 205],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -602,12 +602,14 @@ describe('Hosted real-process gates', () => {
       // and the Verify step to 100 minutes; the FG13d worker-stop cancel
       // cell adds 150 s and the dropped-reply cancel cell adds 150 s, so the
       // fork moves to 5518 and the Verify step to 105 minutes; the FG13a
-      // execute lost-reply cell adds 150 s, so the fork moves to 5668):
+      // execute lost-reply cell adds 150 s, so the fork moves to 5668; the
+      // FG13a status lost-reply cell adds 150 s, so the fork moves to 5818
+      // and the Verify step to 110 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(5668);
+        expect(forkSeconds).toBe(5818);
       }
     },
   );
@@ -648,10 +650,11 @@ describe('Hosted real-process gates', () => {
   // MySQL 8.4.6 across four acceptance runs (~170s budgeted at 2x), so it
   // becomes 4608s; the FG13d worker-stop cancel cell adds 150s and the
   // dropped-reply cancel cell adds 150s, so it becomes 4908s; the FG13a
-  // execute lost-reply cell adds 150s, so it becomes 5058s.
+  // execute lost-reply cell adds 150s, so it becomes 5058s; the FG13a
+  // status lost-reply cell adds 150s, so it becomes 5208s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 5058;
+  const hostedForkHealthySeconds = 5208;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

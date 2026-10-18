@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -20,6 +22,7 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -249,9 +252,72 @@ class HostedHookReplyLossFaultGatesIT {
         return json.readTree(body);
     }
 
+    @Test
+    @Timeout(300)
+    void fg13aStatusReplyLossStaysUnknownUntilTheNextPollOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+                (method, path, body) -> path.contains("/control") && body.contains("\"kind\":\"hook-status\""),
+                "hook-status-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STATUS_LOSS");
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        // The dropped poll answer cannot prove the end, so the gate records
+        // the honest unknown instead of guessing.
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
+        });
+        assertThat(events("hook.call")).hasSize(1);
+        assertThat(events("hook.allow")).hasSize(1);
+        // A later poll of the same owner resolves the receipt the worker
+        // still holds, without a second physical call.
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("success");
+        assertThat(events("hook.call")).hasSize(1);
+        assertThat(Files.readString(temporary.resolve("proxy.log"))).contains("PROXY dropped hook-status-reply");
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
+
+    // The Harness status route identifies the caller by the client id its
+    // attach minted and the process generation it attached to; the connector
+    // keeps both on the private attachment ref.
+    private record HarnessAttach(String clientId, String bootId) {}
+
+    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
+        Field field = connector.getClass().getDeclaredField("attachments");
+        field.setAccessible(true);
+        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
+            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
+                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
+            }
+        }
+        return null;
+    }
+
+    private HttpResponse<String> hookStatus(String session, String executionId, HarnessAttach attach) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
+                        + "/session/" + session + "/hooks/operations/" + executionId))
+                .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
+        return http.send(request, HttpResponse.BodyHandlers.ofString());
+    }
 
     private void startHarness() throws Exception {
         Path home = Files.createDirectory(temporary.resolve("home-" + ++boots));
@@ -309,7 +375,7 @@ class HostedHookReplyLossFaultGatesIT {
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
-                    && List.of("FG13_EXECUTE_LOSS").contains(prompt);
+                    && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
