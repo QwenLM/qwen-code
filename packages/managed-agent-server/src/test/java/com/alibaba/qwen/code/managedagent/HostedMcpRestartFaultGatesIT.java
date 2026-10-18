@@ -199,25 +199,33 @@ class HostedMcpRestartFaultGatesIT {
         SessionRef reloaded = reload(session);
         pending.cancel(true);
         triggerTurn(reloaded);
+        java.util.concurrent.atomic.AtomicReference<Map<String, Object>>
+                statusRef = new java.util.concurrent.atomic.AtomicReference<>();
         await().atMost(Duration.ofSeconds(60)).ignoreExceptions()
-                .until(() -> controls("mcp-status").stream().anyMatch(
-                        call -> configuration.equals(call.operationId())));
-        Map<String, Object> statusEntry = wire.stream()
-                .filter(entry -> ((Number) entry.get("seq")).intValue()
-                        > wireBaseline)
-                .filter(entry -> {
-                    JsonNode request = (JsonNode) entry.get("request");
-                    return request != null
-                            && "mcp-status".equals(
-                                    request.at("/operation/kind").asText())
-                            && configuration.equals(request.at(
-                                    "/operation/targetOperationId").asText());
-                })
-                .filter(entry -> Integer.valueOf(200)
-                        .equals(entry.get("status")))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(
-                        "No successful status lookup for " + configuration));
+                .untilAsserted(() -> {
+                    Map<String, Object> found = wire.stream()
+                            .filter(entry -> ((Number) entry.get("seq"))
+                                    .intValue() > wireBaseline)
+                            .filter(entry -> {
+                                JsonNode request =
+                                        (JsonNode) entry.get("request");
+                                return request != null
+                                        && "mcp-status".equals(request.at(
+                                                "/operation/kind").asText())
+                                        && configuration.equals(request.at(
+                                                "/operation/targetOperationId")
+                                                .asText());
+                            })
+                            .filter(entry -> Integer.valueOf(200)
+                                    .equals(entry.get("status")))
+                            .findFirst().orElse(null);
+                    assertThat(found)
+                            .as("a successful status lookup for %s",
+                                    configuration)
+                            .isNotNull();
+                    statusRef.set(found);
+                });
+        Map<String, Object> statusEntry = statusRef.get();
         JsonNode statusAnswer = (JsonNode) statusEntry.get("answer");
         String answerState = statusAnswer.path("result").path("state")
                 .asText();
@@ -313,6 +321,13 @@ class HostedMcpRestartFaultGatesIT {
         waitFor(() -> assertThat(fixtureEvents("mcp.exit"))
                 .as("the stdio fixture exits on worker stdin EOF")
                 .hasSize(1));
+        ProcessHandle.of(fixturePid()).ifPresent(handle -> {
+            try {
+                handle.onExit().get(10, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // The fixture records mcp.exit just before it exits.
+            }
+        });
         assertThat(ProcessHandle.of(fixturePid()).map(
                 ProcessHandle::isAlive).orElse(false)).isFalse();
         // A 202 only admits the prompt; the MCP refresh/acquire runs later
@@ -359,6 +374,10 @@ class HostedMcpRestartFaultGatesIT {
             assertThat(code).as("a refusal must name the recovery failure")
                     .isIn("hosted_mcp_recovery_required",
                             "hosted_turn_recovery_required");
+            assertThat(deadGenerationRefused(wireBefore))
+                    .as("a direct refusal must still be backed by the dead "
+                            + "generation's refusal")
+                    .isTrue();
         }
         JsonNode after = configuration(session.id());
         assertThat(after.path("run").path("runtime"))
@@ -589,6 +608,20 @@ class HostedMcpRestartFaultGatesIT {
             String operationId) throws Exception {
         return rawRequest("GET", "/session/" + session.id()
                 + "/mcp/operations/" + operationId, null, session.clientId());
+    }
+
+    private boolean deadGenerationRefused(int wireBefore) {
+        return wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBefore)
+                .map(entry -> (JsonNode) entry.get("answer"))
+                .filter(answer -> answer != null)
+                .anyMatch(answer -> {
+                    String error = answer.path("error").asText();
+                    return "Runtime generation is no longer live".equals(error)
+                            || "Managed Runtime process is not alive."
+                                    .equals(error);
+                });
     }
 
     private String uuid() {
