@@ -53,6 +53,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
@@ -40012,7 +40013,7 @@ describe('Session', () => {
               role: 'user',
               parts: [
                 { text: 'an earlier prompt' },
-                core.createUserPromptSubmitContextPart('extra hook context'),
+                createUserPromptSubmitContextPart('extra hook context'),
               ],
             },
           ]);
