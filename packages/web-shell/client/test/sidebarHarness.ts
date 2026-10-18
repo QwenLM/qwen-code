@@ -166,12 +166,14 @@ export interface SidebarWorkspace {
   refreshCapabilities: Mock;
 }
 
-export function createSidebarWorkspace(options: {
-  baseUrl?: string;
-  colorOptions?: string[];
-  searchWorkspaceSessions?: boolean;
-  capabilities?: Partial<SidebarConnectionCapabilities>;
-} = {}): SidebarWorkspace {
+export function createSidebarWorkspace(
+  options: {
+    baseUrl?: string;
+    colorOptions?: string[];
+    searchWorkspaceSessions?: boolean;
+    capabilities?: Partial<SidebarConnectionCapabilities>;
+  } = {},
+): SidebarWorkspace {
   const client: SidebarWorkspaceClient = {
     ...(options.searchWorkspaceSessions
       ? {
@@ -207,9 +209,11 @@ export interface SidebarWorkspaceActions {
   updateSessionOrganization: Mock;
 }
 
-export function createSidebarWorkspaceActions(options: {
-  colorOptions?: string[];
-} = {}): SidebarWorkspaceActions {
+export function createSidebarWorkspaceActions(
+  options: {
+    colorOptions?: string[];
+  } = {},
+): SidebarWorkspaceActions {
   return {
     addWorkspace: vi.fn(),
     removeWorkspace: vi.fn(),
@@ -240,9 +244,11 @@ export interface SidebarSessionPageState {
  * One catalog page (active/pinned/archived). `includeData: false` keeps the
  * legacy settled shape without the explicit `data` key.
  */
-export function createSidebarSessionPageState(options: {
-  includeData?: boolean;
-} = {}): SidebarSessionPageState {
+export function createSidebarSessionPageState(
+  options: {
+    includeData?: boolean;
+  } = {},
+): SidebarSessionPageState {
   const sessions: DaemonSessionSummary[] = [];
   const state: SidebarSessionPageState = {
     sessions,
