@@ -340,19 +340,24 @@ class HostedAutomationFaultGatesIT {
     }
 
     // occurrence-insert: the scanner's record of the next slot is refused in MySQL. Nothing
-    // fires while it is; once the refusal is dropped, the slot, still timely, is recorded and
-    // fires once.
+    // fires while it is; once the refusal is dropped, that same slot, still timely, is recorded
+    // and fires once. A later minute firing in its place would mean the slot was lost.
     private Clocked occurrenceInsert() throws Exception {
         String session = createSession("insert");
         String id = create(session, "FG11B_INSERT", "* * * * *", "insert-base");
-        refuse("occurrence-insert", "INSERT", "ma_schedule_occurrence", "NEW.schedule_id = '" + id + "'");
+        refuse("occurrence-insert", "INSERT", "ma_schedule_occurrence", "NEW.schedule_id = '" + id + "'",
+                "NEW.occurrence_key");
         return () -> {
             awaitRefused("occurrence-insert", 2);
+            List<String> refused = refusedDetails("occurrence-insert");
+            assertThat(refused).as("every refusal is the one slot's record").containsOnly(refused.getFirst());
             assertThat(operations).filteredOn(operation -> id.equals(operation.scheduleId())
                     && kind(operation, "fire_run")).as("fires while the record is refused").isEmpty();
             assertThat(occurrenceKeys(id)).isEmpty();
             dropRefusal("occurrence-insert");
             Map<String, Object> occurrence = awaitOccurrence(id, "fired");
+            assertThat(occurrence.get("occurrence_key")).as("the refused slot is the one that fired")
+                    .isEqualTo(refused.getFirst());
             assertThat(((Number) occurrence.get("attempts")).intValue()).isZero();
             assertOneRun(session, id, (String) occurrence.get("run_id"), (String) occurrence.get("occurrence_key"),
                     1, 0);
@@ -367,13 +372,16 @@ class HostedAutomationFaultGatesIT {
         String session = createSession("settle");
         String id = create(session, "FG11B_SETTLE", "* * * * *", "settle-base");
         refuse("occurrence-settle", "UPDATE", "ma_schedule_occurrence", "NEW.schedule_id = '" + id
-                + "' AND NEW.outcome = 'fired'");
+                + "' AND NEW.outcome = 'fired'", "NEW.occurrence_key");
         return () -> {
             awaitRefused("occurrence-settle", 2);
+            List<String> refused = refusedDetails("occurrence-settle");
+            assertThat(refused).as("every refusal is the one slot's settle").containsOnly(refused.getFirst());
             assertThat(jdbc.queryForList("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ? AND"
                     + " schedule_id = ?", String.class, tenant, id)).containsExactly("firing");
             dropRefusal("occurrence-settle");
             Map<String, Object> occurrence = awaitOccurrence(id, "fired");
+            assertThat(occurrence.get("occurrence_key")).isEqualTo(refused.getFirst());
             int attempts = ((Number) occurrence.get("attempts")).intValue();
             assertThat(attempts).as("re-drives").isGreaterThanOrEqualTo(2);
             assertOneRun(session, id, (String) occurrence.get("run_id"), (String) occurrence.get("occurrence_key"),
@@ -389,7 +397,7 @@ class HostedAutomationFaultGatesIT {
         String session = createSession("watermark");
         String id = create(session, "FG11B_WATERMARK", "* * * * *", "watermark-base");
         refuse("watermark", "UPDATE", "ma_schedule", "NEW.schedule_id = '" + id
-                + "' AND NOT (NEW.watermark_slot <=> OLD.watermark_slot)");
+                + "' AND NOT (NEW.watermark_slot <=> OLD.watermark_slot)", "NEW.watermark_slot");
         return () -> {
             Map<String, Object> occurrence = awaitOccurrence(id, "fired");
             long slot = ((Number) occurrence.get("slot")).longValue();
@@ -450,7 +458,7 @@ class HostedAutomationFaultGatesIT {
     // and once the refusal drops the retry creates the definition once.
     private void receiptClaim() throws Exception {
         String session = createSession("claim");
-        refuse("receipt-claim", "INSERT", "ma_request_receipt", "NEW.idempotency_key = 'receipt-claim'");
+        refuse("receipt-claim", "INSERT", "ma_request_receipt", "NEW.idempotency_key = 'receipt-claim'", "NULL");
         Map<String, Object> definition = definition(session, "FG11B_CLAIM", "0 0 1 1 *");
         HttpResponse<String> refused = send("POST", "/v1/agent-automations", definition, "receipt-claim");
         assertThat(refused.statusCode()).as(refused.body()).isGreaterThanOrEqualTo(500);
@@ -469,7 +477,7 @@ class HostedAutomationFaultGatesIT {
     private void receiptSettle() throws Exception {
         String session = createSession("receipt");
         refuse("receipt-settle", "UPDATE", "ma_request_receipt", "NEW.idempotency_key = 'receipt-settle'"
-                + " AND NEW.result_json <> ''");
+                + " AND NEW.result_json <> ''", "NULL");
         Map<String, Object> definition = definition(session, "FG11B_RECEIPT", "0 0 1 1 *");
         HttpResponse<String> refused = send("POST", "/v1/agent-automations", definition, "receipt-settle");
         assertThat(refused.statusCode()).as(refused.body()).isGreaterThanOrEqualTo(500);
@@ -513,17 +521,17 @@ class HostedAutomationFaultGatesIT {
 
     // FG9b's store refusal: a trigger refuses every write of this tenant that matches until it is
     // dropped, and the MyISAM row it writes first survives the rollback, so a case can count the
-    // refusals.
-    private void refuse(String name, String event, String table, String condition) {
+    // refusals and read what each one refused ({@code detail}, an expression over NEW).
+    private void refuse(String name, String event, String table, String condition, String detail) {
         jdbc.execute("CREATE TABLE IF NOT EXISTS fg11b_fire (tenant_id VARCHAR(64) NOT NULL, case_name"
-                + " VARCHAR(64) NOT NULL, fired_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6))"
-                + " ENGINE = MyISAM");
+                + " VARCHAR(64) NOT NULL, detail VARCHAR(512) NULL, fired_at TIMESTAMP(6) NOT NULL DEFAULT"
+                + " CURRENT_TIMESTAMP(6)) ENGINE = MyISAM");
         String trigger = "fg11b_" + UUID.randomUUID().toString().replace("-", "");
         assertThat(refusals.putIfAbsent(name, trigger)).as(name).isNull();
         jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE " + event + " ON " + table + " FOR EACH ROW BEGIN IF"
                 + " NEW.tenant_id = '" + tenant + "' AND " + condition + " THEN INSERT INTO fg11b_fire (tenant_id,"
-                + " case_name) VALUES ('" + tenant + "', '" + name + "'); SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT"
-                + " = 'FG11B_" + name.toUpperCase().replace('-', '_') + "'; END IF; END");
+                + " case_name, detail) VALUES ('" + tenant + "', '" + name + "', " + detail + "); SIGNAL SQLSTATE"
+                + " '45000' SET MESSAGE_TEXT = 'FG11B_" + name.toUpperCase().replace('-', '_') + "'; END IF; END");
     }
 
     private void dropRefusal(String name) {
@@ -540,6 +548,11 @@ class HostedAutomationFaultGatesIT {
     private int refusedCount(String name) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM fg11b_fire WHERE tenant_id = ? AND case_name = ?",
                 Integer.class, tenant, name);
+    }
+
+    private List<String> refusedDetails(String name) {
+        return jdbc.queryForList("SELECT detail FROM fg11b_fire WHERE tenant_id = ? AND case_name = ? ORDER BY"
+                + " fired_at", String.class, tenant, name);
     }
 
     private void awaitRefused(String name, int times) {

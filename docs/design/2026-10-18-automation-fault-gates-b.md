@@ -16,14 +16,14 @@ definitive refusal, or a stale, retired or missing definition, may do that.
 
 Six cases ship, all in one boot:
 
-| Case                | Injection                                                                                  | Expect                                                                                                                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `occurrence-insert` | MySQL refuses the scanner's record of the next slot (`ma_schedule_occurrence` insert)      | Nothing fires while the record is refused, and no row exists. Once the refusal drops, the slot, still timely, is recorded and fires once (`attempts` 0): one run chain, one model Turn                 |
-| `occurrence-settle` | The fire commits on the Harness, and settling its occurrence `fired` is refused            | The occurrence stays `firing` and is re-driven with backoff. Every re-drive names the same occurrence. Once the refusal drops it settles `fired`: one run chain, one accepted input, one model Turn    |
-| `watermark`         | The slot fires and settles, and the watermark advance after it is refused                  | Every later tick derives the same slot again, and its recorded decision stands: one occurrence, one fire. The watermark moves once the refusal drops                                                   |
-| `receipt-claim`     | MySQL refuses the create's request receipt                                                 | A server failure, not a refusal the caller would not retry. Nothing reaches the Harness. After the refusal drops, the retry creates the definition once                                                |
-| `receipt-settle`    | The Harness commits the create, and Spring's settle of the receipt is refused              | A server failure. The retry finds the receipt claimed but unanswered and re-drives the same operation id. It answers revision 1, with one `defineSchedule` commit                                      |
-| `revision-race`     | The scanner's fire of revision 1 is parked at the relay while an update commits revision 2 | The Harness answers `409 automation_revision_stale`. The scanner re-pins the occurrence and fires revision 2, which settles `fired`. One run chain, and its one model Turn carries revision 2's prompt |
+| Case                | Injection                                                                                  | Expect                                                                                                                                                                                                                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `occurrence-insert` | MySQL refuses the scanner's record of the next slot (`ma_schedule_occurrence` insert)      | Nothing fires while the record is refused, and no row exists; every refusal names the same slot. Once the refusal drops, that slot itself, still timely, is recorded and fires once (`attempts` 0): one run chain, one model Turn. A later minute firing in its place fails the case |
+| `occurrence-settle` | The fire commits on the Harness, and settling its occurrence `fired` is refused            | The occurrence stays `firing` and is re-driven with backoff. Every re-drive names the same occurrence. Once the refusal drops it settles `fired`: one run chain, one accepted input, one model Turn                                                                                  |
+| `watermark`         | The slot fires and settles, and the watermark advance after it is refused                  | Every later tick derives the same slot again, and its recorded decision stands: one occurrence, one fire. The watermark moves once the refusal drops                                                                                                                                 |
+| `receipt-claim`     | MySQL refuses the create's request receipt                                                 | A server failure, not a refusal the caller would not retry. Nothing reaches the Harness. After the refusal drops, the retry creates the definition once                                                                                                                              |
+| `receipt-settle`    | The Harness commits the create, and Spring's settle of the receipt is refused              | A server failure. The retry finds the receipt claimed but unanswered and re-drives the same operation id. It answers revision 1, with one `defineSchedule` commit                                                                                                                    |
+| `revision-race`     | The scanner's fire of revision 1 is parked at the relay while an update commits revision 2 | The Harness answers `409 automation_revision_stale`. The scanner re-pins the occurrence and fires revision 2, which settles `fired`. One run chain, and its one model Turn carries revision 2's prompt                                                                               |
 
 Every case ends with the tenant holding no `skipped` or `unknown`
 occurrence.
@@ -71,7 +71,10 @@ the model stub's prompts.
 Each refusal is a MySQL `BEFORE` trigger fenced by this tenant. As in
 FG9b and FG10c, it refuses every matching write until it is dropped.
 First it writes a row to a MyISAM table, which survives the rollback, so
-the case counts its refusals before it drops them.
+the case counts its refusals before it drops them. The row also records
+what was refused (the occurrence key, or the watermark slot), so
+`occurrence-insert` and `occurrence-settle` check that the slot they
+recover is the one that was refused.
 
 The model-Turn check matches a prompt by both its `Automation ID` and its
 `Occurrence`, because the four clock-bound definitions share one slot key.

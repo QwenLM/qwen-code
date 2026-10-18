@@ -15,14 +15,14 @@ Issue #14446 是 #12380 F 阶段的 FG11 轮：为 automation 两个域 `schedul
 
 共六个用例，在一次启动里跑完：
 
-| 用例                | 注入                                                                       | 预期                                                                                                                                                                   |
-| ------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `occurrence-insert` | MySQL 拒绝扫描器为下一个时隙写记录（`ma_schedule_occurrence` 的 insert）   | 记录被拒期间什么都不 fire，也不存在任何行。拒绝撤掉后，该时隙（仍未超出迟到容忍）被记录并只 fire 一次（`attempts` 为 0）：一条 run 链、一个模型 Turn                   |
-| `occurrence-settle` | fire 已在 Harness 上提交，把它的 occurrence 落成 `fired` 被拒绝            | occurrence 保持 `firing`，按退避重驱。每次重驱指向同一个 occurrence。拒绝撤掉后落成 `fired`：一条 run 链、一个被接受的输入、一个模型 Turn                              |
-| `watermark`         | 时隙已 fire 并落定，之后推进 watermark 被拒绝                              | 之后每个 tick 都重新推导出同一个时隙，而它已记录的决策保持不变：一个 occurrence、一次 fire。拒绝撤掉后 watermark 推进                                                  |
-| `receipt-claim`     | MySQL 拒绝创建请求的回执                                                   | 返回服务端错误，而不是调用方不会重试的拒绝。什么都没到达 Harness。拒绝撤掉后，重试只创建一次定义                                                                       |
-| `receipt-settle`    | Harness 已提交创建，Spring 结清回执被拒绝                                  | 返回服务端错误。重试发现回执已占用但未作答，用同一个 operation id 重驱，回答 revision 1，只有一次 `defineSchedule` 提交                                                |
-| `revision-race`     | 扫描器对 revision 1 的 fire 被挂在 relay 上，期间一次更新提交了 revision 2 | Harness 回答 `409 automation_revision_stale`。扫描器重新钉住 occurrence，用 revision 2 再 fire，落成 `fired`。一条 run 链，它唯一的模型 Turn 带着 revision 2 的 prompt |
+| 用例                | 注入                                                                       | 预期                                                                                                                                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `occurrence-insert` | MySQL 拒绝扫描器为下一个时隙写记录（`ma_schedule_occurrence` 的 insert）   | 记录被拒期间什么都不 fire，也不存在任何行；每次拒绝都针对同一个时隙。拒绝撤掉后，正是这个时隙（仍未超出迟到容忍）被记录并只 fire 一次（`attempts` 为 0）：一条 run 链、一个模型 Turn。如果是后面某一分钟顶替它 fire，用例失败 |
+| `occurrence-settle` | fire 已在 Harness 上提交，把它的 occurrence 落成 `fired` 被拒绝            | occurrence 保持 `firing`，按退避重驱。每次重驱指向同一个 occurrence。拒绝撤掉后落成 `fired`：一条 run 链、一个被接受的输入、一个模型 Turn                                                                                     |
+| `watermark`         | 时隙已 fire 并落定，之后推进 watermark 被拒绝                              | 之后每个 tick 都重新推导出同一个时隙，而它已记录的决策保持不变：一个 occurrence、一次 fire。拒绝撤掉后 watermark 推进                                                                                                         |
+| `receipt-claim`     | MySQL 拒绝创建请求的回执                                                   | 返回服务端错误，而不是调用方不会重试的拒绝。什么都没到达 Harness。拒绝撤掉后，重试只创建一次定义                                                                                                                              |
+| `receipt-settle`    | Harness 已提交创建，Spring 结清回执被拒绝                                  | 返回服务端错误。重试发现回执已占用但未作答，用同一个 operation id 重驱，回答 revision 1，只有一次 `defineSchedule` 提交                                                                                                       |
+| `revision-race`     | 扫描器对 revision 1 的 fire 被挂在 relay 上，期间一次更新提交了 revision 2 | Harness 回答 `409 automation_revision_stale`。扫描器重新钉住 occurrence，用 revision 2 再 fire，落成 `fired`。一条 run 链，它唯一的模型 Turn 带着 revision 2 的 prompt                                                        |
 
 每个用例结束时，该租户都没有 `skipped` 或 `unknown` 的 occurrence。
 
@@ -58,7 +58,8 @@ Issue #14446 是 #12380 F 阶段的 FG11 轮：为 automation 两个域 `schedul
 
 每个拒绝都是一个按本租户隔离的 MySQL `BEFORE` trigger。和 FG9b、FG10c 一样，它会拒绝所有
 匹配的写入，直到被删除。它先往一张 MyISAM 表写一行（不会随回滚消失），所以用例可以在删除
-trigger 之前数出拒绝次数。
+trigger 之前数出拒绝次数。这一行还记录被拒绝的是什么（occurrence key 或 watermark 时隙），所以
+`occurrence-insert` 和 `occurrence-settle` 会检查它们恢复的时隙正是被拒绝的那个。
 
 模型 Turn 的检查同时按 prompt 里的 `Automation ID` 和 `Occurrence` 匹配，因为四个依赖时钟的
 定义共用同一个时隙 key。
