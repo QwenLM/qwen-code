@@ -57,6 +57,14 @@ const NULL_FUNCTION_TOOL = {
   function: null,
 } as unknown as OpenAI.Chat.ChatCompletionTool;
 
+// The only malformed entry that separates the type check from the null check
+// behind it: a non-function tool that still carries a `function` object, so
+// removing either conjunct alone changes what this entry gets.
+const NON_FUNCTION_WITH_FUNCTION_TOOL = {
+  type: 'custom',
+  function: { name: 'code', parameters: undefined },
+} as unknown as OpenAI.Chat.ChatCompletionTool;
+
 function createConfig(
   model: string,
   baseUrl: string,
@@ -383,6 +391,23 @@ describe('generationConfig.toolParametersMandatory', () => {
         null,
         NULL_FUNCTION_TOOL,
       ]);
+    });
+
+    it('leaves a non-function entry that carries a function object untouched when the helper is called directly', () => {
+      const request = withEmptyToolParameters({
+        model: 'local-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+        tools: [CONVERTER_SHAPE, NON_FUNCTION_WITH_FUNCTION_TOOL],
+      });
+
+      expect(request.tools?.[0]).toEqual({
+        ...CONVERTER_SHAPE,
+        function: {
+          ...CONVERTER_SHAPE.function,
+          parameters: EMPTY_PARAMETERS,
+        },
+      });
+      expect(request.tools?.[1]).toBe(NON_FUNCTION_WITH_FUNCTION_TOOL);
     });
 
     it('repairs a tool merged from extra_body and leaves a custom tool intact', () => {

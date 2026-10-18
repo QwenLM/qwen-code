@@ -8,9 +8,15 @@ Status: implemented.
 
 A function tool that takes no arguments is sent without a `parameters` object.
 Strict OpenAI-compatible servers that type `tools[].function.parameters` as a
-required Pydantic field reject the whole request over it — `Field required` on
-`tools[].function.parameters`, reported against TabbyAPI. The request fails
-before the model sees any tool, so no tool call can be made at all.
+required field reject the whole request over it. The confirmed capture is
+serde-based — `400 litellm.BadRequestError: ... tools[5].function: missing
+field parameters`, on a `deepseek-v4.1-flash` route through a gateway (#11956).
+Pydantic-typed servers answer the same rejection as `Field required` on
+`tools[].function.parameters`, the form reported against TabbyAPI before that
+server gave the field a default value (tabbyAPI `fb80a9372859`, 2026-09-26), so
+the TabbyAPI runs under Verification stand as dated records rather than a live
+reproducer. The request fails before the model sees any tool, so no tool call
+can be made at all.
 
 ## Why the field is omitted today
 
@@ -95,13 +101,14 @@ declared through Gemini `parameters` fails the first condition, so its schema
 always reaches the repair already carrying the field. An opted-in request
 therefore carries the empty-object schema for a reduced tool and the declared
 shape for every tool the repair leaves alone. The field is present either way,
-and the TabbyAPI run below records HTTP 200 for the bare shape, so this is a
-shape split rather than a rejected request. An MCP tool registered with an empty
-argument list is not an instance of this carve-out: the SDK publishes it as
-`{ "type": "object", "properties": {} }`, which meets all three conditions, so
-the opt-in rewrites it. Filling `properties` on the tools the repair leaves
-alone, so that every parameterless tool ships one shape, is recorded under Not in
-scope; the user-facing documents qualify the promise the same way.
+and the 2026-09-19 TabbyAPI run below records HTTP 200 for the bare shape, so
+this is a shape split rather than a rejected request. An MCP tool registered
+with an empty argument list is not an instance of this carve-out: the SDK
+publishes it as `{ "type": "object", "properties": {} }`, which meets all three
+conditions, so the opt-in rewrites it. Filling `properties` on the tools the
+repair leaves alone, so that every parameterless tool ships one shape, is
+recorded under Not in scope; the user-facing documents qualify the promise the
+same way.
 
 ### Shape
 
@@ -205,9 +212,11 @@ hostname-gated, so it applies wherever the user opted in.
   `extra_body` entry claiming `type: 'function'` with no `function` object is
   left alone on that route with the setting off — the one case where a guard,
   not the flag, is what keeps request building alive. The shared helper is also
-  called directly with a nullish member and a null `function` beside a
-  converter-shaped entry, so every guard conjunct has a case that fails when
-  that conjunct alone is removed. A declared schema passes through unchanged and
+  called directly with a nullish member, a null `function`, and a non-function
+  entry that still carries a `function` object, each beside a converter-shaped
+  entry, so every guard conjunct has a case that fails when that conjunct alone
+  is removed — including `tool.type === 'function'`, which the null check behind
+  it would otherwise mask. A declared schema passes through unchanged and
   a request without tools stays tool-free. With the repair
   disabled every flag-gated case goes red while the MiniMax, omission and
   passthrough cases stay green, so the suite discriminates on the flag rather
@@ -235,9 +244,13 @@ missing field parameters` — which is the arm that used to be shadowed. The uni
   2026-09-19 with three payloads differing only in that field: omitted → HTTP 422
   with `{"type":"missing","loc":["body","tools",0,"function","parameters"],
 "msg":"Field required"}`, `{ "type": "object" }` → HTTP 200, and the shipped
-  `{ "type": "object", "properties": {} }` → HTTP 200. The CLI on that route
-  fails with `422 status code (no body)` by default and completes normally once
-  the key is set on the matching `modelProviders` entry. An earlier run on the
+  `{ "type": "object", "properties": {} }` → HTTP 200. As of that run the CLI on
+  that route failed with `422 status code (no body)` by default and completed
+  normally once the key was set on the matching `modelProviders` entry. That
+  reproducer has since closed: tabbyAPI `fb80a9372859` (2026-09-26, after both
+  runs recorded here) gives `parameters` a default value, so a current TabbyAPI
+  accepts the omission, and #11956's serde/litellm capture above is the live one
+  for this setting. An earlier run on the
   same route, 2026-09-17, recorded HTTP 422 with the field omitted and HTTP 200
   with the bare shape, and added that a key set under `model.generationConfig` is
   reported as ignored for a route that has a matching provider entry, leaving the

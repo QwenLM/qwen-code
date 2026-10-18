@@ -7,9 +7,14 @@
 ## 问题
 
 不接受任何参数的 function tool 在请求中不会携带 `parameters` 对象。
-严格 OpenAI 兼容服务器如果把 `tools[].function.parameters` 声明为 Pydantic
-必填字段，就会因此拒绝整个请求 —— 在 TabbyAPI 上报错为
-`tools[].function.parameters` 的 `Field required`。请求在模型看到任何工具之前就失败了，
+严格 OpenAI 兼容服务器如果把 `tools[].function.parameters` 声明为必填字段，
+就会因此拒绝整个请求。已确认的抓包属于 serde 一族 —— 经网关的
+`deepseek-v4.1-flash` 路由上报出 `400 litellm.BadRequestError: ...
+tools[5].function: missing field parameters`（#11956）。Pydantic 一族的服务器
+对同一种拒绝给出的报错是 `tools[].function.parameters` 的 `Field required`，
+也就是 TabbyAPI 在该服务器为这个字段提供默认值（tabbyAPI `fb80a9372859`，
+2026-09-26）之前所报告的形态；因此"验证"一节里的 TabbyAPI 实测记录是带日期的
+历史纪录，而不是当前可复现的路径。请求在模型看到任何工具之前就失败了，
 所以一个工具调用都无法发出。
 
 ## 为什么今天会省略该字段
@@ -82,8 +87,8 @@ DashScope 自行组装请求，从其合并步骤调用同一份修复。映射�
 `{ "type": "object", "required": [] }`。经 Gemini `parameters` 声明的工具
 不满足第一项，因此其 schema 到达修复时本就带有该字段。开启开关的请求于是
 对被归约的工具发出空对象 schema，对每一个被修复步骤原样保留的工具发出其
-自身声明的形状。两种情况字段都在，下面的 TabbyAPI 实测记录裸形状为 HTTP 200，
-所以这是形状不一致，而非请求被拒。以空参数列表注册的 MCP 工具并不属于这一豁免：
+自身声明的形状。两种情况字段都在，下面的 2026-09-19 TabbyAPI 实测记录裸形状为
+HTTP 200，所以这是形状不一致，而非请求被拒。以空参数列表注册的 MCP 工具并不属于这一豁免：
 SDK 会把它发布为 `{ "type": "object", "properties": {} }`，
 该形状同时满足三项条件，因此开启开关后它同样被改写。给这些被保留的工具补上
 `properties` 以使所有无参数工具发出同一形状，已记入下方的不在范围内，
@@ -173,8 +178,10 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   它还断言在开关关闭时，经由 `extra_body` 合入、声称 `type: 'function'`
   却不带 `function` 对象的条目会被原样保留 —— 在这条路由上撑起请求构建的是
   守卫而不是开关。共享 helper 也会被直接调用，输入中同时含有空值成员、
-  值为 null 的 `function` 与一个 converter 形状的条目，因此每一道守卫都对应
-  一个"仅移除该守卫即变红"的用例。已声明的 schema 原样透传，
+  值为 null 的 `function`、一个仍带有 `function` 对象的非 function 条目，
+  以及一个 converter 形状的条目，因此每一道守卫都对应一个"仅移除该守卫即变红"
+  的用例 —— 包括那会被其后空值判断掩盖的 `tool.type === 'function'`。
+  已声明的 schema 原样透传，
   不含 tools 的请求仍然不带 tools。关闭修复时，每一个受开关门控的用例都会变红，
   而 MiniMax、省略与透传类用例仍为绿，因此测试套件区分的是开关，
   而不是 provider 类。
@@ -198,8 +205,11 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   三个请求体只在该字段上不同：省略 → HTTP 422，错误为
   `{"type":"missing","loc":["body","tools",0,"function","parameters"],"msg":"Field required"}`；
   `{ "type": "object" }` → HTTP 200；线上采用的
-  `{ "type": "object", "properties": {} }` → HTTP 200。CLI 在该路由上默认失败为
-  `422 status code (no body)`，在对应的 `modelProviders` 条目上设置该键后可正常完成。
+  `{ "type": "object", "properties": {} }` → HTTP 200。就那次运行而言，CLI 在该
+  路由上默认失败为 `422 status code (no body)`，在对应的 `modelProviders` 条目上
+  设置该键后可正常完成。这条复现路径此后已经失效：tabbyAPI `fb80a9372859`
+  （2026-09-26，晚于此处记录的两次运行）为 `parameters` 提供了默认值，因此当前的
+  TabbyAPI 会接受省略，而本设置当前有效的抓包是上方 #11956 的 serde/litellm 那一条。
   2026-09-17 在同一路由上的较早运行记录了省略该字段时的 HTTP 422 与裸形状的
   HTTP 200，并额外记录：在存在匹配 provider 条目的路由上，写在
   `model.generationConfig` 下的键会被报告为忽略，请求仍为 422 ——

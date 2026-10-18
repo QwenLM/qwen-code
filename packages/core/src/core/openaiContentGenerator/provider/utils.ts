@@ -45,10 +45,11 @@ export function stripReasoningContent(
 }
 
 // Servers that type `tools[].function.parameters` as a required field reject a
-// request whose parameterless tool omits it (Pydantic `Field required`, e.g.
-// TabbyAPI). The converter omits the field on purpose (#11431) because llama.cpp
-// / LM Studio / vLLM reject the shapes that replace it (#11410), so callers here
-// decide per route. Running at the outbound boundary is also what lets an empty
+// request whose parameterless tool omits it: serde-based routers report `missing
+// field parameters` (#11956), Pydantic-typed ones report `Field required`. The
+// converter omits the field on purpose (#11431) because llama.cpp / LM Studio /
+// vLLM reject the shapes that replace it (#11410), so callers here decide per
+// route. Running at the outbound boundary is also what lets an empty
 // `properties` reach the wire at all: `relaxSchemaForFunctionCalling` strips it
 // during conversion.
 //

@@ -207,9 +207,10 @@ export type ContentGeneratorConfig = {
   toolResultContentFormat?: 'parts' | 'string';
   // When true, a tool that declares no arguments is still sent with a
   // `parameters` object. Servers that type `tools[].function.parameters` as a
-  // required field reject the request when a parameterless tool omits it
-  // (Pydantic `Field required`, e.g. TabbyAPI). The field is omitted by default
-  // because llama.cpp / LM Studio / vLLM reject the replacement shapes
+  // required field reject the request when a parameterless tool omits it —
+  // `missing field parameters` on serde/litellm routers (#11956), `Field
+  // required` on Pydantic-typed ones. The field is omitted by default because
+  // llama.cpp / LM Studio / vLLM reject the replacement shapes
   // (QwenLM/qwen-code#11431, #11410), so this stays an explicit per-route opt-in.
   toolParametersMandatory?: boolean;
 };
