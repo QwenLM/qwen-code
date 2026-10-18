@@ -7046,7 +7046,10 @@ export class Session implements SessionContext {
             // abort and #preserveUnsentMessageHistory still push
             // `nextMessage` into model history — unmarked, it would stay
             // unrewindable for the rest of the session. markApiHistoryPrompt
-            // ignores non-string ids, so this cannot double-mark.
+            // ignores non-string ids, so this cannot double-mark. A tool-lap
+            // continuation later carries the same id (the entry belongs to
+            // this turn), but only this prompt entry starts it, and the
+            // resolver treats that one as the turn's anchor.
             let nextMessage: Content | null = { role: 'user', parts };
             markApiHistoryPrompt(nextMessage, historyPromptId);
             let turnCount = 0;
@@ -7191,7 +7194,16 @@ export class Session implements SessionContext {
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
                   const chat = this.#getCurrentChat();
-                  markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                  // A cancel before the first send lands on the prompt entry
+                  // this turn already marked above; a retry/continuation
+                  // carries the identity of the entries it stripped, so
+                  // replacing it with the transport id would duplicate an
+                  // earlier turn's mark and make both unresolvable. Only an
+                  // entry without an identity of its own (a tool-lap
+                  // continuation) takes the turn id.
+                  if (!getApiHistoryPromptId(nextMessage)) {
+                    markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                  }
                   chat.addHistory(nextMessage);
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
@@ -7273,7 +7285,11 @@ export class Session implements SessionContext {
                     // user never got an answer to.
                     const preserveFullMessage =
                       isContinue || sendResult.stopReason === 'cancelled';
-                    if (preserveFullMessage && nextMessage) {
+                    if (
+                      preserveFullMessage &&
+                      nextMessage &&
+                      !getApiHistoryPromptId(nextMessage)
+                    ) {
                       markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                     }
                     this.#preserveUnsentMessageHistory(

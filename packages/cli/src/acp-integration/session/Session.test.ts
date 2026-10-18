@@ -7160,6 +7160,53 @@ describe('Session', () => {
       expect(session.getRewindCutPoint(promptId!)).toBe(0);
     });
 
+    it("keeps a continued turn's stripped identity when cancelled before the send", async () => {
+      // A retry/continuation reuses the identity of the entries it stripped.
+      // The pre-send cancel path used to re-stamp that entry with the
+      // transport id — the previous turn's mark — which duplicated an earlier
+      // turn under the unique-match resolver and made both refuse.
+      const previous: Content = {
+        role: 'user',
+        parts: [{ text: 'previous prompt' }],
+      };
+      markApiHistoryPrompt(previous, 'previous-prompt');
+      const orphan: Content = { role: 'user', parts: [{ text: 'unanswered' }] };
+      markApiHistoryPrompt(orphan, 'continued-prompt');
+      mockChat.getHistory = vi.fn().mockReturnValue([previous]);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([previous]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([orphan]);
+
+      let releaseCompression!: () => void;
+      const compressionGate = new Promise<void>((resolve) => {
+        releaseCompression = resolve;
+      });
+      mockLlmClient.tryCompressChat.mockImplementation(async () => {
+        await compressionGate;
+        return {
+          originalTokenCount: 1,
+          newTokenCount: 1,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+      });
+
+      const prompt = session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+      await vi.waitFor(() =>
+        expect(mockLlmClient.tryCompressChat).toHaveBeenCalled(),
+      );
+      await session.cancelPendingPrompt();
+      releaseCompression();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+
+      const pushed = vi.mocked(mockChat.addHistory).mock.calls.at(-1)![0];
+      expect(getApiHistoryPromptId(pushed)).toBe('continued-prompt');
+    });
+
     it('associates a recording-disabled fresh prompt with its admitted daemon identity', async () => {
       vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
       const snapshots: core.FileHistorySnapshot[] = [];
