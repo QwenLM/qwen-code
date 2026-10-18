@@ -267,6 +267,23 @@ describe('Managed transcript projection', () => {
     expect(priorReads).toBe(0);
   });
 
+  it('rebuilds when a later raw array carries no epoch token', () => {
+    // use-managed-session stores a full transcript snapshot's events array
+    // directly (it never passed through mergeManagedEvents), so two
+    // consecutive reads are two unregistered arrays of equal length. The
+    // projector must treat the second as unproven continuity and rebuild
+    // rather than reuse the first projection.
+    const firstRead = [event(1, 'assistant_delta', { text: 'A' })];
+    const secondRead = [event(1, 'assistant_delta', { text: 'B' })];
+    const projector = createManagedMessageProjector();
+    expect(projector(firstRead, '[truncated]')).toMatchObject([
+      { role: 'assistant', content: 'A' },
+    ]);
+    expect(projector(secondRead, '[truncated]')).toMatchObject([
+      { role: 'assistant', content: 'B' },
+    ]);
+  });
+
   it('rebuilds a sibling append branch instead of reusing the first branch', () => {
     const root = mergeManagedEvents(
       [],
