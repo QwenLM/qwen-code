@@ -2375,7 +2375,7 @@ export class NativeLspService {
       // the existing pass-through documented in the diagnostic design.
       const attributable =
         extension !== undefined &&
-        this.isAttributableDiagnosticExtension(extension, serverName);
+        this.isAttributableDiagnosticExtension(extension);
       // A server the queried file provably excludes cannot veto the answer —
       // its failure says nothing about this file — and neither can a server
       // that answered `-32601`, which never implemented the pull in the first

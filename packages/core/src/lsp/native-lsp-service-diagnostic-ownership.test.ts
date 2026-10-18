@@ -258,20 +258,56 @@ describe('diagnostic ownership from explicit declarations', () => {
     },
   );
 
-  it('keeps scoped attribution independent of an unselected server mapping', async () => {
+  it('uses global attribution to certify a scoped clean answer', async () => {
     await start([
+      { name: 'custom', language: 'custom', connection: connection() },
       { language: 'remote-lsp', connection: connection() },
-      { language: 'generic', connection: connection() },
     ]);
 
-    expect((await document('main.custom', 'server-1')).error).toBeUndefined();
+    expect((await document('main.custom', 'custom')).error).toBeUndefined();
 
-    manager.getHandles().get('server-0')!.config.extensionToLanguage = {
+    manager.getHandles().get('server-1')!.config.extensionToLanguage = {
       '.custom': 'custom',
     };
-    const result = await document('main.custom', 'server-1');
-    expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('No diagnostics found');
+    const result = await document('main.custom', 'custom');
+    expect(result.error?.message).toContain('could not be attributed');
+    expect(result.llmContent).not.toContain('No diagnostics found');
+  });
+
+  it('does not let a scoped foreign server certify an explicitly owned extension', async () => {
+    await start([
+      { name: 'pyright', language: 'python', connection: connection() },
+      {
+        name: 'my-dsl',
+        language: 'mydsl',
+        mapping: { '.dsl': 'mydsl' },
+        connection: connection(),
+      },
+    ]);
+
+    const result = await document('main.dsl', 'pyright');
+    expect(result.error?.message).toContain('could not be attributed');
+    expect(result.llmContent).not.toContain('No diagnostics found');
+  });
+
+  it('names a failed scoped server despite an unselected mapping', async () => {
+    await start([
+      {
+        name: 'pyright',
+        language: 'python',
+        connection: connection(),
+        failed: true,
+      },
+      {
+        language: 'remote-lsp',
+        mapping: { '.custom': 'custom' },
+        connection: connection(),
+      },
+    ]);
+
+    const result = await document('main.custom', 'pyright');
+    expect(result.error?.message).toContain('pyright');
+    expect(result.error?.message).not.toContain('no configured server covers');
   });
 
   it('keeps an empty language ID as a veto for an attributable file', async () => {
@@ -284,7 +320,7 @@ describe('diagnostic ownership from explicit declarations', () => {
       },
       {
         language: 'remote-lsp',
-        mapping: { '.custom': 'custom' },
+        mapping: { '.custom': 'custom', '.': 'dot' },
         connection: connection(),
       },
     ]);
