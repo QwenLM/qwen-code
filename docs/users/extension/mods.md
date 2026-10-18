@@ -85,11 +85,29 @@ the current Mod command; the next command waits for worker cancellation to
 settle. Clear, resume and branch retain the loaded modules and their variables,
 send `session.end` for the replaced session, and do not repeat `session.start`.
 
-Interactive support currently covers commands, lifecycle and logs. Explicit
-`tool.call`, `tool.check` and `tool.*` registrations reject initialization before
-a model request. Broad wildcard or negated patterns that also match tool events
-receive a visible diagnostic and apply only to supported events. Tool
-interception below is available only in headless sessions.
+Interactive tool middleware runs for model-initiated tools in the local Ink and
+OpenTUI main session. Explicit tool subscriptions and matching wildcard patterns
+use the same tool protocol as headless sessions. Client-initiated slash-command
+tools keep their native path and do not trigger a model continuation.
+
+A synthetic result or denial completes the logical call without inventing a
+native invocation. Every real attempt retains its execution facts and write
+observations, even when a Mod selects an earlier result or withholds a later
+result. The model and recording receive one final result after Mod unwind.
+Native permission denials and required approvals remain authoritative.
+
+The 60-second root wall-clock limit still includes native execution and human
+approval waiting. Expiry cancels outstanding work and drains it before releasing
+the queue; old approvals cannot start a new execution. Esc and accepted session
+switches also revoke the old session's queued tools and approval callbacks.
+
+Tool middleware uses one native scheduler batch per attempt, so classic
+PostToolBatch hooks run for each real attempt, never for synthetic results or
+logical aggregation. Each attempt validates independently; the native scheduler's
+three-identical-validation-failures diagnostic does not accumulate across Mod
+attempts. Invalid inputs remain rejected and the 64-attempt limit remains.
+Sessions without tool middleware retain their existing scheduler, parallelism
+and validation diagnostic behavior.
 
 If Mod initialization fails in an interactive terminal, the error remains visible
 and the input stays available for the built-in `/help` and `/quit` commands.
@@ -172,8 +190,8 @@ export function register(on) {
 
 Every ordinary `tool.call` next starts a fresh native tool attempt: validation,
 classic hooks, permissions, approvals and invocation guards all still apply.
-Additional attempts count against `--max-tool-calls`; catch replay adds no
-attempt. Sessions with tool middleware serialize tool calls, including parallel
+In headless runs, additional attempts count against `--max-tool-calls`; catch replay adds no
+attempt. Interactive terminals retain their existing usage counters and do not add a run-budget setting. Sessions with tool middleware serialize tool calls, including parallel
 next calls, because rewritten arguments may introduce side effects. One root
 call permits at most 64 native attempts and 32 outstanding host operations.
 The 60-second root limit includes native execution and time spent waiting for

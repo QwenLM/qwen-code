@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { ModSession } from '../../services/mod-session.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
   handleBranchSession,
@@ -250,6 +251,45 @@ describe('handleResumeSession', () => {
     );
   });
 
+  it('revokes tools before init and restores a fresh owner after failed resume rolls back', async () => {
+    const { config, calls } = createFakeConfig();
+    const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+    const old = owner.captureToolSignal();
+    const syncSession = vi.fn();
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      invalidateTools: () => owner.invalidateTools(),
+      restoreTools: () => owner.restoreTools(),
+      syncSession,
+    } as unknown as interactiveMods.InteractiveModSession);
+    let initializes = 0;
+    const client = {
+      initialize: async () => {
+        initializes++;
+        expect(owner.captureToolSignal().aborted).toBe(true);
+        if (initializes === 1) throw new Error('forward init failed');
+      },
+    };
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue(
+      client as ReturnType<Config['getGeminiClient']>,
+    );
+    try {
+      await handleResumeSession(createFakeHost(config), 'target-session');
+      expect(calls.startNewSession.map(([id]) => id)).toEqual([
+        'target-session',
+        'old-session',
+      ]);
+      expect(old.aborted).toBe(true);
+      expect(owner.captureToolSignal()).not.toBe(old);
+      expect(owner.captureToolSignal().aborted).toBe(false);
+      expect(syncSession).not.toHaveBeenCalled();
+      const nextTool = vi.fn((active: AbortSignal) => active.throwIfAborted());
+      nextTool(owner.captureToolSignal());
+      expect(nextTool).toHaveBeenCalledOnce();
+    } finally {
+      await owner.close();
+    }
+  });
+
   it('re-initializes the client when rolling back after the core swap', async () => {
     // The forward initialize succeeds; the failure lands at the transcript
     // reset (after the core swap, before the UI commit). The rollback's
@@ -357,6 +397,8 @@ describe('handleBranchSession', () => {
     });
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
       syncSession,
+      invalidateTools: vi.fn(),
+      restoreTools: vi.fn().mockResolvedValue(undefined),
     } as unknown as interactiveMods.InteractiveModSession);
     const forkSession = vi.fn(async () => {});
     const renameSession = vi.fn(async () => true);
@@ -401,6 +443,8 @@ describe('handleBranchSession', () => {
     const syncSession = vi.fn();
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
       syncSession,
+      invalidateTools: vi.fn(),
+      restoreTools: vi.fn().mockResolvedValue(undefined),
     } as unknown as interactiveMods.InteractiveModSession);
     const removeSession = vi.fn(async () => true);
     const sessionService = {

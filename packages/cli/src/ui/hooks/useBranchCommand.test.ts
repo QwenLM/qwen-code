@@ -200,6 +200,8 @@ describe('useBranchCommand', () => {
         .spyOn(interactiveMods, 'getInteractiveModSession')
         .mockReturnValue({
           syncSession,
+          invalidateTools: vi.fn(),
+          restoreTools: vi.fn().mockResolvedValue(undefined),
         } as unknown as interactiveMods.InteractiveModSession);
       if (failed)
         getGoalRuntimeReady.mockRejectedValueOnce(new Error('invalid branch'));

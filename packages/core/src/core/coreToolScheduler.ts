@@ -4989,7 +4989,17 @@ export class CoreToolScheduler {
       ? ToolConfirmationOutcome.ProceedOnce
       : outcome;
 
-    await originalOnConfirm(normalizedOutcome, payload);
+    const isCurrentApproval = () =>
+      !signal.aborted &&
+      this.toolCalls.includes(toolCall) &&
+      toolCall.status === 'awaiting_approval';
+    const isCurrentCancellation = () =>
+      outcome === ToolConfirmationOutcome.Cancel &&
+      this.toolCalls.includes(toolCall) &&
+      toolCall.status === 'awaiting_approval';
+    if (!isCurrentApproval() && !isCurrentCancellation()) return;
+    if (!signal.aborted) await originalOnConfirm(normalizedOutcome, payload);
+    if (!isCurrentApproval() && !isCurrentCancellation()) return;
     if (shouldSwitchToDefault) {
       this.config.setApprovalMode(ApprovalMode.DEFAULT);
     }
@@ -5007,8 +5017,15 @@ export class CoreToolScheduler {
         this.config.getOnPersistPermissionRule?.(),
         this.config.getPermissionManager?.(),
         payload,
+        isCurrentApproval,
       );
-      await this.autoApproveCompatiblePendingTools(signal, callId);
+      if (!isCurrentApproval()) return;
+      await this.autoApproveCompatiblePendingTools(
+        signal,
+        callId,
+        isCurrentApproval,
+      );
+      if (!isCurrentApproval()) return;
     }
 
     this.setToolCallOutcome(callId, outcome);
@@ -7864,6 +7881,7 @@ export class CoreToolScheduler {
   private async autoApproveCompatiblePendingTools(
     signal: AbortSignal,
     triggeringCallId: string,
+    isActive: () => boolean,
   ): Promise<void> {
     const pendingTools = this.toolCalls.filter(
       (call) =>
@@ -7879,6 +7897,8 @@ export class CoreToolScheduler {
 
     for (const pendingTool of pendingTools) {
       try {
+        if (!isActive()) return;
+        if (!this.toolCalls.includes(pendingTool)) continue;
         if (
           this.cancelPreExecutionIfAborted(pendingTool.request.callId, signal)
         ) {
@@ -7900,6 +7920,8 @@ export class CoreToolScheduler {
               signal,
             ),
         );
+        if (!isActive()) return;
+        if (!this.toolCalls.includes(pendingTool)) continue;
         if (
           this.cancelPreExecutionIfAborted(pendingTool.request.callId, signal)
         ) {
@@ -7953,6 +7975,8 @@ export class CoreToolScheduler {
                   : undefined,
               }),
           );
+          if (!isActive()) return;
+          if (!this.toolCalls.includes(pendingTool)) continue;
           if (
             this.cancelPreExecutionIfAborted(pendingTool.request.callId, signal)
           ) {
@@ -7992,6 +8016,8 @@ export class CoreToolScheduler {
               );
             }
           }
+          if (!isActive()) return;
+          if (!this.toolCalls.includes(pendingTool)) continue;
           if (
             this.cancelPreExecutionIfAborted(pendingTool.request.callId, signal)
           ) {
@@ -8108,6 +8134,8 @@ export class CoreToolScheduler {
           );
         }
       } catch (error) {
+        if (!isActive()) return;
+        if (!this.toolCalls.includes(pendingTool)) continue;
         if (
           this.cancelPreExecutionIfAborted(pendingTool.request.callId, signal)
         ) {

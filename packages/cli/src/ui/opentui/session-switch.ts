@@ -169,6 +169,7 @@ export async function handleResumeSession(
     // 1. Core swap first (ink order): any failure before the UI commits
     //    rolls the core back to the previous session below.
     resetBackgroundStateForSessionSwitch(config);
+    getInteractiveModSession(config)?.invalidateTools();
     config.startNewSession(sessionId, sessionData);
     coreSwapped = true;
     await waitForGoalRuntime(config);
@@ -207,6 +208,7 @@ export async function handleResumeSession(
     if (coreSwapped && !uiSwapped) {
       try {
         resetBackgroundStateForSessionSwitch(config);
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, undefined);
         await config.loadPausedBackgroundAgents(oldSessionId).catch(() => {});
         // Re-hydrate the client against the restored session, mirroring the
@@ -220,6 +222,7 @@ export async function handleResumeSession(
         // abandoned session's replay, and restore overwrites rather than
         // subtracts, so the final state is exactly pre-swap (#9833).
         await config.getGeminiClient()?.initialize?.();
+        await getInteractiveModSession(config)?.restoreTools();
       } catch (rollbackErr) {
         config
           .getDebugLogger()
@@ -364,6 +367,7 @@ export async function handleBranchSession(
     }
 
     // 7. Core swap first.
+    getInteractiveModSession(config)?.invalidateTools();
     config.startNewSession(newSessionId, resumed);
     coreSwapped = true;
     await waitForGoalRuntime(config);
@@ -406,8 +410,10 @@ export async function handleBranchSession(
   } catch (err) {
     if (coreSwapped && !uiSwapped) {
       try {
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, prevSessionData);
         await config.getGeminiClient()?.initialize?.();
+        await getInteractiveModSession(config)?.restoreTools();
       } catch (rollbackErr) {
         config
           .getDebugLogger()

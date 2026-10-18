@@ -19,14 +19,10 @@ import type {
   CompletedToolCall,
   CancelledToolCall,
   OutputUpdateHandler,
-  AllToolCallsCompleteHandler,
-  ToolCallsUpdateHandler,
-  ToolCall,
   Status as CoreStatus,
   EditorType,
 } from '@qwen-code/qwen-code-core';
 import {
-  CoreToolScheduler,
   compactToolResultDisplayForHistory,
   convertToFunctionErrorResponse,
   createDebugLogger,
@@ -45,6 +41,13 @@ import type {
 import { ToolCallStatus } from '../types.js';
 import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
 import { collectInlineImages } from '../utils/inline-image-parts.js';
+
+import {
+  InteractiveModToolScheduler,
+  type InteractiveCompletedToolCall,
+  type InteractiveToolCall,
+  type InteractivePendingToolCall,
+} from '../../services/interactive-mod-tool-scheduler.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
@@ -98,14 +101,17 @@ void _ASSERT_INHERITED_FIELDS_PRESENT;
 export type TrackedExecutingToolCall = ExecutingToolCall & {
   responseSubmittedToLlm?: boolean;
 };
-export type TrackedCompletedToolCall = CompletedToolCall & {
+export type TrackedCompletedToolCall = InteractiveCompletedToolCall & {
+  nativeAttemptsObserved?: boolean;
   responseSubmittedToLlm?: boolean;
 };
 export type TrackedCancelledToolCall = CancelledToolCall & {
+  nativeAttemptsObserved?: boolean;
   responseSubmittedToLlm?: boolean;
 };
 
 export type TrackedToolCall =
+  | (InteractivePendingToolCall & { responseSubmittedToLlm?: boolean })
   | TrackedScheduledToolCall
   | TrackedValidatingToolCall
   | TrackedWaitingToolCall
@@ -114,11 +120,12 @@ export type TrackedToolCall =
   | TrackedCancelledToolCall;
 
 export function useReactToolScheduler(
-  onComplete: (tools: CompletedToolCall[]) => Promise<void>,
+  onComplete: (tools: InteractiveToolCall[]) => Promise<void>,
   config: Config,
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
   onToolResultFullTurnModel?: (model: string) => boolean,
+  onNativeAttempt?: (call: CompletedToolCall) => Promise<void>,
 ): [TrackedToolCall[], ScheduleFn, MarkToolsAsSubmittedFn] {
   const [toolCallsForDisplay, setToolCallsForDisplay] = useState<
     TrackedToolCall[]
@@ -128,17 +135,20 @@ export function useReactToolScheduler(
   // Recreating CoreToolScheduler then would drop an in-flight batch's queue
   // and let a later schedule() run in parallel on a fresh idle instance.
   const onCompleteRef = useRef(onComplete);
+  const onNativeAttemptRef = useRef(onNativeAttempt);
   const getPreferredEditorRef = useRef(getPreferredEditor);
   const onEditorCloseRef = useRef(onEditorClose);
   const onToolResultFullTurnModelRef = useRef(onToolResultFullTurnModel);
 
   useLayoutEffect(() => {
     onCompleteRef.current = onComplete;
+    onNativeAttemptRef.current = onNativeAttempt;
     getPreferredEditorRef.current = getPreferredEditor;
     onEditorCloseRef.current = onEditorClose;
     onToolResultFullTurnModelRef.current = onToolResultFullTurnModel;
   }, [
     onComplete,
+    onNativeAttempt,
     getPreferredEditor,
     onEditorClose,
     onToolResultFullTurnModel,
@@ -166,15 +176,15 @@ export function useReactToolScheduler(
     [],
   );
 
-  const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
-    async (completedToolCalls) => {
+  const allToolCallsCompleteHandler = useCallback(
+    async (completedToolCalls: InteractiveToolCall[]) => {
       await onCompleteRef.current(completedToolCalls);
     },
     [],
   );
 
-  const toolCallsUpdateHandler: ToolCallsUpdateHandler = useCallback(
-    (updatedCoreToolCalls: ToolCall[]) => {
+  const toolCallsUpdateHandler = useCallback(
+    (updatedCoreToolCalls: InteractiveToolCall[]) => {
       setToolCallsForDisplay((prevTrackedCalls) =>
         updatedCoreToolCalls.map((coreTc) => {
           const existingTrackedCall = prevTrackedCalls.find(
@@ -225,8 +235,10 @@ export function useReactToolScheduler(
 
   const scheduler = useMemo(
     () =>
-      new CoreToolScheduler({
+      new InteractiveModToolScheduler({
         config,
+        onNativeAttempt: (call) =>
+          onNativeAttemptRef.current?.(call) ?? Promise.resolve(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,

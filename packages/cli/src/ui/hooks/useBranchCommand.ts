@@ -253,6 +253,7 @@ export function useBranchCommand(
         //    The transaction opened in step 0 covers the initialize()
         //    replay (#9833; see beginTelemetrySwap's JSDoc in core
         //    client.ts).
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -337,11 +338,13 @@ export function useBranchCommand(
           // failures (hook, remount, announce) are non-fatal and
           // surfaced as an error item without unwinding the swap.
           try {
+            getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
             // back on the parent, which is the load-bearing invariant.
             await config.getLlmClient()?.initialize?.();
+            await getInteractiveModSession(config)?.restoreTools();
           } catch (rollbackErr) {
             config
               .getDebugLogger()

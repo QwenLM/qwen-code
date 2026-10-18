@@ -7,12 +7,9 @@
 
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
+import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import type { Part } from '@google/genai';
-import type {
-  Config,
-  ToolResult,
-  CompletedToolCall,
-} from '@qwen-code/qwen-code-core';
+import type { Config, ToolResult } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   CoreToolScheduler,
@@ -288,12 +285,12 @@ describe('useReactToolScheduler', () => {
     } as unknown as Config;
 
     type SchedulerProps = {
-      onComplete: (tools: CompletedToolCall[]) => Promise<void>;
+      onComplete: (tools: InteractiveToolCall[]) => Promise<void>;
       onEditorClose: () => void;
       onToolResultFullTurnModel?: (model: string) => boolean;
     };
 
-    const firstOnComplete = vi.fn(async (_tools: CompletedToolCall[]) => {});
+    const firstOnComplete = vi.fn(async (_tools: InteractiveToolCall[]) => {});
     const { result, rerender } = renderHook<
       ReturnType<typeof useReactToolScheduler>,
       SchedulerProps
@@ -333,7 +330,7 @@ describe('useReactToolScheduler', () => {
     });
     expect(resolveFirst).toBeDefined();
 
-    const latestOnComplete = vi.fn(async (_tools: CompletedToolCall[]) => {});
+    const latestOnComplete = vi.fn(async (_tools: InteractiveToolCall[]) => {});
     rerender({
       onComplete: latestOnComplete,
       onEditorClose: vi.fn(),
@@ -435,7 +432,7 @@ describe('useReactToolScheduler', () => {
       }),
     } as unknown as Config;
 
-    const onComplete = vi.fn(async (_tools: CompletedToolCall[]) => {});
+    const onComplete = vi.fn(async (_tools: InteractiveToolCall[]) => {});
     const { result, rerender } = renderHook(() =>
       useReactToolScheduler(onComplete, mockConfig, () => undefined, vi.fn()),
     );

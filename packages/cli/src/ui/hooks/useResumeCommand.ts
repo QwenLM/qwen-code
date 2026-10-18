@@ -212,6 +212,7 @@ export function useResumeCommand(
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -290,6 +291,7 @@ export function useResumeCommand(
             } catch {
               // Best-effort — see above.
             }
+            getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
             // Re-hydrate the client against the restored session, mirroring
             // /branch's rollback: without it the client's chat stays on the
@@ -303,6 +305,7 @@ export function useResumeCommand(
             // throws too, sessionId + recorder are still back on the old
             // session, which is the load-bearing invariant.
             await config.getLlmClient()?.initialize?.();
+            await getInteractiveModSession(config)?.restoreTools();
             // The forward path cleared the old session's in-memory
             // background agents (resetBackgroundStateForSessionSwitch above,
             // ~L158) before swapping core. After rolling core back to the old
