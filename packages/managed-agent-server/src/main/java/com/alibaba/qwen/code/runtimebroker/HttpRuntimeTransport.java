@@ -1328,9 +1328,15 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 if (fields.keySet().equals(Set.of("code", "error"))
                         && fields.get("error") instanceof String
                         && ("managed_context_unavailable".equals(code)
-                                || "managed_context_conflict".equals(code))) {
+                                || "managed_context_conflict".equals(code)
+                                || "managed_runtime_owner_hold_pending".equals(code)
+                                || "managed_runtime_release_timeout".equals(code))) {
+                    boolean retryable = "managed_runtime_owner_hold_pending".equals(code)
+                            || "managed_runtime_release_timeout".equals(code);
                     return error(409, (String) code,
-                            "Managed Session context is unavailable or conflicts.", false);
+                            retryable ? "Managed Runtime Session still owns work."
+                                    : "Managed Session context is unavailable or conflicts.",
+                            retryable);
                 }
             } catch (RuntimeBrokerException ignored) {
                 // An unrecognized error body supplies no Session-scoped evidence.
