@@ -85,6 +85,7 @@ class HostedHookCancelFaultGatesIT {
     private ServletWebServerApplicationContext spring;
     private JdbcTemplate jdbc;
     private Process harness;
+    private HostedSessionRelayForwardingProxy proxy;
 
     @Test
     @Timeout(300)
@@ -187,6 +188,37 @@ class HostedHookCancelFaultGatesIT {
         }
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
+        assertThat(modelFailure.get()).isNull();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13dCancelWithDroppedReplySettlesThroughStatusOnMySql() throws Exception {
+        boot("60000", "-1", "hook-ignore-term");
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+                (method, path, body) -> path.contains("/control") && body.contains("\"kind\":\"hook-cancel\""),
+                "hook-cancel-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_CANCEL_DROP");
+        waitFor(() -> {
+            assertThat(events("hook.call")).hasSize(1);
+            assertThat(events("hook.child")).hasSize(1);
+        });
+        JsonNode hook = events("hook.call").getFirst();
+        JsonNode child = events("hook.child").getFirst();
+        assertThat(running(hook)).isTrue();
+        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+
+        cancelHook(session, executionId);
+        // The cancel reply is gone, but the poll through the record's owner
+        // resolves the same cancellation, and the gate drains exactly once.
+        awaitTerminalDrained(session, "cancelled", child);
+        assertThat(events("hook.call")).hasSize(1);
+        assertThat(events("hook.allow")).isEmpty();
+        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("cancelled");
+        assertThat(Files.readString(temporary.resolve("proxy.log"))).contains("PROXY dropped hook-cancel-reply");
         assertThat(modelFailure.get()).isNull();
     }
 
@@ -298,6 +330,8 @@ class HostedHookCancelFaultGatesIT {
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+        proxy = HostedSessionRelayForwardingProxy.start("hook-broker", temporary.resolve("proxy.log"));
+        proxy.forwardTo(URI.create("http://127.0.0.1:" + brokerPort));
         startHarness();
     }
 
@@ -400,7 +434,7 @@ class HostedHookCancelFaultGatesIT {
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(), "serve", "--profile", "hosted-harness",
                 "--http-bridge", "--hostname", "127.0.0.1", "--port", Integer.toString(harnessPort), "--require-auth",
                 "--no-web", "--workspace", temporary.resolve("decoy").toString(), "--managed-runtime-broker-url",
-                "http://127.0.0.1:" + brokerPort, "--managed-runtime-broker-token", TOKEN)
+                proxy.baseUrl(), "--managed-runtime-broker-token", TOKEN)
                 .directory(temporary.resolve("decoy").toFile()).redirectErrorStream(true)
                 .redirectOutput(temporary.resolve("harness-" + boots + ".log").toFile());
         var env = builder.environment();
@@ -446,7 +480,7 @@ class HostedHookCancelFaultGatesIT {
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
-                    && List.of("FG13_CANCEL", "FG13_CANCEL_STOP", "FG13_TIMEOUT").contains(prompt);
+                    && List.of("FG13_CANCEL", "FG13_CANCEL_DROP", "FG13_CANCEL_STOP", "FG13_TIMEOUT").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
@@ -584,6 +618,10 @@ class HostedHookCancelFaultGatesIT {
                         for (Path entry : entries.filter(Files::isDirectory).sorted(Comparator.reverseOrder()).toList()) {
                             Files.delete(entry);
                         }
+                    }
+                }, () -> {
+                    if (proxy != null) {
+                        proxy.close();
                     }
                 }, http::close);
     }
