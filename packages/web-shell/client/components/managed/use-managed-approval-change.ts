@@ -15,6 +15,7 @@ interface ApprovalIntent {
   expectedRevision: number;
   idempotencyKey: string;
   requestId: string;
+  planMode?: boolean;
 }
 
 function readIntent(
@@ -33,7 +34,9 @@ function readIntent(
       typeof value['requestId'] !== 'string' ||
       !value['requestId'] ||
       !Number.isSafeInteger(value['expectedRevision']) ||
-      Number(value['expectedRevision']) < 0
+      Number(value['expectedRevision']) < 0 ||
+      (value['planMode'] !== undefined &&
+        typeof value['planMode'] !== 'boolean')
     )
       return undefined;
     return item as ApprovalIntent;
@@ -182,6 +185,9 @@ export function useManagedApprovalChange(
         {
           approvalMode: intent.approvalMode,
           expectedRevision: intent.expectedRevision,
+          ...(intent.planMode === undefined
+            ? {}
+            : { planMode: intent.planMode }),
         },
         {
           clientId,
@@ -195,6 +201,8 @@ export function useManagedApprovalChange(
       if (
         result.sessionId !== intent.sessionId ||
         result.approvalMode !== intent.approvalMode ||
+        (intent.planMode !== undefined &&
+          result.planMode !== intent.planMode) ||
         !Number.isSafeInteger(result.approvalRevision) ||
         result.approvalRevision <= intent.expectedRevision
       )
@@ -206,7 +214,9 @@ export function useManagedApprovalChange(
         latest?.sessionId !== intent.sessionId ||
         revision < result.approvalRevision ||
         (revision === result.approvalRevision &&
-          latest.approvalMode !== intent.approvalMode)
+          (latest.approvalMode !== intent.approvalMode ||
+            (intent.planMode !== undefined &&
+              latest.planMode !== intent.planMode)))
       )
         throw new Error('Approval selection is not confirmed');
       update();
@@ -239,7 +249,7 @@ export function useManagedApprovalChange(
     }
   }
 
-  async function submit(approvalMode: ManagedApprovalMode) {
+  async function submit(approvalMode: ManagedApprovalMode, planMode?: boolean) {
     const current = summaryRef.current;
     const options = optionsRef.current;
     if (
@@ -253,12 +263,14 @@ export function useManagedApprovalChange(
       current.capabilities.approvalModeChange !== true ||
       !provider.approvalChange ||
       !options?.supported ||
+      (planMode !== undefined && options.planModeSupported !== true) ||
       !options.availableApprovalModes.includes(approvalMode) ||
       !['created', 'completed', 'failed', 'cancelled'].includes(
         current.phase,
       ) ||
       options.approvalRevision !== (current.approvalRevision ?? 0) ||
-      approvalMode === current.approvalMode
+      (approvalMode === current.approvalMode &&
+        (planMode === undefined || planMode === Boolean(current.planMode)))
     )
       return;
     const intent: ApprovalIntent = {
@@ -267,6 +279,7 @@ export function useManagedApprovalChange(
       expectedRevision: options.approvalRevision,
       idempotencyKey: managedRequestId(),
       requestId: managedRequestId(),
+      ...(planMode === undefined ? {} : { planMode }),
     };
     if (!persist(key, intent)) {
       setState((value) => ({ ...value, errorCode: 'storage_unavailable' }));
