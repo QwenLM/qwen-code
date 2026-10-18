@@ -136,6 +136,8 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
     readonly remoteCode: string,
     message: string,
     readonly contentionExhausted?: boolean,
+    // The envelope's other scalar fields, such as the limit a refusal names.
+    readonly details?: Readonly<Record<string, string | number | boolean>>,
   ) {
     super(message);
     this.name = 'ManagedSessionStoreHttpError';
@@ -1113,6 +1115,8 @@ class ManagedSessionStoreHttpClient {
             response.status,
             error.code,
             error.message,
+            undefined,
+            error.details,
           );
         }
         if (response.headers.get('Cache-Control') !== 'no-store')
@@ -1547,6 +1551,7 @@ class ManagedSessionStoreHttpClient {
               // only collided with the near-deadline instant did not
               // spend it, and the caller's restart stays allowed.
               guardRetries > 0 || undefined,
+              contendedRefusal.details,
             );
           }
           if (transient) {
@@ -1559,6 +1564,8 @@ class ManagedSessionStoreHttpClient {
                 error.status,
                 error.remoteCode,
                 detail,
+                undefined,
+                error.details,
               );
             if (error instanceof ManagedSessionStoreTransportError)
               throw new ManagedSessionStoreTransportError(detail);
@@ -1627,6 +1634,8 @@ class ManagedSessionStoreHttpClient {
         response.status,
         error.code,
         error.message,
+        undefined,
+        error.details,
       );
     }
     if (response.headers.get('Cache-Control') !== 'no-store') {
@@ -2125,15 +2134,28 @@ function requireSameRef(
   }
 }
 
-async function readHttpError(
-  response: Response,
-): Promise<{ code: string; message: string }> {
+async function readHttpError(response: Response): Promise<{
+  code: string;
+  message: string;
+  details?: Record<string, string | number | boolean>;
+}> {
   try {
     const body = asRecord((await response.json()) as unknown, 'error response');
     const error = asRecord(body['error'], 'error');
+    const details: Record<string, string | number | boolean> = {};
+    for (const [key, value] of Object.entries(error))
+      if (
+        key !== 'code' &&
+        key !== 'message' &&
+        (typeof value === 'string' ||
+          typeof value === 'number' ||
+          typeof value === 'boolean')
+      )
+        details[key] = value;
     return {
       code: string(error['code'], 'error.code'),
       message: string(error['message'], 'error.message'),
+      ...(Object.keys(details).length > 0 ? { details } : {}),
     };
   } catch {
     return {
