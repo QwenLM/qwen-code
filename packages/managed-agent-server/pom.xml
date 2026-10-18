@@ -453,8 +453,13 @@
                                  across four runs, ~440 s budgeted at
                                  2x) raise the healthy sum to 5473 s,
                                  so the fork moves to 6083 s and the
-                                 Verify step to 115 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6083</forkedProcessTimeoutInSeconds>
+                                 Verify step to 115 minutes. The FG13d
+                                 dropped-reply cancel cell (issue
+                                 #14449) adds 150 s: the healthy sum
+                                 becomes 5623 s, so the fork moves to
+                                 6233 s, still inside those 115
+                                 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6233</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
