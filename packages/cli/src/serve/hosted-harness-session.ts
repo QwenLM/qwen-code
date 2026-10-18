@@ -363,14 +363,10 @@ function settledTurnOutcome(abort: AbortController): {
  * (writer conflicts, recovery blocks) keep their own names. A bounded
  * tenant-guard wait is not an outage either — the store answered it
  * promptly with a retryable contention refusal — so it stays unattributed
- * rather than naming the store unavailable. A stopped writer keeps the
- * failure name its caller already recorded for the same write latch.
+ * rather than naming the store unavailable. A stopped writer reads as
+ * unattributed here; `blockRecovery` keeps the name it already carries.
  */
-function namedStoreFailure(
-  cause: unknown,
-  latchedReason?: string,
-): string | undefined {
-  if (cause instanceof ManagedSessionWritesStoppedError) return latchedReason;
+function namedStoreFailure(cause: unknown): string | undefined {
   if (
     cause instanceof ManagedSessionStoreTransportError ||
     (cause instanceof ManagedSessionStoreHttpError &&
@@ -396,13 +392,21 @@ function liftRecoveryBlock(session: HostedSession): void {
  * Blocks a Session on recovery under the name of the failure blocking it
  * now — `namedStoreFailure`'s, or none — so a block never carries the
  * reason an earlier block left behind (#13800 R2-14).
+ *
+ * A stopped writer is the exception: its latch is never reset, so the name
+ * recorded for that failure still describes the block when a later error
+ * arrives unclassified. Only `liftRecoveryBlock` clears it.
  */
 function blockRecovery(
   session: HostedSession,
   storeFailure: string | undefined,
 ): void {
   session.blocked = true;
-  session.recoveryReason = storeFailure;
+  session.recoveryReason =
+    storeFailure ??
+    (session.managed.authority.writesStopped
+      ? session.recoveryReason
+      : undefined);
 }
 
 interface HostedSession {
@@ -2909,7 +2913,7 @@ async function startHostedRecoveredTurn(
       // ManagedSessionWritesStoppedError, so fall back to the stopReason
       // the turn already computed, exactly as the prompt route does
       // (#13800; memory only, never a persisted terminal claim).
-      const storeFailure = namedStoreFailure(cause, session.recoveryReason);
+      const storeFailure = namedStoreFailure(cause);
       const recordedStopReason = (
         turnResult?.systemPayload as { stopReason?: unknown } | undefined
       )?.['stopReason'];
@@ -4093,10 +4097,7 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
         } catch (cause) {
-          blockRecovery(
-            resident,
-            namedStoreFailure(cause, resident.recoveryReason),
-          );
+          blockRecovery(resident, namedStoreFailure(cause));
           writeStderrLineSafe(
             'qwen serve: Hosted recovery redrive failed: ' + String(cause),
           );
@@ -6792,8 +6793,7 @@ export function registerHostedHarnessSessionRoutes(
               turnResult?.systemPayload as { stopReason?: unknown } | undefined
             )?.['stopReason'];
             const blockStoreFailure =
-              namedStoreFailure(cause, session.recoveryReason) ??
-              namedStoreFailure(settleCause, session.recoveryReason);
+              namedStoreFailure(cause) ?? namedStoreFailure(settleCause);
             blockRecovery(
               session,
               blockStoreFailure ??

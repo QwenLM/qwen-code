@@ -6185,137 +6185,162 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }, 60_000);
 
-  it('preserves the named store failure when resident model recovery meets the stopped writer', async () => {
-    const server = await app();
-    const created = await headers(supertest(server).post('/session')).send({
-      sessionId: SESSION_ID,
-      sessionScope: 'thread',
-      managedSessionStore: store(),
-    });
-    expect(created.status).toBe(200);
-    const clientId = created.body.clientId as string;
-    const text = 'recover the interrupted model';
-    const prompt = [{ type: 'text', text }];
-    state.model.mockReset();
-    state.model.mockImplementationOnce(async (input) => {
-      const prepare = (
-        input as unknown as {
-          prepareModel(
-            prepared: LlmPreparedRequest,
-            round: number,
-            pending: boolean,
-          ): Promise<
-            | import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef
-            | undefined
-          >;
-        }
-      ).prepareModel;
-      const ref = await prepare(
-        {
-          request: {
-            model: 'model-b',
-            contents: [{ role: 'user', parts: [{ text }] }],
-            config: {},
+  it.each([
+    { cause: 'the stopped writer', preparationFailure: false },
+    { cause: 'an unrelated failure', preparationFailure: true },
+  ])(
+    'preserves the named store failure when resident model recovery meets $cause',
+    async ({ preparationFailure }) => {
+      const server = await app();
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      });
+      expect(created.status).toBe(200);
+      const clientId = created.body.clientId as string;
+      const text = 'recover the interrupted model';
+      const prompt = [{ type: 'text', text }];
+      state.model.mockReset();
+      state.model.mockImplementationOnce(async (input) => {
+        const prepare = (
+          input as unknown as {
+            prepareModel(
+              prepared: LlmPreparedRequest,
+              round: number,
+              pending: boolean,
+            ): Promise<
+              | import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef
+              | undefined
+            >;
+          }
+        ).prepareModel;
+        const ref = await prepare(
+          {
+            request: {
+              model: 'model-b',
+              contents: [{ role: 'user', parts: [{ text }] }],
+              config: {},
+            },
+            history: [],
+            completedToolCallIds: [],
+            routeSelector: 'openai:model-b',
+            providerPin: 'a'.repeat(64),
+            promptTokensForClamp: 0,
           },
-          history: [],
-          completedToolCallIds: [],
-          routeSelector: 'openai:model-b',
-          providerPin: 'a'.repeat(64),
-          promptTokensForClamp: 0,
-        },
-        0,
-        false,
-      );
-      const attempt = await input.modelScope!.beginMainAttempt('model-b', ref);
-      await attempt(false, []);
-      throw new Error('interrupted model');
-    });
-    const originalAppend =
-      LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
-    let storeUnavailable = true;
-    let settlementAttempts = 0;
-    const append = vi
-      .spyOn(
-        LocalJsonlManagedSessionJournalHandle.prototype,
-        'appendTransaction',
-      )
-      .mockImplementation(async function (
-        this: LocalJsonlManagedSessionJournalHandle,
-        records: readonly unknown[],
-      ) {
-        if (
-          storeUnavailable &&
-          JSON.stringify(records).includes('"turn.settled"')
+          0,
+          false,
+        );
+        const attempt = await input.modelScope!.beginMainAttempt(
+          'model-b',
+          ref,
+        );
+        await attempt(false, []);
+        throw new Error('interrupted model');
+      });
+      const originalAppend =
+        LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+      let storeUnavailable = true;
+      let settlementAttempts = 0;
+      const append = vi
+        .spyOn(
+          LocalJsonlManagedSessionJournalHandle.prototype,
+          'appendTransaction',
+        )
+        .mockImplementation(async function (
+          this: LocalJsonlManagedSessionJournalHandle,
+          records: readonly unknown[],
         ) {
-          settlementAttempts += 1;
-          throw new ManagedSessionStoreTransportError(
-            'terminal write unavailable',
+          if (
+            storeUnavailable &&
+            JSON.stringify(records).includes('"turn.settled"')
+          ) {
+            settlementAttempts += 1;
+            throw new ManagedSessionStoreTransportError(
+              'terminal write unavailable',
+            );
+          }
+          return originalAppend.call(this, records);
+        });
+      const stderr = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const status = () =>
+        headers(supertest(server).get(`/session/${SESSION_ID}/status`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        );
+      let preparation: { mockRestore(): void } | undefined;
+      try {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(async () => {
+          const blocked = await status();
+          expect(blocked.body.hasActivePrompt).toBe(false);
+          expect(blocked.body.recoveryBlocked).toBe(true);
+          expect(blocked.body.recoveryReason).toBe(
+            'managed_session_store_unavailable',
+          );
+        });
+        expect(settlementAttempts).toBe(1);
+        storeUnavailable = false;
+        const appended = append.mock.calls.length;
+        stderr.mockClear();
+        if (preparationFailure)
+          preparation = vi
+            .spyOn(modelRecovery, 'findHostedCommittedModelOutput')
+            .mockRejectedValueOnce(
+              new Error('recovery preparation unavailable'),
+            );
+        const redriven = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({ managedSessionStore: store(), driveRuntimeRecovery: true });
+        expect(redriven.status).toBe(409);
+        expect(redriven.body.code).toBe('hosted_turn_recovery_required');
+        await vi.waitFor(async () => {
+          const blocked = await status();
+          expect(blocked.body.hasActivePrompt).toBe(false);
+          expect(blocked.body.recoveryBlocked).toBe(true);
+          expect(blocked.body.recoveryReason).toBe(
+            'managed_session_store_unavailable',
+          );
+        });
+        expect(state.model).toHaveBeenCalledOnce();
+        expect(append).toHaveBeenCalledTimes(appended);
+        if (preparationFailure) {
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Hosted recovery redrive failed: Error: recovery preparation unavailable',
+            ),
+          );
+        } else {
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Hosted Harness recovery remained blocked: ManagedSessionWritesStoppedError:',
+            ),
+          );
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Hosted recovery redrive failed: ManagedSessionWritesStoppedError:',
+            ),
           );
         }
-        return originalAppend.call(this, records);
-      });
-    const stderr = vi
-      .spyOn(stdio, 'writeStderrLineSafe')
-      .mockImplementation(() => {});
-    const status = () =>
-      headers(supertest(server).get(`/session/${SESSION_ID}/status`)).set(
-        'X-Qwen-Client-Id',
-        clientId,
-      );
-    try {
-      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-        .set('X-Qwen-Client-Id', clientId)
-        .send({
-          prompt,
-          promptId: PROMPT_ID,
-          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
-        })
-        .expect(202);
-      await vi.waitFor(async () => {
-        const blocked = await status();
-        expect(blocked.body.hasActivePrompt).toBe(false);
-        expect(blocked.body.recoveryBlocked).toBe(true);
-        expect(blocked.body.recoveryReason).toBe(
-          'managed_session_store_unavailable',
-        );
-      });
-      expect(settlementAttempts).toBe(1);
-      storeUnavailable = false;
-      const appended = append.mock.calls.length;
-      stderr.mockClear();
-      const redriven = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/load`),
-      )
-        .set('X-Qwen-Client-Id', clientId)
-        .send({ managedSessionStore: store(), driveRuntimeRecovery: true });
-      expect(redriven.status).toBe(409);
-      expect(redriven.body.code).toBe('hosted_turn_recovery_required');
-      await vi.waitFor(async () => {
-        const blocked = await status();
-        expect(blocked.body.hasActivePrompt).toBe(false);
-        expect(blocked.body.recoveryBlocked).toBe(true);
-        expect(blocked.body.recoveryReason).toBe(
-          'managed_session_store_unavailable',
-        );
-      });
-      expect(state.model).toHaveBeenCalledOnce();
-      expect(append).toHaveBeenCalledTimes(appended);
-      expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Hosted Harness recovery remained blocked: ManagedSessionWritesStoppedError:',
-        ),
-      );
-      expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Hosted recovery redrive failed: ManagedSessionWritesStoppedError:',
-        ),
-      );
-    } finally {
-      append.mockRestore();
-      stderr.mockRestore();
-      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
-    }
-  });
+      } finally {
+        append.mockRestore();
+        preparation?.mockRestore();
+        stderr.mockRestore();
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+      }
+    },
+  );
 
   it('names the store on the block a cancelled turn leaves when its settlement cannot commit', async () => {
     // A cancelled turn keeps 'cancelled' as its outcome, so the prompt
