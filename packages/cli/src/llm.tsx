@@ -62,6 +62,7 @@ import {
   ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
+  getOperatorTrustSettings,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -123,6 +124,7 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -732,7 +734,14 @@ export async function main() {
         undefined,
         undefined,
         undefined,
-        undefined,
+        privateAcpParentCapability === undefined
+          ? {
+              workflowAncestorTrustProvider:
+                createLocalWorkflowAncestorTrustProvider(
+                  getOperatorTrustSettings(settings),
+                ),
+            }
+          : undefined,
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -1067,7 +1076,14 @@ export async function main() {
       undefined,
       settingsWatcher,
       undefined,
-      undefined,
+      privateAcpParentCapability === undefined
+        ? {
+            workflowAncestorTrustProvider:
+              createLocalWorkflowAncestorTrustProvider(
+                getOperatorTrustSettings(settings),
+              ),
+          }
+        : undefined,
       buildEnabledSkillNamesProvider(settings),
     );
     markAcpStartup('configConstructionEnd');
