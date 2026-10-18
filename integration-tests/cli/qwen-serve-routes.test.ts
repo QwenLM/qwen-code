@@ -477,6 +477,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
+      'github_code_review',
       'workspace_git_worktrees',
       'workspace_mcp_restart',
       'session_recap',

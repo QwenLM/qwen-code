@@ -625,6 +625,11 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js.includes('managed.tasks.')).toBe(false);
   });
 
+  it('keeps code-review messages in the interactive entry only', () => {
+    expect(readPackageJavascript()).toContain('prWorkbench.disabledBody');
+    expect(readTranscriptBundle()).not.toContain('prWorkbench.');
+  });
+
   it('keeps remote Workspace registration copy in the interactive entry', () => {
     expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
     expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');

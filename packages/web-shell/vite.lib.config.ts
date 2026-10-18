@@ -193,6 +193,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/workspace-agents/messages.transcript-stub.ts',
     ],
     [
+      './client/components/code-review/messages.ts',
+      './client/components/code-review/messages.transcript-stub.ts',
+    ],
+    [
       './client/settings/messages.ts',
       './client/settings/messages.transcript-stub.ts',
     ],
