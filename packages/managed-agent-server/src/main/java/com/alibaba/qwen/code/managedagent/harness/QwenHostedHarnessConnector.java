@@ -690,6 +690,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Map<String, Object> runAutomationOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
         try {
+            if ("cancel_run".equals(body.get("kind"))) {
+                HarnessSessionRef ref = committedStopAttachment(tenantId,
+                        sessionId, false);
+                return client().runAutomationOperation(ref, body);
+            }
             // Automation operations drive new work (a fire admits an input
             // and wakes a turn), so a cached attachment is no admission:
             // the Workspace checks submit and continueManagedRuntime run
@@ -776,6 +781,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      */
     private HarnessSessionRef messageStopAttachment(String tenantId,
             String sessionId) {
+        return committedStopAttachment(tenantId, sessionId, true);
+    }
+
+    private HarnessSessionRef committedStopAttachment(String tenantId,
+            String sessionId, boolean stopMessages) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
@@ -793,8 +803,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             workspaceExecution.authorizeCommittedStop(session);
         }
-        HarnessSessionRef attached = client().loadSession(
-                new LoadHarnessSession(session.sessionId(),
+        LoadHarnessSession load = new LoadHarnessSession(session.sessionId(),
                         managedSessionStore(session),
                         session.harnessBootId() != null, toolProfile(session),
                         false, false,
@@ -803,8 +812,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         .withMcpServers(mcpServers(session))
                         .withHookCatalog(hookCatalog(session))
                         .withForegroundOnly(foregroundOnly(session))
-                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session))
-                        .withStoppedMessages());
+                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session));
+        HarnessSessionRef attached = client().loadSession(
+                stopMessages ? load.withStoppedMessages() : load);
         if (session.workspace() != null && !actions.approvalMode(tenantId,
                 sessionId).equals(attached.getApprovalMode())) {
             throw new IllegalStateException(
