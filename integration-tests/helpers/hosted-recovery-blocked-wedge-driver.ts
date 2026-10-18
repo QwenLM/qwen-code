@@ -559,7 +559,11 @@ interface WireRow {
 
 async function readWire(): Promise<WireRow[]> {
   try {
-    return (await readFile(config.wireFile, 'utf8'))
+    // wire() appends while proxied requests are still in flight, so a read
+    // can end inside a half-written row; only newline-terminated rows count.
+    const text = await readFile(config.wireFile, 'utf8');
+    return text
+      .slice(0, text.lastIndexOf('\n') + 1)
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line) as WireRow);
