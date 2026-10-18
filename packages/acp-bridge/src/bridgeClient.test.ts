@@ -5582,7 +5582,7 @@ describe('background execution ownership', () => {
       undefined,
       ownsSession,
     );
-    const request = (bindingId?: number) =>
+    const request = (bindingId?: number, teammateName?: string) =>
       client.requestPermission({
         sessionId: 'session',
         ...(bindingId !== undefined
@@ -5594,8 +5594,9 @@ describe('background execution ownership', () => {
             }
           : {}),
         toolCall: {
-          toolCallId: `call-${bindingId ?? 'leader'}`,
+          toolCallId: `call-${bindingId ?? 'leader'}-${teammateName ?? 'leader'}`,
           title: 'Write',
+          ...(teammateName ? { _meta: { teammateName } } : {}),
         },
         options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
       });
@@ -5634,6 +5635,33 @@ describe('background execution ownership', () => {
     });
     await expect(current).resolves.toEqual({
       outcome: { outcome: 'selected', optionId: 'allow' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+
+  it("retires the exited teammate's approval and leaves its neighbour pending", async () => {
+    const { client, entry, mediator, request } = teammatePermissionClient(4);
+    const security = request(1, 'security');
+    const tests = request(1, 'tests');
+    expect(entry.pendingPermissionIds.size).toBe(2);
+
+    await client.extNotification('qwen/notify/session/teammate-exited', {
+      v: 1,
+      sessionId: 'session',
+      teammateName: 'security',
+    });
+
+    await expect(security).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    // The session must stop advertising the dead teammate's prompt — and only
+    // that one: its neighbour is still running and still answerable.
+    expect(entry.pendingPermissionIds.size).toBe(1);
+    expect(entry.pendingInteractions.size).toBe(1);
+
+    mediator.forgetSession('session');
+    await expect(tests).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
     });
     expect(entry.pendingPermissionIds.size).toBe(0);
   });

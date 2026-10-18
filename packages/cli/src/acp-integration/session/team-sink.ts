@@ -83,6 +83,14 @@ export interface TeamSinkDeps {
     message?: string;
   }) => void;
   readonly retireTeamBinding: (bindingId: number) => Promise<void>;
+  /**
+   * Retires a single teammate's pending approvals on the host. A teammate's
+   * approval is session-scoped, so it outlives the leader turn that happens to
+   * be running — and the abort that clears the child-side await never crosses
+   * the wire, so the host keeps advertising an unanswerable prompt unless the
+   * exit is reported.
+   */
+  readonly retireTeammateApprovals: (teammateName: string) => Promise<void>;
   /** Asks the ACP client to decide a teammate's tool approval. */
   readonly requestPermission: (
     params: RequestPermissionRequest,
@@ -285,6 +293,12 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
   };
 
   const handleExited = (event: TeammateExitedEvent): void => {
+    // Order matters only in that both must happen: the roster notice keeps a
+    // membership-tracking client honest, and the retirement stops the host
+    // advertising a prompt the exited teammate can no longer answer.
+    deps
+      .retireTeammateApprovals(event.name)
+      .catch((error) => swallow(error, 'retireTeammateApprovals'));
     deps.reportRosterChange({
       type: 'exited',
       name: event.name,

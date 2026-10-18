@@ -129,6 +129,7 @@ describe('attachTeamSink', () => {
   let reportRosterChange: ReturnType<typeof vi.fn>;
   let reportTeammateActivity: ReturnType<typeof vi.fn>;
   let retireTeamBinding: ReturnType<typeof vi.fn>;
+  let retireTeammateApprovals: ReturnType<typeof vi.fn>;
   let deps: TeamSinkDeps;
 
   // Re-fires the team-manager change callback with the already-bound manager,
@@ -145,6 +146,7 @@ describe('attachTeamSink', () => {
     reportRosterChange = vi.fn();
     reportTeammateActivity = vi.fn();
     retireTeamBinding = vi.fn(async () => {});
+    retireTeammateApprovals = vi.fn(async () => {});
     deps = {
       config: config as unknown as Config,
       sessionId: 's1',
@@ -153,6 +155,7 @@ describe('attachTeamSink', () => {
       reportRosterChange,
       reportTeammateActivity,
       retireTeamBinding,
+      retireTeammateApprovals,
       requestPermission,
     };
   });
@@ -482,6 +485,25 @@ describe('attachTeamSink', () => {
       timestamp: 3,
     });
     expect(reportRosterChange).toHaveBeenCalledTimes(2);
+  });
+
+  it('retires the exiting teammate\u2019s approvals on the host', () => {
+    // A teammate approval is session-scoped, so nothing about the leader's
+    // turn ends it: without this the host keeps advertising a prompt whose
+    // requester has left.
+    const detach = attachTeamSink(deps);
+
+    manager.emitter.emit(TeamEventType.TEAMMATE_EXITED, {
+      agentId: 'a1',
+      name: 'correctness',
+      status: 'completed',
+      timestamp: 1,
+    });
+
+    expect(retireTeammateApprovals).toHaveBeenCalledExactlyOnceWith(
+      'correctness',
+    );
+    detach();
   });
 
   it('ignores a same-instance manager re-notification instead of doubling listeners', () => {

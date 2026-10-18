@@ -11534,6 +11534,12 @@ export class Session implements SessionContext {
             bindingId,
           },
         ),
+      retireTeammateApprovals: (teammateName) =>
+        this.client.extNotification('qwen/notify/session/teammate-exited', {
+          v: 1,
+          sessionId: this.sessionId,
+          teammateName,
+        }),
     });
   }
 
