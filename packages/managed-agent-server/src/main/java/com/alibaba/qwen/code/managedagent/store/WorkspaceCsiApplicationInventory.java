@@ -223,7 +223,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "session_scope_key:CHAR,title_revision:BIGINT,retirement_operation_id:VARBINARY,"
                     + "retirement_generation:BIGINT,retired_at:BIGINT,recovery_protected:BOOLEAN,"
                     + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN,"
-                    + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT"),
+                    + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
+                    + "plan_enabled:BOOLEAN"),
             declaration("ma_session_head", "tenant_key,harness_key",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,storage_version:INT,state:VARCHAR,"
                     + "writer_generation:BIGINT,writer_id:VARBINARY,writer_lease_until:BIGINT,lease_token_hash:CHAR,"
@@ -287,7 +288,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "harness_last_event_id:BIGINT,dispatch_owner:VARBINARY,dispatch_lease_until:BIGINT,error_code:VARCHAR,"
                     + "error_message:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,completed_at:BIGINT,version:BIGINT,"
                     + "retry_count:INT,consecutive_failures:INT,budget_exempt_failures:INT,retry_after:BIGINT,"
-                    + "model_id:VARBINARY,model_revision:BIGINT,approval_mode:VARCHAR,approval_revision:BIGINT"),
+                    + "model_id:VARBINARY,model_revision:BIGINT,approval_mode:VARCHAR,approval_revision:BIGINT,"
+                    + "plan_enabled:BOOLEAN"),
             declaration("ma_workspace", "tenant_id,workspace_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:BIGINT,storage_id:VARBINARY,"
                     + "display_name:VARCHAR,config_ref:VARBINARY,policy_ref:VARBINARY,state:VARCHAR,workspace_kind:VARCHAR,"
@@ -3072,6 +3074,7 @@ final class WorkspaceCsiApplicationInventory {
                             && CsiFilesRetirementProfile.PROFILE.equals(row.text("tool_profile"))
                             && row.cell("model_id").isNull() && Objects.equals(0L, row.number("model_revision"))
                             && row.cell("selected_approval_mode").isNull() && Objects.equals(0L, row.number("approval_revision"))
+                            && Boolean.FALSE.equals(row.bool("plan_enabled"))
                             && original.request().requestKey().equals(row.text("runtime_request_key"))
                             && workspace.equals(row.text("workspace_id")) && storage.equals(row.text("workspace_storage_id"))
                             && original.request().getScope().getWorkspaceGeneration().equals(String.valueOf(row.number("workspace_generation")))

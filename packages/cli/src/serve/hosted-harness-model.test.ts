@@ -11,6 +11,7 @@ import {
   type LlmPreparedRequestCallback,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { Content, Part } from '@google/genai';
 import type { ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
 import {
@@ -25,6 +26,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import {
   HostedModelRoundLimitError,
+  HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
 } from './hosted-harness-model.js';
 import { createHostedChatRecord } from './hosted-harness-turn.js';
@@ -116,6 +118,7 @@ function config(
     getModel: () => 'test-model',
     getMaxSessionTurns: () => -1,
     getContentGeneratorConfig: () => undefined,
+    getEffectiveInputModalities: () => ({ image: false }),
     setUserMemory,
     setPromptToolSnapshot,
     setPromptAgentReachable,
@@ -167,6 +170,66 @@ function nativeInput(event: HookEventName): HookInput {
 
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('passes attachments as real model parts while a prompt Hook only replaces the text', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    state.config['getEffectiveInputModalities'] = () => ({ image: true });
+    const hook = hostedHooks([HookEventName.UserPromptSubmit]);
+    hook.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: HookEventName.UserPromptSubmit,
+              updatedPrompt: 'updated text',
+            },
+          }
+        : undefined,
+    );
+    const attachmentParts = [
+      { text: 'Attached file "notes.md": contents' },
+      { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+    ];
+    await runHostedHarnessTextTurn({
+      ...input,
+      attachmentParts,
+      hooks: hook.session,
+    });
+    expect(model.requests[0]).toEqual([
+      { text: 'updated text' },
+      ...attachmentParts,
+    ]);
+  });
+
+  it.each([false, true])(
+    'refuses image input on a text-only selected model, including image history (history=%s)',
+    async (history) => {
+      const model = config([]);
+      const parts = [
+        { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+      ];
+      await expect(
+        runHostedHarnessTextTurn({
+          ...input,
+          ...(history
+            ? {
+                history: [
+                  {
+                    uuid: 'image-user',
+                    type: 'user',
+                    message: { role: 'user', parts },
+                  } as ChatRecord,
+                ],
+              }
+            : { attachmentParts: parts }),
+        }),
+      ).rejects.toBeInstanceOf(HostedImageInputUnsupportedError);
+      expect(model.sendMessageStream).not.toHaveBeenCalled();
+      expect(model.shutdown).toHaveBeenCalled();
+    },
+  );
 
   it.each([-1, 18])(
     'continues beyond sixteen rounds with limit %s',

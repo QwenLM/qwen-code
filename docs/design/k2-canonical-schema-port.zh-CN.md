@@ -13,9 +13,9 @@
 
 ## 数据库结构与行身份
 
-保留当前主干 V1–V9 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段，V6 增加四个审批选择字段。V7 增加 SSH storage 索引并扩展 operation kinds，V8 增加 input/cancel operation kinds，均不新增表或列。V9 增加 runtime Session 的 harness 索引，不新增表或列。未发布的 K2 退役增量以不变 SQL 字节顺延为 V10，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 755 列，应用清单为 33 表 749 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
+保留当前主干 V1–V10 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段，V6 增加四个审批选择字段。V7 增加 SSH storage 索引并扩展 operation kinds，V8 增加 input/cancel operation kinds，均不新增表或列。V9 增加 runtime Session 的 harness 索引，不新增表或列。V10 增加 Session 与 Turn 的 plan policy 字段。未发布的 K2 退役增量以不变 SQL 字节顺延为 V11，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 757 列，应用清单为 33 表 751 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
 
-十一个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL、三项重试预算字段与四项审批选择字段。私有 Session 仅支持审批覆盖 `(NULL,0)`；非默认覆盖阻塞，普通审批选择保留主干行为，Turn 审批字段保留实际 nullable 快照。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4/V6/V7 不伪装为已发布主干迁移，不修改 Flyway 历史。缺少已发布 SSH 索引或 operation check 的旧私有预览 catalog 在迁移前拒绝；历史访问保留原构建，本候选使用全新临时 catalog。
+十三个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL、三项重试预算字段、四项审批选择字段与两项 plan policy 字段。私有 Session 仅支持审批覆盖 `(NULL,0)`；非默认覆盖阻塞，普通审批选择保留主干行为，Turn 审批字段保留实际 nullable 快照。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4/V6/V7 不伪装为已发布主干迁移，不修改 Flyway 历史。缺少已发布 SSH 索引或 operation check 的旧私有预览 catalog 在迁移前拒绝；历史访问保留原构建，本候选使用全新临时 catalog。
 
 原生资源读取证据使用现有 `ma_request_receipt`，namespace 为 `SESSION_COMMAND`，
 operation 为 `CSI_RESOURCE_READ`，真实主键为 `key("csi-read", readId)`。
@@ -100,3 +100,17 @@ checkpoint 协议检查、精确应用像和回滚/重试行为、同步读端�
 主干 V7/V8/V9 不增表或列，因此现有 typed 清单保持33表749列，另有6列的物理伴随表。新 SSH 和命令操作活动仍经过既有归属及支持活动规则，不能悄悄归为无关。普通取消在操作准入前保留私有 Session 守卫。仅前台 SSH 工具声明保留无 monitor/无 background 形状，同时共享既有 Write/Edit 描述。私有第6版 boot 与非容器及 publisher 模式一样拒绝 SSH runtime 注入。
 
 定向 H2/mock、仓库构建与临时 MySQL 8.4 V9 至 V10 迁移检查覆盖此次兼容增量；私有 Main/F2、Hosted/原生故障组，以及物理/复用资格均不在这些检查范围内。
+
+## 已发布主干 V10 plan policy 延续
+
+latest-main Flyway 检查在 head `167edd8222` 复现已发布 `V10__session_plan_mode.sql` 与私有退役迁移的版本碰撞。本候选合入主干 `970b8876294d400183974b24f81240cceee7b67f`，逐字保留十份已发布 SQL 资源，仅将正文不变的私有退役资源顺延为 V11。已发布主干 V10 升级仅追加 V11，保留已有 Session/Turn 的 plan-enabled 值及全部旧 Flyway history 行。上文 V9 至 V10 的结果继续限定为历史范围。
+
+两个新 plan 列均为必需的 typed whole-row 事实。受支持原私有 Session 要求 `plan_enabled=FALSE`，启用值阻断应用资格校验。原 `ma_turn` ledger 仍应为空且不支持活动；增加其 schema 列不开放新的私有 Turn 活动。历史像完整保留新列，不增加 mask 或默认值。缺列的 inventory/2 字节以及缺少已发布 plan 列的旧私有 V10 catalog 均拒绝，显式初始化器和 Flyway 都不得 adopt 或 repair。旧开发历史仍需使用其原 binary。
+
+合并保留普通 plan-mode 与 attachment 行为、完整 Session 创建重载链和私有变更守卫。共享 Hosted 模型同时保留 prompt-hook 组成和动态 plan 指令；K2 仍在消费前提交完整 final Parts，保留原 cold-output 路径。本次不为私有 CSI profile 启用 plan mode、attachment 或扩大 Part grammar。
+
+有界本地兼容验证已通过。同工作树 SDK/Server source reactor 完成全部默认 unit/static 门禁及八类受影响 MySQL 检查：SDK 390 项、9 项条件跳过，Server 5,229 项、18 项条件跳过，MySQL 151 项且无跳过，均零失败、零错误。Server 两套 Checkstyle 及 SpotBugs 均通过。独立 MySQL 观察器验证已发布 V10 至 V11 的 true-plan 行/history 保留，以及真实旧私有 V10 目录在有/无实际旧 history 时均被拒绝，DDL、行及 history 无变化。完整33表751列 typed 清单、真实 foreign snapshot/agent producer 及历史扫描保留全部字节；历史扫描无写入或加锁。Active-inspection 字段控制仍有夹具自身的其他前置 blocker，不据此授予独立 active 正向资格。真实 SQL-worker 的退役原件另行达到 DRAINED/4，并在 worker 关闭前后执行保留读取。
+
+Root build/typecheck/bundle、定向 Core/WebShell 回归及完整579项 Hosted Session 文件重跑通过。初次 CLI 组合运行有一项 wake-park 拒绝码不匹配，原因尚未确认；源码未变的完整文件重跑是独立证据。三项与主干一致的 workflow meta-test 夹具在本地 macOS Bash 3.2 解析器失败，不据此声称 Ubuntu 结果。上述边界及先前失败尝试保留在 E2E 记录中；本地结果不等于 CI 或累计 Draft 批准。
+
+冷 writer 争用及独立 content publication 旧 owner 验收仍是计划增量。原生安装、已资格化物理释放和复用仍未完成。

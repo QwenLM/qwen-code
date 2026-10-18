@@ -1125,7 +1125,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(33);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(749);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(751);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1169,6 +1169,43 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("UPDATE ma_session SET model_id = ?", new byte[] {(byte) 0xff});
         assertThatThrownBy(this::inspect).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Identity is not valid UTF-8");
+    }
+
+    @Test
+    void mainPlanColumnsRetainActualValuesWithoutAdmittingPrivatePlanActivity() throws Exception {
+        var before = inspect();
+        var owner = before.table("ma_session").rows().getFirst();
+        assertThat(owner.bool("plan_enabled")).isFalse();
+        assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+
+        assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET plan_enabled = TRUE"))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        jdbc.update("UPDATE ma_session SET plan_enabled = TRUE, selected_approval_mode = 'default', approval_revision = 1");
+        var enabled = inspect();
+        assertThat(enabled.table("ma_session").rows().getFirst().bool("plan_enabled")).isTrue();
+        assertThat(enabled.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        assertThat(enabled.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+        assertThat(enabled.table("ma_session").rows().getFirst().bytes()).isNotEqualTo(owner.bytes());
+
+        jdbc.update("UPDATE ma_session SET plan_enabled = FALSE, selected_approval_mode = NULL, approval_revision = 0");
+        var restored = inspect();
+        assertThat(restored.table("ma_session").rows().getFirst().bytes()).isEqualTo(owner.bytes());
+        assertThat(restored.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                + "status,gmt_create,gmt_modified)"
+                + " VALUES ('tenant',?,'turn','prompt','[]','digest','COMPLETED',1,1)", session);
+        var originalTurn = inspect();
+        assertThat(originalTurn.table("ma_turn").rows().getFirst().cell("plan_enabled").isNull()).isTrue();
+        assertThat(originalTurn.blockers()).anyMatch(blocker -> blocker.table().equals("ma_turn"));
+        jdbc.update("UPDATE ma_turn SET plan_enabled = TRUE, approval_mode = 'default', approval_revision = 1");
+        var plannedTurn = inspect();
+        assertThat(plannedTurn.table("ma_turn").rows().getFirst().bool("plan_enabled")).isTrue();
+        assertThat(plannedTurn.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        assertThat(plannedTurn.blockers()).anyMatch(blocker -> blocker.table().equals("ma_turn"));
+        assertThat(plannedTurn.table("ma_turn").rows().getFirst().bytes())
+                .isNotEqualTo(originalTurn.table("ma_turn").rows().getFirst().bytes());
     }
 
     @Test
