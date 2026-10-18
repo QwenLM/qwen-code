@@ -45,8 +45,12 @@ public final class LoadHarnessSession {
         return this;
     }
 
+    /**
+     * Keeps the snapshot capability this copy carries, as every other copy
+     * does, so only turning child Workspaces off drops it.
+     */
     public LoadHarnessSession withChildWorkspaces(boolean value) {
-        return withChildWorkspaces(value, false);
+        return withChildWorkspaces(value, childSnapshots);
     }
 
     /**
