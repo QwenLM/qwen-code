@@ -622,6 +622,11 @@ The review of `e1ba36ad4b` found:
   creation and child Sessions, rename, mutation, close/archive/delete
   admission, cwd change and task-cancel operations. None is per-turn; each
   still waits up to `innodb_lock_wait_timeout` behind a long holder.
+- Bound the remaining `output_publication` acquisitions:
+  `ManagedAgentStore.beginLifecycle` (the close/archive/delete admission of a
+  lifecycle-protocol Session) and the o3-backfill pair in
+  `ManagedToolResultStore`. A user-facing close admission can still wait up to
+  `innodb_lock_wait_timeout` on a held `ma_tenant_guard` row.
 - Materializer gap tripwire quarantine (audit §B2; mark the poisoned
   consumer progress dead instead of a 10 Hz permanent exception).
 - Renewal-scheduler isolation baseline (reproduction hypothesis H2) —

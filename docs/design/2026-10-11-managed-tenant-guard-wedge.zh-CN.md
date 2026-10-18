@@ -513,6 +513,10 @@ O4 门控的迟到 writer 在应被拒绝处径直获得授权
   `WorkspaceLifecycleStore.lockPlacement`）：Session 创建与子 Session、重命
   名、变更、close/archive/delete 准入、cwd 变更与任务取消操作。它们都不是
   逐轮路径；被长持有时每一处仍会等满 `innodb_lock_wait_timeout`。
+- 给剩余 `output_publication` 获取加界：`ManagedAgentStore.beginLifecycle`
+  （lifecycle 协议 Session 的 close/archive/delete 准入）与
+  `ManagedToolResultStore` 中的 o3 回填两处。用户可见的 close 准入仍可能在
+  被持有的 `ma_tenant_guard` 行上等满 `innodb_lock_wait_timeout`。
 - 物化器 gap 绊线熔断（审计 §B2；毒化的 consumer progress 标死而不是
   10 Hz 永久异常）。
 - 续期调度器隔离基线（复现假设 H2）——当前未决；rig 证据若指向它再
