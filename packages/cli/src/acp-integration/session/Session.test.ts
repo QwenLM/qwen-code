@@ -7207,6 +7207,44 @@ describe('Session', () => {
       expect(getApiHistoryPromptId(pushed)).toBe('continued-prompt');
     });
 
+    it('does not lend a live prompt id to a retry that stripped nothing', async () => {
+      // A retry whose history tail is a model entry strips nothing, so it has
+      // no identity of its own to reuse. Lending the last live id would stamp
+      // a second entry with the previous turn's mark, and the unique-match
+      // resolver would then refuse both turns for the rest of the session.
+      const previous: Content = { role: 'user', parts: [{ text: 'previous' }] };
+      markApiHistoryPrompt(previous, 'previous-prompt');
+      const history: Content[] = [
+        previous,
+        { role: 'model', parts: [{ text: 'first answer' }] },
+      ];
+      mockChat.getHistory = vi.fn().mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([]);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'retried' }] } }],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.retry': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[0]?.[4];
+      expect(sendOptions).toBeUndefined();
+    });
+
     it('associates a recording-disabled fresh prompt with its admitted daemon identity', async () => {
       vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
       const snapshots: core.FileHistorySnapshot[] = [];

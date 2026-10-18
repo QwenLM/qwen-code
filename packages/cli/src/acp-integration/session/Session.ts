@@ -585,6 +585,20 @@ const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
 const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
   ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
+/**
+ * Whether the entry is a tool-lap continuation: the turn's tool results being
+ * sent back to the model. It belongs to the turn without starting it, so only
+ * this shape may carry the turn's id without competing with the prompt entry
+ * as the rewind anchor. A mid-turn takeover prompt has no `functionResponse`
+ * and is answered inside the turn, so it is not a continuation here.
+ */
+function isToolLapContinuation(message: Content | null): message is Content {
+  return (
+    message !== null &&
+    message.parts?.some((part) => 'functionResponse' in part) === true
+  );
+}
+
 // Content has no private metadata slot, so history cleanup recognizes only
 // these exact templates; byte-identical user text is intentionally ambiguous.
 function isTodoStopGuardPromptText(text: unknown): text is string {
@@ -7194,14 +7208,14 @@ export class Session implements SessionContext {
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
                   const chat = this.#getCurrentChat();
-                  // A cancel before the first send lands on the prompt entry
-                  // this turn already marked above; a retry/continuation
-                  // carries the identity of the entries it stripped, so
-                  // replacing it with the transport id would duplicate an
-                  // earlier turn's mark and make both unresolvable. Only an
-                  // entry without an identity of its own (a tool-lap
-                  // continuation) takes the turn id.
-                  if (!getApiHistoryPromptId(nextMessage)) {
+                  // Take the turn id only on a tool-lap continuation: it is
+                  // the entry that belongs to this turn without starting it.
+                  // An unmarked prompt entry is either the prompt this turn
+                  // already marked above, or a mid-turn takeover input that
+                  // is answered inside this turn — stamping either with the
+                  // transport id would duplicate a turn's mark (and make it
+                  // unresolvable) or promote a takeover to a rewind anchor.
+                  if (isToolLapContinuation(nextMessage)) {
                     markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                   }
                   chat.addHistory(nextMessage);
@@ -7268,7 +7282,7 @@ export class Session implements SessionContext {
                             (part) => part.functionResponse,
                           )
                             ? continuesCurrentWorkChain
-                              ? continuedPromptId
+                              ? historyPromptId
                               : promptId
                             : undefined,
                         consumeInitialMemory:
@@ -7287,8 +7301,7 @@ export class Session implements SessionContext {
                       isContinue || sendResult.stopReason === 'cancelled';
                     if (
                       preserveFullMessage &&
-                      nextMessage &&
-                      !getApiHistoryPromptId(nextMessage)
+                      isToolLapContinuation(nextMessage)
                     ) {
                       markApiHistoryPrompt(nextMessage, responseCapture.turnId);
                     }
