@@ -77,6 +77,20 @@ function result(overrides: Record<string, unknown> = {}) {
 }
 
 describe('shell result presentation', () => {
+  it('does not open an empty execution details list for elapsed-only metadata', () => {
+    render(
+      tool('', {
+        args: undefined,
+        content: undefined,
+        startTime: 1000,
+        endTime: 4000,
+      }),
+    );
+    expect(container.textContent).toContain('Completed3s');
+    expect(container.textContent).not.toContain('Execution details');
+    expect(container.querySelector('dl')).toBeNull();
+  });
+
   it('uses an intact text fallback for documents without structured metadata', () => {
     const text = envelope('failed output');
     render(tool(text, { status: 'failed' }), true);

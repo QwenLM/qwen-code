@@ -3,20 +3,29 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.store.EventIdentity;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 @Component
 public class HarnessEventProjector {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern SAFE_ERROR_CODE = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
 
     public ProjectedEvent project(SourceEvent event, String turnId) {
+        return project(event, turnId, false);
+    }
+
+    public ProjectedEvent project(SourceEvent event, String turnId,
+            boolean toolDetailsEnabled) {
         if ("turn_complete".equals(event.type())) {
             Map<String, Object> data = object(event.data());
             String stopReason = string(data.get("stopReason"));
@@ -65,7 +74,7 @@ public class HarnessEventProjector {
         if ("tool_call".equals(kind)
                 || "tool_call_update".equals(kind)) {
             return new ProjectedEvent("item.tool_call.updated",
-                    safeToolData(update, turnId, event.id()), false, null,
+                    safeToolData(update, turnId, event.id(), toolDetailsEnabled), false, null,
                     null, null);
         }
         return null;
@@ -85,7 +94,8 @@ public class HarnessEventProjector {
     }
 
     private static Map<String, Object> safeToolData(
-            Map<String, Object> update, String turnId, Long sourceId) {
+            Map<String, Object> update, String turnId, Long sourceId,
+            boolean toolDetailsEnabled) {
         Map<String, Object> safe = new LinkedHashMap<>();
         safe.put("kind", string(update.get("sessionUpdate")));
         copyScalar(update, safe, "toolCallId");
@@ -93,6 +103,9 @@ public class HarnessEventProjector {
         copyScalar(update, safe, "title");
         copyScalar(update, safe, "status");
         copyScalar(update, safe, "name");
+        if (toolDetailsEnabled) {
+            copyToolDetails(update, safe);
+        }
         String callId = string(update.get("toolCallId"));
         if (callId == null) {
             callId = string(update.get("callId"));
@@ -106,6 +119,53 @@ public class HarnessEventProjector {
                                 .getBytes(StandardCharsets.UTF_8))
                 : EventIdentity.toolCallItemId(turnId, callId));
         return Map.copyOf(safe);
+    }
+
+    private static void copyToolDetails(Map<String, Object> source,
+            Map<String, Object> target) {
+        String name = string(source.get("name"));
+        if (!"read_file".equals(name) && !"run_shell_command".equals(name)) {
+            return;
+        }
+        List<String> keys = "read_file".equals(name)
+                ? List.of("file_path", "path", "offset", "limit")
+                : List.of("command", "directory", "timeout");
+        Map<String, Object> input = new LinkedHashMap<>();
+        Map<String, Object> args = object(source.get("input"));
+        for (String key : keys) {
+            Object value = args.get(key);
+            boolean numeric = List.of("timeout", "offset", "limit").contains(key);
+            if (!numeric && value instanceof String || numeric && value instanceof Number number
+                    && Double.isFinite(number.doubleValue())) {
+                input.put(key, value);
+            }
+        }
+        boolean truncated = Boolean.TRUE.equals(source.get("truncated"));
+        if (!input.isEmpty()) {
+            if (fitsJson(input, 4096)) {
+                target.put("input", Map.copyOf(input));
+            } else {
+                truncated = true;
+            }
+        }
+        if (source.get("output") instanceof String output) {
+            if (fitsJson(output, 8192)) {
+                target.put("output", output);
+            } else {
+                truncated = true;
+            }
+        }
+        if (truncated) {
+            target.put("truncated", true);
+        }
+    }
+
+    private static boolean fitsJson(Object value, int limit) {
+        try {
+            return JSON.writeValueAsString(value).getBytes(StandardCharsets.UTF_8).length <= limit;
+        } catch (JsonProcessingException error) {
+            return false;
+        }
     }
 
     private static void copyScalar(Map<String, Object> source,

@@ -299,7 +299,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
             {t('shell.result.signal')}: {result.signal}
           </div>
         )}
-        {(result || showTimeout || live || elapsed) && (
+        {(result ||
+          showTimeout ||
+          live?.totalLines !== undefined ||
+          live?.totalBytes !== undefined) && (
           <details className={styles.shellDetails} open={documentMode}>
             <summary>{t('shell.result.details')}</summary>
             <dl>

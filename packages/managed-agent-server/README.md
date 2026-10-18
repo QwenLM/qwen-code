@@ -75,6 +75,25 @@ Actions (Hosted permission approvals): [English](../../docs/design/2026-09-30-ma
 AgentDefinition revisions: [English](../../docs/design/2026-10-01-managed-agent-definitions.md) |
 [简体中文](../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
+## Inline tool details
+
+Set `qwen.managed-agent.harness.tool-details-enabled=true` (environment variable
+`QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=true`) to publish bounded saved
+`read_file` and `run_shell_command` arguments, output and errors in Session
+events and Items. The default is `false`. This approves disclosure of file
+contents and commands to **all authorized Session readers**; it is not a
+secret-redaction or per-user debugging feature. Both Server and Harness must
+contain this change. Input JSON is capped at 4 KiB and output JSON at 8 KiB;
+truncated previews are marked. No Runtime execution or capture read is required.
+
+Published inline text persists in Session history. Disabling the setting stops
+new publication without retracting old events; enabling it does not backfill
+already consumed metadata-only events. Configure it before running the turns
+whose details should be visible. Existing O3 Artifact publication and download
+policies remain independent. Design:
+[English](../../docs/design/2026-10-19-managed-inline-tool-details.md) |
+[简体中文](../../docs/design/2026-10-19-managed-inline-tool-details.zh-CN.md).
+
 ## Tool publication storage
 
 Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.

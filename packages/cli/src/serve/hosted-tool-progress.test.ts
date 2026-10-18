@@ -15,6 +15,8 @@ import { hostedToolProgress } from './hosted-tool-progress.js';
 
 function fixture(
   outcome: unknown = { envelope: { executionStatus: 'success' } },
+  response: Record<string, unknown> = { output: 'private file contents' },
+  resultName = 'read_file',
 ) {
   const bodies = new Map<string, Buffer>();
   const resource = (id: string, body: unknown) => {
@@ -45,8 +47,11 @@ function fixture(
         {
           functionCall: {
             id: 'model-call-2',
-            name: 'read_file',
-            args: { path: '/private/file' },
+            name: resultName,
+            args:
+              resultName === 'run_shell_command'
+                ? { command: 'printf ok', directory: 'src' }
+                : { path: '/private/file' },
           },
         },
       ],
@@ -64,8 +69,8 @@ function fixture(
         {
           functionResponse: {
             id: 'model-call-2',
-            name: 'read_file',
-            response: { output: 'private file contents' },
+            name: resultName,
+            response,
           },
         },
       ],
@@ -121,10 +126,152 @@ function fixture(
     },
     resources: { read },
   } as unknown as Pick<ManagedSession, 'authority' | 'resources'>;
-  return { session, events, read };
+  return { session, events, read, resource };
 }
 
 describe('Hosted tool lifecycle metadata', () => {
+  it('preserves Shell command, output and errors through deterministic replay', async () => {
+    const { session, events } = fixture(
+      undefined,
+      {
+        output: 'stdout and stderr\nExit Code: 2',
+        error: 'command failed',
+      },
+      'run_shell_command',
+    );
+    const result = await hostedToolProgress(session, events[4], true);
+    expect(result?.update).toMatchObject({
+      input: { command: 'printf ok', directory: 'src' },
+      output: 'stdout and stderr\nExit Code: 2\n\ncommand failed',
+      status: 'failed',
+    });
+    expect(await hostedToolProgress(session, events[4], true)).toEqual(result);
+  });
+
+  it('keeps unsupported tool details private', async () => {
+    const { session, events } = fixture(
+      undefined,
+      { output: 'private' },
+      'mcp_private',
+    );
+    const result = await hostedToolProgress(session, events[4], true);
+    expect(result?.update).not.toHaveProperty('input');
+    expect(result?.update).not.toHaveProperty('output');
+  });
+
+  it('does not pair a result with a call from a different prompt', async () => {
+    const { session, events, resource } = fixture();
+    const contentRef = resource('other-batch', {
+      daemonPromptId: 'other-prompt',
+      message: {
+        parts: [
+          {
+            functionCall: {
+              id: 'model-call-2',
+              name: 'read_file',
+              args: { file_path: 'unrelated' },
+            },
+          },
+        ],
+      },
+    });
+    events[0] = { ...events[0], payload: { ...events[0].payload, contentRef } };
+    expect(
+      (await hostedToolProgress(session, events[4], true))?.update,
+    ).not.toHaveProperty('input');
+  });
+
+  it('bounds escaped input and drops undeclared fields', async () => {
+    const { session, events, resource } = fixture(
+      undefined,
+      { output: 'ok' },
+      'run_shell_command',
+    );
+    const contentRef = resource('large-batch', {
+      daemonPromptId: 'prompt',
+      message: {
+        parts: [
+          {
+            functionCall: {
+              id: 'model-call-2',
+              name: 'run_shell_command',
+              args: {
+                command: '\u0000"😀'.repeat(5000),
+                directory: 'src'.repeat(5000),
+                headers: { Authorization: 'never-public' },
+              },
+            },
+          },
+        ],
+      },
+    });
+    events[0] = { ...events[0], payload: { ...events[0].payload, contentRef } };
+    const update = (await hostedToolProgress(session, events[4], true))?.update;
+    expect(update).toHaveProperty('truncated', true);
+    expect(
+      Buffer.byteLength(JSON.stringify(update?.input)),
+    ).toBeLessThanOrEqual(4096);
+    expect(JSON.stringify(update)).not.toContain('never-public');
+  });
+
+  it('can provide bounded private display fields for the Java publication gate', async () => {
+    const { session, events } = fixture();
+    expect(
+      (await hostedToolProgress(session, events[1], true))?.update,
+    ).toMatchObject({
+      input: { command: 'secret command' },
+    });
+    const result = await hostedToolProgress(session, events[4], true);
+    expect(result?.update).toMatchObject({
+      input: { path: '/private/file' },
+      output: 'private file contents',
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /broker-execution|outcome-body|result-body/,
+    );
+  });
+
+  it('publishes the saved validation error even when there is no execution intent', async () => {
+    const { session, events } = fixture(undefined, {
+      error:
+        'Hosted file tools require file_path relative to the saved Session working directory.',
+    });
+    events.splice(1, 3);
+    const result = await hostedToolProgress(session, events[1], true);
+    expect(result?.update).toMatchObject({
+      status: 'failed',
+      input: { path: '/private/file' },
+      output:
+        'Hosted file tools require file_path relative to the saved Session working directory.',
+    });
+  });
+
+  it('keeps explicit empty output and ignores arbitrary response fields', async () => {
+    const { session, events } = fixture(undefined, {
+      output: '',
+      capture: { secret: 'never-copy' },
+    });
+    const result = await hostedToolProgress(session, events[4], true);
+    expect(result?.update).toHaveProperty('output', '');
+    expect(JSON.stringify(result)).not.toContain('never-copy');
+  });
+
+  it.each(['中😀'.repeat(5000), '\u0000"\\'.repeat(5000)])(
+    'bounds encoded output without splitting Unicode characters',
+    async (output) => {
+      const { session, events } = fixture(undefined, { output });
+      const update = (await hostedToolProgress(session, events[4], true))
+        ?.update;
+      expect(update).toHaveProperty('truncated', true);
+      const preview = (update as unknown as { output: string }).output;
+      expect(output.startsWith(preview)).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(preview))).toBeLessThanOrEqual(
+        8192,
+      );
+      expect(preview).not.toMatch(/[\uD800-\uDBFF]$/u);
+    },
+  );
+
   it('finishes file tools from committed history when the legacy path has no receipt', async () => {
     const { session, events } = fixture();
     const progress = await hostedToolProgress(session, events[4]);

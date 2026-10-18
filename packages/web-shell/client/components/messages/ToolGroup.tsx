@@ -242,7 +242,29 @@ const READ_LANGUAGE_ALIASES: Record<string, string> = {
 };
 
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
+  const { t } = useI18n();
   const content = useMemo(() => extractText(tool) || '', [tool]);
+  if (!content) {
+    const available =
+      typeof tool.rawOutput === 'string' ||
+      tool.content?.some(
+        (block) =>
+          block.type === 'content' && typeof block.content?.text === 'string',
+      );
+    return (
+      <div className={styles.expandedRead}>
+        <pre className={styles.expandedOutput}>
+          {t(
+            isActiveToolStatus(tool.status)
+              ? 'shell.result.waiting'
+              : available
+                ? 'shell.result.empty'
+                : 'shell.result.unavailable',
+          )}
+        </pre>
+      </div>
+    );
+  }
   const language = languageForPath(getReadFilePath(tool));
   const plainText =
     language === 'text' ||

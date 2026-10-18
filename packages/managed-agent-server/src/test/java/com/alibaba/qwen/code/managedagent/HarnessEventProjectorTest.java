@@ -15,6 +15,62 @@ class HarnessEventProjectorTest {
             new HarnessEventProjector();
 
     @Test
+    void inlineToolDetailsRequireExplicitPublicationApproval() {
+        SourceEvent source = new SourceEvent(9L, "managed_journal_event",
+                Map.of("update", Map.of("sessionUpdate", "tool_call_update",
+                        "toolCallId", "read-1", "name", "read_file", "status", "failed",
+                        "input", Map.of("file_path", "/tmp/example.diff", "secret", "not-public"),
+                        "output", "Hosted file tools require file_path relative to the saved Session working directory.",
+                        "truncated", true)), "prompt", Map.of());
+        assertThat(projector.project(source, "turn").data())
+                .doesNotContainKeys("input", "output", "truncated");
+        ProjectedEvent approved = projector.project(source, "turn", true);
+        assertThat(approved.data()).containsEntry("status", "failed")
+                .containsEntry("input", Map.of("file_path", "/tmp/example.diff"))
+                .containsEntry("output", "Hosted file tools require file_path relative to the saved Session working directory.")
+                .containsEntry("truncated", true);
+        assertThat(approved.data().toString()).doesNotContain("not-public");
+    }
+
+    @Test
+    void validatesInlineFieldsIndependentlyOfTheHarness() {
+        SourceEvent source = toolDetails("run_shell_command", Map.of("command", "\\\"".repeat(3000)), "中".repeat(3000));
+        assertThat(projector.project(source, "turn", true).data())
+                .doesNotContainKeys("input", "output")
+                .containsEntry("truncated", true);
+        SourceEvent unknown = toolDetails("mcp__private", Map.of("command", "secret"), "private");
+        assertThat(projector.project(unknown, "turn", true).data())
+                .doesNotContainKeys("input", "output");
+    }
+
+    @Test
+    void keepsEmptyOutputAndOnlyScalarAllowlistedArguments() {
+        SourceEvent source = toolDetails("run_shell_command",
+                Map.of("command", "printf 'ok'", "directory", "src", "timeout", 10,
+                        "headers", Map.of("Authorization", "secret")), "");
+        assertThat(projector.project(source, "turn", true).data())
+                .containsEntry("input", Map.of("command", "printf 'ok'", "directory", "src", "timeout", 10))
+                .containsEntry("output", "")
+                .doesNotContainKey("truncated");
+    }
+
+    private static SourceEvent toolDetails(String name, Map<String, Object> input, String output) {
+        return new SourceEvent(10L, "session_update", Map.of("update", Map.of(
+                "sessionUpdate", "tool_call_update", "toolCallId", "shell-1", "name", name,
+                "input", input, "output", output)), "prompt", Map.of());
+    }
+
+    @Test
+    void keepsBoundedUnicodeOutputAndRejectsWrongArgumentTypes() {
+        String output = "😀".repeat(2047);
+        SourceEvent source = toolDetails("read_file",
+                Map.of("file_path", "proof.txt", "offset", "not-a-number", "limit", 10), output);
+        assertThat(projector.project(source, "turn", true).data())
+                .containsEntry("input", Map.of("file_path", "proof.txt", "limit", 10))
+                .containsEntry("output", output);
+    }
+
+    @Test
     void projectsTextWithoutLeakingOtherUpdateFields() {
         ProjectedEvent event = projector.project(new SourceEvent(1L,
                 "session_update", Map.of("update", Map.of(

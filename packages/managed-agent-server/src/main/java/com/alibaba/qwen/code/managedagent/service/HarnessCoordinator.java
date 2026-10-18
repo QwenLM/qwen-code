@@ -91,6 +91,7 @@ public class HarnessCoordinator {
     private final AgentStateStore store;
     private final HarnessConnector harness;
     private final HarnessEventProjector projector;
+    private final boolean toolDetailsEnabled;
     private final RuntimeWarmer runtimeWarmer;
     private final ExecutorService executor;
     private final Clock clock;
@@ -126,6 +127,7 @@ public class HarnessCoordinator {
         this.store = store;
         this.harness = harness;
         this.projector = projector;
+        this.toolDetailsEnabled = properties.getHarness().isToolDetailsEnabled();
         this.runtimeWarmer = runtimeWarmer;
         this.executor = executor;
         this.clock = clock;
@@ -860,7 +862,7 @@ public class HarnessCoordinator {
                     continue;
                 }
                 ProjectedEvent projection = projector.project(source,
-                        turn.turnId());
+                        turn.turnId(), toolDetailsEnabled);
                 HarnessEvent event = new HarnessEvent(source.id(),
                         bootId + ":" + stream.eventEpoch() + ":"
                                 + source.id(),

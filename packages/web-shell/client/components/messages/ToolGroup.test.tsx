@@ -77,6 +77,36 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   };
 }
 
+describe('ReadFile output availability', () => {
+  it.each(['failed', 'completed'] as const)(
+    'labels missing %s read details',
+    (status) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status,
+        }),
+        { forceExpanded: true },
+      );
+      expect(container.textContent).toContain(
+        'Output is unavailable for this tool call.',
+      );
+    },
+  );
+
+  it('distinguishes an explicitly empty read from missing output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        rawOutput: '',
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+});
+
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},

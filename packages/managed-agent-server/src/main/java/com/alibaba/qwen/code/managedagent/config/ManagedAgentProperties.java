@@ -426,6 +426,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public static class Harness {
         private boolean enabled;
+        private boolean toolDetailsEnabled;
         private boolean workspaceFilesEnabled;
         private boolean workspaceShellEnabled;
         private String baseUrl = "http://127.0.0.1:4170";
@@ -464,6 +465,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public boolean isEnabled() {
             return enabled;
+        }
+
+        public boolean isToolDetailsEnabled() {
+            return toolDetailsEnabled;
+        }
+
+        public void setToolDetailsEnabled(boolean value) {
+            toolDetailsEnabled = value;
         }
 
         public void setEnabled(boolean enabled) {

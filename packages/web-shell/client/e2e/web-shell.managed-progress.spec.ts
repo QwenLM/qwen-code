@@ -268,6 +268,66 @@ test('Managed progress stays visible through a long transcript and live thought/
   expect(fixture.errors).toEqual([]);
 });
 
+test('Managed tool details survive transcript refresh @smoke', async ({
+  page,
+}, testInfo) => {
+  const fixture = await installManagedScenario(page, testInfo);
+  await fixture.emit('item.tool_call.updated', {
+    toolCallId: 'saved-read',
+    name: 'read_file',
+    status: 'failed',
+    input: { file_path: '/tmp/example.diff' },
+    output:
+      'Hosted file tools require file_path relative to the saved Session working directory.',
+  });
+  await fixture.emit('item.tool_call.updated', {
+    toolCallId: 'saved-shell',
+    name: 'run_shell_command',
+    status: 'completed',
+    input: { command: "printf 'saved shell output'", directory: 'src' },
+    output: 'saved shell output\nExit Code: 0',
+  });
+  await fixture.emit('item.tool_call.updated', {
+    toolCallId: 'old-read',
+    name: 'read_file',
+    status: 'failed',
+  });
+  await fixture.emit('turn.completed');
+  await page.reload();
+  const list = page
+    .getByRole('region', { name: 'Managed conversation' })
+    .locator('[data-web-shell-message-list]');
+  await list
+    .getByRole('button', { name: 'Ran 1 command Read files 2 times' })
+    .click();
+  await list
+    .getByText('ReadFile', { exact: true })
+    .first()
+    .click({ timeout: 10000 });
+  await expect(list).toContainText(
+    'Hosted file tools require file_path relative',
+  );
+  await list
+    .getByText('Shell', { exact: true })
+    .first()
+    .click({ timeout: 10000 });
+  await expect(list).toContainText("printf 'saved shell output'");
+  await expect(list).toContainText('saved shell output\nExit Code: 0');
+  await list
+    .getByText('ReadFile', { exact: true })
+    .last()
+    .click({ timeout: 10000 });
+  await expect(list).toContainText('Output is unavailable for this tool call.');
+  await expect(list.locator('dl:empty')).toHaveCount(0);
+  await testInfo.attach('managed-tool-details', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+  expect(fixture.prompts).toHaveLength(0);
+  expect(fixture.daemon.promptRequests()).toHaveLength(0);
+  expect(fixture.errors).toEqual([]);
+});
+
 test('Managed cancellation waits for settlement before continuing the same session @smoke', async ({
   page,
 }, testInfo) => {

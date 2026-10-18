@@ -15,6 +15,7 @@ import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtim
 export async function hostedToolProgress(
   session: Pick<ManagedSession, 'authority' | 'resources'>,
   event: ManagedSessionEvent,
+  includeDetails = false,
 ): Promise<
   | {
       promptId: string;
@@ -23,6 +24,9 @@ export async function hostedToolProgress(
         toolCallId: string;
         name: string;
         status: 'in_progress' | 'completed' | 'failed' | 'cancelled';
+        input?: Record<string, string | number>;
+        output?: string;
+        truncated?: boolean;
       };
     }
   | undefined
@@ -60,6 +64,36 @@ export async function hostedToolProgress(
       response.response?.['error'],
     );
     if (!status) return;
+    let args: Record<string, unknown> | undefined;
+    if (includeDetails && supportsDetails(response.name)) {
+      const batch = session.authority
+        .eventsInSequenceRange(1, event.sequence - 1)
+        .findLast(
+          (entry) =>
+            entry.kind === 'message.committed' &&
+            entry.payload['role'] === 'assistant',
+        );
+      if (batch) {
+        const assistant = JSON.parse(
+          (
+            await readManagedMessageBody(
+              (ref) => session.resources.read(ref),
+              assertManagedSessionDurableRef(
+                batch.payload['contentRef'],
+                'tool batch',
+              ),
+            )
+          ).toString('utf8'),
+        ) as ChatRecord;
+        if (assistant.daemonPromptId === message.daemonPromptId) {
+          args = assistant.message?.parts?.find(
+            (part) =>
+              part.functionCall?.id === response.id &&
+              part.functionCall?.name === response.name,
+          )?.functionCall?.args;
+        }
+      }
+    }
     return {
       promptId: message.daemonPromptId,
       update: {
@@ -67,6 +101,9 @@ export async function hostedToolProgress(
         toolCallId: response.id,
         name: response.name,
         status,
+        ...(includeDetails
+          ? inlineDetails(response.name, args, response.response)
+          : {}),
       },
     };
   }
@@ -142,8 +179,8 @@ export async function hostedToolProgress(
     if (!terminal) return;
     status = terminal;
   }
-  // Arguments and output remain behind the tool-publication policy. This
-  // lifecycle feed only names the call and its durable execution state.
+  // These are private transport fields. Java applies its explicit inline
+  // publication policy before persisting them in public events and Items.
   return {
     promptId: message.daemonPromptId,
     update: {
@@ -152,8 +189,70 @@ export async function hostedToolProgress(
       toolCallId: call.id,
       name: call.name,
       status,
+      ...(includeDetails ? inlineDetails(call.name, call.args) : {}),
     },
   };
+}
+
+function supportsDetails(name: string) {
+  return name === 'read_file' || name === 'run_shell_command';
+}
+
+function inlineDetails(
+  name: string,
+  args?: Record<string, unknown>,
+  response?: Record<string, unknown>,
+) {
+  if (!supportsDetails(name)) return {};
+  const input: Record<string, string | number> = {};
+  const keys =
+    name === 'read_file'
+      ? ['file_path', 'path', 'offset', 'limit']
+      : ['command', 'directory', 'timeout'];
+  for (const key of keys) {
+    const value = args?.[key];
+    const numeric = ['timeout', 'offset', 'limit'].includes(key);
+    if (
+      (!numeric && typeof value === 'string') ||
+      (numeric && typeof value === 'number' && Number.isFinite(value))
+    )
+      input[key] = value;
+  }
+  let truncated = false;
+  if (Buffer.byteLength(JSON.stringify(input)) > 4096) {
+    for (const key of keys) {
+      if (typeof input[key] === 'string')
+        input[key] = boundedText(input[key], 1024).text;
+    }
+    truncated = true;
+  }
+  const output =
+    typeof response?.['output'] === 'string' ? response['output'] : undefined;
+  const error =
+    typeof response?.['error'] === 'string' ? response['error'] : undefined;
+  const text = error ? (output ? `${output}\n\n${error}` : error) : output;
+  const preview = text === undefined ? undefined : boundedText(text, 8192);
+  return {
+    ...(Object.keys(input).length ? { input } : {}),
+    ...(preview ? { output: preview.text } : {}),
+    ...(truncated ||
+    preview?.truncated ||
+    response?.['previewTruncated'] === true
+      ? { truncated: true }
+      : {}),
+  };
+}
+
+function boundedText(text: string, limit: number) {
+  let bytes = 2;
+  let length = 0;
+  for (const char of text) {
+    const size = Buffer.byteLength(JSON.stringify(char)) - 2;
+    if (bytes + size > limit) break;
+    bytes += size;
+    length += char.length;
+  }
+  return { text: text.slice(0, length), truncated: length < text.length };
 }
 
 function terminalToolStatus(status: unknown, error: unknown) {
