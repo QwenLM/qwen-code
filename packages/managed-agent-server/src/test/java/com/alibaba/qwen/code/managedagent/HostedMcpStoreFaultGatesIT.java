@@ -49,7 +49,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -87,8 +86,6 @@ class HostedMcpStoreFaultGatesIT {
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     private final ExecutorService caseExecutor =
             Executors.newVirtualThreadPerTaskExecutor();
-    private volatile CountDownLatch controlHold;
-    private volatile String controlHoldKind;
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private Path cli;
@@ -583,15 +580,6 @@ class HostedMcpStoreFaultGatesIT {
                 "mcp_configuration");
     }
 
-    private int liveOwners(SessionRef session) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " ma_runtime_session WHERE tenant_id = ? AND"
-                + " harness_session_id = ? AND session_state IN"
-                + " ('ACQUIRING', 'READY')", Integer.class, tenant,
-                session.id());
-        return count == null ? 0 : count;
-    }
-
     /**
      * The exact owner the baseline acquired: a positive count alone would
      * accept a fresh generation the refused commit could have minted.
@@ -679,60 +667,12 @@ class HostedMcpStoreFaultGatesIT {
         return settled;
     }
 
-    private long fixturePid() {
-        return fixtureEvents("mcp.start").getFirst().path("pid").asLong();
-    }
-
-    private long workerPid() throws IOException {
-        try (var files = Files.list(temporary.resolve("broker"))) {
-            for (Path file : files.filter(path -> path.getFileName()
-                    .toString().endsWith(".json")).toList()) {
-                long pid = json.readTree(Files.readString(file))
-                        .path("pid").asLong();
-                if (pid > 0 && ProcessHandle.of(pid)
-                        .map(ProcessHandle::isAlive).orElse(false)) {
-                    return pid;
-                }
-            }
-        }
-        throw new AssertionError("No durable Runtime worker registered");
-    }
-
-    private long awaitWorkerPid() {
-        java.util.concurrent.atomic.AtomicLong pid =
-                new java.util.concurrent.atomic.AtomicLong();
-        await().atMost(Duration.ofSeconds(30)).ignoreExceptions()
-                .untilAsserted(() -> pid.set(workerPid()));
-        return pid.get();
-    }
-
-    private void kill(long pid) throws Exception {
-        ProcessHandle handle = ProcessHandle.of(pid)
-                .orElseThrow(() -> new AssertionError("pid " + pid));
-        handle.destroyForcibly();
-        handle.onExit().get(10, TimeUnit.SECONDS);
-    }
-
     private void killHarness() throws Exception {
         Process dead = harness;
         dead.destroyForcibly();
         assertThat(dead.waitFor(10, TimeUnit.SECONDS))
                 .as("the Harness must die before the replacement starts")
                 .isTrue();
-    }
-
-    private void holdNextControl(String kind) {
-        controlHoldKind = kind;
-        controlHold = new CountDownLatch(1);
-    }
-
-    private void releaseControl() {
-        CountDownLatch latch = controlHold;
-        controlHold = null;
-        controlHoldKind = null;
-        if (latch != null) {
-            latch.countDown();
-        }
     }
 
     private String writeRelease() throws IOException {
@@ -839,73 +779,10 @@ class HostedMcpStoreFaultGatesIT {
         return found.getLast();
     }
 
-    private void triggerTurn(SessionRef session) {
-        try {
-            assertThat(promptRaw(session, "FG12C_RECOVER").statusCode())
-                    .isIn(202, 409, 503);
-        } catch (Exception failed) {
-            throw new IllegalStateException(failed);
-        }
-    }
-
-    private HttpResponse<String> promptRaw(SessionRef session, String text)
-            throws Exception {
-        List<Map<String, Object>> prompt = List.of(
-                Map.of("type", "text", "text", text));
-        String payload = json.writeValueAsString(prompt);
-        Map<String, Object> body = Map.of("promptId", uuid(), "prompt", prompt,
-                "payloadDigest", "sha256:" + DigestUtils.sha256Hex(payload));
-        return rawRequest("POST", "/session/" + session.id() + "/prompt",
-                json.writeValueAsString(body), session.clientId());
-    }
-
     private HttpResponse<String> rawStatus(SessionRef session,
             String operationId) throws Exception {
         return rawRequest("GET", "/session/" + session.id()
                 + "/mcp/operations/" + operationId, null, session.clientId());
-    }
-
-    private boolean deadAcquireRefused(Map<String, Object> entry) {
-        if (!"POST".equals(entry.get("method"))
-                || !String.valueOf(entry.get("path")).endsWith(":acquire")) {
-            return false;
-        }
-        JsonNode answer = (JsonNode) entry.get("answer");
-        if (answer == null) {
-            return false;
-        }
-        int status = ((Number) entry.get("status")).intValue();
-        String error = answer.path("error").asText();
-        return (status == 409
-                && ("Runtime generation is no longer live".equals(error)
-                        || "Runtime Session is not ready".equals(error)))
-                || (status == 503
-                        && "Managed Runtime process is not alive."
-                                .equals(error));
-    }
-
-    private Map<String, Object> terminalStatus(String configuration) {
-        return wire.stream()
-                .filter(entry -> ((Number) entry.get("seq")).intValue()
-                        > wireBaseline)
-                .filter(entry -> {
-                    JsonNode request = (JsonNode) entry.get("request");
-                    return request != null
-                            && "mcp-status".equals(request.at(
-                                    "/operation/kind").asText())
-                            && configuration.equals(request.at(
-                                    "/operation/targetOperationId").asText());
-                })
-                .filter(entry -> Integer.valueOf(200)
-                        .equals(entry.get("status")))
-                .filter(entry -> {
-                    JsonNode answer = (JsonNode) entry.get("answer");
-                    String state = answer == null ? ""
-                            : answer.path("result").path("state").asText();
-                    return "settled".equals(state)
-                            || "outcome_unknown".equals(state);
-                })
-                .findFirst().orElse(null);
     }
 
     private OperationRecord admitClose(SessionRef session) {
@@ -965,64 +842,6 @@ class HostedMcpStoreFaultGatesIT {
         return rawRequest("POST", "/session/" + session.id() + "/lifecycle",
                 json.writeValueAsString(lifecycleBody(session, operationId,
                         claimGeneration, phase)), session.clientId());
-    }
-
-    private List<JsonNode> controlRequests(String kind) {
-        return wire.stream()
-                .filter(entry -> ((Number) entry.get("seq")).intValue()
-                        > wireBaseline)
-                .map(entry -> (JsonNode) entry.get("request"))
-                .filter(request -> request != null
-                        && kind.equals(request.at("/operation/kind").asText()))
-                .toList();
-    }
-
-    private String earlyBody(Future<HttpResponse<String>> future) {
-        if (!future.isDone()) {
-            return "";
-        }
-        try {
-            HttpResponse<String> response = future.get();
-            return response.statusCode() + " " + response.body();
-        } catch (Exception failure) {
-            return String.valueOf(failure);
-        }
-    }
-
-    private Map<String, Object> awaitWireControl(String kind,
-            String operationId, String state) {
-        AtomicReference<Map<String, Object>> found = new AtomicReference<>();
-        await().atMost(Duration.ofSeconds(60)).ignoreExceptions()
-                .untilAsserted(() -> {
-                    wire.stream()
-                            .filter(entry -> ((Number) entry.get("seq"))
-                                    .intValue() > wireBaseline)
-                            .filter(entry -> {
-                                JsonNode request = (JsonNode) entry.get("request");
-                                return request != null
-                                        && kind.equals(request.at(
-                                                "/operation/kind").asText())
-                                        && operationId.equals(request.at(
-                                                "/operation/operationId")
-                                                .asText());
-                            })
-                            .filter(entry -> Integer.valueOf(200)
-                                    .equals(entry.get("status")))
-                            .filter(entry -> {
-                                if (state == null) {
-                                    return true;
-                                }
-                                JsonNode answer = (JsonNode) entry.get("answer");
-                                return answer != null && state.equals(answer
-                                        .path("result").path("state").asText());
-                            })
-                            .findFirst().ifPresent(found::set);
-                    assertThat(found.get())
-                            .as("%s %s must settle before the replacement",
-                                    kind, operationId)
-                            .isNotNull();
-                });
-        return found.get();
     }
 
     private String uuid() {
@@ -1318,15 +1137,6 @@ class HostedMcpStoreFaultGatesIT {
         entry.put("seq", wireSequence.incrementAndGet());
         if (parsed != null) {
             entry.put("request", parsed);
-        }
-        CountDownLatch hold = controlHold;
-        if (hold != null && controlHoldKind != null
-                && controlHoldKind.equals(kind)) {
-            try {
-                hold.await(120, TimeUnit.SECONDS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
         }
         URI upstream = URI.create("http://127.0.0.1:" + brokerPort + path
                 + (query == null ? "" : "?" + query));
