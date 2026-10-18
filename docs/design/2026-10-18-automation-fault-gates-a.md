@@ -150,7 +150,9 @@ The class measured 46.3 s, 85.0 s, 57.1 s and 67.0 s locally on JDK 21 +
 MySQL 8.4.6. Most of the spread is the wait for the next minute boundary.
 It is budgeted at about 170 s (2× the heaviest run). The shared fork's
 healthy sum and its timeout move by that amount, composed onto `main`'s
-values at push time; the Verify step's 95 minutes still wrap the fork.
+values at push time. On top of `main` after #14533 the fork reaches
+5218 s, so the Verify step moves from 95 to 100 minutes (fork + 600 s =
+5818 s) and the job ceiling from 190 to 195.
 
 ## Acceptance
 
