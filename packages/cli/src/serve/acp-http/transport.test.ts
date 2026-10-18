@@ -3976,6 +3976,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.message).toContain('resolveConflicts');
   });
 
+  it('_qwen/sessions/archive rejects a non-boolean idle guard', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 144,
+      method: '_qwen/sessions/archive',
+      params: { sessionIds: ['session-1'], requireIdle: 'yes' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(144);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('requireIdle');
+  });
+
   it('_qwen/sessions/unarchive returns per-id result buckets', async () => {
     const sessionId = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
     const connId = await initialize();

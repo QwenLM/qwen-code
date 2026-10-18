@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.daemon;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /** Input for attaching Java to an existing Hosted Harness session. */
 public final class LoadHarnessSession {
@@ -15,28 +17,77 @@ public final class LoadHarnessSession {
     private Map<String, Object> lifecycleAuthority;
     private int lifecycleProtocolVersion = 1;
     private Map<String, Object> agentDefinition;
+    private List<Map<String, Object>> mcpServers;
+    private Map<String, Object> hookCatalog;
     private boolean stopMessages;
+    private boolean foregroundOnly;
 
     /**
      * #13753 I2: a copy that tells the Hosted side this control plane
      * serves child Workspaces (see {@link CreateHarnessSession.Builder#childWorkspaces}).
      */
     private boolean childWorkspaces;
+    /** #13753 I3: with child Workspaces, the control plane serves snapshots too. */
+    private boolean childSnapshots;
 
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
         return this;
     }
 
+    public LoadHarnessSession withMcpServers(List<Map<String, Object>> value) {
+        this.mcpServers = value == null ? null : value.stream().map(Map::copyOf).collect(Collectors.toUnmodifiableList());
+        return this;
+    }
+
+    public LoadHarnessSession withHookCatalog(Map<String, Object> value) {
+        this.hookCatalog = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
+    /**
+     * Keeps the snapshot capability this copy carries, as every other copy
+     * does, so only turning child Workspaces off drops it.
+     */
     public LoadHarnessSession withChildWorkspaces(boolean value) {
+        return withChildWorkspaces(value, childSnapshots);
+    }
+
+    /**
+     * #13753 I3: the copy also says whether the control plane serves
+     * read-only snapshot children, which only a host that serves child
+     * Workspaces can (see {@link CreateHarnessSession.Builder#childSnapshots}).
+     */
+    public LoadHarnessSession withChildWorkspaces(boolean value, boolean snapshots) {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = value;
+        copy.childSnapshots = value && snapshots;
         copy.stopMessages = stopMessages;
+        copy.foregroundOnly = foregroundOnly;
+        return copy;
+    }
+
+    /** Restates the immutable SSH Session tool restriction on every attachment. */
+    public LoadHarnessSession withForegroundOnly(boolean value) {
+        LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
+        copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
+        copy.lifecycleAuthority = lifecycleAuthority;
+        copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
+        copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
+        copy.stopMessages = stopMessages;
+        copy.foregroundOnly = value;
         return copy;
     }
 
@@ -55,10 +106,14 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
         copy.lifecycleProtocolVersion = protocolVersion;
         copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
         copy.stopMessages = stopMessages;
+        copy.foregroundOnly = foregroundOnly;
         return copy;
     }
 
@@ -69,10 +124,14 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.mcpServers = mcpServers;
+        copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.lifecycleProtocolVersion = lifecycleProtocolVersion;
         copy.childWorkspaces = childWorkspaces;
+        copy.childSnapshots = childSnapshots;
         copy.stopMessages = true;
+        copy.foregroundOnly = foregroundOnly;
         return copy;
     }
 
@@ -172,11 +231,23 @@ public final class LoadHarnessSession {
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
         }
+        if (mcpServers != null) {
+            result.put("mcpServers", mcpServers);
+        }
+        if (hookCatalog != null) {
+            result.put("hookCatalog", hookCatalog);
+        }
         if (stopMessages) {
             result.put("stopMessages", true);
         }
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
+        }
+        if (foregroundOnly) {
+            result.put("foregroundOnly", true);
+        }
+        if (childSnapshots) {
+            result.put("childSnapshots", true);
         }
         return result;
     }

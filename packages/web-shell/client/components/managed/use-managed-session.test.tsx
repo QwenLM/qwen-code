@@ -54,6 +54,88 @@ describe('useManagedSession', () => {
     return null;
   }
 
+  it('does not resurrect older model or approval selections from a delayed summary', async () => {
+    const getSession = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessionId: 'session-1',
+        modelSelection: { modelId: 'A', revision: 1 },
+        approvalMode: 'default',
+        initialApprovalMode: 'default',
+        approvalRevision: 1,
+        planMode: true,
+        modelContext: {
+          modelId: 'A',
+          inputTokens: 200,
+          contextWindowSize: 1000,
+          observedAt: 1,
+        },
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'session-1',
+        modelSelection: { modelId: 'A', revision: 3 },
+        approvalMode: 'yolo',
+        initialApprovalMode: 'default',
+        approvalRevision: 2,
+        planMode: false,
+      })
+      .mockResolvedValue({
+        sessionId: 'session-1',
+        modelSelection: { modelId: 'A', revision: 1 },
+        approvalMode: 'default',
+        approvalRevision: 1,
+        planMode: true,
+        modelContext: {
+          modelId: 'A',
+          inputTokens: 200,
+          contextWindowSize: 1000,
+          observedAt: 1,
+        },
+      });
+    const provider = {
+      getSession,
+      getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+      async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+        await new Promise((resolve) =>
+          opts.signal.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    root = createRoot(document.createElement('div'));
+    await act(async () => {
+      root!.render(<Probe provider={provider} />);
+    });
+    await act(async () => {
+      await latest!.refreshSummary();
+    });
+    expect(latest!.summary?.modelSelection).toEqual({
+      modelId: 'A',
+      revision: 3,
+    });
+    expect(latest!.summary?.modelContext).toBeUndefined();
+    expect(latest!.summary).toMatchObject({
+      approvalMode: 'yolo',
+      initialApprovalMode: 'default',
+      approvalRevision: 2,
+      planMode: false,
+    });
+    await act(async () => {
+      await latest!.refreshSummary();
+    });
+    expect(latest!.summary?.modelSelection).toEqual({
+      modelId: 'A',
+      revision: 3,
+    });
+    expect(latest!.summary?.modelContext).toBeUndefined();
+    expect(latest!.summary).toMatchObject({
+      approvalMode: 'yolo',
+      initialApprovalMode: 'default',
+      approvalRevision: 2,
+      planMode: false,
+    });
+  });
+
   function deterministicBackoff(): () => void {
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
     return () => random.mockRestore();
