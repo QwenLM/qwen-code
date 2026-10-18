@@ -365,11 +365,20 @@ This displays an interactive conversation selector with a clean list view showin
 
 Use arrow keys to navigate and press Enter to select a conversation. Press Esc to exit.
 
+**4. Resume a conversation by ID after moving the project**
+
+```bash
+qwen --resume 123e4567-e89b-12d3-a456-426614174000
+```
+
+If the current project directory was renamed or moved, an explicit session ID lets Qwen Code look for that session under the old project path. When exactly one safe match is found and the old directory no longer exists, Qwen Code shows the old and new paths and asks whether to reattach the session. It never overwrites an existing session, moves a session with an active writer, or chooses between duplicate IDs. This recovery prompt is interactive; `--continue`, the conversation picker, title lookup, and headless commands remain scoped to the current project.
+
 > [!tip]
 >
 > - Conversation history is stored locally on your machine
 > - Use `--continue` for quick access to your most recent conversation
 > - Use `--resume` when you need to select a specific past conversation
+> - Use `--resume <session-id>` to recover a known conversation after renaming or moving its project directory
 > - When resuming, you'll see the entire conversation history before continuing
 > - The resumed conversation starts with the same model and configuration as the original
 >
@@ -391,6 +400,9 @@ Use arrow keys to navigate and press Enter to select a conversation. Press Esc t
 >
 > # Show conversation picker
 > qwen --resume
+>
+> # Reattach a known session after moving its project directory
+> qwen --resume 123e4567-e89b-12d3-a456-426614174000
 >
 > # Continue most recent conversation in non-interactive mode
 > qwen --continue -p "Run the tests again"
