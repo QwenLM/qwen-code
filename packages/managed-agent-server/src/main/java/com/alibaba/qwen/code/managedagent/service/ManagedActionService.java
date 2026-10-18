@@ -302,7 +302,7 @@ public class ManagedActionService {
             if (!text.equals(new String(bytes, StandardCharsets.UTF_8))) {
                 return null;
             }
-            int end = Math.min(INPUT_PREVIEW_BYTES, bytes.length);
+            int end = Math.min("exit_plan_mode".equals(tool) ? 64 * 1024 : INPUT_PREVIEW_BYTES, bytes.length);
             while (end < bytes.length && (bytes[end] & 0xc0) == 0x80) {
                 end--;
             }
