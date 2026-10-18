@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -25,8 +26,8 @@ public class HarnessConfiguration {
             AgentStateStore sessions,
             WorkspaceExecutionStore workspaceExecution,
             ManagedActionStore actions, ManagedAgentDefinitionStore definitions,
-            ManagedSessionStore resources) {
-        return new QwenHostedHarnessConnector(properties, sessions, workspaceExecution, actions, definitions, resources);
+            ManagedSessionStore resources, SshWorkspaceStore ssh) {
+        return new QwenHostedHarnessConnector(properties, sessions, workspaceExecution, actions, definitions, resources, ssh);
     }
 
     @Bean
