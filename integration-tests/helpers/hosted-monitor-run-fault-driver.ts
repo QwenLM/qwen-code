@@ -1748,6 +1748,14 @@ async function runStoreCase() {
         processRows: blocked.executions.filter((row) =>
           row.execution_call_id.endsWith(':process'),
         ).length,
+        // The full rows, not just counts: the IT re-reads every one of
+        // these after the clean pass and proves the prefix never drifted.
+        resources: blocked.resources.map((row) => [
+          row.resource_id,
+          row.kind,
+          row.sha256,
+          row.byte_length,
+        ]),
         resourceByKind: kindCounts(blocked),
         childRuns: (
           blocked.childRuns as Array<{
@@ -1765,6 +1773,15 @@ async function runStoreCase() {
         ).length,
         resourceByKind: kindCounts(settled),
         landedRuns: landed.length,
+        childRuns: (
+          settled.childRuns as Array<{
+            run?: { state?: string };
+            stopReason?: string | null;
+          }>
+        ).map((child) => [
+          child?.run?.state ?? null,
+          child?.stopReason ?? null,
+        ]),
       },
       modelCalls,
       pids: startedPids(),
