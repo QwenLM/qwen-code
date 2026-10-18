@@ -120,7 +120,7 @@ class HostedHookFaultGatesIT {
         // The fresh prompt's admission runs reconcileUnsettled before it
         // admits or refuses the new Turn; the pending Hook settles from the
         // original receipt without waiting for the stalled Turn.
-        submitAllowingRefusal(session, "FG13_RECONCILE");
+        submit(session, "FG13_RECONCILE");
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         JsonNode executionAfter = hookExecution(session);
         assertThat(executionAfter.path("resultRef").isNull()).isFalse();
@@ -325,11 +325,6 @@ class HostedHookFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 409);
     }
 
-    private void submitAllowingRefusal(String session, String prompt) throws Exception {
-        api("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type", "agent.session.input.message",
-                "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202, 409);
-    }
-
     private JsonNode hookExecution(String session) {
         List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
                 .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
@@ -515,11 +510,7 @@ class HostedHookFaultGatesIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        waitFor(Duration.ofSeconds(60), assertion);
-    }
-
-    private void waitFor(Duration atMost, org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(atMost).ignoreException(java.net.ConnectException.class).failFast(() -> {
+        await().atMost(Duration.ofSeconds(60)).ignoreException(java.net.ConnectException.class).failFast(() -> {
             if (modelFailure.get() != null) {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }
