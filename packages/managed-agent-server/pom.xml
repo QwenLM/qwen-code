@@ -418,10 +418,11 @@
                                  the healthy sum becomes 4238 s, so the
                                  fork moves to 4848 s. The FG13d
                                  cancel/timeout cells (two cases, issue
-                                 #14449) add 200 s: the healthy sum
-                                 becomes 4438 s, so the fork moves to
-                                 5048 s. -->
-                            <forkedProcessTimeoutInSeconds>5048</forkedProcessTimeoutInSeconds>
+                                 #14449) add 200 s, and the worker-stop
+                                 cancel cell (issue #14449) adds 150 s:
+                                 the healthy sum becomes 4588 s, so the
+                                 fork moves to 5198 s. -->
+                            <forkedProcessTimeoutInSeconds>5198</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

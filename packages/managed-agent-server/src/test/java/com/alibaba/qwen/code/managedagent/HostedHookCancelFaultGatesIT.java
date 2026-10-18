@@ -145,6 +145,48 @@ class HostedHookCancelFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13dCancelWithStoppedWorkerStaysUnknownAndKeepsTheHoldOnMySql() throws Exception {
+        boot("60000", "60000", "hook-ignore-term");
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_CANCEL_STOP");
+        waitFor(() -> {
+            assertThat(events("hook.call")).hasSize(1);
+            assertThat(events("hook.child")).hasSize(1);
+        });
+        JsonNode hook = events("hook.call").getFirst();
+        JsonNode child = events("hook.child").getFirst();
+        assertThat(running(hook)).isTrue();
+        assertThat(running(child)).isTrue();
+        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        JsonNode worker = worker(session);
+
+        signal(worker, "STOP");
+        try {
+            JsonNode cancelled = cancelHook(session, executionId);
+            assertThat(cancelled.path("cancelRequested").asBoolean()).isTrue();
+            // The stopped worker cannot answer the owner lookup, so the
+            // record reports the honest unknown and keeps the hold instead
+            // of inventing an end for a command that still runs.
+            waitFor(() -> {
+                JsonNode execution = hookExecution(session);
+                assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
+                assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
+            });
+            assertThat(running(hook)).isTrue();
+            assertThat(running(child)).isTrue();
+            assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+        } finally {
+            signal(worker, "CONT");
+        }
+        assertThat(events("hook.call")).hasSize(1);
+        assertThat(events("hook.allow")).isEmpty();
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The record may report a terminal state only once the unit is empty:
     // inspect the first observation, not a later poll, so a regression that
     // settles early while the drain continues still fails the cell.
@@ -319,7 +361,7 @@ class HostedHookCancelFaultGatesIT {
         assertThat(attach).as("Session attachment before cancel").isNotNull();
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId + "/cancel"))
-                .timeout(Duration.ofSeconds(30)).header("Authorization", "Bearer " + TOKEN)
+                .timeout(Duration.ofSeconds(90)).header("Authorization", "Bearer " + TOKEN)
                 .header("X-Qwen-Client-Id", attach.clientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
                 .header("X-Qwen-Harness-Boot-Id", attach.bootId())
@@ -327,6 +369,22 @@ class HostedHookCancelFaultGatesIT {
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("hook cancel: %s", response.body()).isEqualTo(200);
         return json.readTree(response.body());
+    }
+
+    private JsonNode worker(String session) throws Exception {
+        String binding = jdbc.queryForObject("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ? AND isolation_key = ?",
+                String.class, tenant, session);
+        JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM ma_runtime_binding WHERE binding_id = ?",
+                String.class, binding));
+        JsonNode registration = json.readTree(Files.readString(temporary.resolve("broker").resolve(handle.path("resourceId").asText() + ".json")));
+        return json.createObjectNode().put("binding", binding).put("pid", registration.path("pid").asLong())
+                .put("startTicks", registration.path("started").asText().replace("ticks:", ""))
+                .put("bootId", handle.path("bootId").asText());
+    }
+
+    private void signal(JsonNode process, String name) throws Exception {
+        Process kill = new ProcessBuilder("kill", "-" + name, Long.toString(process.path("pid").asLong())).start();
+        assertThat(kill.waitFor()).as("kill -%s %s", name, process.path("pid").asLong()).isZero();
     }
 
     private void startHarness() throws Exception {
@@ -385,7 +443,7 @@ class HostedHookCancelFaultGatesIT {
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
-                    && List.of("FG13_CANCEL", "FG13_TIMEOUT").contains(prompt);
+                    && List.of("FG13_CANCEL", "FG13_CANCEL_STOP", "FG13_TIMEOUT").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
