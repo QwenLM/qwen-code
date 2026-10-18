@@ -19,6 +19,8 @@ public final class CreateHarnessSession {
     private final Map<String, Object> lineage;
     private final boolean suppressChildAgents;
     private final boolean childWorkspaces;
+    private final boolean foregroundOnly;
+    private final boolean childSnapshots;
 
     private CreateHarnessSession(Builder builder) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
@@ -34,6 +36,8 @@ public final class CreateHarnessSession {
         this.lineage = builder.lineage;
         this.suppressChildAgents = builder.suppressChildAgents;
         this.childWorkspaces = builder.childWorkspaces;
+        this.foregroundOnly = builder.foregroundOnly;
+        this.childSnapshots = builder.childWorkspaces && builder.childSnapshots;
     }
 
     public static Builder builder() {
@@ -81,6 +85,12 @@ public final class CreateHarnessSession {
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
         }
+        if (foregroundOnly) {
+            result.put("foregroundOnly", true);
+        }
+        if (childSnapshots) {
+            result.put("childSnapshots", true);
+        }
         return result;
     }
 
@@ -97,6 +107,14 @@ public final class CreateHarnessSession {
         private Map<String, Object> lineage;
         private boolean suppressChildAgents;
         private boolean childWorkspaces;
+        private boolean foregroundOnly;
+        private boolean childSnapshots;
+
+        /** Restricts the saved Session to files and foreground Shell on an SSH Runtime. */
+        public Builder foregroundOnly(boolean value) {
+            this.foregroundOnly = value;
+            return this;
+        }
 
         /**
          * #13753 I2: whether this control plane serves child Workspaces, so
@@ -106,6 +124,17 @@ public final class CreateHarnessSession {
          */
         public Builder childWorkspaces(boolean value) {
             this.childWorkspaces = value;
+            return this;
+        }
+
+        /**
+         * #13753 I3: whether this control plane also serves read-only
+         * snapshot children, so the Hosted Agent tool admits {@code
+         * isolation: "snapshot"}. Sent only beside {@link #childWorkspaces};
+         * like it, it describes the host and is never persisted.
+         */
+        public Builder childSnapshots(boolean value) {
+            this.childSnapshots = value;
             return this;
         }
 

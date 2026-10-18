@@ -23,6 +23,160 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('uses authorized Workspace registration POST routes without putting credentials in request bodies', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer short-lived' }),
+      credentials: 'include',
+      fetch: fetchImpl,
+    });
+    const abort = new AbortController();
+    await client.listRuntimeNodes(abort.signal);
+    await client.checkWorkspaceDirectory(
+      { nodeId: 'mac', path: '/project' },
+      abort.signal,
+    );
+    await client.registerWorkspace(
+      {
+        nodeId: 'mac',
+        path: '/project',
+        displayName: 'Project',
+        idempotencyKey: 'original',
+      },
+      abort.signal,
+    );
+    await client.getWorkspaceOperation('operation-a', abort.signal);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://product.example/gateway/api/agent/web-shell/v1/runtime-nodes/query',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/check-directory',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/register',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/operations/get',
+    ]);
+    expect(
+      fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      {},
+      { nodeId: 'mac', path: '/project' },
+      {
+        nodeId: 'mac',
+        path: '/project',
+        displayName: 'Project',
+        idempotencyKey: 'original',
+      },
+      { operationId: 'operation-a' },
+    ]);
+    for (const [, request] of fetchImpl.mock.calls) {
+      expect(request?.method).toBe('POST');
+      expect(request?.credentials).toBe('include');
+      expect(request?.signal).toBe(abort.signal);
+      expect(new Headers(request?.headers).get('authorization')).toBe(
+        'Bearer short-lived',
+      );
+    }
+  });
+
+  it('queries and changes Session models using authenticated cancellable POSTs', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant-a' }),
+    });
+    const abort = new AbortController();
+    await client.getSessionModels('session-a', abort.signal);
+    const request = {
+      sessionId: 'session-a',
+      modelId: 'published',
+      expectedRevision: 2,
+      idempotencyKey: 'frozen',
+    };
+    await client.changeModel(request, abort.signal);
+    expect(
+      fetchImpl.mock.calls.map(([url, init]) => [
+        url,
+        JSON.parse(String(init?.body)),
+      ]),
+    ).toEqual([
+      [
+        'https://product.example/api/agent/web-shell/v1/session-models/query',
+        { sessionId: 'session-a' },
+      ],
+      [
+        'https://product.example/api/agent/web-shell/v1/session-models/change',
+        request,
+      ],
+    ]);
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(init?.method).toBe('POST');
+      expect(init?.credentials).toBe('include');
+      expect(init?.signal).toBe(abort.signal);
+      expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
+    }
+  });
+  it('queries effective Session options for the selected Agent with authenticated headers', async () => {
+    const options = {
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'auto-edit'],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(options));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant-a' }),
+    });
+    const abort = new AbortController();
+    expect(
+      await client.getSessionOptions('model-specific-agent', abort.signal),
+    ).toEqual(options);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/session-options/query',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      agentId: 'model-specific-agent',
+    });
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(abort.signal);
+    expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
+  });
+  it('creates a Workspace with the frozen name and key through the authenticated POST route', async () => {
+    const workspace = {
+      workspaceId: 'created-a',
+      displayName: 'A',
+      state: 'active',
+      canCreateSession: true,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(workspace));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant-a' }),
+    });
+    const abort = new AbortController();
+    const request = { displayName: 'A', idempotencyKey: 'saved-key' };
+    expect(await client.createWorkspace(request, abort.signal)).toEqual(
+      workspace,
+    );
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/workspaces/create',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(abort.signal);
+    expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
   it('uses all existing task POST routes with headers, credentials and cancellation', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

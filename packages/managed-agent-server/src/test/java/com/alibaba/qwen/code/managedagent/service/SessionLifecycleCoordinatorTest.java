@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
@@ -67,6 +68,7 @@ class SessionLifecycleCoordinatorTest {
         Mockito.doThrow(failure).when(harness).prepareLifecycleResources(operation);
         var warmer = Mockito.mock(RuntimeWarmer.class);
         Mockito.when(warmer.supportsWorkspaceClose()).thenReturn(true);
+        Mockito.when(warmer.supportsWorkspaceClose(session.workspace())).thenReturn(true);
         var authority = com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation);
         Mockito.when(warmer.recoverStoppedWorkspaceResources("tenant", "session", authority)).thenReturn(CompletableFuture.completedFuture(null));
         Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
@@ -76,22 +78,84 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness, warmer,
                     relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor, Clock.systemUTC(), new ManagedAgentProperties());
             coordinator.setWorkspaceLifecycleStore(lifecycle);
-            var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class);
+            var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class,
+                    java.util.concurrent.atomic.AtomicBoolean.class);
             settle.setAccessible(true);
             try {
                 if (recovery) {
-                    assertThat(settle.invoke(coordinator, operation)).isEqualTo(true);
+                    assertThat(settle.invoke(coordinator, operation,
+                            new java.util.concurrent.atomic.AtomicBoolean())).isEqualTo(true);
                     Mockito.verify(lifecycle).requireSettledExecutions(operation);
                     Mockito.verify(lifecycle).verifyResources(operation);
                     Mockito.verify(lifecycle).verifyOutputContents(operation);
                     Mockito.verify(harness).detachLifecycle(operation);
                 } else {
                     var thrown = org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
-                            () -> settle.invoke(coordinator, operation));
+                            () -> settle.invoke(coordinator, operation,
+                                    new java.util.concurrent.atomic.AtomicBoolean()));
                     assertThat(thrown.getCause()).isSameAs(failure);
                     Mockito.verify(lifecycle, Mockito.never()).verifyResources(operation);
                 }
                 Mockito.verify(warmer, Mockito.times(recovery ? 1 : 0)).recoverStoppedWorkspaceResources("tenant", "session", authority);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"0,true", "0,false", "1,true", "1,false"})
+    void settlesOnlyWhenTheSelectedBindingSupportsClose(int protocol, boolean supported) throws Exception {
+        var store = Mockito.mock(com.alibaba.qwen.code.managedagent.store.AgentStateStore.class);
+        var session = Mockito.mock(StoreModels.SessionRecord.class);
+        var workspace = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                "tenant", "workspace", 1, "storage", ".", "config", 1);
+        Mockito.when(session.workspace()).thenReturn(workspace);
+        Mockito.when(session.toolProfile()).thenReturn(WorkspaceExecutionProfile.PROFILE);
+        Mockito.when(store.requireSession("tenant", "session")).thenReturn(session);
+        var warmer = Mockito.mock(RuntimeWarmer.class);
+        Mockito.when(warmer.supportsWorkspaceClose()).thenReturn(!supported);
+        Mockito.when(warmer.supportsWorkspaceClose(workspace)).thenReturn(supported);
+        Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
+        var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.CLOSE,
+                "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, protocol);
+        var lifecycle = Mockito.mock(com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
+        Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(new ObjectMapper().createObjectNode().put("neverInitialized", true));
+        var relay = Mockito.mock(ChildResultRelayStore.class);
+        Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
+        var harness = Mockito.mock(HarnessConnector.class);
+        Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(true);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(ManagedSessionStore.class), harness,
+                    warmer, relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor,
+                    Clock.systemUTC(), new ManagedAgentProperties());
+            coordinator.setWorkspaceLifecycleStore(lifecycle);
+            try {
+                assertThat(coordinator.supportsWorkspaceLifecycle(session)).isEqualTo(supported);
+                Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(false);
+                assertThat(coordinator.supportsWorkspaceLifecycle(session)).isFalse();
+                Mockito.when(harness.supportsLifecycle(WorkspaceExecutionProfile.PROFILE)).thenReturn(true);
+                var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle", StoreModels.OperationRecord.class,
+                        java.util.concurrent.atomic.AtomicBoolean.class);
+                settle.setAccessible(true);
+                if (supported) {
+                    assertThat(settle.invoke(coordinator, operation,
+                            new java.util.concurrent.atomic.AtomicBoolean())).isEqualTo(protocol != 0);
+                    Mockito.verify(warmer).closeWorkspace("tenant", "session");
+                } else {
+                    var error = org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
+                            () -> settle.invoke(coordinator, operation,
+                                    new java.util.concurrent.atomic.AtomicBoolean()));
+                    if (protocol == 0) {
+                        assertThat(error.getCause()).isInstanceOfSatisfying(
+                                com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class,
+                                failure -> assertThat(failure.getCode()).isEqualTo("workspace_close_identity_unverified"));
+                    } else {
+                        assertThat(error.getCause()).isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                                failure -> assertThat(failure.getCode()).isEqualTo("workspace_close_identity_unverified"));
+                    }
+                    Mockito.verify(warmer, Mockito.never()).closeWorkspace(Mockito.anyString(), Mockito.anyString());
+                }
             } finally {
                 coordinator.stopRenewals();
             }
@@ -257,6 +321,43 @@ class SessionLifecycleCoordinatorTest {
         assertThatThrownBy(() -> transactions.execute(ignored -> world.store.beginChildClose("tenant", world.session,
                 world.child, "wrong-run", "actor", "spoof", "digest", true)))
                 .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
+    }
+
+    // #14387: a Turn parked by the recovery-blocked mark is evidence, not
+    // live work — the child's close admission must not refuse the Session
+    // for it, or the relay's blocked settlement could never land (P1
+    // review finding on #14461).
+    @Test
+    void childCloseAdmitsASessionWhoseOnlyTurnIsRecoveryBlocked() {
+        World world = closingWorld("blocked-close-");
+        var transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(world.jdbc.getDataSource()));
+        var turn = transactions.execute(ignored -> world.store
+                .insertTurnCommand("tenant", "SUBMIT_TURN", "blocked-turn",
+                        "digest-turn", world.child,
+                        List.of(Map.of("type", "text", "text", "work")),
+                        "digest-payload"));
+        transactions.execute(ignored -> world.store.claimTurn("tenant",
+                world.child, turn.turnId(), "owner", Duration.ofMinutes(1)));
+        Boolean marked = transactions.execute(ignored -> world.store
+                .markTurnRecoveryBlocked("tenant", world.child, turn.turnId(),
+                        "owner", AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                        "lost generation"));
+        assertThat(marked).isTrue();
+
+        var admitted = transactions.execute(ignored -> world.store
+                .beginChildClose("tenant", world.session, world.child,
+                        "run-1", "actor", "blocked-child-close", "digest",
+                        true));
+
+        assertThat(admitted.operation().sessionId()).isEqualTo(world.child);
+        assertThat(admitted.operation().state()).isEqualTo("PENDING");
+        // The mark still stands — the close exempts the parked Turn from
+        // its gate, it never rewrites it.
+        assertThat(world.store
+                .findTurn("tenant", world.child, turn.turnId()).get()
+                .errorCode())
+                .isEqualTo(AgentStateStore.WORKFLOW_RECOVERY_BLOCKED);
     }
 
     private static void liveScope(World world, String resourceBody) {

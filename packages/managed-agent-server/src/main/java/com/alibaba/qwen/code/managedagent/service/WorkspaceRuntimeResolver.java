@@ -22,21 +22,36 @@ import java.util.Objects;
 final class WorkspaceRuntimeResolver {
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore authority;
+    private final SshWorkspaceService ssh;
+    private final com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
+    private final String boundSessionIsolationClass;
 
     WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentProperties properties) {
+        this(sessions, authority, properties, null);
+    }
+
+    WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+            ManagedAgentProperties properties, SshWorkspaceService ssh) {
+        this.ssh = ssh;
         this.sessions = sessions;
         this.authority = authority;
         var broker = properties.getRuntimeBroker();
+        this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
+        this.residents = new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(broker.getResidentWorkspaces());
         if (WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
-                properties.getHarness().getCapabilityDigest())) {
+                properties.getHarness().getCapabilityDigest())
+                || com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())) {
             throw new IllegalStateException("Workspace execution profile is reserved");
         }
         if (!broker.getWorkspaceMounts().isEmpty()
                 && (!LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner())
-                        || !WorkspaceExecutionProfile.admitsIsolationClass(broker.getIsolationClass()))) {
-            throw new IllegalStateException("Workspace execution requires local Session isolation");
+                        || !"session".equals(boundSessionIsolationClass)
+                                && !"workspace".equals(boundSessionIsolationClass))) {
+            throw new IllegalStateException("Workspace execution requires a local-process Broker"
+                    + " with session or workspace bound-Session isolation");
         }
         try {
             for (var configured : broker.getWorkspaceMounts()) {
@@ -85,14 +100,28 @@ final class WorkspaceRuntimeResolver {
             authority.authorizeLifecycle(session, lifecycle);
         }
         ContextBinding binding = session.workspace();
-        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            if (hook) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ssh.verifyBinding(binding);
+            return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
+                    Long.toString(binding.getWorkspaceGeneration()), ssh.runtimeStorage(binding).mountRoot(),
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+        }
+        var resident = residents.find(binding);
+        if (resident != null) {
+            return new Resolved(binding, com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces.scope(resident)
+                    .withLifecycleAuthority(lifecycle));
+        }
+        Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                 Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
     }
 
     /**
@@ -107,7 +136,13 @@ final class WorkspaceRuntimeResolver {
      * feature exists for.
      */
     void verifyInstallable(ContextBinding binding, String targetCwdRelative) {
-        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            ssh.verify(new ContextBinding(binding.getTenantId(), binding.getWorkspaceId(),
+                    binding.getWorkspaceGeneration(), binding.getStorageId(), WorkspaceRelativePath.normalize(targetCwdRelative),
+                    binding.getContextConfigRef(), binding.getContextRevision()));
+            return;
+        }
+        Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -134,12 +169,52 @@ final class WorkspaceRuntimeResolver {
      * continuity check as an acquisition.
      */
     java.nio.file.Path storageRoot(ContextBinding binding) {
-        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        Mount mount = mount(binding);
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
         return mount.root();
+    }
+
+    /**
+     * The verified-recovery check for a shared (Workspace-isolated) request:
+     * the mount for the storage must still resolve to the request's root and
+     * stay intact. A shared binding has no owning Session to resolve by.
+     */
+    void requireMountCurrent(RuntimeScope scope, String storageId) {
+        Mount mount = mounts.get(new Storage(scope.getTenantId(), storageId));
+        if (mount == null) {
+            Path root = authority.createdStorageRoot(scope.getTenantId(), storageId);
+            if (root == null) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            try {
+                mount = new Mount(root, Files.readAttributes(root, BasicFileAttributes.class).fileKey());
+            } catch (IOException error) {
+                throw WorkspaceExecutionStore.unavailable(error);
+            }
+        }
+        if (!mount.root().toString().equals(scope.getCanonicalCwd())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        verifyMountIntact(mount);
+    }
+
+    private Mount mount(ContextBinding binding) {
+        Mount configured = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (configured != null) {
+            return configured;
+        }
+        Path root = authority.createdStorageRoot(binding.getTenantId(), binding.getStorageId());
+        if (root == null) {
+            return null;
+        }
+        try {
+            return new Mount(root, Files.readAttributes(root, BasicFileAttributes.class).fileKey());
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable(error);
+        }
     }
 
     // The acquire-path mount check: every I/O anomaly is the terminal

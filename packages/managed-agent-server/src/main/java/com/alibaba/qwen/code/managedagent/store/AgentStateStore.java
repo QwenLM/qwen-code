@@ -1,6 +1,14 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalChangeResult;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalSelection;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelContext;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelOption;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelSelection;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -13,6 +21,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
@@ -32,6 +41,18 @@ import java.util.Optional;
 import java.util.Set;
 
 public interface AgentStateStore {
+    /**
+     * #14387: the durable error code a workflow Turn carries once its
+     * recovery was refused — the Harness generation running it was lost
+     * and its deterministic in-process work must never be re-executed
+     * while the first run's outcome stays unwitnessed. The Turn is never
+     * settled: the code stays on the active row for the child result
+     * relay to classify the record blocked from, and the dispatch sweep
+     * parks the row (a cancel still scans it — settling the Turn
+     * cancelled is the cancel's own act).
+     */
+    String WORKFLOW_RECOVERY_BLOCKED = "hosted_workflow_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional
@@ -112,6 +133,49 @@ public interface AgentStateStore {
 
     Optional<Admission> findWorkspaceCreateReplay(String tenantId,
             String actorId, String idempotencyKey, String requestDigest);
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String approvalMode) {
+        if (approvalMode != null) {
+            throw new UnsupportedOperationException("Approval mode selection is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, selection);
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection, String approvalMode,
+            boolean approvalSelectionSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest,
+                selection, approvalMode);
+    }
+
+    default WebShellSessionOptions workspaceSessionOptions(
+            String tenantId, String agentId) {
+        throw new UnsupportedOperationException("Approval mode selection is unavailable");
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String approvalMode, boolean approvalSelectionSupported,
+            Boolean planMode, boolean planModeSupported) {
+        if (Boolean.TRUE.equals(planMode)) {
+            throw new UnsupportedOperationException("Plan mode is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection,
+                approvalMode, approvalSelectionSupported);
+    }
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
@@ -274,6 +338,21 @@ public interface AgentStateStore {
     }
 
     /**
+     * Blocks the operation, and when {@code budgetExempt} is true records the
+     * attempt as a wait on an external condition (a live journal writer or a
+     * stale Harness view) that never consumed the terminal retry budget.
+     */
+    default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt,
+            boolean budgetExempt) {
+        if (budgetExempt) {
+            throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+        }
+        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
+                generation, failureCode, availableAt);
+    }
+
+    /**
      * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
      * or returns the operation the same actor already admitted under the
      * key. The target directory is already normalized and the request digest
@@ -335,24 +414,75 @@ public interface AgentStateStore {
         return List.of();
     }
 
-    /** Parked (recovery_blocked) task cancels due for reconciliation. */
-    default List<OperationTarget> findParkedTaskCancels(int limit) {
-        return List.of();
-    }
-
     /**
-     * Records a task cancel's outcome: {@code completed} with a receipt,
-     * {@code failed} or {@code recovery_blocked} with its code (the latter
-     * parked until {@code retryAt}). A leased claim ({@code owner} set)
-     * settles only while it is still current; a parked operation
-     * ({@code owner} null) only while it is still parked.
+     * Records a leased task cancel's outcome: {@code completed} with a
+     * receipt, {@code failed} or {@code recovery_blocked} with its code (the
+     * latter parked until {@code retryAt}), only while the claim is still
+     * current. A parked cancel is settled only by
+     * {@link #settleParkedOperation}.
      *
-     * @return false when the claim or the parking is no longer current
+     * @return false when the claim is no longer current
      */
     default boolean settleTaskCancel(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             TaskCancelOutcome outcome, long retryAt) {
         throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /**
+     * D7-2: operations parked recovery_blocked because their command's
+     * acceptance is unknown, due for reconciliation. No claim ever takes
+     * one; only the reconciler reads them.
+     */
+    default List<ParkedOperation> findParkedOperations(int limit) {
+        return List.of();
+    }
+
+    /**
+     * D7-2: settles a parked operation from its kind's evidence, only while
+     * it is still parked. Committed completes it with a receipt; not
+     * committed fails it with the proven code; unknown parks it again until
+     * {@code retryAt}.
+     *
+     * @return false when the operation is no longer parked
+     */
+    default boolean settleParkedOperation(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        throw new UnsupportedOperationException(
+                "Operation reconciliation is unavailable");
+    }
+
+    /**
+     * D7-2: what the Session journal proves about a parked Turn input whose
+     * submission no Harness answered: committed once the journal holds its
+     * prompt's admission, not committed once no writer can still commit it.
+     */
+    default AcceptanceVerdict turnInputAcceptance(String tenantId,
+            String sessionId, String operationId) {
+        return AcceptanceVerdict.unknown();
+    }
+
+    /**
+     * D7-2: what the Session journal proves about a parked Session title, or
+     * empty when its delivery is no longer parked: committed once the journal
+     * holds its revision's title, not committed once no writer can still
+     * commit it.
+     */
+    default Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
+        return Optional.of(AcceptanceVerdict.unknown());
+    }
+
+    /**
+     * D7-2: settles a parked Session title, only while it is still parked.
+     * Committed completes its command and shows the title; not committed
+     * fails it; unknown parks it again until {@code retryAt}.
+     *
+     * @return false when the title is no longer parked
+     */
+    default boolean settleParkedRename(ParkedOperation parked,
+            AcceptanceVerdict verdict, long retryAt) {
+        throw new UnsupportedOperationException(
+                "Operation reconciliation is unavailable");
     }
 
     /** A task cancel's recorded outcome: its public status and code. */
@@ -388,9 +518,53 @@ public interface AgentStateStore {
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed);
 
+    /**
+     * Terminates a claimed operation whose retry budget is spent, recording
+     * the failure honestly: the operation row goes to FAILED with the
+     * failure code kept and delivery_state CONFIRMED so no recovery path
+     * re-drives it — and nothing else. The Session keeps its pending status
+     * and no completion event is appended, because the settle this operation
+     * promised never happened; the receipt the contract requires of every
+     * confirmed row certifies nothing.
+     *
+     * @return false when the claim is no longer current
+     */
+    boolean failOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode);
+
     void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt);
+
+    /**
+     * Retries the operation, and when {@code budgetExempt} is true records
+     * the attempt as a wait on an external condition (a live journal writer,
+     * a stale Harness view, or the projection lag after the Harness answered
+     * an action response) that must not consume the terminal retry budget.
+     * The attempt count still grows, so the dispatch backoff keeps
+     * stretching.
+     */
+    default void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt, boolean budgetExempt) {
+        if (budgetExempt) {
+            throw new UnsupportedOperationException(
+                    "Budget-exempt retry is unavailable");
+        }
+        retryOperation(tenantId, sessionId, operationId, owner,
+                claimGeneration, availableAt);
+    }
+
+    /**
+     * Records that the current attempt reached the Harness (the decision was
+     * committed), so a later failure of this attempt stays budget-exempt even
+     * when the recovery reads that would reschedule it throw before that
+     * write (review round 14, R14-3). The row stays leased; the watermark
+     * only makes a re-claimed attempt read budgetExemptAttempt &gt; 0.
+     */
+    void markOperationAnswered(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration);
 
     Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest);
@@ -414,6 +588,52 @@ public interface AgentStateStore {
     /** The latest Turn of each given Session, in one round trip. */
     Map<String, TurnSummary> findLatestTurns(String tenantId,
             List<String> sessionIds);
+
+    default Map<String, WebShellModelContext> findModelContexts(
+            String tenantId, List<String> sessionIds) {
+        return Map.of();
+    }
+
+    default List<WebShellModelOption> modelOptions() { return List.of(); }
+
+    default Map<String, WebShellModelSelection> findModelSelections(
+            String tenantId, List<String> sessionIds) { return Map.of(); }
+
+    default WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
+            String sessionId, String key, String digest, String modelId, long expectedRevision,
+            boolean supported) {
+        throw new UnsupportedOperationException("Model selection is unavailable");
+    }
+
+    default Map<String, WebShellApprovalSelection> findApprovalSelections(
+            String tenantId, List<String> sessionIds) { return Map.of(); }
+
+    default boolean supportsPlanMode(SessionRecord session) { return false; }
+
+    default Set<String> findApprovalOwners(String tenantId, String actorId,
+            List<String> sessionIds) { return Set.of(); }
+
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported) {
+        throw new UnsupportedOperationException("Approval selection is unavailable");
+    }
+
+    default WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
+            String promptId) { return null; }
+
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean planMode, boolean planModeSupported) {
+        if (planMode != null) {
+            throw new UnsupportedOperationException("Plan mode is unavailable");
+        }
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported);
+    }
+
+    default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
+            String promptId) { return null; }
 
     /**
      * The latest environment event of each Session's latest Turn, in one
@@ -486,11 +706,22 @@ public interface AgentStateStore {
     void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
 
+    /**
+     * #14387: durably marks an active Turn whose recovery was refused —
+     * the error code stays on the still-active row for the child result
+     * relay to classify from, and the dispatch lease is released so the
+     * drive ends without settling the Turn. Never a terminal status: the
+     * unwitnessed execution's outcome was never observed.
+     */
+    boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
+            String turnId, String owner, String errorCode,
+            String errorMessage);
+
     void deferTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
 
     void scheduleTurnRetry(String tenantId, String sessionId, String turnId,
-            String owner, long retryAfter);
+            String owner, long retryAfter, boolean budgetExempt);
 
     boolean bindHarness(String tenantId, String sessionId, String turnId,
             String owner, String harnessBootId);
@@ -503,6 +734,9 @@ public interface AgentStateStore {
             String turnId, String owner);
 
     boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
+            String turnId, String owner);
+
+    boolean cancelUnadmittedTurn(String tenantId, String sessionId,
             String turnId, String owner);
 
     void recordAdmission(String tenantId, String sessionId, String turnId,
@@ -546,6 +780,9 @@ public interface AgentStateStore {
 
     void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message);
+
+    boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
+            String turnId, String owner, String message);
 
     void appendPublicEventIfAbsent(String tenantId, String sessionId,
             String turnId, String type, Map<String, Object> data,

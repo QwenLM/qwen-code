@@ -326,6 +326,7 @@ async function hostedModelFixture(
           records.push(...batch);
         },
         seal: async () => {},
+        writerSealed: false,
         abort: async () => {},
       }),
     },
@@ -655,9 +656,12 @@ async function shellFixture(
   return { ...f, localSegmentId, emptySealId, manifestRef, seals, binary };
 }
 
-async function detachedShellFixture(options: { partial?: boolean } = {}) {
+async function detachedShellFixture(
+  options: { partial?: boolean; recoveredCancellation?: boolean } = {},
+) {
   const f = fixture();
   const partial = options.partial === true;
+  const recoveredCancellation = options.recoveredCancellation === true;
   const manifestRef = partial
     ? f.resource('managed-tool-result-manifest', {
         toolResult: 'managed-tool-result/1',
@@ -694,7 +698,11 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
       })
     : null;
   const envelope = {
-    executionStatus: partial ? ('error' as const) : ('success' as const),
+    executionStatus: recoveredCancellation
+      ? ('cancelled' as const)
+      : partial
+        ? ('error' as const)
+        : ('success' as const),
     responseParts: [
       { text: 'Background shell started under unit qwen-bg-call.' },
     ],
@@ -707,8 +715,12 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
           deliveryStatus: 'pending' as const,
         }
       : {
-          captureStatus: 'detached' as const,
-          captureReason: null,
+          captureStatus: recoveredCancellation
+            ? ('unavailable' as const)
+            : ('detached' as const),
+          captureReason: recoveredCancellation
+            ? ('producer_lost' as const)
+            : null,
           manifest: null,
           previewTruncated: false,
           deliveryStatus: 'pending' as const,
@@ -753,11 +765,24 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
     }),
   ]);
   const outcomeRef = f.resource('managed-tool-outcome', {
-    schemaVersion: 1,
+    ...(recoveredCancellation
+      ? {
+          version: 1,
+          identity: {
+            tenantId: 'tenant',
+            sessionId: SESSION,
+            turnId: 'prompt',
+            executionCallId: 'execution',
+            callId: 'call',
+            invocationDigest: 'sha256:' + 'a'.repeat(64),
+            bindingGeneration: '1',
+            captureId: 'capture',
+            revision: 1,
+          },
+        }
+      : { schemaVersion: 1, manifestRef, history }),
     decision: 'blocked',
     envelope,
-    manifestRef,
-    history,
   });
   f.append([
     f.event('tool.receipt', {
@@ -1767,6 +1792,16 @@ describe('verifyRecoverySession', () => {
       verifyRecoverySession(committedFree.source, committedFree.io),
     ).rejects.toThrow();
   });
+
+  it('replays a recovered cancellation without capture as not captured', async () => {
+    const f = await detachedShellFixture({ recoveredCancellation: true });
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+    expect(f.io.publicationObject).not.toHaveBeenCalled();
+    expect(f.complete.size).toBe(f.refs.size);
+  });
   it('uses the actual private workspace key and verifies an initial journal', async () => {
     const f = fixture();
     expect(await verifyRecoverySession(f.source, f.io)).toEqual({
@@ -1782,6 +1817,7 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
     // One refused profile would abort recovery for the whole Workspace,
     // so recovery reads the same profile vocabulary creation persists.
@@ -1794,6 +1830,7 @@ describe('verifyRecoverySession', () => {
   it.each([
     { toolProfile: 'hosted-workspace-files/3' },
     { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1', captureBytes: 1024 },
   ])('still refuses an unknown Hosted definition (%j)', async (definition) => {
     const f = fixture(definition);
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(

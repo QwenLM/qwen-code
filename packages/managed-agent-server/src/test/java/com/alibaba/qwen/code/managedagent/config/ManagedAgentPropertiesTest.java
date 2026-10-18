@@ -714,6 +714,53 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void sshCatalogBindsAndRetainsExistingRuntimeConfigurationWhenNewAdmissionIsDisabled() {
+        var remote = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues("qwen.managed-agent.harness.enabled=true",
+                        "qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "qwen.managed-agent.session-store.enabled=true",
+                        "qwen.managed-agent.runtime-broker.enabled=true",
+                        "qwen.managed-agent.runtime-broker.ssh.enabled=true",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].node-id=mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].display-name=Build Mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].ssh-host=build-mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].node-executable=/node",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].qwen-entry=/cli.js",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].state-directory=/state",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].allowed-roots[0]=/work",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].publication-port=41270",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].qwen-version=0.25.1",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].access[0].tenant-id=tenant",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].access[0].actor-id=actor");
+        remote.run(started -> {
+            assertThat(started).hasNotFailed();
+            var ssh = started.getBean(ManagedAgentProperties.class).getRuntimeBroker().getSsh();
+            assertThat(ssh.isEnabled()).isTrue();
+            assertThat(ssh.getNodes().getFirst().admits("tenant", "actor")).isTrue();
+            assertThat(ssh.getNodes().getFirst().admits("tenant", "other")).isFalse();
+        });
+        remote.withPropertyValues("qwen.managed-agent.runtime-broker.ssh.enabled=false")
+                .run(started -> assertThat(started).hasNotFailed());
+        if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+            var mixed = remote.withPropertyValues("qwen.managed-agent.runtime-broker.child-workspaces-enabled=true",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=local-storage",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
+            mixed.run(started -> {
+                assertThat(started).hasNotFailed();
+                var broker = started.getBean(ManagedAgentProperties.class).getRuntimeBroker();
+                assertThat(broker.getSsh().isEnabled()).isTrue();
+                assertThat(broker.isChildWorkspacesEnabled()).isTrue();
+            });
+            mixed.withPropertyValues(DURABLE_KEY + "=false").run(started -> assertThat(started).hasFailed());
+        }
+        for (String invalid : List.of("runtime-broker.child-workspaces-enabled=true", "harness.workspace-files-enabled=false")) {
+            remote.withPropertyValues("qwen.managed-agent." + invalid).run(started -> assertThat(started).hasFailed());
+        }
+    }
+
+    @Test
     void validatesWorkspaceFilesWhenSpringInitializesTheProperties() {
         ApplicationContextRunner context = new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class);
@@ -742,6 +789,59 @@ class ManagedAgentPropertiesTest {
                 .run(started -> assertThat(started).hasFailed()
                         .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
                         .hasRootCauseMessage("Hosted Harness requires the Managed Session Store"));
+    }
+
+    @Test
+    void springBindsResidentMappingsAndRequiresTheExplicitResidentDeploymentShape() {
+        String prefix = "qwen.managed-agent.runtime-broker.";
+        String entry = prefix + "resident-workspaces[0].";
+        var values = new java.util.ArrayList<String>(List.of(
+                "qwen.managed-agent.harness.enabled=true", "qwen.managed-agent.harness.workspace-files-enabled=true",
+                "qwen.managed-agent.session-store.enabled=true", prefix + "enabled=true",
+                prefix + "provisioner=kubernetes-workspace", prefix + "isolation-class=workspace",
+                TRUSTED_KEY + "=false", prefix + "resident-kubernetes-api-url=https://cluster.example",
+                prefix + "resident-kubernetes-token-file=/reviewed/token", prefix + "resident-kubernetes-ca-file=/reviewed/ca",
+                entry + "workspace-id=workspace", entry + "workspace-generation=1",
+                entry + "image=worker@sha256:" + "a".repeat(64), entry + "command[0]=node", entry + "command[1]=/worker/cli.js"));
+        var registration = java.util.Map.ofEntries(java.util.Map.entry("tenant-id", "tenant"),
+                java.util.Map.entry("storage-id", "storage"), java.util.Map.entry("cluster-domain", "cluster"),
+                java.util.Map.entry("namespace", "resident"), java.util.Map.entry("pvc-name", "claim"),
+                java.util.Map.entry("pvc-uid", "pvc-uid"), java.util.Map.entry("pv-name", "volume"),
+                java.util.Map.entry("pv-uid", "pv-uid"), java.util.Map.entry("driver", "diskplugin.csi.alibabacloud.com"),
+                java.util.Map.entry("volume-handle", "handle"), java.util.Map.entry("backend-domain", "backend"),
+                java.util.Map.entry("disk-serial", "serial"), java.util.Map.entry("mount-root", "/workspace"),
+                java.util.Map.entry("revision", "1"));
+        registration.forEach((key, value) -> values.add(entry + "registration." + key + "=" + value));
+        java.util.Map.of("namespace-uid", "namespace", "policy-name", "policy", "policy-uid", "policy-uid",
+                "policy-generation", "1", "binding-name", "binding", "binding-uid", "binding-uid", "binding-generation", "1")
+                .forEach((key, value) -> values.add(entry + "protection." + key + "=" + value));
+        // Empty lists bind from YAML; a constructor receiving no artifacts must do the same.
+        values.add(entry + "artifacts=");
+        var context = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues(values.toArray(String[]::new));
+        context.run(started -> {
+            assertThat(started).hasNotFailed();
+            var selected = started.getBean(ManagedAgentProperties.class).getRuntimeBroker().getResidentWorkspaces().getFirst();
+            assertThat(selected.workspaceId()).isEqualTo("workspace");
+            assertThat(selected.registration().storageId()).isEqualTo("storage");
+            assertThat(selected.command()).containsExactly("node", "/worker/cli.js");
+        });
+        context.withPropertyValues(TRUSTED_KEY + "=true").run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues(prefix + "workspace-creation-root=/local-workspaces")
+                .run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
+                .run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues(prefix + "ssh.nodes[0].node-id=remote",
+                        prefix + "ssh.nodes[0].display-name=Remote",
+                        prefix + "ssh.nodes[0].ssh-host=remote",
+                        prefix + "ssh.nodes[0].node-executable=/node",
+                        prefix + "ssh.nodes[0].qwen-entry=/cli.js",
+                        prefix + "ssh.nodes[0].state-directory=/state",
+                        prefix + "ssh.nodes[0].allowed-roots[0]=/work",
+                        prefix + "ssh.nodes[0].publication-port=41270",
+                        prefix + "ssh.nodes[0].qwen-version=0.25.1")
+                .run(started -> assertThat(started).hasFailed().getFailure()
+                        .hasRootCauseMessage("Resident Workspaces require exclusive CSI/files configuration"));
     }
 
     @Test
@@ -781,6 +881,40 @@ class ManagedAgentPropertiesTest {
         missing.getHarness().setWorkspaceFilesEnabled(true);
         missing.getHarness().setApprovalMode(null);
         assertThatThrownBy(missing::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void boundSessionIsolationDefaultsToSessionAndWorkspaceRequiresADurableLocalBrokerWithoutChildren() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().getBoundSessionIsolationClass()).isEqualTo("session");
+        plain.validateWorkspaceFiles();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties unknown = new ManagedAgentProperties();
+        unknown.getRuntimeBroker().setBoundSessionIsolationClass("tenant");
+        assertThatThrownBy(unknown::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("session or workspace");
+
+        ManagedAgentProperties notDurable = new ManagedAgentProperties();
+        notDurable.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        notDurable.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThatThrownBy(notDurable::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durable");
+
+        ManagedAgentProperties withChildren = new ManagedAgentProperties();
+        withChildren.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        withChildren.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        assertThatThrownBy(withChildren::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("child Workspaces");
+
+        ManagedAgentProperties nonLocal = new ManagedAgentProperties();
+        nonLocal.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        nonLocal.getRuntimeBroker().setProvisioner("static");
+        assertThatThrownBy(nonLocal::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("local-process");
     }
 
     @Configuration(proxyBeanMethods = false)
@@ -957,6 +1091,26 @@ class ManagedAgentPropertiesTest {
         ManagedAgentProperties off = new ManagedAgentProperties();
         off.getAutomation().setMaxSlotsPerTick(0);
         assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    // #13753 I3: snapshots are read-only child Workspaces, so their own
+    // switch needs the capability's.
+    @Test
+    void childSnapshotsAreOffByDefaultAndNeedChildWorkspaces() {
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isChildSnapshotsEnabled()).isFalse();
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setChildSnapshotsEnabled(true);
+        assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Child snapshots require child Workspaces");
+        // Beside a valid child-Workspaces configuration, the switch boots.
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+        if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+            assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        }
     }
 
     @Test

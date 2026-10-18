@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 
@@ -164,6 +166,23 @@ class ManagedHostedRecoveryRecordsTest {
             ObjectNode body = modelRequest();
             ((ObjectNode) body.get("prepared")).put("allowPersistentRetry", allow);
             assertThatCode(() -> validateModel(body)).doesNotThrowAnyException();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0, 15, 16, 20, ManagedSessionStoreModels.MAX_SAFE_COUNTER})
+    void acceptsNonnegativeSafeModelRoundCounters(long round) {
+        assertThatCode(() -> validateModel(modelRequest().put("round", round))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsInvalidModelRoundCounters() {
+        for (var value : java.util.List.of(json.getNodeFactory().numberNode(-1),
+                json.getNodeFactory().numberNode(1.5), json.getNodeFactory().textNode("16"),
+                json.getNodeFactory().numberNode(ManagedSessionStoreModels.MAX_SAFE_COUNTER + 1))) {
+            ObjectNode body = modelRequest();
+            body.set("round", value);
+            assertThatThrownBy(() -> validateModel(body)).hasMessageContaining("round");
         }
     }
 

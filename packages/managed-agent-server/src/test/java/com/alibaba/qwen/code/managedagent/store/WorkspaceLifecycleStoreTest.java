@@ -9,11 +9,16 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
@@ -22,6 +27,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -58,7 +64,7 @@ class WorkspaceLifecycleStoreTest {
         var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");
         var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
-                HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest("{}".getBytes(StandardCharsets.UTF_8))), "e30=");
+                DigestUtils.sha256Hex("{}"), "e30=");
         ObjectNode registration = templates.get("hook_registration").deepCopy();
         registration.withObject("/catalogRef").put("digest", data.digest());
         for (String state : List.of("admitted", "running", "settled")) {
@@ -324,6 +330,9 @@ class WorkspaceLifecycleStoreTest {
             effects.addObject().put("event", event).set("recordRef", ref);
         }
         if (recover) {
+            // recoverEffects synthesizes the receipt from the journal and
+            // marks it as its own build (review round 14, R14-2).
+            receipt.put("storeSynthesized", true);
             JsonNode recovered = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
             assertThat(recovered).isNotNull();
             assertThat(fixture.json.readTree(recovered.toString())).isEqualTo(receipt);
@@ -341,6 +350,91 @@ class WorkspaceLifecycleStoreTest {
 
     static Stream<Arguments> hookReceiptPaths() {
         return Stream.of(OperationKind.CLOSE, OperationKind.DELETE).flatMap(kind -> Stream.of(false, true).map(recover -> Arguments.of(kind, recover)));
+    }
+
+    // A close whose effects were saved before its terminal fail parks the
+    // fence in DRAINING with the dead operation still named. The resumed
+    // close rebinds that fence and carries the validated receipt, whose
+    // hook executions stay in the failed operation's namespace: completion
+    // verifies the carried receipt against those records and finishes
+    // (review round 13, R13-1).
+    @Test
+    void aResumedCloseVerifiesTheCarriedReceiptAgainstTheFailedOperationsHooks() throws Exception {
+        var fixture = fixture();
+        var journal = new ManagedSessionStore(fixture.jdbc);
+        var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
+                "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        byte[] definition = "{\"toolProfile\":\"hosted-workspace-files/1\",\"hookCatalog\":{}}".getBytes(StandardCharsets.UTF_8);
+        String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(definition));
+        var header = fixture.json.createObjectNode().put("subtype", "managed_session_header_v1");
+        header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
+                .put("kind", "managed-session-definition").put("schemaVersion", 1).put("byteLength", definition.length).put("digest", digest);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n" + header + "\n").getBytes(StandardCharsets.UTF_8);
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
+                0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
+                Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
+                List.of(new ManagedSessionStoreModels.CommitResource("definition", "managed-session-definition", 1,
+                        definition.length, digest, Base64.getEncoder().encodeToString(definition))));
+        fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
+        var first = fixture.admit(OperationKind.CLOSE);
+        // The SessionEnd hook execution was recorded under the first
+        // operation's occurrence namespace.
+        String occurrence = "hook-plan-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(
+                ("[\"SessionEnd\",\"" + first.operationId() + "\"]").getBytes(StandardCharsets.UTF_8)));
+        var plan = fixture.json.createObjectNode();
+        plan.putObject("input").put("hook_event_name", "SessionEnd").put("session_id", fixture.session);
+        var planRef = fixture.resource("SessionEnd-plan", "hook-data", plan);
+        var resultRef = fixture.resource("SessionEnd-result", "hook-data", fixture.json.createObjectNode());
+        var record = fixture.json.createObjectNode().put("hookExecutionId", occurrence).put("occurrenceId", first.operationId())
+                .put("runtimeSessionId", "original").put("registrationId", "registration").put("eventName", "SessionEnd")
+                .put("ordinal", 0).put("hookId", "__plan__").put("cancelRequested", false);
+        record.putNull("onceKey");
+        record.set("planRef", planRef);
+        record.set("inputRef", planRef);
+        record.set("resultRef", resultRef);
+        var run = record.putObject("run").put("state", "settled").put("effectId", occurrence).put("execution", "settled");
+        run.putObject("definition").put("definitionId", "catalog").put("definitionRevision", 1).put("definitionDigest", "b".repeat(64));
+        for (String key : List.of("reason", "executionCallId", "dispatchId", "deliveryId", "runtime", "delivery")) {
+            run.putNull(key);
+        }
+        ManagedHookRecords.requireExecution(record);
+        var ref = fixture.resource("SessionEnd-record", "hook-execution", record);
+        fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
+                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
+                + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
+                ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
+                ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", occurrence),
+                fixture.session, occurrence, "a".repeat(64), ref.path("resourceId").asText());
+        // The first close persists its effects — the fence moves to
+        // DRAINING — and only then fails terminally; the writer is sealed
+        // first so the resumed completion's writer check can pass.
+        JsonNode effects = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(first));
+        assertThat(effects.path("effects").size()).isOne();
+        assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("DRAINING");
+        fixture.transactions.executeWithoutResult(ignored -> journal.sealWriter("tenant", fixture.session, "w".repeat(32),
+                new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", writer.writerGeneration()),
+                WorkspaceLifecycleStore.authority(first)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.failOperation("tenant", fixture.session,
+                first.operationId(), "worker", first.claimGeneration(), "session_close_completion_unsettled"));
+        assertThat(fixture.jdbc.queryForObject("SELECT operation_id FROM ma_session_head", String.class))
+                .isEqualTo(first.operationId());
+
+        String secondId = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant",
+                fixture.session, OperationKind.CLOSE, "owner", "b".repeat(64), "close-2", "digest", true, 1)
+                .operation().operationId());
+        var second = fixture.transactions.execute(ignored -> fixture.store.claimOperation("tenant", fixture.session,
+                secondId, "worker", Duration.ofSeconds(30)).orElseThrow());
+        // The DRAINING fence rebound to the resumed close, and the carried
+        // receipt still names the failed operation that ran the hooks.
+        assertThat(fixture.jdbc.queryForObject("SELECT operation_id FROM ma_session_head", String.class))
+                .isEqualTo(secondId);
+        assertThat(fixture.jdbc.queryForObject("SELECT phase FROM ma_session_head", String.class)).isEqualTo("DRAINING");
+        JsonNode recovered = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(second));
+        assertThat(fixture.json.readTree(recovered.toString()))
+                .isEqualTo(fixture.json.readTree(effects.toString()));
+        assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation("tenant", fixture.session,
+                secondId, "worker", second.claimGeneration(), true))).isTrue();
+        assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSED");
     }
 
     @Test
@@ -472,6 +566,34 @@ class WorkspaceLifecycleStoreTest {
     }
 
     @Test
+    void sharedRuntimeSessionsBlockTheNeverInitializedReceipt() throws Exception {
+        var fixture = fixture();
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null, "local-process", "storage");
+        var initial = fixture.bindings.findOrCreate(request);
+        var claimed = fixture.bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
+        var seed = claimed.getProvisionSeed();
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), java.net.URI.create("http://127.0.0.1:9999"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        var handle = new RuntimeResourceHandle("local-process", 2, java.util.Map.of("resource", "original"));
+        var attested = fixture.bindings.compareAndSet(claimed,
+                claimed.withAttestation(lease, handle, java.time.Instant.now(), java.time.Instant.now()));
+        var binding = fixture.bindings.releaseOperation(attested.getBindingId(), "setup", attested.getOperationGeneration());
+        var sessions = new JdbcRuntimeSessionRepository(fixture.jdbc.getDataSource());
+        fixture.bindings.admitSession(sessions, new RuntimeSessionRecord(
+                new RuntimeSession(fixture.session, UUID.randomUUID().toString(), "bootstrap", scope), binding.getBindingId(),
+                binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, java.time.Instant.now()));
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+        String id = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant", fixture.session,
+                OperationKind.DELETE, "owner", "a".repeat(64), "operation", "digest", true, 2).operation().operationId());
+        var operation = fixture.transactions.execute(ignored -> fixture.store.claimOperation("tenant", fixture.session, id,
+                "worker", Duration.ofSeconds(30)).orElseThrow());
+        assertThat(fixture.transactions.<JsonNode>execute(ignored -> fixture.lifecycle.recoverEffects(operation))).isNull();
+        assertThat(fixture.jdbc.queryForObject("SELECT lifecycle_effects_receipt_json FROM ma_operation", String.class)).isNull();
+    }
+
+    @Test
     void emptySessionCompletesAtomicallyOnlyAfterEffectsAndPermanentFence() {
         var fixture = fixture();
         OperationRecord operation = fixture.admit(OperationKind.DELETE);
@@ -532,6 +654,104 @@ class WorkspaceLifecycleStoreTest {
         return new Fixture();
     }
 
+    @Test
+    void terminalPublicTurnWithoutJournalSettlementStillBlocksClose() throws Exception {
+        var fixture = fixture();
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+                "original-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
+        fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
+                "dispatch-owner", Duration.ofMinutes(1)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.failTurn("tenant", fixture.session, turn,
+                "dispatch-owner", "managed_runtime_recovery_blocked", "shell_in_flight"));
+        assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE record_kind = 'ACTION'"
+                + " AND state = 'requested'", Integer.class)).isZero();
+
+        var journal = new ExtensionRecordJournal(new ManagedSessionStore(fixture.jdbc), "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        byte[] genesis = fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class);
+        String prompt = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
+        var request = fixture.promptCommit(prompt, false);
+        fixture.transactions.executeWithoutResult(ignored -> new ManagedSessionStore(fixture.jdbc).commit(
+                "tenant", fixture.session, "extension-writer-token-0123456789", request));
+        assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(2L);
+        assertThat(fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class)).isEqualTo(genesis);
+
+        var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+                "cancel-failed-turn", "digest", fixture.session, turn, "owner"));
+        assertThat(cancel.commandEffect()).isFalse();
+        var operations = fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class);
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> {
+            try {
+                fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.CLOSE, "owner",
+                        "a".repeat(64), "close-failed-turn", "digest", true, 1);
+            } catch (ApiException refusal) {
+                assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+                        .containsExactlyInAnyOrderElementsOf(operations);
+                throw refusal;
+            }
+        })).isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+                .containsExactlyInAnyOrderElementsOf(operations);
+        assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"expired-idle", "sealed-idle", "live-idle",
+            "expired-pending", "expired-settled", "expired-other-settled", "expired-compacted", "missing-head", "stale-dispatch", "admitted",
+            "expired-monitor-v1", "expired-monitor-v2"})
+    void unacknowledgedCancellationRequiresFencedWriterAndIdleJournal(String cut) throws Exception {
+        var fixture = fixture();
+        var journal = new ExtensionRecordJournal(new ManagedSessionStore(fixture.jdbc), "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        byte[] genesis = fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class);
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+                "ambiguous-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
+        fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
+                "dispatch-owner", Duration.ofMinutes(1)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.markSubmissionAttempted("tenant", fixture.session,
+                turn, "dispatch-owner"));
+        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+                "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
+        switch (cut) {
+            case "sealed-idle" -> fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
+            case "expired-pending", "expired-settled", "expired-other-settled", "expired-monitor-v1", "expired-monitor-v2" -> {
+                boolean monitor = cut.startsWith("expired-monitor");
+                if ("expired-monitor-v2".equals(cut)) {
+                    fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+                }
+                String prompt = "expired-other-settled".equals(cut) || monitor ? "other-prompt"
+                        : fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
+                var request = fixture.promptCommit(prompt, !"expired-pending".equals(cut) && !monitor,
+                        monitor ? "monitor" : "user");
+                fixture.transactions.executeWithoutResult(ignored -> new ManagedSessionStore(fixture.jdbc).commit(
+                        "tenant", fixture.session, "extension-writer-token-0123456789", request));
+                assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(2L);
+            }
+            case "expired-compacted" -> fixture.jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
+            case "missing-head" -> fixture.jdbc.update("DELETE FROM ma_session_head");
+            case "stale-dispatch" -> fixture.jdbc.update("UPDATE ma_turn SET dispatch_lease_until = 0");
+            case "admitted" -> fixture.jdbc.update("UPDATE ma_turn SET harness_event_epoch = 'old-epoch'");
+            default -> assertThat(cut).isIn("expired-idle", "live-idle");
+        }
+        if (!"live-idle".equals(cut)) {
+            fixture.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
+        }
+        assertThat(fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
+                + " WHERE journal_revision = 1", byte[].class)).isEqualTo(genesis);
+        boolean expected = List.of("expired-idle", "sealed-idle", "expired-other-settled", "expired-monitor-v2").contains(cut);
+        assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.cancelUnadmittedTurn("tenant",
+                fixture.session, turn, "dispatch-owner"))).isEqualTo(expected);
+        var result = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
+        assertThat(result.status()).isEqualTo(expected ? "CANCELLED" : "CANCELLING");
+        assertThat(result.submissionAttempted()).isEqualTo(!expected);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE event_type = 'turn.cancelled'",
+                Integer.class)).isEqualTo(expected ? 1 : 0);
+    }
+
     static final class Fixture {
         final JdbcTemplate jdbc;
         final ObjectMapper json = new ObjectMapper();
@@ -573,6 +793,36 @@ class WorkspaceLifecycleStoreTest {
                     + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
             session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand("tenant", "owner", "create", "digest", "qwen-code",
                     null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
+        }
+
+        ManagedSessionStoreModels.CommitTransactionRequest promptCommit(String turn, boolean settled) throws Exception {
+            return promptCommit(turn, settled, "user");
+        }
+
+        ManagedSessionStoreModels.CommitTransactionRequest promptCommit(String turn, boolean settled, String source) throws Exception {
+            ObjectNode accepted = json.createObjectNode().put("v", 1).put("sequence", 1)
+                    .put("eventId", "late-accepted").put("kind", "input.accepted").put("occurredAt", 1_000);
+            accepted.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace")
+                    .put("sessionId", session);
+            var payload = accepted.putObject("payload").put("inputId", "late-input").put("turnId", turn)
+                    .put("source", source).putNull("deadline");
+            var ref = json.createObjectNode().put("resourceId", "late-input").put("kind", "managed-session-input")
+                    .put("schemaVersion", 1).put("byteLength", 2).put("digest", DigestUtils.sha256Hex("{}"));
+            payload.set("contentRef", ref);
+            payload.set("admissionRef", ref.deepCopy());
+            ObjectNode terminal = accepted.deepCopy();
+            terminal.put("sequence", 2).put("eventId", "late-settled").put("kind", "turn.settled");
+            terminal.putObject("payload").put("turnId", turn).put("outcome", "completed");
+            String records = "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + accepted + "}\n"
+                    + (settled ? "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + terminal + "}\n" : "")
+                    + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+            int events = settled ? 2 : 1;
+            return new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "writer-extension", 1,
+                    1, 0, "late-transaction", "completeTurn", "late-command", DigestUtils.sha256Hex("late-command"), 1, events,
+                    events, DigestUtils.sha256Hex("late-events"), null, DigestUtils.sha256Hex("late-commit"), 0, null, events + 1,
+                    Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)), DigestUtils.sha256Hex(records),
+                    List.of(new ManagedSessionStoreModels.CommitResource("late-input", "managed-session-input", 1, 2,
+                            DigestUtils.sha256Hex("{}"), "e30=")));
         }
 
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {

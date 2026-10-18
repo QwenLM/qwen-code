@@ -9,6 +9,16 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
+    default boolean supportsApprovalSelection() { return false; }
+
+    default boolean supportsAgentDefinitionApprovalSelection() { return false; }
+
+    default boolean supportsModelSelection() { return false; }
+
+    default boolean supportsPlanMode() { return false; }
+
+    default boolean supportsInputAttachments() { return false; }
+
     default boolean isWorkspaceFilesAvailable() {
         return false;
     }
@@ -65,6 +75,12 @@ public interface HarnessConnector extends AutoCloseable {
      */
     default Attachment recoverManagedCancellation(String tenantId,
             String sessionId) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime recovery is unavailable");
+    }
+
+    default Attachment recoverManagedFailureCancellation(String tenantId,
+            String sessionId, String turnId, String dispatchOwner) {
         throw new UnsupportedOperationException(
                 "Managed Runtime recovery is unavailable");
     }

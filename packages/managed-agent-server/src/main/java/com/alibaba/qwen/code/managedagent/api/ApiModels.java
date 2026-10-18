@@ -3,14 +3,23 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.deser.std.StdDeserializer;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class ApiModels {
     private ApiModels() {
@@ -19,8 +28,38 @@ public final class ApiModels {
     // The per-block cap is enforced in ManagedAgentService, counted in
     // code points to match the published schema's maxLength; @Size counts
     // UTF-16 units and would disagree on astral-plane text.
-    public record InputBlock(@NotBlank String type,
-            @NotBlank String text) {
+    @JsonDeserialize(using = InputBlockDeserializer.class)
+    public record InputBlock(@NotBlank String type, String text,
+            @JsonProperty("mime_type") String mimeType, String data, String name) {
+        public InputBlock(String type, String text) {
+            this(type, text, null, null, null);
+        }
+    }
+
+    public static final class InputBlockDeserializer extends StdDeserializer<InputBlock> {
+        public InputBlockDeserializer() { super(InputBlock.class); }
+
+        @Override
+        public InputBlock deserialize(JsonParser parser, DeserializationContext context) throws IOException {
+            JsonNode node = parser.getCodec().readTree(parser);
+            String type = node.path("type").asText();
+            Set<String> fields = switch (type) {
+                case "input_text", "text" -> Set.of("type", "text");
+                case "input_file" -> Set.of("type", "text", "name", "mime_type");
+                case "input_image" -> Set.of("type", "data", "mime_type");
+                default -> Set.of();
+            };
+            if (!node.isObject() || node.size() != fields.size()) {
+                throw context.weirdStringException(type, InputBlock.class, "Unknown input field or invalid input shape");
+            }
+            for (String field : fields) {
+                if (!node.path(field).isTextual()) {
+                    throw context.weirdStringException(type, InputBlock.class, "Input fields must be strings");
+                }
+            }
+            return new InputBlock(type, node.path("text").textValue(), node.path("mime_type").textValue(),
+                    node.path("data").textValue(), node.path("name").textValue());
+        }
     }
 
     public record CreateSessionRequest(
@@ -34,10 +73,18 @@ public final class ApiModels {
             JsonNode workspace) {
     }
 
+    // D7-3: admission_profile asks a Turn input or cancel for the
+    // java_durable admission view; absent means harness_confirmed.
     public record SessionEventRequest(@NotBlank String type,
             @Size(max = 100) List<@Valid InputBlock> input,
-            @JsonProperty("turn_id") String turnId) {
+            @JsonProperty("turn_id") String turnId,
+            @Pattern(regexp = ADMISSION_PROFILES)
+            @JsonProperty("admission_profile") String admissionProfile) {
     }
+
+    /** The admission profiles a Turn input or cancel may ask for (D7-3). */
+    public static final String ADMISSION_PROFILES =
+            "harness_confirmed|java_durable";
 
     public record UpdateSessionRequest(
             // Single policy owner: ManagedAgentService.validRenameTitle
@@ -52,7 +99,14 @@ public final class ApiModels {
             @JsonProperty("session_id") String sessionId,
             @JsonProperty("turn_id") String turnId,
             String status,
-            boolean replayed) {
+            boolean replayed,
+            @JsonProperty("operation_id") String operationId,
+            @JsonProperty("admission_stage") String admissionStage,
+            @JsonProperty("delivery_state") String deliveryState) {
+        public CommandAdmission(String sessionId, String turnId,
+                String status, boolean replayed) {
+            this(sessionId, turnId, status, replayed, null, null, null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -89,13 +143,18 @@ public final class ApiModels {
             @JsonProperty("session_archive") boolean sessionArchive,
             @JsonProperty("session_unarchive") boolean sessionUnarchive,
             @JsonProperty("session_delete") boolean sessionDelete,
-            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("durable_operations") Boolean durableOperations) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
             boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
             boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -234,23 +293,79 @@ public final class ApiModels {
             String environmentId, String title,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
-            JsonNode workspace) {
+            JsonNode workspace, String approvalMode, Boolean planMode) {
     }
+
+    public record WebShellSessionOptionsRequest(@NotBlank @Size(max = 128) String agentId) {
+    }
+
+    public record WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
+            boolean planModeSupported, boolean inputAttachments) {
+        public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes) {
+            this(approvalMode, availableApprovalModes, false, false);
+        }
+    }
+
+    public record WebShellApprovalSelection(String mode, long revision, boolean planMode) {
+        public WebShellApprovalSelection(String mode, long revision) {
+            this(mode, revision, false);
+        }
+    }
+
+    public record WebShellSessionApproval(String approvalMode, long approvalRevision,
+            List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported) {}
+
+    public record WebShellSessionApprovalRequest(@NotBlank @Size(max = 128) String sessionId) {}
+
+    public record WebShellChangeApprovalRequest(@Size(max = 128) String requestId,
+            @NotBlank @Size(max = 128) String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotBlank String approvalMode,
+            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision, Boolean planMode) {}
+
+    public record WebShellApprovalChangeResult(String sessionId, String approvalMode,
+            long approvalRevision, boolean replayed, boolean planMode) {
+        public WebShellApprovalChangeResult(String sessionId, String approvalMode, long approvalRevision, boolean replayed) {
+            this(sessionId, approvalMode, approvalRevision, replayed, false);
+        }
+    }
+
+    public record WebShellModelOption(String modelId, String label) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellModelSelection(String modelId, long revision) {}
+
+    public record WebShellSessionModelsRequest(@NotBlank @Size(max = 128) String sessionId) {}
+
+    public record WebShellSessionModels(List<WebShellModelOption> models,
+            WebShellModelSelection modelSelection, boolean supported) {}
+
+    public record WebShellChangeModelRequest(@Size(max = 128) String requestId,
+            @NotBlank @Size(max = 128) String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotBlank @Size(max = 512) String modelId,
+            @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {}
+
+    public record WebShellModelChangeResult(String sessionId,
+            WebShellModelSelection modelSelection, boolean replayed) {}
 
     public record WebShellSubmitRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
             @Size(max = 100) List<@Valid InputBlock> input,
-            Map<String, Object> metadata) {
+            Map<String, Object> metadata,
+            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
     }
 
     public record WebShellCancelRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
-            @NotBlank String turnId) {
+            @NotBlank String turnId,
+            @Pattern(regexp = ADMISSION_PROFILES) String admissionProfile) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellAdmission(String sessionId, String turnId,
-            String status, boolean replayed) {
+            String status, boolean replayed, String operationId,
+            String admissionStage, String deliveryState) {
     }
 
     public record WebShellLifecycleRequest(@NotBlank String sessionId,
@@ -355,11 +470,18 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellModelContext(String modelId, Long inputTokens,
+            Long contextWindowSize, long observedAt) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellSession(String sessionId, String title,
             String agentId, String status, long createdAt, long updatedAt,
             WebShellTurn activeTurn, Object environment, long lastSequence,
             WebShellWorkspace workspace,
-            WebShellSessionCapabilities capabilities) {
+            WebShellSessionCapabilities capabilities, String approvalMode,
+            WebShellModelContext modelContext, WebShellModelSelection modelSelection,
+            Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported) {
     }
 
     /** H6b: the definition fields a create or revise request carries. */
@@ -447,7 +569,8 @@ public final class ApiModels {
             @JsonProperty("output_cursor") String outputCursor,
             @JsonProperty("artifact_refs") List<String> artifactRefs,
             @JsonProperty("action_capabilities")
-                    List<String> actionCapabilities) {
+                    List<String> actionCapabilities,
+            @JsonProperty("child_session_id") String childSessionId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -455,7 +578,8 @@ public final class ApiModels {
             String state, Long definitionRevision, String runtimeState,
             long createdAt, Long startedAt, Long settledAt,
             String outputCursor,
-            List<String> artifactRefs, List<String> actionCapabilities) {
+            List<String> artifactRefs, List<String> actionCapabilities,
+            String childSessionId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

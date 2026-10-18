@@ -4,7 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -28,6 +38,7 @@ describe('main CI failure issue workflow', () => {
     // autofix route as the nightly CLI checks.
     const watchedFiles = {
       'E2E Tests': 'e2e',
+      'Managed Agent gate': 'managed-agent-gate',
       'SDK Java': 'sdk-java',
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
@@ -40,7 +51,7 @@ describe('main CI failure issue workflow', () => {
     // workflow_run.workflows matches the watched workflow's name: key, so a
     // watch entry is live only while its file still carries that name —
     // renaming one silently unhooks the suite's failure issues, and nothing
-    // else here reads the coupling for all five.
+    // else here reads the coupling for all of them.
     for (const [watchedName, watchedFile] of Object.entries(watchedFiles)) {
       const definition = parse(
         readFileSync(`.github/workflows/${watchedFile}.yml`, 'utf8'),
@@ -294,13 +305,18 @@ describe('main CI failure issue workflow', () => {
       expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
         'lost communication with the server',
       );
+      // A per-host lock starvation (#14550) is the same class: the annotation
+      // names a lock budget, not an assertion.
+      expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
+        'lock not acquired within',
+      );
     });
 
     it('classifies per failed job and only when EVERY one is infrastructure', () => {
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
       expect(infraScript).toContain(
-        'jq -r \'.jobs[] | select(.conclusion == "failure") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
+        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
       );
       expect(infraScript).toContain(
         'gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations"',
@@ -331,6 +347,120 @@ describe('main CI failure issue workflow', () => {
       expect(infraScript).toContain(
         '--jq \'[.[].message] | join("\\n")\' 2>/dev/null || true',
       );
+    });
+
+    // The gate workflow's reporter job is always() and fails with only the
+    // tier-result error — no infrastructure signature — so without the
+    // exclusion pinned above every Managed Agent gate lane failure counted
+    // as an unclassified job and an infra-killed lane filed an issue instead
+    // of rerunning. These cases run the step body against fixture job lists.
+    const failedJob = (id, checkId, steps) => ({
+      id,
+      conclusion: 'failure',
+      check_run_url: `https://api.github.com/repos/QwenLM/qwen-code/check-runs/${checkId}`,
+      steps,
+    });
+    const REPORTER_STEP = 'Report the tier result';
+    const reporterJob = (id, checkId) =>
+      failedJob(id, checkId, [
+        { name: 'Set up job', conclusion: 'success' },
+        { name: REPORTER_STEP, conclusion: 'failure' },
+        { name: 'Complete job', conclusion: 'success' },
+      ]);
+    const classify = (jobs, annotations) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'infra-classify-'));
+      try {
+        const bin = join(tmp, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/usr/bin/env bash',
+            'id="$(printf \'%s \' "$@" | grep -oE \'check-runs/[0-9]+\' | cut -d/ -f2)"',
+            'cat "${ANN_DIR}/${id}.txt" 2>/dev/null || true',
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const annDir = join(tmp, 'annotations');
+        mkdirSync(annDir);
+        for (const [id, message] of Object.entries(annotations)) {
+          writeFileSync(join(annDir, `${id}.txt`), message);
+        }
+        writeFileSync(join(tmp, 'run-jobs.json'), JSON.stringify({ jobs }));
+        const output = join(tmp, 'output');
+        writeFileSync(output, '');
+        const result = spawnSync('bash', ['-c', infraStep.run], {
+          env: {
+            PATH: `${bin}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            RUN_ATTEMPT: '1',
+            REPO: 'QwenLM/qwen-code',
+            GH_TOKEN: 'fake',
+            INFRA_FAILURE_SIGNATURES: infraStep.env.INFRA_FAILURE_SIGNATURES,
+            ANN_DIR: annDir,
+            GITHUB_OUTPUT: output,
+          },
+          encoding: 'utf8',
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return readFileSync(output, 'utf8');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    it('reruns when the only unannotated failure is the gate reporter', () => {
+      // This PR's run 38936748280: the lane died with its runner while the
+      // reporter failed with the tier-result error — infra, once the
+      // derivative reporter is out of the tally.
+      const out = classify(
+        [
+          failedJob(1001, 9001, [
+            { name: 'Run Managed Agent tests', conclusion: 'failure' },
+          ]),
+          reporterJob(1002, 9002),
+        ],
+        {
+          9001: 'lost communication with the server',
+          9002: 'Process completed with exit code 1.\nThe fast tier cancelled.',
+        },
+      );
+      expect(out).toContain('infra_only=true');
+    });
+
+    it('still reruns when every failed job carries an infra annotation', () => {
+      const out = classify(
+        [
+          failedJob(1001, 9001, [
+            { name: 'Run Managed Agent tests', conclusion: 'failure' },
+          ]),
+        ],
+        { 9001: 'No space left on device' },
+      );
+      expect(out).toContain('infra_only=true');
+    });
+
+    it('keeps counting the reporter when its own runner died before any step', () => {
+      // Filtering by the failing STEP name is what keeps this rerun: no step
+      // failed, so the job still counts and its infra annotation matches.
+      const out = classify([failedJob(1002, 9002, [])], {
+        9002: 'The runner has received a shutdown signal',
+      });
+      expect(out).toContain('infra_only=true');
+    });
+
+    it('files when a lane failure carries no infra annotation', () => {
+      const out = classify(
+        [
+          failedJob(1001, 9001, [{ name: 'Run tests', conclusion: 'failure' }]),
+          reporterJob(1002, 9002),
+        ],
+        {
+          9001: 'AssertionError: expected the daemon to answer',
+          9002: 'Process completed with exit code 1.',
+        },
+      );
+      expect(out).toContain('infra_only=false');
     });
 
     it('reruns the failed jobs once, with actions:write and no PAT or checkout', () => {

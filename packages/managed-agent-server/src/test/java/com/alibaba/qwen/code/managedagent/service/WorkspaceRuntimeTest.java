@@ -66,6 +66,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -214,6 +215,45 @@ class WorkspaceRuntimeTest {
             JdbcToolExecutionRepository executions, RuntimeBindingRecord binding, RuntimeSessionRecord session) { }
 
     @Test
+    void operatorRecoveryRecordsTheHeldRuntimeSessionsOwnerOnASharedBinding() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var isolated = resolver(session, temp.toRealPath()).resolve(session.sessionId()).scope();
+        var scope = new RuntimeScope(isolated.getTenantId(), isolated.getWorkspaceId(), isolated.getWorkspaceGeneration(),
+                isolated.getCanonicalCwd(), isolated.getCapabilityDigest(), "workspace");
+        var bindings = bindings();
+        RuntimeBindingRecord runtime = readyBinding(bindings,
+                new RuntimeProvisionRequest(scope, null, "local-process", session.workspace().getStorageId()), 2);
+        String runtimeSessionId = UUID.randomUUID().toString();
+        RuntimeSessionRecord held = bindings.admitSession(new JdbcRuntimeSessionRepository(dataSource),
+                new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), runtimeSessionId, "bootstrap", scope),
+                        runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        authority.claim(session.workspace(), held);
+        String callId = UUID.randomUUID().toString();
+        var executions = new JdbcToolExecutionRepository(dataSource);
+        executions.findOrCreate(ToolExecutionRecord.prepared(callId, UUID.randomUUID().toString(),
+                runtime.getBindingId(), runtime.getGeneration(), session.sessionId(), runtimeSessionId, "prompt", "call",
+                "digest", Map.of("sessionId", runtimeSessionId, "promptId", "prompt", "callId", "call",
+                        "argsDigest", "digest", "runtimeProtocol", 3, "inputDigest", "digest", "dispatchMode", "deferred")));
+        ToolExecutionRecord dispatched = executions.claimDispatch(callId, "dispatcher", Duration.ofMinutes(1));
+        assertThat(executions.compareAndSet(dispatched, dispatched.withResult(Map.of("executionStatus", "success",
+                "responseParts", List.of(), "capture", Map.of("captureStatus", "partial", "captureReason", "producer_lost")),
+                1, Instant.now()), "dispatcher", dispatched.getDispatchGeneration())).isNotNull();
+        var seed = runtime.getProvisionSeed();
+        assertThat(bindings.compareAndSet(runtime, runtime.withRecoveryEvidence(new RuntimeRecoveryEvidence(
+                UUID.randomUUID().toString(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "registered-process-exit",
+                Instant.now(), "host", seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), runtime.getResourceHandle()),
+                null, Instant.now()))).isNotNull();
+
+        var recovery = new WorkspaceOperatorRecoveryStore(jdbc,
+                new DataSourceTransactionManager(dataSource), bindings, new ObjectMapper());
+        String recoveryId = recovery.prepare(runtime.getBindingId(), runtime.getGeneration(),
+                recovery.inspect(runtime.getBindingId(), runtime.getGeneration()).holderKey(), "operator", "verified incident");
+        assertThat(jdbc.queryForObject("SELECT session_id FROM ma_operation WHERE operation_id = ?", String.class,
+                recoveryId.getBytes(StandardCharsets.UTF_8))).isEqualTo(session.sessionId());
+    }
+
+    @Test
     void operatorRecoveryFencesTheExactHeldGenerationBeforeAttestation() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var scope = resolver(session, temp.toRealPath()).resolve(session.sessionId()).scope();
@@ -327,6 +367,7 @@ class WorkspaceRuntimeTest {
                 fenced.withRecoveryEvidence(originalLoss, stop, Instant.now()))).isNotNull();
         RuntimeProvisioner local = mock(RuntimeProvisioner.class);
         when(local.kind()).thenReturn("local-process");
+        when(local.supportsKind("local-process")).thenReturn(true);
         when(local.supportsStartupRecovery(any())).thenReturn(true);
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?",
                 session.tenantId());
@@ -448,6 +489,82 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void boundSessionIsolationSwitchesTheResolvedScope() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        assertThat(resolver(session, root).resolve(session.sessionId()).scope().getIsolationClass())
+                .isEqualTo("session");
+        var properties = properties(List.of(new WorkspaceMount(session.tenantId(),
+                session.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        assertThat(resolver.resolve(session.sessionId()).scope().getIsolationClass()).isEqualTo("workspace");
+    }
+
+    @Test
+    void sharedPlacementResolvesTheHarnessSessionSeparatelyFromTheEmptyIsolationKey() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        var properties = properties(List.of(new WorkspaceMount(session.tenantId(),
+                session.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        var resolved = resolver.resolve(session.sessionId());
+        assertThat(resolved.scope().getIsolationClass()).isEqualTo("workspace");
+        var local = mock(RuntimeProvisioner.class);
+        when(local.kind()).thenReturn("local-process");
+        when(local.createRequest(any(), any())).thenAnswer(invocation -> new RuntimeProvisionRequest(
+                invocation.getArgument(0), invocation.getArgument(1), "local-process"));
+        var provisioner = new WorkspaceRuntimeProvisioner(local, resolver, authority);
+        // Before the fix the empty isolation key resolved the Session and failed
+        // workspace_unavailable; the Harness Session id must travel on its own.
+        var request = provisioner.createRequest(resolved.scope(), null, session.sessionId());
+        assertThat(request.getIsolationKey()).isNull();
+        assertThat(request.getStorageId()).isEqualTo("storage");
+        assertThat(request.getScope()).isEqualTo(resolved.scope());
+    }
+
+    @Test
+    void boundSessionsConvergeOnOneSharedWorkspaceBinding() throws Exception {
+        SessionRecord first = createSession("storage", ".");
+        SessionRecord second = sessions.findSessionById(sessions.insertWorkspaceSessionCommand(first.tenantId(),
+                "actor", "create-2", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", ".")).sessionId()).orElseThrow();
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        var properties = properties(List.of(new WorkspaceMount(first.tenantId(),
+                first.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        var local = mock(RuntimeProvisioner.class);
+        when(local.kind()).thenReturn("local-process");
+        when(local.createRequest(any(), any())).thenAnswer(invocation -> new RuntimeProvisionRequest(
+                invocation.getArgument(0), invocation.getArgument(1), "local-process"));
+        var provisioner = new WorkspaceRuntimeProvisioner(local, resolver, authority);
+        var firstRequest = provisioner.createRequest(resolver.resolve(first.sessionId()).scope(), null,
+                first.sessionId());
+        var secondRequest = provisioner.createRequest(resolver.resolve(second.sessionId()).scope(), null,
+                second.sessionId());
+        // The shared placement carries no per-Session key, so both Sessions place identically.
+        assertThat(secondRequest).isEqualTo(firstRequest);
+        var bindings = bindings();
+        assertThat(bindings.findOrCreate(secondRequest).getBindingId())
+                .isEqualTo(bindings.findOrCreate(firstRequest).getBindingId());
+    }
+
+    @Test
+    void sharedPlacementReadyCheckValidatesTheWorkspaceMount() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
+        var properties = properties(List.of(new WorkspaceMount(session.tenantId(),
+                session.workspace().getStorageId(), root.toString())));
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        var resolver = new WorkspaceRuntimeResolver(sessions, authority, properties);
+        var scope = resolver.resolve(session.sessionId()).scope();
+        resolver.requireMountCurrent(scope, "storage");
+        assertUnavailable(() -> resolver.requireMountCurrent(scope, "other-storage"));
+    }
+
+    @Test
     void serializesIndependentSqlClientsByStorageAndFencesStaleRelease() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var binding = session.workspace();
@@ -502,6 +619,109 @@ class WorkspaceRuntimeTest {
         assertUnavailable(() -> authority.claim(session.workspace(), releasing));
         verify(fixture.http(), never()).installContext(any(), any(), any(), any());
         verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
+    }
+
+    @Test
+    void mountHandbackLeavesTheWorkerDetachOwedToTheLaterFullRelease() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var binding = session.workspace();
+        var runtimeSession = fixture.record().getSession();
+        var ready = acquireReady(fixture);
+        // #13800: the handback frees only the holder; the worker keeps the
+        // installation a re-drive of this READY identity reuses.
+        assertThat(fixture.transport().releaseMount(fixture.lease(), runtimeSession).toCompletableFuture().join())
+                .isTrue();
+        verify(fixture.http(), never()).release(any(), any());
+        verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), eq(false));
+        var rival = holder(session, "rival");
+        authority.claim(binding, rival);
+        assertThat(new JdbcRuntimeSessionRepository(dataSource).compareAndSet(ready,
+                ready.withState(RuntimeSessionRecord.State.RELEASING, Instant.now()))).isNotNull();
+        assertThat(fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join()).isTrue();
+        // The detach the absent-holder shortcut would skip reaches the worker,
+        // and the rival's mount survives it; a repeated release owes nothing.
+        verify(fixture.http()).release(fixture.lease(), runtimeSession);
+        verify(fixture.http()).activateWorkspace(any(), any(), any(), eq(false));
+        authority.assertHeld(binding, rival);
+        assertThat(fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join()).isTrue();
+        verify(fixture.http()).release(fixture.lease(), runtimeSession);
+    }
+
+    @Test
+    void mountHandbackAfterAFailedCleanupReleaseKeepsTheWorkerDetachOwed() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var binding = session.workspace();
+        var runtimeSession = fixture.record().getSession();
+        var ready = acquireReady(fixture);
+        assertThat(new JdbcRuntimeSessionRepository(dataSource).compareAndSet(ready,
+                ready.withState(RuntimeSessionRecord.State.RELEASING, Instant.now()))).isNotNull();
+        // #13800: the turn's cleanup release failed at the worker, so the
+        // Session parks RELEASING with its installation still in place and
+        // hands its mount back.
+        when(fixture.http().release(any(), any()))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("lost release")))
+                .thenReturn(CompletableFuture.completedFuture(true));
+        assertThatThrownBy(() -> fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join())
+                .hasRootCauseMessage("lost release");
+        assertThat(fixture.transport().releaseMount(fixture.lease(), runtimeSession).toCompletableFuture().join())
+                .isTrue();
+        var rival = holder(session, "rival");
+        authority.claim(binding, rival);
+        // The retried cleanup release still reaches the worker and the
+        // deactivation instead of the absent-holder shortcut.
+        assertThat(fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join()).isTrue();
+        verify(fixture.http(), times(2)).release(fixture.lease(), runtimeSession);
+        verify(fixture.http()).activateWorkspace(any(), any(), any(), eq(false));
+        authority.assertHeld(binding, rival);
+    }
+
+    @Test
+    void mountHandbackOfANeverInstalledSessionOwesNoDetach() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var rival = holder(session, "holder");
+        authority.claim(session.workspace(), rival);
+        assertBusy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
+        assertThat(fixture.transport().releaseMount(fixture.lease(), fixture.record().getSession())
+                .toCompletableFuture().join()).isTrue();
+        var releasing = new JdbcRuntimeSessionRepository(dataSource).compareAndSet(fixture.record(),
+                fixture.record().withState(RuntimeSessionRecord.State.RELEASING, Instant.now()));
+        assertThat(releasing).isNotNull();
+        assertThat(fixture.transport().release(fixture.lease(), releasing.getSession()).toCompletableFuture().join())
+                .isTrue();
+        authority.assertHeld(session.workspace(), rival);
+        verify(fixture.http(), never()).release(any(), any());
+        verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
+    }
+
+    @Test
+    void reclaimTakesAHandedBackMountAgainOnlyWhileItIsFree() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var binding = session.workspace();
+        var runtimeSession = fixture.record().getSession();
+        var ready = acquireReady(fixture);
+        fixture.transport().releaseMount(fixture.lease(), runtimeSession).toCompletableFuture().join();
+        var rival = holder(session, "rival");
+        authority.claim(binding, rival);
+        assertBusy(() -> fixture.transport().reclaimMount(fixture.lease(), runtimeSession));
+        authority.release(binding, rival);
+        fixture.transport().reclaimMount(fixture.lease(), runtimeSession).toCompletableFuture().join();
+        authority.assertHeld(binding, ready);
+        fixture.transport().reclaimMount(fixture.lease(), runtimeSession).toCompletableFuture().join();
+        authority.assertHeld(binding, ready);
+    }
+
+    private RuntimeSessionRecord acquireReady(TransportFixture fixture) {
+        when(fixture.http().installContext(any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Map.of()));
+        when(fixture.http().activateWorkspace(any(), any(), any(), any(Boolean.class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().acquire(fixture.lease(), fixture.record().getSession()).toCompletableFuture().join();
+        return new JdbcRuntimeSessionRepository(dataSource).compareAndSet(fixture.record(),
+                fixture.record().withState(RuntimeSessionRecord.State.READY, Instant.now()));
     }
 
     @Test

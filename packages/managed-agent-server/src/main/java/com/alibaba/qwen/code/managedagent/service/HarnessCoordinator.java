@@ -52,7 +52,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class HarnessCoordinator {
     // The one 409 whose wait provably ends on its own: a fenced
     // predecessor's writer lease lapses, so retrying past the budget's
-    // pre-admission window is exactly the wait D9a meant. The exemption is
+    // window is exactly the wait D9a meant. The exemption is
     // keyed on the lease's own wire code, never on a catch-all code:
     // `hosted_turn_recovery_required` covers arbitrary takeover failures
     // including refusals no retry can change, so exempting IT wedged a
@@ -73,6 +73,19 @@ public class HarnessCoordinator {
     // `hosted_turn_recovery_required` and still meets the budget.
     private static final Set<String> TRANSIENT_RECOVERY_WINDOW_409_CODES =
             Set.of("hosted_turn_recovery_in_progress");
+    // A generation change on a bound Session is exempt from the retry
+    // budget because one change is bounded by the prior generation's
+    // lease. A Harness that restarts between every attempt keeps throwing
+    // it, though, and the exemption alone would retry such a Turn forever
+    // with nothing to tell it from a healthy retry. The exemption therefore
+    // lapses once the Turn has gone this many budgets without journaled
+    // progress (review round 3, R3-6). The cap reads consecutive_failures,
+    // so it bounds the whole run without progress that ends on a generation
+    // wait, whatever wait family filled the run: no counter tells the
+    // families apart, and the other exempt waits stay uncapped while they
+    // are the current failure. A zero budget is floored to one so a single
+    // change still re-attaches (review round 1, R1-1 and R1-8).
+    private static final int GENERATION_CHURN_BUDGET_FACTOR = 4;
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -86,6 +99,7 @@ public class HarnessCoordinator {
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
     private final int maxPreAdmissionRetries;
+    private final int maxPostAdmissionRetries;
     private final Duration batchInterval;
     private final int batchMaxEvents;
     private final int batchMaxBytes;
@@ -123,6 +137,8 @@ public class HarnessCoordinator {
         this.retryMaxDelay = properties.getDispatch().getRetryMaxDelay();
         this.maxPreAdmissionRetries = properties.getDispatch()
                 .getMaxPreAdmissionRetries();
+        this.maxPostAdmissionRetries = properties.getDispatch()
+                .getMaxPostAdmissionRetries();
         this.batchInterval = properties.getEvents().getBatchInterval();
         this.batchMaxEvents = properties.getEvents().getBatchMaxEvents();
         this.batchMaxBytes = properties.getEvents().getBatchMaxBytes();
@@ -131,11 +147,32 @@ public class HarnessCoordinator {
             throw new IllegalStateException(
                     "Managed event batch limits must be positive");
         }
+        int maxOperationRetries = properties.getDispatch()
+                .getMaxOperationRetries();
         if (retryInitialDelay.isNegative() || retryInitialDelay.isZero()
-                || retryMaxDelay.compareTo(retryInitialDelay) < 0
-                || maxPreAdmissionRetries < 0) {
+                || retryMaxDelay.compareTo(retryInitialDelay) < 0) {
             throw new IllegalStateException(
-                    "Managed dispatch retry limits are invalid");
+                    "Managed dispatch retry delays are invalid:"
+                            + " retry-initial-delay=" + retryInitialDelay
+                            + " retry-max-delay=" + retryMaxDelay);
+        }
+        if (maxPreAdmissionRetries < 0 || maxPostAdmissionRetries < 0
+                || maxOperationRetries < 0) {
+            throw new IllegalStateException(
+                    "Managed dispatch retry limits are invalid:"
+                            + " max-pre-admission-retries="
+                            + maxPreAdmissionRetries
+                            + " max-post-admission-retries="
+                            + maxPostAdmissionRetries
+                            + " max-operation-retries=" + maxOperationRetries);
+        }
+        if (maxPostAdmissionRetries < maxPreAdmissionRetries) {
+            throw new IllegalStateException(
+                    "Managed dispatch retry limits are invalid:"
+                            + " max-pre-admission-retries="
+                            + maxPreAdmissionRetries
+                            + " exceeds max-post-admission-retries="
+                            + maxPostAdmissionRetries);
         }
         // The scheduler receives toMillis(): a renew interval that is
         // positive but below a millisecond still dies on the worker thread,
@@ -234,7 +271,18 @@ public class HarnessCoordinator {
             // guard only catches a Harness that still declines it.
             if ("await_action".equals(error.getReason())) {
                 terminal = transientFailure(claimed,
-                        submissionAttempted.get(), error, false);
+                        submissionAttempted.get(), error, true);
+            } else if (recoveryPath.get()
+                    && !"CANCELLING".equals(claimed.status())
+                    && isWorkflowLaunchTurn(claimed)) {
+                // #14387: a decline is terminal for a workflow Turn — the
+                // in-process executor died with its generation and no
+                // retry re-creates it — so the Turn parks blocked, never
+                // FAILED as if its outcome were observed. A CANCELLING
+                // Turn keeps the cancel's own bounded path: the mark
+                // cannot park it (the sweep re-admits CANCELLING rows),
+                // so writing it would only spin the cancel forever.
+                terminal = blockWorkflowRecovery(claimed, leaseLost);
             } else {
                 // The reason is remote-supplied; the terminal write lands
                 // in managed_agent_turn.error_message VARCHAR(2048), so bound it
@@ -252,7 +300,8 @@ public class HarnessCoordinator {
             // G3: a generation change is adopted, not failed. The next
             // dispatch attempt re-attaches through the takeover load; on a
             // bound Session the wait is bounded by the prior generation's
-            // lease, so only that path escapes the retry budget.
+            // lease, so only that path escapes the retry budget — up to the
+            // churn cap transientFailure applies to generation waits.
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error, recoveryPath.get());
         } catch (DaemonProtocolException error) {
@@ -268,7 +317,23 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed, submissionAttempted.get(),
                     error, false);
         } catch (DaemonHttpException error) {
-            if (error.getStatusCode() >= 400
+            // #14387: a takeover refusal for a workflow Turn with the
+            // takeover_unrecovered verdict is terminal in effect — the
+            // workflow's in-process executor died with the generation, and
+            // no retry re-creates it — so the Turn parks blocked instead
+            // of retrying into a budget-exhausted FAILED. Every other
+            // reason (a transient restore read hiccup, a takeover still in
+            // flight) keeps the retry path: it is not evidence the
+            // workflow cannot be observed, and a committed result may
+            // already sit journaled behind it.
+            if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
+                    && isWorkflowLaunchTurn(claimed)
+                    && "hosted_turn_recovery_required".equals(
+                            error.getErrorCode())
+                    && "takeover_unrecovered".equals(
+                            error.getBodyField("reason"))) {
+                terminal = blockWorkflowRecovery(claimed, leaseLost);
+            } else if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
                     && error.getStatusCode() != 409) {
                 terminal = failTerminally(claimed, "hosted_harness_rejected",
@@ -334,6 +399,18 @@ public class HarnessCoordinator {
         // here wait on the prior generation's lease, a wait bounded by that
         // lease itself rather than by the pre-admission retry budget.
         recoveryPath.set(session.harnessBootId() != null);
+        // #14387: a workflow Turn whose recovery was already refused
+        // carries the durable mark — end the drive before any attach.
+        // The refusal was decided by the drive that found the generation
+        // lost; re-attaching on every scan would only repeat a takeover
+        // load that must never become a re-execution. A cancel still
+        // drives: settling the Turn cancelled is the cancel's own act.
+        if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
+                && isWorkflowLaunchTurn(claimed)
+                && AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(
+                        claimed.errorCode())) {
+            return false;
+        }
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
             if (!claimed.submissionAttempted()) {
                 // Before submission a Workspace-files outage holds the Turn
@@ -351,6 +428,12 @@ public class HarnessCoordinator {
                 && !claimed.submissionAttempted()) {
             store.cancelBeforeAdmission(claimed.tenantId(),
                     claimed.sessionId(), claimed.turnId(), owner);
+            return true;
+        }
+        if ("CANCELLING".equals(claimed.status())
+                && claimed.harnessEventEpoch() == null
+                && store.cancelUnadmittedTurn(claimed.tenantId(),
+                        claimed.sessionId(), claimed.turnId(), owner)) {
             return true;
         }
         boolean recoveringCancellation =
@@ -371,7 +454,8 @@ public class HarnessCoordinator {
         }
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
-                && runtimeRecovery.hasUnknownOutcome()) {
+                && runtimeRecovery.hasUnknownOutcome()
+                && !recoveringCancellation) {
             return fail(claimed, "managed_runtime_recovery_blocked",
                     "A prior tool execution has an unknown outcome; the"
                             + " Session was blocked without replaying it.");
@@ -380,10 +464,22 @@ public class HarnessCoordinator {
         boolean recoveredCancellation = false;
         boolean cancelledOnAttach = false;
         if (runtimeRecovery != null) {
+            // #14387: continuing a workflow Turn re-runs its deterministic
+            // in-process script while the first run's outcome stays
+            // unwitnessed — the parked snapshot proves nothing about the
+            // in-process subagents the lost generation dispatched. Refuse
+            // the re-execution and mark the Turn so the child result relay
+            // settles the record blocked. A cancel still drives: settling
+            // the Turn cancelled is the cancel's own act, not a re-run.
+            if (!recoveringCancellation && isWorkflowLaunchTurn(claimed)) {
+                return blockWorkflowRecovery(claimed, leaseLost);
+            }
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
                     : !runtimeRecovery.isContinuationReady()) {
-                return fail(claimed, "managed_runtime_recovery_incomplete",
+                return fail(claimed, runtimeRecovery.hasUnknownOutcome()
+                                ? "managed_runtime_recovery_blocked"
+                                : "managed_runtime_recovery_incomplete",
                         "A prior tool execution is not ready for safe"
                                 + (recoveringCancellation
                                         ? " cancellation."
@@ -517,6 +613,19 @@ public class HarnessCoordinator {
             }
             cancelledOnAttach = true;
         } else {
+            // #14387: a workflow Turn re-submitted onto a different
+            // generation may double-run its script — its prior submission
+            // may have been admitted by the lost generation without
+            // recording it (R10-4). The same live boot is safe: the
+            // daemon dedupes the replayed admission, so the drive falls
+            // through to the 409 adopt and the stream. Refuse only with
+            // evidence the generation changed.
+            if (claimed.harnessEventEpoch() == null
+                    && claimed.submissionAttempted()
+                    && isWorkflowLaunchTurn(claimed)
+                    && !attachment.bootId().equals(session.harnessBootId())) {
+                return blockWorkflowRecovery(claimed, leaseLost);
+            }
             boolean bound;
             if (claimed.submissionAttempted()
                     && claimed.harnessEventEpoch() != null
@@ -607,6 +716,11 @@ public class HarnessCoordinator {
                         attachment.bootId());
             }
             if (!bound) {
+                // The lost bind/withdraw CAS usually proves another owner
+                // holds the Turn (R8-1); fail() re-reads the row and its
+                // reconcile re-binds under this host's lease, so a recorded
+                // admission is cancelled only while this host still owns
+                // the dispatch.
                 return fail(claimed, "hosted_harness_generation_mismatch",
                         "Hosted Harness generation changed.");
             }
@@ -1008,6 +1122,83 @@ public class HarnessCoordinator {
         }
     }
 
+    // Best-effort reconciliation before the terminal failure of a Turn
+    // whose submission was attempted: cancelAdmittedTurn's attach-and-cancel
+    // sequence without its CANCELLING precondition — the fail() caller
+    // terminates the Turn, so the cancel must land before failTurn clears
+    // the dispatch owner. The epoch precondition stays, though: the cancel
+    // is session-scoped and aborts whichever Turn the Harness is running on
+    // the Session, so only a recorded admission proves that execution is
+    // this Turn's — a bare submission mark can belong to a Turn the daemon
+    // refused while another Turn is live (R6-3). The row is re-read rather
+    // than trusted from the claim-time record: the admission the mark
+    // precedes may have landed after the claim (R4-1).
+    private boolean cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn,
+            boolean recoveryBlocked) {
+        try {
+            TurnRecord current = store.findTurn(turn.tenantId(),
+                    turn.sessionId(), turn.turnId()).orElse(null);
+            if (current == null) {
+                return true;
+            }
+            if (current.harnessEventEpoch() == null) {
+                // A lost admission response does not prove the native input idle.
+                // Keep the cancellation entry until recovery can prove ownership.
+                return false;
+            }
+            SessionRecord session = store.requireSession(turn.tenantId(),
+                    turn.sessionId());
+            if (session.workspace() != null
+                    && !harness.isWorkspaceFilesAvailable()) {
+                return false;
+            }
+            if (recoveryBlocked && session.workspace() != null
+                    && "RUNNING".equals(current.status())) {
+                Attachment takeover = harness.recoverManagedFailureCancellation(
+                        session.tenantId(), session.sessionId(), current.turnId(), owner);
+                HarnessRuntimeRecovery recovery = takeover.runtimeRecovery();
+                if (recovery != null) {
+                    if (!recovery.isCancellationReady()) {
+                        return false;
+                    }
+                    harness.cancelManagedRuntime(session.tenantId(), session.sessionId(),
+                            current.promptId(), recovery.getCheckpointId(), recovery.getActivationId());
+                }
+                return true;
+            }
+            if (session.harnessBootId() != null
+                    && store.bindHarness(turn.tenantId(), turn.sessionId(),
+                            turn.turnId(), owner, session.harnessBootId())) {
+                try {
+                    harness.cancel(session.tenantId(), session.sessionId());
+                } catch (DaemonHttpException parked) {
+                    if (parked.getStatusCode() != 409
+                            || !"hosted_turn_recovery_required".equals(parked.getErrorCode())) {
+                        throw parked;
+                    }
+                    Attachment takeover = harness.recoverManagedCancellation(
+                            session.tenantId(), session.sessionId());
+                    HarnessRuntimeRecovery recovery = takeover.runtimeRecovery();
+                    if (recovery != null) {
+                        if (!recovery.isCancellationReady()) {
+                            return false;
+                        }
+                        harness.cancelManagedRuntime(session.tenantId(), session.sessionId(),
+                                current.promptId(), recovery.getCheckpointId(), recovery.getActivationId());
+                    }
+                }
+                return true;
+            }
+            return false;
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Turn post-admission cancel failed tenant={}"
+                            + " session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    error.getClass().getSimpleName());
+            return false;
+        }
+    }
+
     private static void requireLease(AtomicBoolean leaseLost) {
         if (leaseLost.get()) {
             throw new IllegalStateException("Turn dispatch lease was lost");
@@ -1015,8 +1206,46 @@ public class HarnessCoordinator {
     }
 
     private boolean fail(TurnRecord turn, String code, String message) {
-        store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
-                owner, code, message);
+        return fail(turn, code, message, null);
+    }
+
+    private boolean fail(TurnRecord turn, String code, String message, RuntimeException error) {
+        // The terminal record makes an admitted Turn unreachable: failTurn
+        // clears the dispatch owner and leaves the active states, so
+        // nothing could later cancel it or re-attach to journal its
+        // output. Reconcile first — best-effort cancel it through the
+        // Session's bound Harness, then record the failure. The gate
+        // re-reads the row rather than trusting a caller's claim-time
+        // record: an admission that landed after the claim is exactly the
+        // execution the terminal record would strand (R4-1), and the
+        // claim-time flag otherwise differs per route (review round 12,
+        // R12-3).
+        TurnRecord current = store.findTurn(turn.tenantId(),
+                turn.sessionId(), turn.turnId()).orElse(turn);
+        boolean recoveryBlocked = "managed_runtime_recovery_blocked".equals(code);
+        if (current.submissionAttempted()) {
+            boolean reconciled = cancelAdmittedTurnBeforeTerminalFail(current, recoveryBlocked);
+            if (!reconciled && recoveryBlocked
+                    && store.requireSession(turn.tenantId(), turn.sessionId()).workspace() != null) {
+                return transientFailure(current, true,
+                        new IllegalStateException("Recovery cancellation remains unsettled"), true);
+            }
+        }
+        if (recoveryBlocked && !"CANCELLING".equals(turn.status())) {
+            if (!store.failRecoveryBlockedTurn(turn.tenantId(), turn.sessionId(),
+                    turn.turnId(), owner, message)) {
+                return false;
+            }
+        } else {
+            store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    owner, code, message);
+        }
+        if (error != null) {
+            LOG.warn("Managed Turn failed terminally tenant={} session={}"
+                            + " turn={} code={} message={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(), code,
+                    message, error);
+        }
         return true;
     }
 
@@ -1025,24 +1254,52 @@ public class HarnessCoordinator {
     // actual cause.
     private boolean failTerminally(TurnRecord turn, String code,
             String message, RuntimeException error) {
-        LOG.warn("Managed Turn failed terminally tenant={} session={}"
-                        + " turn={} code={} message={}",
-                turn.tenantId(), turn.sessionId(), turn.turnId(), code,
-                message, error);
-        return fail(turn, code, message);
+        return fail(turn, code, message, error);
     }
 
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error,
-            boolean exemptFromPreAdmissionBudget) {
+            boolean exemptFromRetryBudget) {
         if (!submissionAttempted && isHarnessDisabled(error)) {
             return deferOutage(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.", error);
         }
+        // The budget counts consecutive failures without journaled
+        // progress: the fenced cursor updates reset that counter (the pacing
+        // counter retry_count is never reset — the backoff must keep growing
+        // across a crash loop that keeps making progress, review round 8
+        // R8-3), so the claim-time record is stale for a delivery that
+        // admitted or journaled since.
+        TurnRecord current = store.findTurn(turn.tenantId(),
+                turn.sessionId(), turn.turnId()).orElse(turn);
+        // The budget reads only the attempts that could have made progress:
+        // exempt waits (a predecessor's lease-bounded conflict, the daemon's
+        // recovery window) still count toward the journaled-progress reset
+        // but not toward the terminal budget (review round 10, R10-2).
+        int chargedFailures =
+                current.consecutiveFailures() - current.budgetExemptFailures();
+        // A generation wait keeps its exemption only while the Turn's run
+        // of failures without journaled progress stays under the churn cap.
+        // Past it, the arm for the Turn's phase fails it with that phase's
+        // unavailable code, as if the budget were spent (review round 3,
+        // R3-6).
+        // The wait is read off the failure itself, like every other fact
+        // this method derives from it, so no caller can route a generation
+        // change here without the cap (review round 1, R1-5).
+        boolean generationWait =
+                error instanceof HostedHarnessGenerationException;
+        int budget = submissionAttempted ? maxPostAdmissionRetries
+                : maxPreAdmissionRetries;
+        boolean generationChurn = generationWait && exemptFromRetryBudget
+                && current.consecutiveFailures()
+                        >= (long) Math.max(1, budget)
+                                * GENERATION_CHURN_BUDGET_FACTOR;
+        boolean exempt = exemptFromRetryBudget && !generationChurn;
         if (!submissionAttempted
-                && !exemptFromPreAdmissionBudget
-                && turn.retryCount() >= maxPreAdmissionRetries) {
+                && !exempt
+                && (chargedFailures >= maxPreAdmissionRetries
+                        || generationChurn)) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1074,15 +1331,45 @@ public class HarnessCoordinator {
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
         }
+        // The lease-bounded exemption exempts the post-admission budget too:
+        // the wait it names ends on the predecessor's own lease, so charging
+        // it against this Turn would terminally fail a wait that is still
+        // resolving on its own.
+        if (submissionAttempted
+                && !exempt
+                && (chargedFailures >= maxPostAdmissionRetries
+                        || generationChurn)) {
+            LOG.error("Managed Turn coordination exhausted retries tenant={}"
+                            + " session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    failureLabel(error), error);
+            // A distinct code from the pre-admission arm: the Turn may have
+            // been admitted and executed, so blind retry is not safe. A
+            // named load refusal and a Runtime Broker failure each keep
+            // their own code — the generic one would name a component that
+            // did not fail.
+            if (error instanceof HarnessSessionRefusedException refusal) {
+                return fail(turn, refusal.getCode(),
+                        "Hosted Harness refused to open the Session after"
+                                + " Turn admission.");
+            }
+            if (error instanceof RuntimeBrokerException brokerError) {
+                return fail(turn, brokerError.getCode(),
+                        brokerError.getMessage());
+            }
+            return fail(turn, "hosted_harness_unavailable_after_admission",
+                    "Hosted Harness remained unavailable after Turn"
+                            + " admission.");
+        }
         long delay = retryDelay(retryInitialDelay, retryMaxDelay,
-                turn.retryCount());
+                current.retryCount());
         long retryAfter = Math.addExact(clock.millis(), delay);
         store.scheduleTurnRetry(turn.tenantId(), turn.sessionId(),
-                turn.turnId(), owner, retryAfter);
+                turn.turnId(), owner, retryAfter, exempt);
         LOG.warn("Managed Turn coordination will retry tenant={} session={}"
                         + " turn={} retry={} delayMs={} failure={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),
-                turn.retryCount() + 1, delay, failureLabel(error));
+                current.retryCount() + 1, delay, failureLabel(error));
         return true;
     }
 
@@ -1102,7 +1389,8 @@ public class HarnessCoordinator {
 
     private boolean deferOutage(TurnRecord turn, String exhaustionCode,
             String exhaustionMessage, RuntimeException cause) {
-        if (turn.retryCount() >= maxPreAdmissionRetries) {
+        if (turn.consecutiveFailures() - turn.budgetExemptFailures()
+                >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted outage deferrals"
                             + " tenant={} session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1122,6 +1410,50 @@ public class HarnessCoordinator {
 
     private static boolean isHarnessDisabled(RuntimeException error) {
         return error instanceof HarnessDisabledException;
+    }
+
+    // #14387: refuse the workflow Turn's unwitnessed re-execution — mark
+    // it durably (the child result relay reads the code off the Turn line
+    // and settles the record blocked) and end the drive. The Turn itself
+    // stays unsettled: its work's outcome was never observed, so no
+    // terminal status may claim otherwise. The mark is fenced by the live
+    // dispatch lease (the CAS checks dispatch_lease_until), and a locally
+    // lost lease skips the decision outright — another owner re-walks the
+    // same refusal on its own claim.
+    private boolean blockWorkflowRecovery(TurnRecord claimed,
+            AtomicBoolean leaseLost) {
+        if (leaseLost.get()) {
+            return true;
+        }
+        if (!store.markTurnRecoveryBlocked(claimed.tenantId(),
+                claimed.sessionId(), claimed.turnId(), owner,
+                AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                "The Harness generation running this workflow was lost;"
+                        + " the in-process run's outcome was never"
+                        + " observed.")) {
+            // The fenced CAS missed — the lease lapsed between the attach
+            // and this write, so the Turn is neither marked nor parked.
+            // The next claim re-walks the refusal; the lost durable guard
+            // must never be silent.
+            LOG.warn("Managed workflow Turn recovery-blocked mark lost to"
+                            + " a lease CAS tenant={} session={} turn={}",
+                    claimed.tenantId(), claimed.sessionId(),
+                    claimed.turnId());
+        }
+        return true;
+    }
+
+    // #14387: a workflow Turn's work is one deterministic in-process script
+    // — the only Turn kind whose input is a `workflow_launch` block (the
+    // Java creation arm mints it, ManagedAgentService). Identified by the
+    // block's type, never by re-reading the record or the prompt text.
+    private static boolean isWorkflowLaunchTurn(TurnRecord turn) {
+        for (Map<String, Object> block : turn.input()) {
+            if (block != null && "workflow_launch".equals(block.get("type"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String failureLabel(RuntimeException error) {
