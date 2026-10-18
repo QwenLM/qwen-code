@@ -1407,6 +1407,51 @@ class QwenHostedHarnessConnectorTest {
         verify(client, times(2)).runMessageOperation(attached, stop);
     }
 
+    @Test
+    void automationCancelLoadsPassivelyUnderCommittedStopAuthority() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        SessionRecord session = mock(SessionRecord.class);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant-a");
+        when(session.sessionId()).thenReturn(SESSION_ID);
+        when(session.harnessBootId()).thenReturn(BOOT_ID);
+        when(session.workspace()).thenReturn(new ContextBinding("tenant-a", "workspace", 1,
+                "storage", ".", "config", 1));
+        when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorizeCancellation(session);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        Map<String, Object> cancel = Map.of("kind", "cancel_run",
+                "scheduleId", "asch_" + "1".repeat(32), "occurrenceKey", "manual:one",
+                "operationId", "66666666-6666-4666-8666-666666666666");
+        connector.runAutomationOperation("tenant-a", SESSION_ID, cancel);
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(loads.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(loads.getValue(), "toJson"))
+                .containsEntry("passiveManagedRuntimeRecovery", true)
+                .doesNotContainKeys("stopMessages", "driveRuntimeRecovery", "cancellationTakeover");
+        verify(execution).authorizeCommittedStop(session);
+        verify(execution, never()).authorize(session);
+        verify(execution, never()).authorizeCancellation(session);
+        connector.runAutomationOperation("tenant-a", SESSION_ID, cancel);
+        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
+        verify(client, times(2)).runAutomationOperation(attached, cancel);
+    }
+
     // D8b: a definition-pinned child Session's message stop loads through
     // the same entry, so the load must carry the pin or the Harness would
     // refuse the Session with hosted_agent_definition_conflict.

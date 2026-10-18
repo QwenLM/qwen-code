@@ -444,16 +444,24 @@
                                  measure 62.1-72.4 s (~145 s budgeted
                                  at 2x): the healthy sum becomes
                                  5033 s, so the fork moves to 5643 s,
-                                 still inside the Verify step's 105
-                                 minutes. The FG12b store-failure
-                                 class (HostedMcpStoreFaultGatesIT,
-                                 eight cases) measures 49.6 s locally
-                                 on JDK 21 + MySQL 8.0.46 (~120 s
-                                 budgeted, a conservative 2.4x): the
-                                 healthy sum becomes 5153 s, so the
-                                 fork moves to 5763 s and the Verify
-                                 step to 107 minutes. -->
-                            <forkedProcessTimeoutInSeconds>5763</forkedProcessTimeoutInSeconds>
+                                 which the Verify step's 105 minutes
+                                 still wrap. The event-stream liveness
+                                 gates (HostedEventStreamLivenessIT,
+                                 four cases on the shipped 15 s
+                                 keepalive / 45 s bound, 214.4-215.0 s
+                                 healthy locally on JDK 21 and 25
+                                 across four runs, ~440 s budgeted at
+                                 2x) raise the healthy sum to 5593 s,
+                                 so the fork moves to 6203 s and the
+                                 Verify step to 115 minutes. These sums
+                                 already include the FG12b
+                                 store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases, 49.6 s measured locally on
+                                 JDK 21 + MySQL 8.0.46, ~120 s
+                                 budgeted): its +120 s is what
+                                 carries 5473/6083 to 5593/6203. -->
+                            <forkedProcessTimeoutInSeconds>6203</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
