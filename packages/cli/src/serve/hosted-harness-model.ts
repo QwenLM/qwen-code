@@ -16,7 +16,7 @@ import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 
 import type { Content, Part } from '@google/genai';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
@@ -491,6 +491,38 @@ export async function runHostedHarnessTextTurn(input: {
     let pendingToolResults =
       input.resumeFromToolResults !== undefined ||
       (input.resumeModel?.pendingToolResults ?? false);
+    const selectedSkills =
+      !input.resumeFromToolResults && !input.resumeModel && input.toolTurn
+        ? (input.skills?.invocations(effectivePrompt) ?? [])
+        : [];
+    if (selectedSkills.length && input.toolTurn) {
+      const calls: ToolCallRequestInfo[] = selectedSkills.map((skill) => ({
+        callId: randomUUID(),
+        name: 'skill',
+        args: { skill },
+        isClientInitiated: true,
+        origin: { kind: 'client' },
+        prompt_id: input.promptId,
+      }));
+      const parts: Part[] = calls.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      }));
+      client
+        .getChat()
+        .setHistory([
+          ...history,
+          { role: 'user', parts: request },
+          { role: 'model', parts },
+        ]);
+      input.toolTurn.setModelRound?.(0);
+      request = await input.toolTurn.execute(
+        calls,
+        parts,
+        config.getModel(),
+        input.signal,
+      );
+      pendingToolResults = true;
+    }
     let preparedRecovery = input.resumeModel?.prepared;
     let stopHookActive =
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
@@ -608,7 +640,7 @@ export async function runHostedHarnessTextTurn(input: {
             )
           : client.sendMessageStream(request, input.signal, input.promptId, {
               type:
-                round === 0 && !input.resumeFromToolResults
+                round === 0 && !pendingToolResults
                   ? SendMessageType.UserQuery
                   : SendMessageType.ToolResult,
               // Published deltas cannot be un-glued after the fact: a cut that

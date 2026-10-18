@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LlmEventType, Turn } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  LlmEventType,
+  Turn,
+  type ToolCallRequestInfo,
+} from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   llmPreparedProviderPin,
   type LlmPreparedRequest,
@@ -2053,4 +2057,81 @@ it('advertises only the published Skill catalog while keeping host Skill discove
     'PROJECT_SECTION',
   );
   expect(mocks.refreshSystemInstruction).toHaveBeenCalled();
+});
+
+it('loads explicit Skills before the first model request and preserves the task and attachments', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  const skills = new HostedSkillCatalog([
+    { name: 'review', description: 'Review.', body: 'PINNED_REVIEW_BODY' },
+    { name: 'testing', description: 'Test.', body: 'PINNED_TEST_BODY' },
+  ]);
+  const execute = vi.fn(async (calls: ToolCallRequestInfo[]) =>
+    calls.map((call) => ({
+      functionResponse: {
+        id: call.callId,
+        name: call.name,
+        response: { output: skills.response(call.args) },
+      },
+    })),
+  );
+  const toolTurn = {
+    execute,
+    consumeResults: vi.fn(async () => undefined),
+    declarations: vi.fn(async () => [skills.declaration()!]),
+    setPromptHookRunner: vi.fn(),
+  };
+  const prompt = '/review /testing /review inspect the patch';
+  const attachmentParts = [{ text: 'ATTACHMENT_CONTENT' }];
+  await runHostedHarnessTextTurn({
+    ...input,
+    prompt,
+    attachmentParts,
+    skills,
+    toolTurn,
+  });
+  expect(execute).toHaveBeenCalledOnce();
+  expect(execute.mock.calls[0][0]).toMatchObject([
+    { name: 'skill', args: { skill: 'review' }, isClientInitiated: true },
+    { name: 'skill', args: { skill: 'testing' }, isClientInitiated: true },
+  ]);
+  expect(mocks.setHistory).toHaveBeenLastCalledWith([
+    { role: 'user', parts: [{ text: prompt }, ...attachmentParts] },
+    { role: 'model', parts: expect.any(Array) },
+  ]);
+  expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_REVIEW_BODY');
+  expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_TEST_BODY');
+  expect(mocks.sendOptions[0]).toMatchObject({
+    type: SendMessageType.ToolResult,
+  });
+  expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
+});
+
+it('uses saved Skill results on continuation without loading the selection again', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  const result: Part[] = [
+    {
+      functionResponse: {
+        id: 'saved',
+        name: 'skill',
+        response: { output: 'SAVED_BODY' },
+      },
+    },
+  ];
+  const toolTurn = {
+    execute: vi.fn(),
+    consumeResults: vi.fn(async () => undefined),
+    declarations: vi.fn(async () => []),
+    setPromptHookRunner: vi.fn(),
+  };
+  await runHostedHarnessTextTurn({
+    ...input,
+    prompt: '/review inspect the patch',
+    skills: new HostedSkillCatalog([
+      { name: 'review', description: 'Review.', body: 'NEW_BODY' },
+    ]),
+    toolTurn,
+    resumeFromToolResults: result,
+  });
+  expect(toolTurn.execute).not.toHaveBeenCalled();
+  expect(mocks.requests[0]).toEqual(result);
 });
