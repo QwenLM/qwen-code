@@ -20,6 +20,18 @@ export const PROMPT_UNSAFE_INVISIBLES =
   /[\u0080-\u009f\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029\u2800\ud800-\udfff]/gu;
 
 /**
+ * The pre-widening invisibles set, kept for PATHS. Adapters store attachments
+ * under the original basename (e.g. DingTalk `basename(fileName)`), so the
+ * `saved to:` path must stay byte-identical to the name on disk: replacing a
+ * zero-ink char (a Default_Ignorable like U+3164, U+2800, a lone surrogate)
+ * with a space would advertise a path that does not exist, and the read-file
+ * tool gets ENOENT. None of those can break or reorder the line the path is
+ * rendered on, so the wider PROMPT_UNSAFE_INVISIBLES buys nothing here.
+ */
+const PATH_UNSAFE_INVISIBLES =
+  /[\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+
+/**
  * Truncate to at most `max` Unicode CODE POINTS (not UTF-16 code units). A cap
  * applied with `.slice` counts code units, so one landing mid-surrogate-pair
  * (e.g. an emoji \ud83c\udf89 = 2 units) leaves a lone surrogate that renders as `\ufffd`.
@@ -268,7 +280,7 @@ export function sanitizeDisplayText(text: string, maxLen?: number): string {
  */
 export function sanitizePromptPath(path: string): string {
   const cleaned = path
-    .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
+    .replace(PATH_UNSAFE_INVISIBLES, ' ')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
   // Cap by code point so a path ending in an emoji can't be split mid-pair.

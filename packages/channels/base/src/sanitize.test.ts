@@ -261,6 +261,17 @@ describe('sanitizePromptPath', () => {
     expect(sanitizePromptPath(path)).toBe(path);
   });
 
+  it('keeps zero-ink filename chars byte-intact so the advertised path resolves', () => {
+    // Adapters store attachments under the ORIGINAL basename (DingTalk:
+    // `basename(fileName)`), so the `saved to:` path must stay byte-identical
+    // to the stored name. Widening the shared invisibles class replaced
+    // U+3164/U+2800 with a space here and the read-file tool got ENOENT.
+    for (const zeroInk of [HANGUL_FILLER, BRAILLE_BLANK]) {
+      const path = `/tmp/channel-files/report${zeroInk}final.txt`;
+      expect(sanitizePromptPath(path)).toBe(path);
+    }
+  });
+
   it('strips CR/LF so the path cannot inject extra prompt lines', () => {
     const CR = String.fromCharCode(0x0d);
     const NL = String.fromCharCode(0x0a);
