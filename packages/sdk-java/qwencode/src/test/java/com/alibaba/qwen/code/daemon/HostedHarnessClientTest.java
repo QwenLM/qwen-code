@@ -4939,6 +4939,15 @@ class HostedHarnessClientTest {
         assertTrue(heartbeats.get() > 0, "heartbeat never fired");
     }
 
+    private static void awaitHeartbeatAfter(AtomicInteger heartbeats,
+            int previous, String message) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (heartbeats.get() <= previous && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertTrue(heartbeats.get() > previous, message);
+    }
+
     private static void awaitSchedulerDrained(HostedHarnessClient client)
             throws Exception {
         // A periodic task is off the queue while it runs, so the queue is
@@ -6533,8 +6542,9 @@ class HostedHarnessClientTest {
             // keeps beating.
             Thread.sleep(100);
             int beating = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > beating,
+            // A loaded runner can delay the 10ms heartbeat task past a fixed
+            // observation window; wait for the replacement's beat instead.
+            awaitHeartbeatAfter(heartbeats, beating,
                     "the re-registered attachment must keep beating");
         } finally {
             releaseDelete.countDown();
