@@ -2054,6 +2054,37 @@ class ManagedAgentApiContractTest {
         assertThat(workflowWebShell.get("operationId").asText())
                 .isEqualTo(workflowAdmitted.get("id").asText());
         assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
+
+        String automationKey = "1".repeat(64);
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind = 'TASK_CANCEL'"
+                + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                automationKey, tenant, sessionId, "2".repeat(64));
+        childRunResource(tenant, sessionId, "resource-automation-contract",
+                "{\"scheduleId\":\"asch_" + "1".repeat(32)
+                        + "\",\"occurrenceKey\":\"manual:contract\"}");
+        String automationTask = "task_" + automationKey;
+        assertThat(json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        automationTask).header(TENANT, tenant), null))
+                .get("action_capabilities").toString()).isEqualTo("[\"cancel\"]");
+        JsonNode automationAdmitted = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, automationTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-automation-cancel"), null));
+        assertThat(automationAdmitted.get("type").asText()).isEqualTo("task_cancel");
+        assertThat(automationAdmitted.get("task_id").asText()).isEqualTo(automationTask);
+        JsonNode automationWebShell = json(exchange(drift, "cancelWebShellTask", 202,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-automation-cancel\"}")
+                        .formatted(sessionId, automationTask)));
+        assertThat(automationWebShell.get("operationId").asText())
+                .isEqualTo(automationAdmitted.get("id").asText());
+        assertThat(automationWebShell.get("replayed").asBoolean()).isTrue();
     }
 
     /**
