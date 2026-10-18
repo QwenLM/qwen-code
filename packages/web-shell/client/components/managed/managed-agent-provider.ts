@@ -171,6 +171,35 @@ export type ManagedTaskEventPage =
 export type ManagedTaskCancelOperation =
   components['schemas']['WebShellCommandOperation'] & { type: 'task_cancel' };
 
+export type ManagedRuntimeNode = components['schemas']['WebShellRuntimeNode'];
+
+export type ManagedWorkspaceDirectory =
+  components['schemas']['WebShellWorkspaceDirectory'];
+
+export type ManagedWorkspaceCreateOperation =
+  components['schemas']['WebShellWorkspaceCreateOperation'];
+
+export interface ManagedWorkspaceRegistration {
+  listNodes(
+    options: ManagedAgentRequestOptions,
+  ): Promise<components['schemas']['WebShellRuntimeNodePage']>;
+  checkDirectory(
+    request: components['schemas']['WebShellWorkspaceDirectoryRequest'],
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedWorkspaceDirectory>;
+  create(
+    request: Omit<
+      components['schemas']['WebShellWorkspaceRegisterRequest'],
+      'idempotencyKey' | 'requestId'
+    >,
+    options: ManagedAgentCommandOptions,
+  ): Promise<ManagedWorkspaceCreateOperation>;
+  query(
+    operationId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedWorkspaceCreateOperation>;
+}
+
 /** A Hosted tool approval waiting for the Session owner's answer. */
 export interface ManagedAgentPendingAction {
   actionId: string;
@@ -269,6 +298,7 @@ export interface ManagedAgentProvider {
   };
   readonly workspaceBinding?: {
     readonly agentId: string;
+    readonly registration?: ManagedWorkspaceRegistration;
     /** Host-published model-specific AgentDefinitions available for new Sessions. */
     readonly modelPresets?: readonly { agentId: string; label: string }[];
     list(
@@ -279,6 +309,7 @@ export interface ManagedAgentProvider {
       nextCursor?: string;
       supported: boolean;
       canCreateWorkspace?: boolean;
+      canSelectDirectory?: boolean;
       supportsApprovalModeSelection?: boolean;
     }>;
     get(
@@ -286,9 +317,17 @@ export interface ManagedAgentProvider {
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedAgentWorkspace>;
     createWorkspace?(
-      request: { displayName: string },
+      request: {
+        displayName: string;
+        sourceWorkspaceId?: string;
+        cwdRelative?: string;
+      },
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedAgentWorkspace>;
+    directories?(
+      request: { workspaceId: string; cwdRelative: string },
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceDirectoryPage']>;
     getSessionOptions?(
       agentId: string,
       options: ManagedAgentRequestOptions,
@@ -374,4 +413,6 @@ export interface ManagedAgentWorkspace {
   displayName: string;
   state: string;
   canCreateSession: boolean;
+  defaultCwdRelative?: string;
+  canSelectDirectory?: boolean;
 }

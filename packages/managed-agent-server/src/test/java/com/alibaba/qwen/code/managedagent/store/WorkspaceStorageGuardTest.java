@@ -76,6 +76,62 @@ class WorkspaceStorageGuardTest {
     }
 
     @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.MAC)
+    void nativeMacRegistrationPreservesTheIndependentNanosecondBirthOfAnEmptyRoot() throws Exception {
+        root = Files.createDirectory(temp.resolve("empty-native-root")).toRealPath();
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new WorkspaceMount("tenant", "storage", root.toString())));
+        var guard = new WorkspaceStorageGuard(jdbc, new DataSourceTransactionManager(dataSource), properties);
+        guard.register("tenant", "storage", UUID.randomUUID().toString());
+        Process probe = new ProcessBuilder("node", "-e",
+                "console.log(require('node:fs').lstatSync(process.argv[1],{bigint:true}).birthtimeNs.toString())",
+                root.toString()).start();
+        try {
+            assertThat(probe.waitFor(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(probe.exitValue()).isZero();
+            long nanos = Long.parseLong(new String(probe.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8).strip());
+            String expected = Instant.ofEpochSecond(nanos / 1_000_000_000L, nanos % 1_000_000_000L).toString();
+            assertThat(new ObjectMapper().readTree(Files.readString(root.resolve(".qwen-managed-storage.json")))
+                    .path("birthTime").asText()).isEqualTo(expected);
+            assertThat(guard.inspect("tenant", "storage")).contains("identity=match");
+        } finally {
+            probe.destroyForcibly();
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs({org.junit.jupiter.api.condition.OS.MAC,
+            org.junit.jupiter.api.condition.OS.LINUX})
+    void nativeRegistrationSurvivesNewGuardAndMtimeChangesButRefusesRootReplacement() throws Exception {
+        if ("Linux".equals(System.getProperty("os.name"))) {
+            Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+        }
+        var manager = new DataSourceTransactionManager(dataSource);
+        var first = new WorkspaceStorageGuard(jdbc, manager, properties);
+        String operation = UUID.randomUUID().toString();
+        first.register("tenant", "storage", operation);
+        var restarted = new WorkspaceStorageGuard(jdbc, manager, properties);
+        restarted.verify(binding);
+        Files.createDirectory(root.resolve("another-child"));
+        restarted.verify(binding);
+        Path marker = root.resolve(".qwen-managed-storage.json");
+        byte[] savedMarker = Files.readAllBytes(marker);
+        Files.writeString(marker, "{}");
+        assertUnavailable(() -> restarted.verify(binding));
+        assertUnavailable(() -> restarted.register("tenant", "storage", operation));
+        Files.write(marker, savedMarker);
+        restarted.verify(binding);
+        Path previous = root.resolveSibling("previous-native-root");
+        Files.move(root, previous);
+        Files.createDirectory(root);
+        Files.createDirectory(root.resolve("child"));
+        Files.write(root.resolve(".qwen-managed-storage.json"), savedMarker);
+        assertUnavailable(() -> restarted.verify(binding));
+        assertUnavailable(() -> restarted.register("tenant", "storage", operation));
+    }
+
+    @Test
     void requiresRegistrationAcrossInstancesAndRejectsReplacedRoot() throws Exception {
         WorkspaceStorageGuard first = guard();
         assertThat(first.inspect("tenant", "storage")).isEqualTo("unverified");

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime } from './runtime.js';
 import type { ModLog, ModOptions } from './types.js';
 
@@ -46,6 +46,23 @@ describe('ModRuntime with the real QuickJS worker', () => {
     runtimes.push(runtime);
     return runtime;
   };
+  const createTerminal = async (sources = [fixture()]) => {
+    const runtime = await ModRuntime.createGroup(
+      sources.map((source, index) => ({
+        id: `mod-${index}`,
+        name: `mod-${index}`,
+        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        options: {},
+      })),
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      'terminal',
+    );
+    runtimes.push(runtime);
+    return runtime;
+  };
 
   afterEach(async () => {
     await Promise.all(runtimes.splice(0).map((runtime) => runtime.dispose()));
@@ -69,6 +86,173 @@ describe('ModRuntime with the real QuickJS worker', () => {
       'end:clear:old:old',
       'end:other:new:new',
     ]);
+  });
+
+  it('uses terminal identity and current presentation while allowing argument middleware', async () => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('command.run', ($, e, next) => next({...e, args:'changed:' + e.args}));
+      }`,
+      fixture('return {text: JSON.stringify(e)};'),
+    ]);
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:terminal:true' },
+    ]);
+    for (const presentation of [
+      { isFullscreen: false, columns: 81 },
+      { isFullscreen: true, columns: 144 },
+    ]) {
+      expect(
+        JSON.parse(
+          await runtime.runCommand('hello', 'input', signal(), presentation),
+        ),
+      ).toEqual({
+        command: 'hello',
+        args: 'changed:input',
+        origin: { kind: 'composer' },
+        presentation,
+      });
+    }
+    await runtime.end('old', 'clear', signal());
+    expect(
+      await runtime.runCommand('hello', 'after-clear', signal()),
+    ).toContain('changed:after-clear');
+    expect(logs.filter((log) => log.text.startsWith('start:'))).toHaveLength(1);
+  });
+
+  it('preserves headless identity and presentation defaults', async () => {
+    const runtime = await create(fixture('return {text: JSON.stringify(e)};'));
+    expect(
+      JSON.parse(
+        await runtime.runCommand('hello', 'headless', signal(), {
+          isFullscreen: true,
+          columns: 144,
+        }),
+      ),
+    ).toEqual({
+      command: 'hello',
+      args: 'headless',
+      origin: { kind: 'sdk' },
+      presentation: { isFullscreen: false, columns: 80 },
+    });
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:null:false' },
+    ]);
+  });
+
+  it.each(['surface:null', 'isInteractive:false'])(
+    'pins terminal startup identity: %s',
+    async (change) => {
+      const runtime = await createTerminal([
+        `export function register(on) {
+          on('session.start', ($, e, next) => next({...e, ${change}}));
+        }`,
+        fixture(),
+      ]);
+      expect(logs).toContainEqual({
+        to: 'debug',
+        text: expect.stringContaining('pinned event fields'),
+      });
+      expect(logs).toContainEqual({
+        to: 'transcript',
+        text: 'start:hello:terminal:true',
+      });
+      expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
+    },
+  );
+
+  it.each([
+    "origin:{kind:'sdk'}",
+    'presentation:{isFullscreen:false,columns:80}',
+  ])('pins terminal command identity and presentation: %s', async (change) => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('command.run', ($, e, next) => next({...e, ${change}}));
+      }`,
+      fixture('return {text: JSON.stringify(e)};'),
+    ]);
+    expect(
+      JSON.parse(
+        await runtime.runCommand('hello', '', signal(), {
+          isFullscreen: true,
+          columns: 144,
+        }),
+      ),
+    ).toEqual({
+      command: 'hello',
+      args: '',
+      origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 144 },
+    });
+    expect(logs).toContainEqual({
+      to: 'debug',
+      text: expect.stringContaining('pinned event fields'),
+    });
+  });
+
+  it.each(['tool.call', 'tool.check', 'tool.*'])(
+    'rejects terminal %s registrations before any plugin starts',
+    async (event) => {
+      await expect(
+        createTerminal([
+          fixture(),
+          `export function register(on) {
+            on('${event}', ($, e, next) => next(e));
+          }`,
+        ]),
+      ).rejects.toThrow(`${event} is not supported in terminal sessions`);
+      expect(logs).toEqual([]);
+    },
+  );
+
+  it.each(['*', '!session.*', '!tool.call'])(
+    'limits terminal %s subscriptions with a visible diagnostic',
+    async (pattern) => {
+      const runtime = await createTerminal([
+        `export function register(on) {
+          on('${pattern}', ($, e, next) => next(
+            typeof e.args === 'string' ? {...e, args:'observed:' + e.args} : e
+          ));
+        }`,
+        fixture(),
+      ]);
+      expect(runtime.hasToolHooks).toBe(false);
+      expect(logs).toEqual([
+        {
+          to: 'transcript',
+          text: expect.stringContaining(
+            'tool.call and tool.check are not supported',
+          ),
+        },
+        { to: 'transcript', text: 'start:hello:terminal:true' },
+      ]);
+      expect(await runtime.runCommand('hello', 'input', signal())).toBe(
+        '1:observed:input',
+      );
+      const next = vi.fn(async () => ({ result: 'unexpected' }));
+      await expect(
+        runtime.runTool(
+          { tool: 'write_file', tool_use_id: 'call-1', path: '/unused' },
+          next,
+          signal(),
+        ),
+      ).rejects.toThrow(/not supported in terminal sessions/);
+      expect(next).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not warn for terminal patterns that exclude tool events', async () => {
+    const runtime = await createTerminal([
+      `export function register(on) {
+        on('!tool.*', ($, e, next) => next(e));
+      }`,
+      fixture(),
+    ]);
+    expect(runtime.hasToolHooks).toBe(false);
+    expect(logs).toEqual([
+      { to: 'transcript', text: 'start:hello:terminal:true' },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
   });
 
   it('isolates globals and state between plugins without Node capabilities', async () => {
