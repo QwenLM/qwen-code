@@ -39,6 +39,12 @@ import {
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
+import {
+  HOSTED_PUBLIC_PLAN_TOOL,
+  HOSTED_PUBLIC_PLAN_READS,
+  HOSTED_PUBLIC_PLAN_REFUSAL,
+  hostedPublicPlanActive,
+} from './hosted-plan-mode.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
@@ -317,6 +323,43 @@ function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
     !(cause instanceof ManagedSessionStoreTransportError) &&
     !(cause instanceof ManagedSessionWritesStoppedError)
   );
+}
+
+// #14434: the store refuses a reservation past a tenant or Session limit
+// with its own code: a 429 when open captures will make room as they end,
+// and a 409 when used bytes alone fill the limit, which does not free while
+// their Session lives. Only a reserve answers either, so it refuses the
+// batch rather than faulting it.
+function isPublicationLimitRefusal(
+  cause: unknown,
+): cause is ManagedSessionStoreHttpError {
+  return (
+    cause instanceof ManagedSessionStoreHttpError &&
+    ((cause.status === 429 &&
+      cause.remoteCode === 'managed_tool_publication_capacity_exhausted') ||
+      (cause.status === 409 &&
+        cause.remoteCode === 'managed_tool_publication_retention_exhausted'))
+  );
+}
+
+// #14518: a limit refusal of a batch that needs more reservations than its
+// Session could ever hold at once. The store counts them under every limit,
+// less the output the Session retains until it is deleted: waiting cannot
+// make such a batch fit, only a smaller one does.
+// Returns that count, or undefined when the batch could fit or the refusal
+// does not say. A 409 is never retried, and its answer comes first.
+function unreservableBatchFit(
+  cause: unknown,
+  reservations: number,
+): number | undefined {
+  if (!isPublicationLimitRefusal(cause)) return undefined;
+  const admits = cause.details?.['admits'];
+  return typeof admits === 'number' &&
+    Number.isSafeInteger(admits) &&
+    admits >= 1 &&
+    reservations > admits
+    ? admits
+    : undefined;
 }
 
 // H3: background admissions exist only while the child_run domain's shell
@@ -1432,14 +1475,15 @@ export async function journaledToolResultIds(
 /**
  * The one derivation of the child run id shared by the launcher, the
  * recovery probe and the gap fill: a wake turn's turn id already embeds
- * its commissioning child run (`<childRunId>:accept:notify`), so using it
- * verbatim as the launch base grows the next run id one suffix per hop
- * and walks a chained helper into the 128-char lineage bound by the
- * third hop. The replay-stable key needs determinism, not readability:
- * collapse the wake turn's identity to a bounded digest of its own
- * stable name — never grow across hops, always 17 chars plus the call
- * id. Calls keyed verbatim for every other turn — re-driven batches and
- * resumed Hook results both name the same run again and again.
+ * its commissioning child run (`<childRunId>:accept:notify` or
+ * `<childRunId>:blocked:notify`), so using it verbatim as the launch base
+ * grows the next run id one suffix per hop and walks a chained helper
+ * into the 128-char lineage bound by the third hop. The replay-stable key
+ * needs determinism, not readability: collapse the wake turn's identity
+ * to a bounded digest of its own stable name — never grow across hops,
+ * always 17 chars plus the call id. Calls keyed verbatim for every other
+ * turn — re-driven batches and resumed Hook results both name the same
+ * run again and again.
  */
 export function hostedChildRunIdFor(promptId: string, callId: string): string {
   return hostedCallKey(promptId, callId);
@@ -1543,9 +1587,12 @@ interface HostedPreparedRequest {
   message: boolean;
   command: boolean;
   skill: boolean;
+  planExit?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
+  private readonly publicPlanMode: boolean;
+  private planning: boolean;
   private logicalRound = 0;
   private nativeBatch?: {
     messageId: string;
@@ -1667,6 +1714,7 @@ export class HostedWorkspaceToolTurn {
        * `plan-mode="required"` preamble; its calls admit reads only.
        */
       memberPlanMode?: boolean;
+      publicPlanMode?: boolean;
     },
   ) {
     this.foregroundOnly = extras?.foregroundOnly === true;
@@ -1693,6 +1741,21 @@ export class HostedWorkspaceToolTurn {
     this.commands = this.foregroundOnly ? undefined : extras?.commands;
     this.skills = extras?.skills;
     this.memberPlanMode = extras?.memberPlanMode === true;
+    this.publicPlanMode = extras?.publicPlanMode === true;
+    this.planning = this.publicPlanMode;
+    if (
+      this.publicPlanMode &&
+      (this.hooks ||
+        this.mcp ||
+        this.memberPlanMode ||
+        this.childDepth !== 0 ||
+        ![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/2',
+        ].includes(this.profile ?? ''))
+    )
+      throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -1744,6 +1807,9 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    this.planning =
+      this.publicPlanMode &&
+      (await hostedPublicPlanActive(this.session, this.promptId));
     // #13753 I3: a snapshot child's read profile declares its two read
     // tools and nothing else, whatever lanes, orchestration or MCP the
     // Session has; the refusal of every other call rests on this alone.
@@ -1880,7 +1946,18 @@ export class HostedWorkspaceToolTurn {
           : tool,
       );
     }
-    return this.advertised;
+    if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+    return this.planning
+      ? this.advertised.filter(
+          (tool) =>
+            tool.name === 'exit_plan_mode' ||
+            HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
+        )
+      : this.advertised;
+  }
+
+  planModeInstructions(): string {
+    return this.planning ? HOSTED_PUBLIC_PLAN_REFUSAL : '';
   }
 
   /** Which side of its lineage this Session's send_message addresses. */
@@ -2716,6 +2793,7 @@ export class HostedWorkspaceToolTurn {
           message: false,
           command: false,
           skill: item.call.name === 'skill' && this.skills !== undefined,
+          planExit: this.publicPlanMode && item.call.name === 'exit_plan_mode',
         });
       }
       this.logicalRound = plan.round;
@@ -2738,17 +2816,24 @@ export class HostedWorkspaceToolTurn {
   ): Promise<ManagedSessionDurableRef | undefined> {
     const batch = this.nativeBatch;
     const runtime = this.broker.runtime;
+    const singlePlanExit =
+      this.publicPlanMode &&
+      batch?.requests.length === 1 &&
+      batch.requests[0].planExit === true;
     if (
       !batch ||
       batch.uncaptured ||
       !runtime ||
-      isHostedWorkspaceShellProfile(this.profile) ||
+      (isHostedWorkspaceShellProfile(this.profile) && !singlePlanExit) ||
       this.hooks ||
       this.mcp ||
       batch.requests.some(
         (request) =>
-          !['read_file', 'write_file', 'edit', 'glob'].includes(
-            request.call.name,
+          !(
+            singlePlanExit ||
+            ['read_file', 'write_file', 'edit', 'glob'].includes(
+              request.call.name,
+            )
           ) ||
           // A call refused at the canonical-digest ceiling (#13803 D1) has
           // no argument digest a restore could re-verify, and one refused
@@ -2996,10 +3081,31 @@ export class HostedWorkspaceToolTurn {
           (HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
             (call.name === 'team_plan_approval' &&
               teamPlanAdmissionsEnabled()));
+        const planExit = this.publicPlanMode && call.name === 'exit_plan_mode';
         // H4e-b3 decision 9: a run whose first input carried an unescaped
         // plan-mode preamble admits reads only; every other call is
         // refused before it runs, ahead of any per-tool arm below.
         if (
+          this.planning &&
+          !planExit &&
+          !HOSTED_PUBLIC_PLAN_READS.has(call.name)
+        ) {
+          validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
+          input = { ...call.args };
+        } else if (planExit) {
+          input = { ...call.args };
+          if (!this.planning)
+            validationError = 'Plan mode already ended for this Turn.';
+          else if (
+            source.length !== 1 ||
+            Object.keys(input).length !== 1 ||
+            typeof input['plan'] !== 'string' ||
+            !input['plan'].trim() ||
+            input['plan'].length > 24000
+          )
+            validationError =
+              'Hosted exit_plan_mode requires a nonempty Markdown plan of at most 24000 characters and must be the only call in its batch.';
+        } else if (
           this.memberPlanMode &&
           !HOSTED_PLAN_MODE_READS.has(call.name) &&
           !(
@@ -3591,6 +3697,7 @@ export class HostedWorkspaceToolTurn {
           team,
           command,
           skill,
+          planExit,
         };
       });
     };
@@ -3968,6 +4075,9 @@ export class HostedWorkspaceToolTurn {
       return responses;
     }
     const reserved = new Map<number, string>();
+    // Set once the batch's first call may run; every reservation is made
+    // before that.
+    let executing = false;
     try {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
@@ -3982,6 +4092,7 @@ export class HostedWorkspaceToolTurn {
           request.message ||
           request.team ||
           request.command ||
+          request.planExit ||
           request.skill ||
           request.workflow
         )
@@ -4319,11 +4430,13 @@ export class HostedWorkspaceToolTurn {
               break;
             } catch (cause) {
               const retryable =
-                (cause instanceof ManagedSessionStoreHttpError &&
+                ((cause instanceof ManagedSessionStoreHttpError &&
                   (cause.status === 429 || cause.status >= 500)) ||
-                cause instanceof TypeError ||
-                (cause instanceof DOMException &&
-                  ['AbortError', 'TimeoutError'].includes(cause.name));
+                  cause instanceof TypeError ||
+                  (cause instanceof DOMException &&
+                    ['AbortError', 'TimeoutError'].includes(cause.name))) &&
+                // A batch its limit never admits at once fits no sooner.
+                unreservableBatchFit(cause, shellBindings.size) === undefined;
               if (!retryable || attempt === 2) throw cause;
               await new Promise((resolve) => setTimeout(resolve, 250));
             }
@@ -4390,6 +4503,7 @@ export class HostedWorkspaceToolTurn {
               ]
             : [],
       );
+      executing = true;
       for (const [index, request] of requests.entries()) {
         const refused = refusal(index);
         if (refused) {
@@ -4418,6 +4532,29 @@ export class HostedWorkspaceToolTurn {
               commandRuns,
             )),
           );
+          continue;
+        }
+        if (request.planExit) {
+          if (await hostedPublicPlanActive(this.session, this.promptId))
+            throw new HostedToolRecoveryRequiredError(
+              'The public plan has no durable approval.',
+            );
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [
+              {
+                text: 'The user approved the plan. Plan mode is now off for this Turn. Continue under the original execution permission; ordinary tool approvals still apply.',
+              },
+            ],
+          );
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Plan result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          this.planning = false;
+          responses.push(...converted);
           continue;
         }
         if (request.skill) {
@@ -4672,8 +4809,22 @@ export class HostedWorkspaceToolTurn {
       }
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
-      const cancellationBarriers = new Set<string>();
       const reservedIds = [...reserved.values()];
+      // A limit refusal can only come from a reservation, and every
+      // reservation precedes the batch's first call. Each execution is read
+      // before its cancel: one the Broker still holds as `prepared` was
+      // never dispatched.
+      const limitRefusal =
+        !executing && isPublicationLimitRefusal(cause) ? cause : undefined;
+      const undispatched = new Set<string>();
+      if (limitRefusal)
+        for (const id of reservedIds)
+          if (
+            (await this.broker.status(id).catch(() => undefined))?.state ===
+            'prepared'
+          )
+            undispatched.add(id);
+      const cancellationBarriers = new Set<string>();
       const cancellationResults = await Promise.allSettled(
         reservedIds.map((id) => this.broker.cancel(id)),
       );
@@ -4681,15 +4832,33 @@ export class HostedWorkspaceToolTurn {
         if (result.status === 'fulfilled')
           cancellationBarriers.add(reservedIds[index]!);
       });
+      // Once cancelled, an undispatched execution settles and can no longer
+      // start. A Shell or Monitor execution settles with the Broker's own
+      // not-started result: the execution half of what close_not_started
+      // checks.
+      const neverStarted =
+        limitRefusal &&
+        reservedIds.every(
+          (id) => undispatched.has(id) && cancellationBarriers.has(id),
+        )
+          ? await this.settledNeverStarted(
+              reservedIds,
+              new Set(shellBindings.keys()),
+            )
+          : new Set<string>();
       const probeBindings: Array<{
         readonly executionCallId: string;
         readonly request: (typeof requests)[number] | undefined;
       }> = [];
+      // The ids whose child run or monitor record (when the call has one)
+      // settled as never started.
+      const recordsSettled = new Set<string>();
       const settleNeverStarted = async (
         executionCallId: string,
         request: (typeof requests)[number] | undefined,
         processProven: boolean,
       ) => {
+        let settled = true;
         if (request?.background) {
           try {
             if (this.childRuns !== undefined) {
@@ -4703,6 +4872,7 @@ export class HostedWorkspaceToolTurn {
                 );
             }
           } catch (settleCause) {
+            settled = false;
             writeStderrLineSafe(
               'qwen serve: Unstarted child run record was not settled: ' +
                 String(settleCause),
@@ -4715,12 +4885,14 @@ export class HostedWorkspaceToolTurn {
               stopReason: 'start_failed',
               started: false,
             })
-            .catch((settleCause: unknown) =>
+            .catch((settleCause: unknown) => {
+              settled = false;
               writeStderrLineSafe(
                 'qwen serve: Unstarted monitor run record was not settled: ' +
                   String(settleCause),
-              ),
-            );
+              );
+            });
+        if (settled) recordsSettled.add(executionCallId);
       };
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
@@ -4747,12 +4919,22 @@ export class HostedWorkspaceToolTurn {
           if (grantOwnerState !== 'NOT_STARTED')
             throw new Error('Original execution was not proven unstarted.');
         } catch (closeCause) {
-          writeStderrLineSafe(
-            'qwen serve: Tool publication close was not confirmed: ' +
-              String(closeCause),
-          );
+          // A reservation the limit refused, or never reached, has no row:
+          // its close failing is expected and not worth a line.
+          if (!limitRefusal || saved.originalBinding !== undefined)
+            writeStderrLineSafe(
+              'qwen serve: Tool publication close was not confirmed: ' +
+                String(closeCause),
+            );
         }
         if (grantOwnerState === 'NOT_STARTED') {
+          await settleNeverStarted(executionCallId, request, false);
+          continue;
+        }
+        // A Monitor whose close was not confirmed (its reservation was
+        // refused, or the close failed) settles on the Broker's not-started
+        // record. A background Shell still needs its process ledger (#13801).
+        if (request?.monitoring && neverStarted.has(executionCallId)) {
           await settleNeverStarted(executionCallId, request, false);
           continue;
         }
@@ -4780,12 +4962,170 @@ export class HostedWorkspaceToolTurn {
         // started. Publication absence alone proves nothing.
         await settleNeverStarted(executionCallId, request, true);
       }
+      if (
+        limitRefusal &&
+        reservedIds.every((id) => neverStarted.has(id)) &&
+        [...shellBindings.keys()].every((id) => {
+          const request = requests.find(
+            (_, index) => reserved.get(index) === id,
+          );
+          return (
+            (!request?.background && !request?.monitoring) ||
+            recordsSettled.has(id)
+          );
+        })
+      ) {
+        // No call of the batch ran and none can start now, so the batch is
+        // answered as refused and the turn goes on: the model sees why, and
+        // the Session keeps taking prompts. A reservation granted before the
+        // refusal whose close was not confirmed holds its slot only until
+        // its grant expires.
+        writeStderrLineSafe(
+          `qwen serve: Tool publication refused batch ${messageId} before any call started: ${limitRefusal.message}`,
+        );
+        // Only the calls that capture output reserve: the answer tells the
+        // model whether waiting can help them, and that the others can go
+        // in a batch without them (#14518).
+        const capturing = requests.flatMap((request, index) => {
+          const id = reserved.get(index);
+          return id !== undefined && shellBindings.has(id) ? [index] : [];
+        });
+        const kinds = [
+          ...new Set(capturing.map((index) => requests[index]!.call.name)),
+        ].join(' and ');
+        const fit = unreservableBatchFit(limitRefusal, shellBindings.size);
+        const refused = limitRefusal.message.slice(0, 512);
+        const captureReason =
+          `This call was not started: ${refused}. ` +
+          (limitRefusal.status === 409
+            ? 'Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.'
+            : fit !== undefined
+              ? `This batch has ${capturing.length} ${kinds} calls, but this Session can run at most ${fit} of them at a time, so retrying the same batch will not succeed. Send at most ${fit} of them in one batch.`
+              : capturing.length > 1
+                ? `Retry after the running tools finish, or send fewer ${kinds} calls in one batch.`
+                : 'Retry after the running tools finish.');
+        const otherReason = `This call was not started: another call in its batch was refused before any call ran (${refused}). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.`;
+        try {
+          return await this.answerUnstartedBatch(
+            requests,
+            refusal,
+            reserved,
+            paths,
+            model,
+            (index) =>
+              capturing.includes(index) ? captureReason : otherReason,
+          );
+        } catch (answerCause) {
+          throw new HostedToolRecoveryRequiredError(answerCause);
+        }
+      }
+      // Any other failure leaves some reserved call's outcome unproven: it
+      // may have started, or its record may not have settled. Answering it
+      // would tell the model a call never ran that might have, so the turn
+      // waits for recovery instead.
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {
       if (renewTimer) clearInterval(renewTimer);
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
     }
+  }
+
+  /**
+   * The cancelled executions that settled without starting, or none when any
+   * one did not. Only a settled record is a witness: a missing, unknown or
+   * abandoned one, or one still open when the window closes, proves no
+   * stop. A publication execution (`v3`) must also settle with the Broker's
+   * not-started result; a started one that was cancelled settles otherwise.
+   */
+  private async settledNeverStarted(
+    ids: readonly string[],
+    v3: ReadonlySet<string>,
+  ): Promise<Set<string>> {
+    const deadline = Date.now() + 30_000;
+    for (const id of ids) {
+      for (;;) {
+        const status = await this.broker.status(id).catch(() => undefined);
+        if (status?.state === 'settled') {
+          if (v3.has(id) && status.executionStatus !== 'not_started')
+            return new Set();
+          break;
+        }
+        if (
+          status === undefined ||
+          status.state === 'unknown' ||
+          status.state === 'abandoned' ||
+          Date.now() >= deadline
+        )
+          return new Set();
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    return new Set(ids);
+  }
+
+  /**
+   * Answers a batch none of whose calls started: each call gets its
+   * pre-dispatch refusal or its `reason`. A reserved execution resolves its
+   * await_runtime item with that answer, after the tool_result commits, in
+   * the order the Runtime result path uses.
+   */
+  private async answerUnstartedBatch(
+    requests: readonly HostedPreparedRequest[],
+    refusal: (index: number) => Part[] | undefined,
+    reserved: ReadonlyMap<number, string>,
+    paths: readonly string[],
+    model: string,
+    reason: (index: number) => string,
+  ): Promise<Part[]> {
+    const responses: Part[] = [];
+    for (const [index, request] of requests.entries()) {
+      const parts =
+        refusal(index) ??
+        convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          reason(index),
+        );
+      if (!this.messageFitsInline('tool_result', parts, model))
+        throw new Error(
+          'Hosted tool refusal exceeds the inline Session Store limit.',
+        );
+      const executionCallId = reserved.get(index);
+      if (executionCallId === undefined) {
+        await this.commit('tool_result', parts, model);
+      } else {
+        const response = parts[0]?.functionResponse;
+        if (!response || parts.length !== 1)
+          throw new Error('Unstarted tool result cannot be recorded.');
+        response.response = {
+          ...response.response,
+          executionStatus: 'not_started',
+        };
+        const outcomeRef = await this.session.resources.publish(
+          'managed-tool-outcome',
+          Buffer.from(JSON.stringify({ executionCallId, ...parts[0] })),
+        );
+        await this.commit('tool_result', parts, model);
+        await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);
+      }
+      responses.push(...parts);
+    }
+    if (paths.length) {
+      const state = await this.broker.fileHistory({
+        kind: 'raw-file-history',
+        action: 'snapshot',
+      });
+      await commitHostedFileHistory(this.session, {
+        schemaVersion: 1,
+        state,
+        pendingTurn: null,
+        pendingUndo: null,
+      });
+    }
+    this.uncertain = false;
+    return responses;
   }
 
   private encodeToolInput(payload: {
@@ -5046,14 +5386,15 @@ export class HostedWorkspaceToolTurn {
   /**
    * One derivation of the child run id shared by the launcher and the
    * recovery probe: a wake turn's turn id already embeds its
-   * commissioning child run (`<childRunId>:accept:notify`), so using it
-   * verbatim as the launch base grows the next run id one suffix per hop
-   * and walks a chained helper into the 128-char lineage bound by the
-   * third hop. The replay-stable key needs determinism, not readability:
-   * collapse the wake turn's identity to a bounded digest of its own
-   * stable name — never grow across hops, always 17 chars plus the call
-   * id. Calls keyed verbatim for every other turn — re-driven batches
-   * and resumed Hook results both name the same run again and again.
+   * commissioning child run (`<childRunId>:accept:notify` or
+   * `<childRunId>:blocked:notify`), so using it verbatim as the launch
+   * base grows the next run id one suffix per hop and walks a chained
+   * helper into the 128-char lineage bound by the third hop. The
+   * replay-stable key needs determinism, not readability: collapse the
+   * wake turn's identity to a bounded digest of its own stable name —
+   * never grow across hops, always 17 chars plus the call id. Calls keyed
+   * verbatim for every other turn — re-driven batches and resumed Hook
+   * results both name the same run again and again.
    */
   private childRunIdFor(callId: string): string {
     return hostedChildRunIdFor(this.promptId, callId);
@@ -6349,7 +6690,14 @@ export class HostedWorkspaceToolTurn {
       }
       const record = children.record(childRunId);
       if (record !== undefined) {
-        if (record.run.state === 'failed' || record.run.state === 'cancelled') {
+        // #14387: a recovery-blocked child is an ending too — its outcome
+        // is unwitnessed, but the wait must not poll forever: the parent
+        // gets the blocked line as its tool result and the await resolves.
+        if (
+          record.run.state === 'failed' ||
+          record.run.state === 'cancelled' ||
+          record.run.state === 'recovery_blocked'
+        ) {
           const ended = convertToFunctionErrorResponse(
             request.call.name,
             request.call.callId,
@@ -7039,8 +7387,17 @@ export class HostedWorkspaceToolTurn {
       if (
         refusals[index] ||
         (request.call.name === 'skill' && this.skills !== undefined) ||
-        this.hookPermission.get(request.call.callId) === 'allow' ||
-        !hostedApprovalAsks(approval.settings, request.call.name, globProfile)
+        (!(
+          this.publicPlanMode &&
+          this.planning &&
+          request.call.name === 'exit_plan_mode'
+        ) &&
+          (this.hookPermission.get(request.call.callId) === 'allow' ||
+            !hostedApprovalAsks(
+              approval.settings,
+              request.call.name,
+              globProfile,
+            )))
       )
         continue;
       asked = true;

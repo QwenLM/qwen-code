@@ -52,7 +52,9 @@ function taskErrorKey(code?: string): string {
   }
 }
 
-const TASK_KINDS = new Set([
+// Typed by the generated union, so a label for a kind the contract does
+// not name fails the type check; a newer server's kind still reads as other.
+const TASK_KINDS = new Set<ManagedTask['kind']>([
   'child_agent',
   'workflow',
   'background_shell',
@@ -61,7 +63,7 @@ const TASK_KINDS = new Set([
   'channel_delivery',
 ]);
 
-function taskKindKey(kind: string): string {
+function taskKindKey(kind: ManagedTask['kind']): string {
   return `managed.tasks.kind.${TASK_KINDS.has(kind) ? kind : 'other'}`;
 }
 
