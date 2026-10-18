@@ -107,26 +107,21 @@ Without snapshots, the model's retained turn ordinals cannot safely
 identify the recorder's complete-branch ordinals, so ACP conversation rewind
 refuses rather than guessing. Only the initial ordinary
 prompt send acquires its prompt identity; retry and interrupted-prompt resend
-reuse the sole identity of the entries actually stripped from history, while
-tool/automatic continuations do not acquire one.
+reuse the sole identity of the entries actually stripped from history, while a
+tool/automatic continuation never acquires an identity of its own.
 Unavailable or ambiguous associations refuse before changing conversation,
 files, or recording. Snapshot-list eligibility follows the same resolver.
 ACP history rollback carries each entry's `rewindId` through JSON and removes
 that transport metadata before restoring model content. Existing clients
 already echo the history array, so no new option or client-side counter is needed.
 
-Daemon-backed interfaces use the existing admitted `daemonPromptId` to associate
-each eligible snapshot with its visible user message. The catalog and rewind
-notification carry that association; `turnIndex` remains the raw snapshot
-position, including retry gaps and compressed prefixes. Recorder projections
-recover the association from existing records. With recording disabled, ACP
-retains it only for live file-history snapshots. Optimistic messages bind to
-their exact block when admission returns. WebShell and VS Code require a unique
-association before requesting rewind; missing or ambiguous associations are
-unavailable, not positional guesses. The SDK truncates the matching user block
-and its suffix, excluding injected owner-sharing rows. Legacy notifications
-without this association retain the old numeric interpretation for older
-producers; they are not used to authorize editing in the updated interfaces.
+Daemon-backed surfaces carry the existing admitted `daemonPromptId` on the
+checkpoint catalog and the rewind notification; `turnIndex` remains the raw
+snapshot position, including retry gaps and compressed prefixes. Recorder
+projections recover the association from existing records, and with recording
+disabled ACP retains it only for live file-history snapshots. Resolving that
+association in Web Shell, VS Code and the SDK is a separate change: no
+daemon-backed client behavior changes here.
 
 Acceptance requires the same legacy fixture to cut at its source record,
 identified turns to keep resolving, unlinked/ambiguous targets to refuse, and
