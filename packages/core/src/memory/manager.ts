@@ -703,7 +703,9 @@ export class MemoryManager {
     }
     return params;
   }
-  private seqOfExtractParams(params: ScheduleExtractParams | undefined): number {
+  private seqOfExtractParams(
+    params: ScheduleExtractParams | undefined,
+  ): number {
     return (params && this.extractParamSeq.get(params)) ?? 0;
   }
   /** Clone preserving the sequence: the flush replays the parked snapshot. */
@@ -1475,8 +1477,7 @@ export class MemoryManager {
     const carried = this.extractCadence.get(params.sessionId);
     const previous = carried?.pending;
     const carry =
-      previous !== undefined &&
-      runSeq < this.seqOfExtractParams(previous);
+      previous !== undefined && runSeq < this.seqOfExtractParams(previous);
     this.extractCadence.set(params.sessionId, {
       projectRoot: params.projectRoot,
       armed:

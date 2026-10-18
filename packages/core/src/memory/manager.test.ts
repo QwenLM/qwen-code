@@ -2821,9 +2821,9 @@ describe('MemoryManager', () => {
       // survive the settle and be extracted by the close flush.
       await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
-        vi.mocked(runAutoMemoryExtract).mock.calls.map(
-          (call) => (call[0].history as Content[]).length,
-        ),
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => (call[0].history as Content[]).length),
       ).toEqual([4, 20, 9]);
     });
 
@@ -2854,9 +2854,9 @@ describe('MemoryManager', () => {
 
       await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(
-        vi.mocked(runAutoMemoryExtract).mock.calls.map(
-          (call) => (call[0].history as Content[]).length,
-        ),
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => (call[0].history as Content[]).length),
       ).toEqual([10, 3, 12]);
     });
 
