@@ -444,14 +444,21 @@ class HostedAutomationFaultGatesIT {
     // failed/outcome_unknown: the input stays consumed and the turn is never re-run.
     private void turnCrash() throws Exception {
         String session = createSession("turn-crash");
+        // Park the scanner until the manual run reaches the crash point: a minute boundary
+        // during setup would otherwise admit a scheduled occurrence of its own.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
         String id = create(session, "FG11C_HOLD", "* * * * *", "turn-crash-base");
         String key = "turn-crash-run";
         String runId = request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202)
                 .path("id").asText();
         waiting().atMost(Duration.ofSeconds(90)).until(() -> modelPrompts.stream()
                 .anyMatch(prompt -> prompt.contains("Automation ID: " + id)));
-        assertThat(commands(session, "fireRun")).containsExactly(runId + ":1", runId + ":2");
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":1", runId + ":2");
         long generation = coldRestart(session);
+        // Let the next minute slot drive the reconcile now that the crash is in place.
+        scannerHold.countDown();
         waiting().atMost(Duration.ofSeconds(210)).untilAsserted(() -> {
             assertNoModelFailure();
             assertThat(runState(runId)).isEqualTo("failed");
@@ -471,17 +478,28 @@ class HostedAutomationFaultGatesIT {
     // once, and the input is not run again.
     private void settledCrash() throws Exception {
         String session = createSession("settled-crash");
+        // Park the scanner until the manual run reaches the crash point: a minute boundary
+        // during setup would otherwise admit a scheduled occurrence of its own.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
         String id = create(session, "FG11C_SETTLED", "* * * * *", "settled-crash-base");
         String key = "settled-crash-run";
-        String runId = request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202)
-                .path("id").asText();
+        String runId = com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.automationRunId(id,
+                "manual:" + key);
+        // Arm the hold before the POST: the Harness kicks the wake pump before answering
+        // fire_run, so revision 3 can otherwise reach the store before the hold exists.
         Hold hold = storeHold("settled-crash", body -> (runId + ":3").equals(body.path("commandId").asText()));
+        assertThat(request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202)
+                .path("id").asText()).isEqualTo(runId);
         assertThat(hold.reached().await(90, TimeUnit.SECONDS)).as("revision 3 reached the store").isTrue();
-        assertThat(commands(session, "fireRun")).containsExactly(runId + ":1", runId + ":2");
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":1", runId + ":2");
         assertThat(events(session, "turn.settled")).filteredOn(event -> event.contains(runId))
                 .containsExactly("turn:" + runId + ":input");
         long generation = coldRestart(session);
         hold.release().countDown();
+        // Let the next minute slot drive the reconcile now that the crash is in place.
+        scannerHold.countDown();
         waiting().atMost(Duration.ofSeconds(210)).untilAsserted(() -> {
             assertNoModelFailure();
             assertThat(runState(runId)).isEqualTo("completed");
