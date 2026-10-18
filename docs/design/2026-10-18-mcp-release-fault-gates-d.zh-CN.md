@@ -39,7 +39,7 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的两个域 `m
 
 不新增类，因此六处 fork 账目不变：类 `@Timeout` 600 s、`hostedForkHealthySeconds` 4438 s、CI fork 5048 s 及其字面钉点、本地 `hosted-mcp-gates` profile（`**/HostedMcp*IT.java`）、workflow 注释、artifact 根 `target/fg12-cases/`。
 
-JDK 21 + MariaDB 10.11 实测：新格 6.7–9.1 s；六格整类 33.0–50.5 s（最新 33.0 s）。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，新增的 +9 s 仍在该余量内；共享 healthy 和 CI fork 均不动。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
+JDK 21 + MariaDB 10.11 实测：新格 6.7–9.1 s；六格整类 33.0–50.5 s（最新 33.9 s）。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，新增的 +9 s 仍在该余量内；共享 healthy 和 CI fork 均不动。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
 
 ## 验收
 

@@ -384,8 +384,7 @@ class HostedMcpRestartFaultGatesIT {
                 JsonNode refusal = json.readTree(settled.body());
                 String code = refusal.path("error").asText(
                         refusal.path("code").asText());
-                if ("hosted_turn_active".equals(code)
-                        || "hosted_lifecycle_operation_conflict".equals(code)) {
+                if ("hosted_turn_active".equals(code)) {
                     Thread.sleep(1_000);
                     continue;
                 }
@@ -418,7 +417,9 @@ class HostedMcpRestartFaultGatesIT {
                             && "mcp-status".equals(request.at(
                                     "/operation/kind").asText())
                             && releaseId.equals(request.at(
-                                    "/operation/targetOperationId").asText());
+                                    "/operation/targetOperationId").asText())
+                            && runtimeSessionId.equals(request.path(
+                                    "runtimeSessionId").asText());
                 })
                 .filter(entry -> Integer.valueOf(200)
                         .equals(entry.get("status")))

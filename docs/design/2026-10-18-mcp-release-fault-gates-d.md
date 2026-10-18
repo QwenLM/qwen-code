@@ -39,7 +39,7 @@ The whole-Spring/Broker restart cells stay out. A whole-Spring restart replaces 
 
 No new class, so the six fork accounts stay unchanged: the class `@Timeout` 600 s, `hostedForkHealthySeconds` 4438 s, the CI fork 5048 s and its literal pin, the local `hosted-mcp-gates` profile (`**/HostedMcp*IT.java`), the workflow comments, and the artifact root `target/fg12-cases/`.
 
-Measured on JDK 21 + MariaDB 10.11: the new case 6.7–9.1 s; the six-case class 33.0–50.5 s (latest 33.0 s). FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the +9 s case stays inside that allowance; the shared healthy sum and the CI fork do not move. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
+Measured on JDK 21 + MariaDB 10.11: the new case 6.7–9.1 s; the six-case class 33.0–50.5 s (latest 33.9 s). FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the +9 s case stays inside that allowance; the shared healthy sum and the CI fork do not move. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
 
 ## Acceptance
 
