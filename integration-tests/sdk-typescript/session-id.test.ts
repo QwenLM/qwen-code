@@ -549,14 +549,25 @@ describe('Session ID Support (E2E)', () => {
         },
       });
 
+      // Read each query only up to its init system message, which echoes the
+      // session ID the CLI is running under. The init message arrives before
+      // any model call, so this test does not depend on a model completion.
+      const readInitSessionId = async (
+        q: ReturnType<typeof query>,
+      ): Promise<string | undefined> => {
+        for await (const message of q) {
+          if (isSDKSystemMessage(message) && message.subtype === 'init') {
+            return message.session_id;
+          }
+        }
+        return undefined;
+      };
+
       try {
-        // Consume messages from both queries
-        for await (const _msg of q1) {
-          // consume
-        }
-        for await (const _msg of q2) {
-          // consume
-        }
+        const [cliSessionId1, cliSessionId2] = await Promise.all([
+          readInitSessionId(q1),
+          readInitSessionId(q2),
+        ]);
 
         const sessionId1 = q1.getSessionId();
         const sessionId2 = q2.getSessionId();
@@ -565,6 +576,10 @@ describe('Session ID Support (E2E)', () => {
         expect(sessionId1).toBeDefined();
         expect(sessionId2).toBeDefined();
         expect(sessionId1).not.toBe(sessionId2);
+
+        // The CLI runs each query under its SDK-generated session ID
+        expect(cliSessionId1).toBe(sessionId1);
+        expect(cliSessionId2).toBe(sessionId2);
 
         // Both should be valid UUIDs
         expect(sessionId1).toMatch(
