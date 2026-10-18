@@ -589,12 +589,13 @@ describe('Hosted real-process gates', () => {
       // the class to ~182 s, so the fork moves to 4353 and the Verify step
       // to 90 minutes; slice 3 (FG10d) brings it to ~247 s, so the fork
       // moves to 4484, still inside those 90 minutes; the FG12a MCP
-      // reply-loss letter adds ~15 s, so the fork moves to 4499):
+      // reply-loss letter adds ~15 s, so the fork moves to 4499; the FG12c
+      // restart matrix (five cases) adds ~26 s, so the fork moves to 4525):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4499);
+        expect(forkSeconds).toBe(4525);
       }
     },
   );
@@ -622,10 +623,12 @@ describe('Hosted real-process gates', () => {
   // across three acceptance runs (~494s budgeted at 2x, as FG10a, up from
   // slice 2's ~363s); with the fork itself ~14s, 3874s (3545s after slice
   // 1, plus slice 2's ~198s and slice 3's ~131s) covers them; FG12a's
-  // ~15s budgeted at 2x raises it to 3889s.
+  // ~15s budgeted at 2x raises it to 3889s; FG12c's five-case restart
+  // matrix measures ~26s healthy locally (~52s budgeted at 2x), raising it
+  // to 3915s.
   // A larger ceiling lets failsafe kill the fork mid-run, and the classes
   // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 3889;
+  const hostedForkHealthySeconds = 3915;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -725,6 +728,20 @@ describe('Hosted real-process gates', () => {
     // broker proxy, the same per-ceiling shape the FG8/FG10 letters use.
     const ceilings = ceilingsOf(hostedTestSource('HostedMcpReplyLossIT'));
     expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedMcpRestartFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG12c restart matrix boots one Spring/Harness per process-kill
+    // letter; five @Timeout cases share the same 600 s ceiling shape.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedMcpRestartFaultGatesIT'),
+    );
+    expect(ceilings).toHaveLength(5);
     for (const ceiling of ceilings) {
       expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
         hostedForkSeconds(),

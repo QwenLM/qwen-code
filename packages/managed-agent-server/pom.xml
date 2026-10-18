@@ -408,8 +408,14 @@
                                  locally on macOS JDK 21 + MariaDB
                                  10.11 (~15 s budgeted at 2x): the
                                  healthy sum becomes 3889 s, so the
-                                 fork moves to 4499 s. -->
-                            <forkedProcessTimeoutInSeconds>4499</forkedProcessTimeoutInSeconds>
+                                 fork moves to 4499 s. The FG12c MCP
+                                 restart matrix (HostedMcpRestartFault
+                                 GatesIT, five process-kill cases)
+                                 measures ~26 s healthy locally (~52 s
+                                 budgeted at 2x): the healthy sum
+                                 becomes 3915 s, so the fork moves to
+                                 4525 s. -->
+                            <forkedProcessTimeoutInSeconds>4525</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
