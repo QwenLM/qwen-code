@@ -58,9 +58,20 @@ owner 重启矩阵；本切片覆盖 **FG13d 的取消、超时与异步 drain �
 - `delete-drains-held-async-hook`：在生命周期事件前跳过 async drain，`SessionEnd`
   会在单元仍被占据时运行；drain 顺序与单元断言失败。
 
+## 派发前取消（单测仪器）
+
+记录提交到 `dispatch_started` 之间的 `intent` 窗口太短，轮询观测不到；首轮
+`executionBroker` 也不发网络请求。单测阻塞 `executionBroker`，在 Hook 执行记录
+仍为 `intent` 时取消，断言 `cancelled` / `not_started_proven`，且 `hook-execute`
+请求为零。
+
+真正承重的是 `commitExtensionRecord` 探针。`dispatch_started` 提交之后还有第三个
+取消检查点，会以相同条件兜住，所以去掉获取后的检查时，最终记录与零 `hook-execute`
+仍然为绿；变化的是子记录的 `dispatch_started` 提交，由探针捕获。
+
 ## 非目标
 
-派发前取消仍留在 #14449。同样不在范围：FG13a、FG13b、FG13e、FG13f、本地
+派发前取消由上方单测钉住。同样不在范围：FG13a、FG13b、FG13e、FG13f、本地
 非托管 Hook、Windows/macOS，以及 #13133 的设计项。
 
 ## 验证
