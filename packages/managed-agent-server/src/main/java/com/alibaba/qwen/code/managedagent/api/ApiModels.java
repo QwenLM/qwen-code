@@ -667,6 +667,8 @@ public final class ApiModels {
 
     public record ToolResultResponse(JsonNode result, ArtifactAccess access) { }
 
+    public record WebShellToolDetails(JsonNode input, String output, boolean truncated) { }
+
     public record ArtifactResponse(JsonNode artifact, ArtifactAccess access) { }
 
     public record WebShellToolResultRequest(@NotBlank String sessionId,

@@ -398,6 +398,10 @@ export function createJavaManagedAgentProvider(
         }
       },
     },
+    toolDetails: {
+      get: (sessionId, itemId, request) =>
+        client.getToolDetails(sessionId, itemId, request.signal),
+    },
     toolResults: {
       canDownload: saveArtifact !== undefined,
       getResult: (sessionId, itemId, request) =>

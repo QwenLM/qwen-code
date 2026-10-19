@@ -4301,6 +4301,92 @@
           }
         }
       }
+    },
+    "/api/agent/web-shell/v1/tool-details/get": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "getWebShellToolDetails",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Bounded saved ReadFile/Shell input and text output, read on demand; requires a trusted actor and current Session/Workspace read access. Enabled by default; an administrator may disable reads.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellToolDetails"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellToolResultRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -11269,6 +11355,25 @@
           }
         },
         "description": "Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 48 KiB."
+      },
+      "WebShellToolDetails": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["input", "output", "truncated"],
+        "properties": {
+          "input": {
+            "type": ["object", "null"],
+            "additionalProperties": true,
+            "description": "Allowlisted display arguments, or null when unavailable or larger than 4 KiB."
+          },
+          "output": {
+            "type": ["string", "null"],
+            "description": "Recorded text or error, bounded to 8 KiB and 200 lines; null means unavailable, an empty string means recorded empty output."
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
       }
     }
   }

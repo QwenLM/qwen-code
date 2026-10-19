@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.ManagedArtifactController;
+import com.alibaba.qwen.code.managedagent.api.ManagedToolDetailsController;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
@@ -11,9 +12,12 @@ import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactService;
+import com.alibaba.qwen.code.managedagent.service.ManagedToolDetailsService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedToolDetailsStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,13 +59,18 @@ class ManagedArtifactApiIntegrationTest {
 
     @BeforeEach
     void setup() {
-        fixture = ToolPublicationStoreTest.apiFixture();
+        var source = dataSource();
+        fixture = source == null ? ToolPublicationStoreTest.apiFixture() : ToolPublicationStoreTest.apiFixture(source);
         configureApi();
         var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
         stdout = artifacts.stream().filter(a -> "stdout".equals(a.streamId())).findFirst().orElseThrow().descriptor();
         stderr = artifacts.stream().filter(a -> "stderr".equals(a.streamId())).findFirst().orElseThrow().descriptor();
         itemId = fixture.sessions().findSnapshot("tenant-1", "session-1").orElseThrow()
                 .items().getFirst().itemId();
+    }
+
+    protected javax.sql.DataSource dataSource() {
+        return null;
     }
 
     void configureApi() {
@@ -97,7 +106,9 @@ class ManagedArtifactApiIntegrationTest {
         };
         var service = new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
                 policy, fixture.properties());
-        mvc = MockMvcBuilders.standaloneSetup(new ManagedArtifactController(service))
+        var details = new ManagedToolDetailsService(sessions, fixture.properties(),
+                new ManagedToolDetailsStore(fixture.jdbc(), new ManagedExtensionRecordStore(fixture.jdbc()), JSON));
+        mvc = MockMvcBuilders.standaloneSetup(new ManagedArtifactController(service), new ManagedToolDetailsController(details))
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver())
                 .setControllerAdvice(new ApiExceptionHandler())
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(JSON))
@@ -109,6 +120,218 @@ class ManagedArtifactApiIntegrationTest {
                         assertThat(response.getHeader("Cache-Control")).isEqualTo("private, no-store");
                     }
                 }).build();
+    }
+
+    @Test
+    void readsCommittedFileErrorsWithoutAnArtifactPublication() throws Exception {
+        savedDetails("read_file", "error", "Path must be relative to the Workspace.");
+        fixture.jdbc().update("DELETE FROM ma_artifact");
+        fixture.jdbc().update("DELETE FROM ma_output_capture");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.input.file_path").value("/tmp/pr-14599.diff"))
+                .andExpect(jsonPath("$.output").value("Path must be relative to the Workspace."))
+                .andExpect(jsonPath("$.truncated").value(false))
+                .andExpect(response -> contract("getWebShellToolDetails", "WebShellToolDetails",
+                        response.getResponse().getContentAsString()));
+    }
+
+    @Test
+    void preservesSavedShellTextAndDistinguishesEmptyOutput() throws Exception {
+        String text = "Command: printf sentinel\nDirectory: /workspace\nOutput: sentinel\nExit Code: 0";
+        savedDetails("run_shell_command", "output", text);
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.input.command").value("printf sentinel"))
+                .andExpect(jsonPath("$.output").value(text));
+        fixture.jdbc().update("DELETE FROM ma_resource WHERE resource_id IN (?, ?)", "details-call", "details-result");
+        savedDetails("run_shell_command", "output", "");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value(""));
+    }
+
+    @Test
+    void preservesBothSavedShellOutputAndFailureText() throws Exception {
+        savedDetails("run_shell_command", JSON.createObjectNode().put("command", "false"),
+                JSON.createObjectNode().put("output", "saved stdout").put("error", "saved failure"));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("saved stdout\n\nsaved failure"));
+    }
+
+    @Test
+    void toolDetailsRequireActorAndCurrentWorkspaceGrant() throws Exception {
+        savedDetails("read_file", "error", "private error");
+        mvc.perform(toolDetails().header(TenantContextFilter.HEADER, "tenant-1"))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(asActor(toolDetails(), "other-tenant", "reader")).andExpect(status().isNotFound());
+        mvc.perform(asActor(toolDetails(), "tenant-1", "no-grant")).andExpect(status().isNotFound());
+        mvc.perform(asActor(toolDetails(), "tenant-1", "metadata-reader"))
+                .andExpect(status().isOk());
+        fixture.jdbc().update("DELETE FROM ma_workspace_access WHERE actor_id = ?", "reader".getBytes(StandardCharsets.UTF_8));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void toolDetailsAreEnabledByDefaultAndCanBeDisabled() throws Exception {
+        savedDetails("read_file", "error", "saved error");
+        assertThat(fixture.properties().getHarness().isToolDetailsEnabled()).isTrue();
+        fixture.properties().getHarness().setToolDetailsEnabled(false);
+        mvc.perform(asReader(toolDetails())).andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("tool_details_disabled"));
+    }
+
+    @Test
+    void oversizedArgumentsDoNotMarkCompleteOutputAsTruncated() throws Exception {
+        savedDetails("run_shell_command", "output", "complete output",
+                JSON.createObjectNode().put("command", "x".repeat(5000)));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.input").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.output").value("complete output"))
+                .andExpect(jsonPath("$.truncated").value(false));
+    }
+
+    @Test
+    void toolDetailsExcludeUnsupportedToolsAndPrivateArgumentFields() throws Exception {
+        savedDetails("run_shell_command", "output", "saved output",
+                JSON.createObjectNode().put("command", "true").put("timeout", "not-a-number")
+                        .put("captureRef", "private"));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.input.command").value("true"))
+                .andExpect(jsonPath("$.input.timeout").doesNotExist())
+                .andExpect(jsonPath("$.input.captureRef").doesNotExist());
+        fixture.jdbc().update("UPDATE ma_message SET attributes_json = ? WHERE item_id = ?",
+                JSON.createObjectNode().put("name", "mcp__private").put("toolCallId", "model-1").toString(), itemId);
+        mvc.perform(asReader(toolDetails())).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void toolDetailsDoNotSubstituteAnotherPromptOrExposeDeletingSessions() throws Exception {
+        savedDetails("read_file", "error", "private error");
+        fixture.jdbc().update("UPDATE ma_turn SET prompt_id = ?", "other-prompt");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isNotFound());
+        fixture.jdbc().update("UPDATE ma_session SET status='DELETING'");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void boundsToolDetailsAndRejectsCorruptCommittedBytes() throws Exception {
+        savedDetails("read_file", "output", "界".repeat(4000));
+        String body = mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.truncated").value(true)).andReturn().getResponse().getContentAsString();
+        assertThat(JSON.readTree(body).path("output").asText().getBytes(StandardCharsets.UTF_8).length)
+                .isLessThanOrEqualTo(8192);
+        fixture.jdbc().update("UPDATE ma_resource SET inline_bytes = ? WHERE resource_id = ?",
+                "changed".getBytes(StandardCharsets.UTF_8), "details-result");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isConflict());
+    }
+
+    @Test
+    void readsChunkedToolMessagesAndRefusesOversizedJournalRows() throws Exception {
+        savedDetails("read_file", "output", "saved chunk\n".repeat(7000));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.truncated").value(true));
+        byte[] oversized = new byte[8 * 1024 * 1024 + 1];
+        fixture.jdbc().update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
+                oversized, oversized.length, org.apache.commons.codec.digest.DigestUtils.sha256Hex(oversized));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isPayloadTooLarge());
+    }
+
+    @Test
+    void readsTheLaterCommittedMessageWhenO3KeptAnEarlierItemSequence() throws Exception {
+        savedDetails("read_file", "error", "saved file error");
+        long first = fixture.jdbc().queryForObject("SELECT MIN(journal_revision) FROM ma_session_journal_tx", Long.class);
+        long last = fixture.jdbc().queryForObject("SELECT MAX(journal_revision) FROM ma_session_journal_tx", Long.class);
+        assertThat(last).isGreaterThan(first);
+        long earlier = fixture.jdbc().queryForObject("SELECT first_sequence FROM ma_session_journal_tx WHERE journal_revision = ?",
+                Long.class, first);
+        long later = fixture.jdbc().queryForObject("SELECT last_sequence FROM ma_session_journal_tx WHERE journal_revision = ?",
+                Long.class, last);
+        byte[] full = fixture.jdbc().queryForObject("SELECT record_bytes FROM ma_session_journal_tx WHERE journal_revision = ?",
+                byte[].class, last);
+        byte[] call = new String(full, StandardCharsets.UTF_8).split("\n")[0].getBytes(StandardCharsets.UTF_8);
+        fixture.jdbc().update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?"
+                        + " WHERE journal_revision < ?", call, call.length,
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(call), last);
+        var attributes = (com.fasterxml.jackson.databind.node.ObjectNode) JSON.readTree(fixture.jdbc().queryForObject(
+                "SELECT attributes_json FROM ma_message WHERE item_id = ?", String.class, itemId));
+        attributes.put("sourceSequence", earlier);
+        fixture.jdbc().update("UPDATE ma_message SET attributes_json = ? WHERE item_id = ?", attributes.toString(), itemId);
+        fixture.jdbc().update("UPDATE ma_public_event SET event_type = 'item.tool_call.updated', source_key = ?",
+                "boot:epoch:" + later);
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("saved file error"));
+        attributes.put("sourceSequence", later);
+        fixture.jdbc().update("UPDATE ma_message SET attributes_json = ? WHERE item_id = ?", attributes.toString(), itemId);
+        fixture.jdbc().update("DELETE FROM ma_public_event");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("saved file error"));
+    }
+
+    private MockHttpServletRequestBuilder toolDetails() {
+        return post("/api/agent/web-shell/v1/tool-details/get").contentType(MediaType.APPLICATION_JSON)
+                .content(JSON.createObjectNode().put("sessionId", "session-1").put("itemId", itemId).toString());
+    }
+
+    private void savedDetails(String tool, String field, String output) throws Exception {
+        var input = JSON.createObjectNode();
+        input.put("read_file".equals(tool) ? "file_path" : "command",
+                "read_file".equals(tool) ? "/tmp/pr-14599.diff" : "printf sentinel");
+        savedDetails(tool, field, output, input);
+    }
+
+    private void savedDetails(String tool, String field, String output, JsonNode input) throws Exception {
+        savedDetails(tool, input, JSON.createObjectNode().put(field, output));
+    }
+
+    private void savedDetails(String tool, JsonNode input, JsonNode result) throws Exception {
+        String prompt = fixture.jdbc().queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                String.class, "tenant-1", "session-1");
+        var attributes = (com.fasterxml.jackson.databind.node.ObjectNode) JSON.readTree(fixture.jdbc().queryForObject(
+                "SELECT attributes_json FROM ma_message WHERE item_id = ?", String.class, itemId));
+        attributes.put("name", tool);
+        fixture.jdbc().update("UPDATE ma_message SET attributes_json = ? WHERE item_id = ?", attributes.toString(), itemId);
+        var call = JSON.createObjectNode().put("id", "model-1").put("name", tool).set("args", input);
+        var response = JSON.createObjectNode().put("id", "model-1").put("name", tool)
+                .set("response", result);
+        var callRecord = JSON.createObjectNode().put("uuid", "details-call").put("daemonPromptId", prompt);
+        callRecord.putObject("message").putArray("parts").addObject().set("functionCall", call);
+        var resultRecord = JSON.createObjectNode().put("uuid", "details-result").put("daemonPromptId", prompt);
+        resultRecord.putObject("message").putArray("parts").addObject().set("functionResponse", response);
+        String records = detailsEvent("assistant", callRecord) + "\n" + detailsEvent("tool_result", resultRecord);
+        byte[] bytes = records.getBytes(StandardCharsets.UTF_8);
+        fixture.jdbc().update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
+                bytes, bytes.length, org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes));
+    }
+
+    private String detailsEvent(String role, JsonNode record) throws Exception {
+        String id = record.path("uuid").asText();
+        byte[] bytes = JSON.writeValueAsBytes(record);
+        JsonNode ref;
+        if (bytes.length > 64 * 1024) {
+            var manifest = JSON.createObjectNode();
+            var parts = manifest.putArray("parts");
+            for (int offset = 0; offset < bytes.length; offset += 60 * 1024) {
+                parts.add(detailsResource(id + "-" + offset, "managed-message-part",
+                        java.util.Arrays.copyOfRange(bytes, offset, Math.min(offset + 60 * 1024, bytes.length))));
+            }
+            ref = detailsResource(id, "managed-message-chunks", JSON.writeValueAsBytes(manifest));
+        } else {
+            ref = detailsResource(id, "managed-message", bytes);
+        }
+        var event = JSON.createObjectNode().put("kind", "message.committed");
+        event.putObject("sessionKey").put("tenantId", "tenant-1").put("workspaceId", "workspace-1").put("sessionId", "session-1");
+        event.putObject("payload").put("role", role).put("messageId", id).set("contentRef", ref);
+        return JSON.createObjectNode().set("managedSession", event).toString();
+    }
+
+    private JsonNode detailsResource(String id, String kind, byte[] bytes) {
+        String digest = org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes);
+        String scope = ManagedSessionStore.sessionScopeKey("tenant-1", "session-1");
+        fixture.jdbc().update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+                        + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
+                org.apache.commons.codec.digest.DigestUtils.sha256Hex(id), scope, "tenant-1", "workspace-1", "session-1",
+                id, kind, bytes.length, digest, bytes);
+        return JSON.createObjectNode().put("resourceId", id).put("kind", kind)
+                .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
     }
 
     @Test

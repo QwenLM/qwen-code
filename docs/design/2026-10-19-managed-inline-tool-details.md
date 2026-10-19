@@ -1,86 +1,46 @@
-# Managed inline tool details
+# Managed tool details on expansion
 
 [English](2026-10-19-managed-inline-tool-details.md) | [简体中文](2026-10-19-managed-inline-tool-details.zh-CN.md)
 
-Status: implemented; verified with isolated projection, H2 persistence and
-Chromium transcript-replay fixtures. Full Runtime acceptance remains out of scope.
-
 ## Problem and scope
 
-Managed tool lifecycle events carry names and statuses, while saved model-facing
-arguments, output and errors stay private. Without O3 publication, a failed
-ReadFile expands into a blank card and Shell cannot display its command/output.
-Elapsed time also incorrectly makes an empty Shell execution-details list visible.
+Managed lifecycle events carry names and statuses, while saved tool arguments, output and errors remain in private committed history. Failed ReadFile cards therefore expand without diagnostics and successful Shell cards show unavailable output. Elapsed time also caused an empty execution-details section.
 
-This change supports bounded inline details for exactly `read_file` and
-`run_shell_command`. It does not change tool execution, path validation, Runtime
-selection, permissions, raw captures, downloads or O3 publication verification.
-Other tools remain metadata-only. A failed absolute-path read remains failed;
-showing its diagnostic does not authorize that path.
+ReadFile and Shell details should be loaded only when a user expands a settled card. Preparing every result for display must not scan preceding history or copy private text into lifecycle events. This change preserves tool execution, path validation, Runtime selection and the independent O3 Artifact publication/download policies.
 
-## Publication and authorization
+## Read policy and ownership
 
-`qwen.managed-agent.harness.tool-details-enabled` defaults to `false` and can be
-set through `QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=true`. Enabling it is an
-explicit deployment decision to publish tool arguments and model-facing text,
-including file contents, commands and errors, to **every authorized reader of
-the Session**. This is a separate inline publication policy, not a secret
-redactor, Artifact policy or per-actor debug permission.
+Add `POST /api/agent/web-shell/v1/tool-details/get`, using the existing Session/Item request. It is a persisted Workspace-scoped read: require a trusted actor, current Session visibility and Workspace read grant, and recheck them before returning. Responses use `Cache-Control: private, no-store`. The route never starts a Harness, acquires a Runtime, executes a command or falls back to another Workspace.
 
-The authenticated private Harness feed already transports committed messages.
-It adds a bounded display projection from those same messages. Java independently
-checks the deployment policy, tool-name/field allowlists and size bounds before
-persisting the display fields in existing `item.tool_call.updated` events and
-Items. The default remains metadata-only even with an upgraded Harness. Existing
-Session/Workspace read authorization protects both transcript and SSE reads.
+The read is enabled by default. Administrators can disable it with `qwen.managed-agent.harness.tool-details-enabled=false`, or `QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=false`. Any authorized Session/Workspace reader may read these bounded tool details. Artifact publication and original-download permissions remain independent; no extra publication switch or object storage is required. Saved text can contain sensitive content and is not automatically redacted.
 
-Published details become durable Session content. Disabling the setting stops
-future publication; it cannot retract already published events. Enabling it does
-not backfill already consumed metadata-only events. Old cards therefore show an
-unavailable message until a separate, authorized backfill is designed. Original
-O3 capture publication and download policies remain independent and unchanged.
+Disabling the setting denies new detail requests. It does not remove previously published inline history or change approved O3 previews. Existing inline data retains its current rendering. New lifecycle events contain no detail text or arguments, and the server does not backfill public events.
 
-## Projection and bounds
+## Retained history and bounds
 
-The model call ID and existing public Item identity remain unchanged. Intents
-can carry the original arguments; committed tool-result messages carry output
-and errors, including validation failures that never created an execution
-receipt. A result can reuse arguments only from the latest preceding assistant
-batch for the same prompt and matching call ID/name. There is no live Runtime
-read, capture traversal, new public endpoint or execution replay.
+Resolve the persisted Item and Turn to the original prompt, tool name and call ID. Support only `read_file` and `run_shell_command`, and match the exact Session, Workspace, prompt, call ID and name in committed assistant/result messages. Read validation errors even when no execution receipt exists. Preserve both saved output and error text, and distinguish missing text from an explicitly recorded empty string.
 
-Input contains only scalar display fields: `command`, `directory`, `timeout`,
-`file_path`, `path`, `offset` and `limit`, as appropriate to the tool. Input JSON
-is at most 4 KiB; output JSON is at most 8 KiB. Text truncation respects Unicode
-code points and JSON escaping. `truncated=true` marks bounded previews. Output
-uses only saved textual `output` and `error`; it does not copy private capture
-references, transport headers/credentials, media or arbitrary outcome fields.
-The approved text itself can contain sensitive data. Java drops malformed or
-oversize fields independently. This display projection is not an O3 ToolResult
-or an Artifact availability claim.
+Keep a lifecycle source sequence in new Items/events. Resolve legacy Items from a retained public event source key. Use the newer Item/event sequence to start at that tool's journal transaction; newer Turns cannot displace old results from the scan window. A later committed result invalidates an already opened card's read even if its status is unchanged. With no retained pointer, the bounded search starts at the journal head. Missing or pruned history stays unavailable.
 
-## UI behavior
+Each query scans at most 512 journal transactions and reads at most 8 MiB of journal/message bytes. Reject oversized journal rows before transferring them. Verify the journal digest and each committed resource reference; support ordinary and chunked messages. This is a bounded lookup performed only on expansion, not a constant-time index or a reconstruction of removed data.
 
-The existing Managed reducer receives `input`, `output` and `truncated` and
-preserves them in transcript replay. ReadFile displays saved errors, a clear
-unavailable hint for missing details, and a distinct empty-output hint for an
-explicitly empty result. Shell keeps command/output and elapsed status visible;
-its execution-details section exists only when it has actual rows to display.
-Existing structured Shell results and approved O3 result summaries keep their
-existing rendering and lifecycle semantics.
+Return only scalar display arguments: `file_path`, `path`, `offset`, `limit` for ReadFile, and `command`, `directory`, `timeout` for Shell. Filter unknown fields and malformed scalar types. Omit arguments exceeding 4 KiB instead of marking otherwise complete output truncated. Bound saved text to 8 KiB and 200 lines, reporting both local and upstream output truncation. Media, private capture references and raw stdout/stderr downloads remain outside this route.
+
+## Client behavior
+
+The Managed transcript supplies a detail loader to ReadFile/Shell cards. Closed cards issue no detail requests. An expanded settled card missing input or output shows a loading state, reads its own Session/Item, then reuses existing renderers. Already available input/output need no additional read. Missing output has an unavailable hint; recorded empty output has a distinct empty hint.
+
+Closing a card or changing provider, Session or tool identity aborts outstanding reads. Check response identity and lifecycle revision before display so a late response cannot expose another Session's content. A newer completion source sequence reloads details even when a terminal receipt arrived first. Shell execution details render only when actual rows exist; elapsed time remains in the status header.
 
 ## Validation and acceptance
 
-Reproduce the missing fields and empty panels before changing production code.
-Cover default-deny, supported tools, call matching, validation errors, empty
-output, escaping/Unicode bounds and replay without executing tools. Verify the
-Java policy and persisted event/Item projection using isolated fixtures, and
-check browser render/reload against an isolated UI. Run affected tests, root
-build/typecheck/bundle and Maven verification. Do not test by running commands in
-the user's Session or resetting its database.
+- Before expansion, no detail HTTP request, preceding-history argument lookup or inline detail publication occurs.
+- Expanding saved failed ReadFile and completed Shell cards shows their own diagnostics, command and output; refresh and reopen work without executing a tool.
+- Old retained results work without public backfill; empty, missing and truncated results remain distinguishable.
+- Wrong tenants, missing actors, revoked Workspace grants, deleting Sessions, disabled reads and unsupported tools return no private details.
+- Exact matching, corruption, chunked resources, byte limits, allowlisted arguments, late results and cancelled/stale client requests have focused coverage.
+- Run root build/typecheck/bundle, affected producer/reducer/component and browser checks, API/surface contract tests, Maven verification and disposable MySQL 8.4 integration checks. Do not send a prompt to the user's running Session or modify its database.
 
-Acceptance requires visible saved ReadFile diagnostics and Shell arguments/output
-when publishing is approved, no new disclosure with policy off, and no blank
-expanded panels when historic details are unavailable. Full Hosted/fault,
-Linux isolation, remote execution and upstream-model validation are outside this
-display fix; their success must not be inferred from projection tests.
+## Limits
+
+Retain private committed results as before; this change delays their display read rather than their persistence. The first expansion adds one HTTP round trip. Deep or large histories exceeding the fixed read budget remain unavailable. Live output, detached-task artifacts, media, raw capture traversal, new indexes and reconstructing pruned history are outside this fix.

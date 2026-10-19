@@ -2664,7 +2664,7 @@ async function eventEnvelope(
 }> {
   const sessionId =
     session.managed.authority.sessionHeader.sessionKey.sessionId;
-  const progress = await hostedToolProgress(session.managed, event, true);
+  const progress = await hostedToolProgress(session.managed, event);
   if (progress && event.kind !== 'message.committed') {
     return {
       v: 1,

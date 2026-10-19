@@ -1,65 +1,46 @@
-# Managed 内联工具详情
+# 展开时读取 Managed 工具详情
 
 [English](2026-10-19-managed-inline-tool-details.md) | [简体中文](2026-10-19-managed-inline-tool-details.zh-CN.md)
 
-状态：已实现，已通过隔离投影、H2 持久化和 Chromium transcript 重放夹具验证。
-完整 Runtime 验收仍不在范围内。
-
 ## 问题与范围
 
-Managed 工具生命周期事件只有名称和状态，已保存的模型参数、输出与错误仍在私有存储中。
-没有 O3 发布时，失败的 ReadFile 展开为空白，Shell 无法显示命令及输出。
-耗时还会错误地让空的 Shell 执行详情列表出现。
+Managed 生命周期事件携带名称与状态，已保存的工具参数、输出和错误仍保存在私有已提交历史中。因此，失败的 ReadFile 卡片展开后没有诊断，成功的 Shell 卡片显示输出不可用。此前耗时还会导致空的执行详情区域出现。
 
-本次仅为 `read_file` 和 `run_shell_command` 提供有界内联详情。
-不改变工具执行、路径校验、Runtime 选择、权限、原始捕获、下载或 O3 发布验证。
-其他工具仍只显示元数据。绝对路径读取失败仍是失败，显示诊断不会授权该路径。
+ReadFile 和 Shell 详情应仅在用户展开已结束的卡片时加载。为显示结果而提前处理每次调用，不应回扫在先历史或把私有文本复制到生命周期事件。本次保持工具执行、路径校验、Runtime 选择，以及独立的 O3 Artifact 发布和下载策略不变。
 
-## 发布与授权
+## 读取策略与归属
 
-`qwen.managed-agent.harness.tool-details-enabled` 默认 `false`，可通过
-`QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=true` 设置。启用代表部署方明确批准向
-**所有获准读取该 Session 的用户** 发布工具参数和面向模型的文本，包括文件内容、
-命令与错误。这是独立的内联发布策略，不是秘密脱敏器、Artifact 策略或按用户授权的调试权限。
+新增 `POST /api/agent/web-shell/v1/tool-details/get`，复用已有 Session/Item 请求结构。这是以持久化 Workspace 为作用域的读取：要求可信 actor、当前 Session 可见性及 Workspace 读取授权，并在返回前重新校验。响应使用 `Cache-Control: private, no-store`。路由不启动 Harness、不获取 Runtime、不执行命令，也不回退到其他 Workspace。
 
-已认证的私有 Harness 事件流本来就传输已提交消息；此次从相同消息增加有界显示投影。
-Java 在将显示字段持久化到现有 `item.tool_call.updated` 事件和 Item 前，独立检查
-部署策略、工具名称和字段白名单及大小上限。即使升级 Harness，默认仍只有元数据。
-现有 Session/Workspace 读取授权继续保护 transcript 和 SSE。
+读取默认启用。管理员可通过 `qwen.managed-agent.harness.tool-details-enabled=false` 或 `QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=false` 关闭。所有获准读取 Session/Workspace 的用户均可读取这些有界工具详情。Artifact 发布与原始下载权限保持独立，不需要额外发布开关或对象存储。保存的文本可能包含敏感内容，不会自动脱敏。
 
-已发布的详情成为持久化 Session 内容。关闭配置只停止后续发布，不能撤回已发布事件。
-开启配置不会回填已经消费过的纯元数据事件；旧卡片因此显示不可用提示，直到另行设计
-获得授权的回填。原有 O3 捕获发布和下载策略保持独立且不变。
+关闭配置会拒绝新的详情请求，不删除先前发布的内联历史，也不改变已批准的 O3 预览。既有内联数据继续按原方式渲染。新的生命周期事件不携带详情文本或参数，服务端也不回填公共事件。
 
-## 投影与边界
+## 保留历史与边界
 
-模型调用 ID 与现有公开 Item 标识不变。intent 可携带原参数；已提交的工具结果消息
-携带输出及错误，包括未生成执行回执的参数校验失败。结果仅可从同一 prompt 的最近一条
-在先 assistant 批次、且调用 ID/名称匹配时复用参数。不读取活跃 Runtime、不遍历捕获、
-不新增公开端点、不重放执行。
+从持久化 Item 和 Turn 解析原始 prompt、工具名及 call ID。仅支持 `read_file` 和 `run_shell_command`，在已提交 assistant/result 消息中精确匹配 Session、Workspace、prompt、call ID 和名称。没有执行回执的参数校验错误也可读取。同时保留已保存的输出与错误文本，并区分文本缺失和显式记录的空字符串。
 
-输入仅含适用于工具的标量显示字段：`command`、`directory`、`timeout`、`file_path`、
-`path`、`offset`、`limit`。输入 JSON 最大 4 KiB，输出 JSON 最大 8 KiB。
-文本截断遵守 Unicode 码点和 JSON 转义边界，`truncated=true` 标记有界预览。
-输出仅使用已保存的文本 `output` 和 `error`，不复制私有捕获引用、传输请求头/凭据、
-媒体或任意 outcome 字段。获准发布的文本自身可能包含敏感数据。
-Java 独立丢弃格式错误或超限字段。
-显示投影不等于 O3 ToolResult，也不表示 Artifact 可用。
+新的 Item/事件保存生命周期来源序号；既有 Item 可从保留的公共事件来源键解析。使用 Item/事件中较新的序号，从对应工具的 journal 事务开始读取，后续 Turn 不会把旧结果挤出扫描窗口。后到的结果提交即使没有改变状态，也会使已展开卡片的读取失效。没有保留的指针时，从 journal 头开始有界搜索。历史缺失或已被裁剪时继续显示不可用。
 
-## 界面行为
+每次查询最多扫描 512 个 journal 事务，journal/消息总读取量最多 8 MiB。超过预算的 journal 行在传输字节前拒绝。校验 journal 摘要和每个已提交资源引用，支持普通与分块消息。这是仅在展开时进行的有界查询，不是常数时间索引，也不重建已移除的数据。
 
-现有 Managed reducer 接收 `input`、`output`、`truncated` 并在 transcript 重放中保留。
-ReadFile 显示已保存的错误；缺少详情时显示明确的不可用提示；显式空结果显示独立的空输出提示。
-Shell 保持命令、输出和耗时状态可见，仅在有实际字段行时显示执行详情。
-现有结构化 Shell 结果及获准发布的 O3 摘要继续保持原有展示和生命周期语义。
+仅返回标量显示参数：ReadFile 的 `file_path`、`path`、`offset`、`limit`，以及 Shell 的 `command`、`directory`、`timeout`。过滤未知字段及类型错误的标量。超过 4 KiB 的参数不返回，不把原本完整的输出误标为截断。保存的文本限制为 8 KiB、200 行，标识本地及上游输出截断。媒体、私有捕获引用及原始 stdout/stderr 下载不属于此路由。
+
+## 客户端行为
+
+Managed 会话向 ReadFile/Shell 卡片提供详情加载器。关闭的卡片不发出详情请求。已展开且缺少输入或输出的已结束卡片显示加载状态，读取自己的 Session/Item，随后复用已有渲染器。已有输入和输出时无需额外请求。缺失输出显示不可用提示，已记录的空输出显示不同的空提示。
+
+关闭卡片或切换 provider、Session、工具身份会中止进行中的读取。展示前核对响应身份和生命周期版本，避免晚到的响应暴露另一 Session 的内容。即使结束回执先到，新的完成来源序号也会重读详情。Shell 执行详情仅在有实际字段行时渲染，耗时继续显示在状态栏。
 
 ## 验证与验收
 
-修改生产代码前复现字段缺失和空面板。覆盖默认拒绝、支持的工具、调用匹配、参数校验错误、
-空输出、转义/Unicode 上限及无需执行工具的重放。用隔离夹具验证 Java 策略与事件/Item
-持久化投影，用隔离界面检查浏览器渲染和刷新。运行相关测试、根目录 build/typecheck/bundle
-和 Maven 验证。不得通过在用户 Session 运行命令或重置其数据库来测试。
+- 展开之前不发生详情 HTTP 请求、为获取参数而回扫在先历史，或内联发布详情。
+- 展开已保存的失败 ReadFile 和完成 Shell 卡片可显示各自的诊断、命令和输出；刷新后重开无需执行工具。
+- 保留的旧结果无需公共回填即可读取；空、缺失及截断结果保持可区分。
+- 其他 tenant、缺失 actor、已撤销 Workspace 授权、正在删除的 Session、关闭读取及不支持的工具均不返回私有详情。
+- 精确匹配、数据损坏、分块资源、字节上限、参数白名单、晚到结果，以及客户端取消和过期请求均有定向覆盖。
+- 运行根目录 build/typecheck/bundle、受影响生产者/reducer/组件和浏览器检查、API/路由契约测试、Maven 验证，以及可销毁的 MySQL 8.4 集成检查。不向用户正在运行的 Session 发送提示，也不修改其数据库。
 
-验收要求：批准发布时可见已保存的 ReadFile 诊断和 Shell 参数/输出；关闭策略时无新增披露；
-历史详情不可用时展开面板不留白。完整 Hosted/fault、Linux 隔离、远程执行和上游模型验收
-不属于本次显示修复，不能根据投影测试推断其通过。
+## 限制
+
+私有已提交结果仍按原方式保留；本次延迟的是显示读取，而非持久化。首次展开多一次 HTTP 往返。超过固定读取预算的深层或大型历史仍不可用。实时输出、分离任务 artifact、媒体、原始捕获遍历、新索引，以及已裁剪历史重建不属于本次修复。

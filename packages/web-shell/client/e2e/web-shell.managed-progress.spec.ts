@@ -23,6 +23,15 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
   const cancellations: unknown[] = [];
   const errors: string[] = [];
   const streamCursors: number[] = [];
+  const detailRequests: Array<{ sessionId: string; itemId: string }> = [];
+  const toolDetails = new Map<
+    string,
+    {
+      input: Record<string, string | number> | null;
+      output: string | null;
+      truncated: boolean;
+    }
+  >();
   page.on('pageerror', (error) => errors.push(error.message));
   let summary: JavaAgentSession = {
     sessionId: SESSION_ID,
@@ -86,6 +95,15 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
         lastSequence: summary.lastSequence,
         hasMore: false,
       });
+    if (path === '/tool-details/get') {
+      detailRequests.push({ sessionId: body.sessionId, itemId: body.itemId });
+      const details = toolDetails.get(body.itemId);
+      if (details) return respond(details);
+      return respond(
+        { error: { code: 'tool_details_not_found', message: 'Unavailable' } },
+        404,
+      );
+    }
     if (path === '/events/stream') {
       streamCursors.push(body.afterSequence ?? 0);
       return route.fulfill({
@@ -166,7 +184,16 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       .locator('[data-web-shell-composer-editor] .cm-content'),
   ).toHaveAttribute('contenteditable', 'true');
   await waitForCurrentStream();
-  return { daemon, prompts, cancellations, errors, emit, waitForCurrentStream };
+  return {
+    daemon,
+    prompts,
+    cancellations,
+    errors,
+    emit,
+    waitForCurrentStream,
+    detailRequests,
+    toolDetails,
+  };
 }
 
 async function expectScrollableTranscript(page: Page) {
@@ -268,26 +295,35 @@ test('Managed progress stays visible through a long transcript and live thought/
   expect(fixture.errors).toEqual([]);
 });
 
-test('Managed tool details survive transcript refresh @smoke', async ({
+test('Managed tool details load only after expansion and remain readable after refresh @smoke', async ({
   page,
 }, testInfo) => {
   const fixture = await installManagedScenario(page, testInfo);
-  await fixture.emit('item.tool_call.updated', {
-    toolCallId: 'saved-read',
-    name: 'read_file',
-    status: 'failed',
+  fixture.toolDetails.set('item-saved-read', {
     input: { file_path: '/tmp/example.diff' },
     output:
       'Hosted file tools require file_path relative to the saved Session working directory.',
+    truncated: false,
+  });
+  fixture.toolDetails.set('item-saved-shell', {
+    input: { command: "printf 'saved shell output'", directory: 'src' },
+    output: 'saved shell output\nExit Code: 0',
+    truncated: false,
   });
   await fixture.emit('item.tool_call.updated', {
+    itemId: 'item-saved-read',
+    toolCallId: 'saved-read',
+    name: 'read_file',
+    status: 'failed',
+  });
+  await fixture.emit('item.tool_call.updated', {
+    itemId: 'item-saved-shell',
     toolCallId: 'saved-shell',
     name: 'run_shell_command',
     status: 'completed',
-    input: { command: "printf 'saved shell output'", directory: 'src' },
-    output: 'saved shell output\nExit Code: 0',
   });
   await fixture.emit('item.tool_call.updated', {
+    itemId: 'item-old-read',
     toolCallId: 'old-read',
     name: 'read_file',
     status: 'failed',
@@ -297,32 +333,141 @@ test('Managed tool details survive transcript refresh @smoke', async ({
   const list = page
     .getByRole('region', { name: 'Managed conversation' })
     .locator('[data-web-shell-message-list]');
-  await list
-    .getByRole('button', { name: 'Ran 1 command Read files 2 times' })
-    .click();
-  await list
-    .getByText('ReadFile', { exact: true })
-    .first()
-    .click({ timeout: 10000 });
-  await expect(list).toContainText(
+  const group = list.getByRole('button', {
+    name: 'Ran 1 command Read files 2 times',
+  });
+  await expect(group).toBeVisible();
+  expect(fixture.detailRequests).toEqual([]);
+  await expect(list).not.toContainText('saved shell output');
+  await group.click();
+  expect(fixture.detailRequests).toEqual([]);
+  const read = list.locator(
+    '[data-transcript-tool-call-id="p1:item-saved-read"]',
+  );
+  const shell = list.locator(
+    '[data-transcript-tool-call-id="p1:item-saved-shell"]',
+  );
+  const old = list.locator('[data-transcript-tool-call-id="p1:item-old-read"]');
+  await read.getByRole('button').first().click();
+  await expect(read).toContainText(
     'Hosted file tools require file_path relative',
   );
-  await list
-    .getByText('Shell', { exact: true })
-    .first()
-    .click({ timeout: 10000 });
-  await expect(list).toContainText("printf 'saved shell output'");
-  await expect(list).toContainText('saved shell output\nExit Code: 0');
-  await list
-    .getByText('ReadFile', { exact: true })
-    .last()
-    .click({ timeout: 10000 });
-  await expect(list).toContainText('Output is unavailable for this tool call.');
+  expect(fixture.detailRequests).toEqual([
+    { sessionId: SESSION_ID, itemId: 'item-saved-read' },
+  ]);
+  await shell.getByRole('button').first().click();
+  await expect(shell).toContainText("printf 'saved shell output'");
+  await expect(shell).toContainText('saved shell output\nExit Code: 0');
+  expect(fixture.detailRequests).toEqual([
+    { sessionId: SESSION_ID, itemId: 'item-saved-read' },
+    { sessionId: SESSION_ID, itemId: 'item-saved-shell' },
+  ]);
+  await old.getByRole('button').first().click();
+  await expect(old).toContainText('Output is unavailable for this tool call.');
+  await expect.poll(() => fixture.detailRequests.length).toBe(3);
   await expect(list.locator('dl:empty')).toHaveCount(0);
   await testInfo.attach('managed-tool-details', {
     body: await page.screenshot({ fullPage: true }),
     contentType: 'image/png',
   });
+  expect(fixture.prompts).toHaveLength(0);
+  expect(fixture.daemon.promptRequests()).toHaveLength(0);
+  expect(fixture.errors).toEqual([]);
+});
+
+test('Managed details distinguish saved empty output from unavailable output @smoke', async ({
+  page,
+}, testInfo) => {
+  const fixture = await installManagedScenario(page, testInfo);
+  fixture.toolDetails.set('item-empty-shell', {
+    input: { command: 'true' },
+    output: '',
+    truncated: false,
+  });
+  await fixture.emit('item.tool_call.updated', {
+    itemId: 'item-empty-shell',
+    toolCallId: 'empty-shell',
+    name: 'run_shell_command',
+    status: 'completed',
+  });
+  await fixture.emit('turn.completed');
+  await page.reload();
+  await page.getByRole('button', { name: 'Shell', exact: true }).click();
+  const shell = page.locator(
+    '[data-transcript-tool-call-id="p1:item-empty-shell"]',
+  );
+  await expect(shell).toContainText('No output');
+  await expect(shell).toContainText('true');
+  await expect(shell).not.toContainText('Output is unavailable');
+  await expect(shell.locator('dl:empty')).toHaveCount(0);
+  expect(fixture.detailRequests).toEqual([
+    { sessionId: SESSION_ID, itemId: 'item-empty-shell' },
+  ]);
+  expect(fixture.prompts).toHaveLength(0);
+  expect(fixture.daemon.promptRequests()).toHaveLength(0);
+  expect(fixture.errors).toEqual([]);
+});
+
+test('collapsing a Managed card cancels its pending detail read @smoke', async ({
+  page,
+}, testInfo) => {
+  const fixture = await installManagedScenario(page, testInfo);
+  await fixture.emit('item.tool_call.updated', {
+    itemId: 'item-delayed-read',
+    toolCallId: 'delayed-read',
+    name: 'read_file',
+    status: 'failed',
+  });
+  await fixture.emit('turn.completed');
+  await page.reload();
+  const failedReads: string[] = [];
+  page.on('requestfailed', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/tool-details/get')) {
+      failedReads.push(request.failure()?.errorText ?? 'request failed');
+    }
+  });
+  let reads = 0;
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    '**/api/agent/web-shell/v1/tool-details/get',
+    async (route) => {
+      reads += 1;
+      const response = {
+        status: 200,
+        json: {
+          input: { file_path: 'saved.txt' },
+          output: 'saved detail after reopening',
+          truncated: false,
+        },
+      };
+      if (reads === 1) {
+        await pending;
+        await route.fulfill(response).catch(() => undefined);
+        return;
+      }
+      await route.fulfill(response);
+    },
+  );
+  const read = page.locator(
+    '[data-transcript-tool-call-id="p1:item-delayed-read"]',
+  );
+  const header = page.getByRole('button', { name: 'ReadFile', exact: true });
+  try {
+    await header.click();
+    await expect.poll(() => reads).toBe(1);
+    await header.click();
+    await expect(header).toHaveAttribute('aria-expanded', 'false');
+    await expect.poll(() => failedReads.length).toBe(1);
+  } finally {
+    release();
+  }
+  await expect(read).toHaveCount(0);
+  await header.click();
+  await expect(read).toContainText('saved detail after reopening');
+  expect(reads).toBe(2);
   expect(fixture.prompts).toHaveLength(0);
   expect(fixture.daemon.promptRequests()).toHaveLength(0);
   expect(fixture.errors).toEqual([]);

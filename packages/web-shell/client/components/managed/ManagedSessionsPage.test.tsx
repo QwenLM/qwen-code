@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from 'react';
+import { act, useContext, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
@@ -16,11 +16,16 @@ import type {
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
 import type { ComponentProps } from 'react';
+import {
+  ToolDetailsContext,
+  type ToolDetailsLoader,
+} from '../messages/tools/ToolDetailsContext';
 
 const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
+  loadToolDetails: undefined as ToolDetailsLoader | undefined,
   editorProps: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
@@ -55,23 +60,28 @@ vi.mock('../MessageList', () => ({
     onToolResultOpen?: (itemId: string) => void;
     pendingApproval?: unknown;
     welcomeHeader?: ReactNode;
-  }) => (
-    <>
-      {welcomeHeader}
-      <button onClick={() => onToolResultOpen?.('item-1')}>
-        Open tool output
-      </button>
-      <pre data-testid="messages">{JSON.stringify(messages)}</pre>
-      {/* The real MessageList keys its folding off this prop, so the mock has
+  }) => {
+    mocks.loadToolDetails = useContext(ToolDetailsContext);
+    return (
+      <>
+        {welcomeHeader}
+        <button onClick={() => onToolResultOpen?.('item-1')}>
+          Open tool output
+        </button>
+        <pre data-testid="messages">{JSON.stringify(messages)}</pre>
+        {/* The real MessageList keys its folding off this prop, so the mock has
           to expose it for the join between the two to be observed. */}
-      <pre data-testid="message-list-pending-approval">
-        {JSON.stringify(pendingApproval ?? null)}
-      </pre>
-      {hasOlderHistory && (
-        <button onClick={() => void onLoadOlderHistory()}>Older history</button>
-      )}
-    </>
-  ),
+        <pre data-testid="message-list-pending-approval">
+          {JSON.stringify(pendingApproval ?? null)}
+        </pre>
+        {hasOlderHistory && (
+          <button onClick={() => void onLoadOlderHistory()}>
+            Older history
+          </button>
+        )}
+      </>
+    );
+  },
 }));
 
 vi.mock('../ChatEditor', async () => {
@@ -284,6 +294,40 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('binds tool detail reads to the selected Session and distinguishes recorded empty output from missing output', async () => {
+    const get = vi.fn().mockResolvedValue({
+      input: { command: 'true' },
+      output: '',
+      truncated: false,
+    });
+    provider = { ...provider, toolDetails: { get } };
+    await render('s1');
+    expect(get).not.toHaveBeenCalled();
+    const first = mocks.loadToolDetails;
+    expect(first).toBeDefined();
+    const abort = new AbortController();
+    expect(await first!('p1:item-1', abort.signal)).toEqual({
+      args: { command: 'true' },
+      rawOutput: '',
+    });
+    expect(get).toHaveBeenLastCalledWith('s1', 'item-1', {
+      clientId: getManagedClientId(provider.storageKey),
+      signal: abort.signal,
+    });
+    get.mockResolvedValue({ input: null, output: null, truncated: false });
+    await render('s2');
+    const second = mocks.loadToolDetails;
+    expect(second).not.toBe(first);
+    expect(await second!('p2:item-2', abort.signal)).toEqual({
+      args: undefined,
+      rawOutput: undefined,
+    });
+    expect(get).toHaveBeenLastCalledWith('s2', 'item-2', {
+      clientId: getManagedClientId(provider.storageKey),
+      signal: abort.signal,
+    });
+  });
 
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',

@@ -75,22 +75,21 @@ Actions (Hosted permission approvals): [English](../../docs/design/2026-09-30-ma
 AgentDefinition revisions: [English](../../docs/design/2026-10-01-managed-agent-definitions.md) |
 [简体中文](../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
-## Inline tool details
+## On-demand tool details
 
-Set `qwen.managed-agent.harness.tool-details-enabled=true` (environment variable
-`QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=true`) to publish bounded saved
-`read_file` and `run_shell_command` arguments, output and errors in Session
-events and Items. The default is `false`. This approves disclosure of file
-contents and commands to **all authorized Session readers**; it is not a
-secret-redaction or per-user debugging feature. Both Server and Harness must
-contain this change. Input JSON is capped at 4 KiB and output JSON at 8 KiB;
-truncated previews are marked. No Runtime execution or capture read is required.
+Managed ReadFile and Shell cards read saved arguments, output and errors only
+when expanded, through `/api/agent/web-shell/v1/tool-details/get`. The default
+is enabled; set `qwen.managed-agent.harness.tool-details-enabled=false`
+(`QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=false`) to disable these reads.
+Each request requires a trusted actor and current Session/Workspace read access,
+rechecked before returning. It does not require Artifact publication or download
+permissions and never executes a tool or starts a Harness.
 
-Published inline text persists in Session history. Disabling the setting stops
-new publication without retracting old events; enabling it does not backfill
-already consumed metadata-only events. Configure it before running the turns
-whose details should be visible. Existing O3 Artifact publication and download
-policies remain independent. Design:
+Lifecycle events remain metadata-only. Existing retained private results can be
+read without backfilling public events. Allowlisted input is limited to 4 KiB;
+text is limited to 8 KiB and 200 lines, with truncation reported. Closed cards do
+not fetch details. Reads stay inside the saved Session/Workspace and have a
+bounded history budget. See the complete design:
 [English](../../docs/design/2026-10-19-managed-inline-tool-details.md) |
 [简体中文](../../docs/design/2026-10-19-managed-inline-tool-details.zh-CN.md).
 

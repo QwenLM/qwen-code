@@ -225,6 +225,9 @@ export function managedEventsToMessages(
       if (legacyKey) tools.set(legacyKey, tool);
       if (typeof itemId === 'string') tool.callId = key;
       if (typeof callId === 'string') tool.toolCallId = callId;
+      if (Number.isSafeInteger(data['sourceSequence'])) {
+        tool.toolDetailsRevision = Number(data['sourceSequence']);
+      }
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
       // The Harness titles each call itself; the approval card shows it as

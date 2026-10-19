@@ -10,6 +10,10 @@ import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
+import {
+  ToolDetailsContext,
+  type ToolDetailsLoader,
+} from '../messages/tools/ToolDetailsContext';
 import { ChatEditor } from '../ChatEditor';
 import { WelcomeHeader } from '../WelcomeHeader';
 import { ChatContextHeader } from '../ChatContextHeader';
@@ -218,6 +222,22 @@ function ManagedSessionsContent({
     if (detail.summary && !detail.summary.capabilities.artifacts)
       setOutputTarget(undefined);
   }, [detail.summary]);
+  const loadToolDetails = useMemo<ToolDetailsLoader | undefined>(() => {
+    const reader = provider.toolDetails;
+    if (!sessionId || !reader) return undefined;
+    return async (callId, signal) => {
+      const itemId = callId.slice(callId.lastIndexOf(':') + 1);
+      const detail = await reader.get(sessionId, itemId, { clientId, signal });
+      return {
+        args: detail.input ?? undefined,
+        rawOutput:
+          detail.output === null
+            ? undefined
+            : detail.output +
+              (detail.truncated ? `\n${t('managed.truncated')}` : ''),
+      };
+    };
+  }, [provider, sessionId, clientId, t]);
   const openResult = useCallback(
     (itemId: string) => {
       if (sessionId) setOutputTarget({ sessionId, itemId });
@@ -950,34 +970,36 @@ function ManagedSessionsContent({
             />
           ) : (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
-              <MessageList
-                messages={messages}
-                onToolResultOpen={
-                  summary?.capabilities.artifacts && provider.toolResults
-                    ? openResult
-                    : undefined
-                }
-                pendingApproval={pendingApproval}
-                sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
-                loadingTranscript={detail.loading}
-                isResponding={Boolean(active)}
-                activeTurnStartedAt={active ? summary?.admittedAt : undefined}
-                hasOlderHistory={Boolean(detail.olderCursor)}
-                loadingOlderHistory={detail.loadingOlder}
-                onLoadOlderHistory={detail.loadOlder}
-                workspaceCwd={summary?.workspaceCwd}
-                hideSessionTimeline
-                welcomeHeader={
-                  messages.length === 0 && !detail.loading ? (
-                    <WelcomeHeader
-                      version=""
-                      cwd={summary?.workspaceCwd ?? ''}
-                      currentModel={displayedModel}
-                      currentMode=""
-                    />
-                  ) : undefined
-                }
-              />
+              <ToolDetailsContext.Provider value={loadToolDetails}>
+                <MessageList
+                  messages={messages}
+                  onToolResultOpen={
+                    summary?.capabilities.artifacts && provider.toolResults
+                      ? openResult
+                      : undefined
+                  }
+                  pendingApproval={pendingApproval}
+                  sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
+                  loadingTranscript={detail.loading}
+                  isResponding={Boolean(active)}
+                  activeTurnStartedAt={active ? summary?.admittedAt : undefined}
+                  hasOlderHistory={Boolean(detail.olderCursor)}
+                  loadingOlderHistory={detail.loadingOlder}
+                  onLoadOlderHistory={detail.loadOlder}
+                  workspaceCwd={summary?.workspaceCwd}
+                  hideSessionTimeline
+                  welcomeHeader={
+                    messages.length === 0 && !detail.loading ? (
+                      <WelcomeHeader
+                        version=""
+                        cwd={summary?.workspaceCwd ?? ''}
+                        currentModel={displayedModel}
+                        currentMode=""
+                      />
+                    ) : undefined
+                  }
+                />
+              </ToolDetailsContext.Provider>
             </div>
           )}
           {pending && !busy && (

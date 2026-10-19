@@ -9,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
@@ -1076,46 +1075,6 @@ class ManagedAgentServerIntegrationTest {
                 });
         assertThat(store.materializeNextBatch(tenant, session.sessionId(),
                 200).advanced()).isFalse();
-    }
-
-    @Test
-    void approvedInlineDetailsSurviveEventAndItemReplay() throws Exception {
-        String tenant = "inline-details-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant,
-                "CREATE_SESSION", "details-create", "digest-create",
-                "qwen-code", null, null, List.of(), null);
-        String sessionId = session.sessionId();
-        var projector = new HarnessEventProjector();
-        Map<String, Object> readInput = Map.of("file_path", "/tmp/example.diff");
-        String diagnostic = "Hosted file tools require file_path relative to the saved Session working directory.";
-        Map<String, Object> shellInput = Map.of("command", "printf 'saved output'");
-        List<Map<String, Object>> updates = List.of(
-                Map.of("sessionUpdate", "tool_call_update", "toolCallId", "read-1",
-                        "name", "read_file", "status", "failed", "input", readInput, "output", diagnostic),
-                Map.of("sessionUpdate", "tool_call_update", "toolCallId", "shell-1",
-                        "name", "run_shell_command", "status", "completed", "input", shellInput, "output", "saved output"));
-        long id = 0;
-        for (Map<String, Object> update : updates) {
-            id++;
-            var source = new HarnessConnector.SourceEvent(id, "managed_journal_event",
-                    Map.of("update", update), "prompt", Map.of());
-            ProjectedEvent projection = projector.project(source, "turn-details", true);
-            store.appendPublicEventIfAbsent(tenant, sessionId, "turn-details",
-                    projection.type(), projection.data(), false, "details-" + id);
-        }
-        long last = store.requireSession(tenant, sessionId).lastSequence();
-        SnapshotRecord snapshot = awaitSnapshotCovering(tenant, sessionId, last);
-        assertThat(snapshot.items()).filteredOn(item -> "tool_call".equals(item.type()))
-                .extracting(ItemRecord::attributes)
-                .satisfiesExactly(
-                        read -> assertThat(read).containsEntry("input", readInput).containsEntry("output", diagnostic),
-                        shell -> assertThat(shell).containsEntry("input", shellInput).containsEntry("output", "saved output"));
-        List<EventRecord> first = store.findEvents(tenant, sessionId, 0, 100);
-        assertThat(store.findEvents(tenant, sessionId, 0, 100)).isEqualTo(first);
-        assertThat(first).filteredOn(event -> "item.tool_call.updated".equals(event.type()))
-                .extracting(event -> event.data().get("output"))
-                .containsExactly(diagnostic, "saved output");
-        assertThat(store.materializeNextBatch(tenant, sessionId, 100).advanced()).isFalse();
     }
 
     @Test
