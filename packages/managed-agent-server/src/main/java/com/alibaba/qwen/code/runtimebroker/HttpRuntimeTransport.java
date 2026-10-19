@@ -22,6 +22,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * HTTP client for private Runtime attestation, context and tool routes.
@@ -40,6 +41,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     static final String EXECUTE_PATH = "/internal/managed-runtime/v2/execute";
     static final String STATUS_PATH = "/internal/managed-runtime/v2/status";
     static final String CANCEL_PATH = "/internal/managed-runtime/v2/cancel";
+    static final String ACKNOWLEDGE_PATH = "/internal/managed-runtime/v2/acknowledge";
     static final String V3_EXECUTE_PATH = "/internal/managed-runtime/v3/execute";
     static final String V3_STATUS_PATH = "/internal/managed-runtime/v3/status";
     static final String V3_CANCEL_PATH = "/internal/managed-runtime/v3/cancel";
@@ -81,6 +83,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private final HttpClient client;
     private final Duration requestTimeout;
+    private final Function<RuntimeLease, URI> endpointResolver;
 
     public HttpRuntimeTransport() {
         this(HttpClient.newBuilder()
@@ -94,7 +97,17 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         this(client, REQUEST_TIMEOUT);
     }
 
+    public HttpRuntimeTransport(Function<RuntimeLease, URI> endpointResolver) {
+        this(HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                .followRedirects(HttpClient.Redirect.NEVER).connectTimeout(Duration.ofSeconds(5)).build(),
+                REQUEST_TIMEOUT, endpointResolver);
+    }
+
     HttpRuntimeTransport(HttpClient client, Duration requestTimeout) {
+        this(client, requestTimeout, RuntimeLease::getEndpoint);
+    }
+
+    HttpRuntimeTransport(HttpClient client, Duration requestTimeout, Function<RuntimeLease, URI> endpointResolver) {
         if (client == null) {
             throw new IllegalArgumentException("client is required");
         }
@@ -104,6 +117,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         }
         this.client = client;
         this.requestTimeout = requestTimeout;
+        this.endpointResolver = java.util.Objects.requireNonNull(endpointResolver, "endpointResolver");
     }
 
     @Override
@@ -380,10 +394,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
                 || !request.isManagedContext()
                 || !request.getScope().equals(session.getScope())
-                || !HarnessOwnership.sharesRuntimeSessions(request)
-                        && !session.getHarnessSessionId().equals(request.getIsolationKey())
-                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
-                        session.getScope().getCapabilityDigest())
+                || !(ResidentWorkspaceProfile.selects(request)
+                        || (HarnessOwnership.sharesRuntimeSessions(request)
+                                || session.getHarnessSessionId().equals(request.getIsolationKey()))
+                            && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(session.getScope().getCapabilityDigest()))
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
             throw new IllegalArgumentException("Workspace activation identity is invalid");
@@ -394,7 +408,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         body.put("sessionId", session.getRuntimeSessionId());
         body.put("contextDigest", binding.getContextDigest());
         body.put("contextConfigRef", binding.getContextConfigRef());
-        body.put("profile", WorkspaceExecutionProfile.PROFILE);
+        body.put("profile", ResidentWorkspaceProfile.selects(request)
+                ? ResidentWorkspaceProfile.PROFILE : WorkspaceExecutionProfile.PROFILE);
         Map<String, Object> expected = new LinkedHashMap<>(body);
         expected.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
         expected.put("runtimeIncarnation", seed.getGatewayIncarnation());
@@ -448,6 +463,26 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     Map<String, Object> result =
                             (Map<String, Object>) response.get("result");
                     return result;
+                });
+    }
+
+    @Override
+    public CompletionStage<Void> acknowledgeV2(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> reference) {
+        if (lease == null || session == null || ProviderRuntimeProtocol.isReference(reference)) {
+            throw new IllegalArgumentException("Original Tool v2 identity is required");
+        }
+        Map<String, Object> identity = referenceIdentity(reference);
+        if (!session.getRuntimeSessionId().equals(identity.get("sessionId"))) {
+            throw new IllegalArgumentException("Tool v2 acknowledgement belongs to another Session");
+        }
+        return post(lease, ACKNOWLEDGE_PATH,
+                encodeToolRequest(Map.of("protocolVersion", 2, "reference", identity), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> {
+                    Map<String, Object> response = parseToolResponse(bytes, "acknowledge");
+                    if (!Set.of("acknowledged", "unknown").contains(response.get("state"))) {
+                        throw protocol("Managed Runtime did not acknowledge the persisted Tool v2 result.");
+                    }
                 });
     }
 
@@ -629,12 +664,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         }
         Object delivery = receipt.get("deliveryStatus");
         Object revision = receipt.get("historyRevision");
+        boolean noCaptureReceipt = receipt.get("manifest") == null && revision == null;
         if (!(delivery instanceof String status)
                 || !("committed".equals(status) || "blocked".equals(status))
                 || ("committed".equals(status)
-                    ? !(revision instanceof Number number)
+                    ? !noCaptureReceipt && (!(revision instanceof Number number)
                             || new BigDecimal(number.toString()).compareTo(BigDecimal.ONE) < 0
-                            || new BigDecimal(number.toString()).stripTrailingZeros().scale() > 0
+                            || new BigDecimal(number.toString()).stripTrailingZeros().scale() > 0)
                     : revision != null)) {
             throw new IllegalArgumentException("receipt decision is invalid");
         }
@@ -1152,7 +1188,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     private CompletionStage<byte[]> post(RuntimeLease lease, String path,
             byte[] encoded, int responseLimit, String expectedIncarnation) {
         HttpRequest httpRequest = HttpRequest.newBuilder(
-                lease.getEndpoint().resolve(path))
+                endpoint(lease).resolve(path))
                 .timeout(requestTimeout)
                 .header("Authorization", "Bearer " + lease.getToken())
                 .header("Cache-Control", "no-store")
@@ -1258,14 +1294,17 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 case "managed_runtime_provider_invalid", "managed_runtime_tool_invalid" -> 400;
                 case "managed_runtime_identity_conflict", "managed_context_unavailable",
                         "managed_context_conflict", "managed_runtime_provider_operation_failed",
-                        "managed_runtime_provider_incompatible", "managed_runtime_owner_hold_pending" -> 409;
+                        "managed_runtime_provider_incompatible", "managed_runtime_owner_hold_pending",
+                        "managed_runtime_release_timeout" -> 409;
                 case "managed_runtime_provider_too_large" -> 413;
                 case "managed_runtime_provider_unsupported" -> 501;
                 default -> 0;
             };
             if (response.statusCode() == expectedStatus) {
+                boolean retryable = "managed_runtime_owner_hold_pending".equals(code)
+                        || "managed_runtime_release_timeout".equals(code);
                 return error(expectedStatus, code,
-                        BrokerValues.requireWellFormed(message, "provider error"), false);
+                        BrokerValues.requireWellFormed(message, "provider error"), retryable);
             }
         } catch (RuntimeBrokerException | IllegalArgumentException ignored) {
             // Unrecognized responses supply no provider-specific error evidence.
@@ -1292,9 +1331,15 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 if (fields.keySet().equals(Set.of("code", "error"))
                         && fields.get("error") instanceof String
                         && ("managed_context_unavailable".equals(code)
-                                || "managed_context_conflict".equals(code))) {
+                                || "managed_context_conflict".equals(code)
+                                || "managed_runtime_owner_hold_pending".equals(code)
+                                || "managed_runtime_release_timeout".equals(code))) {
+                    boolean retryable = "managed_runtime_owner_hold_pending".equals(code)
+                            || "managed_runtime_release_timeout".equals(code);
                     return error(409, (String) code,
-                            "Managed Session context is unavailable or conflicts.", false);
+                            retryable ? "Managed Runtime Session still owns work."
+                                    : "Managed Session context is unavailable or conflicts.",
+                            retryable);
                 }
             } catch (RuntimeBrokerException ignored) {
                 // An unrecognized error body supplies no Session-scoped evidence.
@@ -1332,7 +1377,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     private HttpRequest request(RuntimeLease lease, Map<String, Object> body) {
-        URI target = lease.getEndpoint().resolve(PATH);
+        URI target = endpoint(lease).resolve(PATH);
         return HttpRequest.newBuilder(target)
                 .timeout(requestTimeout)
                 .header("Authorization", "Bearer " + lease.getToken())
@@ -1344,6 +1389,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 .POST(HttpRequest.BodyPublishers.ofByteArray(
                         JsonCodec.encode(body)))
                 .build();
+    }
+
+    private URI endpoint(RuntimeLease lease) {
+        return BrokerValues.requireOrigin(endpointResolver.apply(lease), "transport endpoint");
     }
 
     private static RuntimeAttestation parse(HttpResponse<BoundedBody> response,

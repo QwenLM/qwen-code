@@ -1,10 +1,14 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
+import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,13 +16,19 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -30,6 +40,7 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
@@ -191,7 +202,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     }
 
     @Test
-    void ordinaryAuthorizationKeepsFenceLocksInsideTheTenant() throws Exception {
+    void ordinaryAuthorizationFencesOnlyWithinOneSession() throws Exception {
         var fixture = fixture();
         var journal = new ManagedSessionStore(fixture.jdbc);
         String token = "w".repeat(32);
@@ -207,7 +218,8 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         var originalRequest = new AuthorizeLifecycleRequest("workspace", "writer", original.writerGeneration());
         var neighborRequest = new AuthorizeLifecycleRequest("workspace", "writer", neighbor.writerGeneration());
         var otherRequest = new AuthorizeLifecycleRequest("workspace", "writer", other.writerGeneration());
-        try (var pool = Executors.newFixedThreadPool(2)) {
+        var sameSession = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>>();
+        try (var pool = Executors.newFixedThreadPool(3)) {
             var entered = new CountDownLatch(2);
             var sameTenant = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<?>>();
             fixture.transactions.executeWithoutResult(ignored -> {
@@ -224,13 +236,24 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                 });
                 try {
                     assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
-                    assertThrows(TimeoutException.class, () -> sameTenant.get().get(100, TimeUnit.MILLISECONDS));
+                    // Ordinary admissions fence per Session (drain + head) and
+                    // never queue on tenant-wide rows: neither the sibling
+                    // session of the same tenant nor another tenant's session
+                    // waits on the in-flight authorisation above (#13800).
+                    sameTenant.get().get(5, TimeUnit.SECONDS);
                     differentTenant.get(5, TimeUnit.SECONDS);
+                    // The fence that stays is per Session: a second ordinary
+                    // authorisation of this same Session queues behind the
+                    // open one until it commits.
+                    sameSession.set(pool.submit(() -> fixture.transactions.executeWithoutResult(transaction ->
+                            journal.authorizeOrdinary("tenant", fixture.session, token, originalRequest))));
+                    MySqlLockProbe.awaitLockWaits(fixture.jdbc, schema, 1, "the same-Session authorisation");
+                    assertThat(sameSession.get()).isNotDone();
                 } catch (Exception error) {
                     throw new IllegalStateException(error);
                 }
             });
-            sameTenant.get().get(5, TimeUnit.SECONDS);
+            sameSession.get().get(10, TimeUnit.SECONDS);
         }
     }
 
@@ -252,5 +275,143 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation("tenant", fixture.session,
                 operation.operationId(), "worker", operation.claimGeneration(), true))).isTrue();
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retirement_operation_id IS NOT NULL", Integer.class)).isOne();
+    }
+
+    /**
+     * The lifecycle admission's composition (#13800 R2-3): its plain reads
+     * pin the REPEATABLE READ snapshot before the head lock is granted, and
+     * a writer commits a revision in between. The idle check must decide on
+     * that revision (here a still-pending Turn, so turn_active), never
+     * refuse an admission it could have read as workspace_lifecycle_journal_unverified,
+     * and never admit over it. Removing the locking rescan turns the direct
+     * arm into journal_unverified; removing the head re-verification turns
+     * it into a silent admission.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void idleJournalCheckReadsARevisionItsSnapshotCannotSee(boolean throughAdmission) throws Exception {
+        var fixture = fixture();
+        var store = new ManagedSessionStore(fixture.jdbc);
+        var journal = fixture.transactions.execute(ignored ->
+                new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
+        var txManager = new DataSourceTransactionManager(source);
+        // Declared rather than inherited: under a server defaulted to READ
+        // COMMITTED every statement gets a fresh read view and the snapshot
+        // below would see the late revision anyway.
+        var definition = new DefaultTransactionDefinition();
+        definition.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        var snapshot = txManager.getTransaction(definition);
+        try {
+            // Pin this REPEATABLE READ transaction's read view with a plain
+            // consistent read, as the admission's replay and open-operation
+            // reads do, before the writer appends behind the head's lock.
+            fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head"
+                    + " WHERE tenant_id = ? AND session_id = ?", Long.class, "tenant", fixture.session);
+            commitPendingTurn(fixture, journal);
+            // The head's revision is ahead of this transaction's read view.
+            assertThatThrownBy(() -> {
+                if (throughAdmission) {
+                    fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.DELETE, "owner",
+                            "a".repeat(64), "operation", "digest", true, 1);
+                } else {
+                    WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json,
+                            "tenant", fixture.session);
+                }
+            }).isInstanceOfSatisfying(ApiException.class, error ->
+                    assertThat(error.getCode()).isEqualTo("turn_active"));
+        } finally {
+            txManager.rollback(snapshot);
+        }
+    }
+
+    /** A journal that falls short of its own head even when read as committed now fails closed. */
+    @Test
+    void idleJournalCheckFailsClosedOnAJournalShortOfItsHead() throws Exception {
+        var fixture = fixture();
+        var store = new ManagedSessionStore(fixture.jdbc);
+        var journal = fixture.transactions.execute(ignored ->
+                new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
+        commitPendingTurn(fixture, journal);
+        fixture.jdbc.update("UPDATE ma_session_head SET journal_revision = journal_revision + 1"
+                + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                "tenant", fixture.session);
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored ->
+                WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json, "tenant", fixture.session)))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("workspace_lifecycle_journal_unverified"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"accepted-settled", "other-settled", "accepted-pending"})
+    void unadmittedCancellationUsesTheFencedJournalSnapshot(String cut) throws Exception {
+        var fixture = fixture();
+        var store = new ManagedSessionStore(fixture.jdbc);
+        fixture.transactions.executeWithoutResult(ignored ->
+                new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
+        String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",
+                "ambiguous-prompt", "digest", fixture.session, List.of(), "payload", "owner").turnId());
+        fixture.transactions.execute(ignored -> fixture.store.claimTurn("tenant", fixture.session, turn,
+                "dispatch-owner", Duration.ofMinutes(1)));
+        fixture.transactions.executeWithoutResult(ignored -> fixture.store.markSubmissionAttempted("tenant", fixture.session,
+                turn, "dispatch-owner"));
+        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+                "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
+        String prompt = "other-settled".equals(cut) ? "other-prompt"
+                : fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
+        var request = fixture.promptCommit(prompt, !"accepted-pending".equals(cut));
+        var manager = new DataSourceTransactionManager(source);
+        var definition = new DefaultTransactionDefinition();
+        definition.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        var snapshot = manager.getTransaction(definition);
+        boolean cancelled;
+        try {
+            // Match the plain Turn read that pins the cancellation transaction before its head fence.
+            fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
+            try (var writer = Executors.newSingleThreadExecutor()) {
+                writer.submit(() -> fixture.transactions.executeWithoutResult(ignored -> {
+                    store.commit("tenant", fixture.session, "extension-writer-token-0123456789", request);
+                    store.sealWriter("tenant", fixture.session, "extension-writer-token-0123456789",
+                            new ManagedSessionStoreModels.SealWriterRequest("workspace", "writer-extension", 1));
+                })).get(30, TimeUnit.SECONDS);
+            }
+            assertThat(fixture.jdbc.queryForObject("SELECT MAX(journal_revision) FROM ma_session_journal_tx"
+                    + " WHERE tenant_id = ? AND session_id = ?", Long.class, "tenant", fixture.session)).isEqualTo(1L);
+            cancelled = fixture.store.cancelUnadmittedTurn("tenant", fixture.session, turn, "dispatch-owner");
+            manager.commit(snapshot);
+        } catch (Exception | AssertionError failure) {
+            if (!snapshot.isCompleted()) {
+                manager.rollback(snapshot);
+            }
+            throw failure;
+        }
+        boolean expected = "other-settled".equals(cut);
+        var result = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
+        assertAll(cut,
+                () -> assertThat(cancelled).as("cancellation decision").isEqualTo(expected),
+                () -> assertThat(result.status()).isEqualTo(expected ? "CANCELLED" : "CANCELLING"),
+                () -> assertThat(result.submissionAttempted()).as("submission attempted").isEqualTo(!expected),
+                () -> assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE event_type = 'turn.cancelled'",
+                        Integer.class)).as("durable cancellation events").isEqualTo(expected ? 1 : 0));
+    }
+
+    /** Commits, from another thread and transaction, a revision that leaves a Turn's input pending. */
+    private static void commitPendingTurn(Fixture fixture, ExtensionRecordJournal journal) throws Exception {
+        var templates = ManagedHookRecordContractTest.fixtures().get("templates");
+        var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2, sha256("{}"), "e30=");
+        ObjectNode registration = templates.get("hook_registration").deepCopy();
+        registration.withObject("/catalogRef").put("digest", data.digest());
+        var input = new ManagedSessionStoreModels.CommitResource("witness-input", "managed-input", 1, 2,
+                sha256("{}"), "e30=");
+        var request = journal.requestDomainWithInput("witness-input", "hook_registration", registration,
+                List.of(data), "witness-turn", input);
+        try (var writer = Executors.newSingleThreadExecutor()) {
+            writer.submit(() -> fixture.transactions.executeWithoutResult(ignored -> journal.commit(request)))
+                    .get(30, TimeUnit.SECONDS);
+        }
+    }
+
+    private static String sha256(String value) throws NoSuchAlgorithmException {
+        return HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
     }
 }

@@ -28,19 +28,30 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
+        return createRequest(scope, isolationKey, isolationKey);
+    }
+
+    @Override
+    public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey, String harnessSessionId) {
         if (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
             return delegate.createRequest(scope, isolationKey);
         }
-        var resolved = resolver.resolve(isolationKey, scope.getLifecycleAuthority());
+        var resolved = resolver.resolve(harnessSessionId, scope.getLifecycleAuthority());
         if (!resolved.scope().equals(scope)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        return new RuntimeProvisionRequest(scope, isolationKey, kind(), resolved.binding().getStorageId());
+        var selected = delegate.createRequest(scope, isolationKey);
+        return new RuntimeProvisionRequest(scope, isolationKey, selected.getProvisionerKind(), resolved.binding().getStorageId());
     }
 
     @Override
     public String kind() {
         return delegate.kind();
+    }
+
+    @Override
+    public boolean supportsKind(String kind) {
+        return delegate.supportsKind(kind);
     }
 
     @Override
@@ -71,11 +82,17 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         if (!request.isManagedContext() || !executionStore.verifiedRecoveryEnabled()) {
             return;
         }
-        var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
-        if (!resolved.scope().equals(request.getScope())
-                || !resolved.binding().getStorageId().equals(request.getStorageId())) {
-            throw WorkspaceExecutionStore.unavailable();
+        if (request.getIsolationKey() != null) {
+            var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
+            if (!resolved.scope().equals(request.getScope())
+                    || !resolved.binding().getStorageId().equals(request.getStorageId())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return;
         }
+        // A shared (Workspace-isolated) request has no owning Session: the
+        // workspace/storage mount mapping itself must still be current.
+        resolver.requireMountCurrent(request.getScope(), request.getStorageId());
     }
 
     @Override
@@ -87,6 +104,11 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     @Override
     public boolean supportsDrainedStop() {
         return delegate.supportsDrainedStop();
+    }
+
+    @Override
+    public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        return delegate.supportsDrainedStop(binding);
     }
 
     @Override

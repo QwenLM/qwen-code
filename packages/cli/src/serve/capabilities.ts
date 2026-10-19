@@ -165,6 +165,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
+  session_archive_idle_guard: { since: 'v1' },
   session_storage_conflict_repair: { since: 'v1' },
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
@@ -244,6 +245,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_settings_toggle: { since: 'v1' },
   workspace_skill_settings_batch_toggle: { since: 'v1' },
+  workspace_session_refresh: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   // Extension activation commits do not refresh active sessions. Clients that
   // need immediate runtime application must submit the independent refresh

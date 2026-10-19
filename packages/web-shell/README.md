@@ -79,6 +79,12 @@ Local Control，以及多主机位置。面板开关遵循 `header.items`，并�
 首条消息创建会话时迁移面板并删除草稿。草稿与会话各保留最近 20 份面板存档，
 草稿不会挤占会话的额度。
 
+源码高亮支持 33 个常用语言键及 GitHub 浅色/深色主题，其他语言显示原文。
+语言清单维护于 [`pierre-resources.ts`](client/components/artifacts/pierre-resources.ts)，
+选择策略与补丁移除条件见[后续设计](../../docs/design/web-shell-files-followups.zh-CN.md)。
+文件树移除名称中的控制字符，保留普通空格；筛选同时支持显示名称和真实路径。
+修改 Pierre 补丁并重新应用后，开发时执行 `npm run dev -- --force` 清除预构建缓存。
+
 Excel（`.xlsx`）支持内联预览，也可通过右键「预览」在独立页签打开；重复打开同一文件复用页签，其他 Excel 格式仍仅支持下载。
 文件树源码预览在读取前限制为 4 MiB，更大的文件请通过右键菜单下载。
 导入失败仅在凭据可恢复的独立页面中提供重载；嵌入宿主或仅内存凭据时提供关闭文件，保留对话和宿主页面。
@@ -495,6 +501,46 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 - 已完成的 assistant 消息支持复制；具备持久化 checkpoint 时还支持分支。
 - 终态 turn error 支持复制显示的错误文本。重试入口保持独立，错误轮次不支持分支。
+
+## 审批模式白名单
+
+`settings.json` 可限制 Web Shell 提供的执行审批模式：
+
+```json
+{
+  "ui": {
+    "allowedApprovalModes": ["default", "auto"]
+  }
+}
+```
+
+嵌入宿主可通过同名 Prop 配置，适用于 `WebShell` 和 `WebShellWithProviders`：
+
+```tsx
+<WebShellWithProviders
+  {...connectionProps}
+  allowedApprovalModes={['default', 'auto']}
+/>
+```
+
+宿主显式传入时优先于设置，包括空数组。不配置时仍显示全部四种模式：
+`default`、`auto-edit`、`auto`、`yolo`。不同设置作用域的列表使用替换合并，
+不拼接；该键仅在用户、系统等操作者作用域生效，仓库工作区设置中的值会被忽略并警告。
+支持导入 `WebShellApprovalMode` 类型。
+
+主会话、分屏和侧边会话均受控：宿主 Prop 在各会话生效；未传时，各会话读取所属
+工作区的设置接口（生效值仅来自操作者作用域）。下拉菜单、审批弹窗、快捷键循环和自定义页脚使用同一列表，保留内置顺序，
+忽略重复值、未知值和 `plan`。空数组禁用下拉入口，弹窗无选项，快捷键不切换；
+仅有一个且已处于该模式时，快捷键也不重复切换。非数组的错误设置回退到默认列表。
+
+宿主 Prop 变化会更新打开的菜单和弹窗；settings.json 的编辑在下次加载
+Web Shell 时生效。配置变化不会自动改变当前会话模式；当前模式被隐藏时，
+入口仍显示真实模式，下一次快捷键切换到列表第一项。Plan 开关独立，不受白名单影响。
+直接通过 Web Shell 斜杠命令选择隐藏模式也不会切换。
+
+这是界面选项配置，不是后端权限约束，其他客户端和 daemon API 仍可切换模式。
+该设置不在浏览器设置编辑器显示，请编辑配置文件；设置加载前使用默认列表，
+独立会话无法读取工作区设置时可使用宿主 Prop。
 
 ## Props
 

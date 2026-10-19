@@ -160,7 +160,7 @@ public class WebShellAgentController {
                     "unsupported_feature",
                     "Standalone Phase 1 has no environment templates.");
         }
-        if (selection == null && request.approvalMode() != null) {
+        if (selection == null && (request.approvalMode() != null || request.planMode() != null)) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "unsupported_approval_mode",
                     "Approval mode selection requires a bound Workspace.");
@@ -176,7 +176,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode()));
+                        request.input(), selection, request.approvalMode(), request.planMode()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -197,7 +197,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.input()));
+                request.input(), request.admissionProfile()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -210,7 +210,7 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(service.cancelTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
-                request.turnId()));
+                request.turnId(), request.admissionProfile()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -265,6 +265,21 @@ public class WebShellAgentController {
                         request.expectedContextRevision()));
     }
 
+    @PostMapping("/session-approval/query")
+    public ApiModels.WebShellSessionApproval querySessionApproval(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellSessionApprovalRequest request) {
+        return service.queryWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId());
+    }
+
+    @PostMapping("/session-approval/change")
+    public ApiModels.WebShellApprovalChangeResult changeSessionApproval(TenantContext tenant,
+            @Valid @RequestBody ApiModels.WebShellChangeApprovalRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        return service.changeWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.idempotencyKey(), request.approvalMode(), request.expectedRevision(), request.planMode());
+    }
+
     @PostMapping("/session-models/query")
     public WebShellSessionModels querySessionModels(TenantContext tenant,
             @Valid @RequestBody WebShellSessionModelsRequest request) {
@@ -291,6 +306,7 @@ public class WebShellAgentController {
     private static WebShellAdmission webShell(CommandAdmission admission) {
         return new WebShellAdmission(admission.sessionId(),
                 admission.turnId(), admission.status(),
-                admission.replayed());
+                admission.replayed(), admission.operationId(),
+                admission.admissionStage(), admission.deliveryState());
     }
 }
