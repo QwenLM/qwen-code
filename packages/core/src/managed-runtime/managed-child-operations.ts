@@ -10,9 +10,13 @@ import {
   type ChildCompletion,
   type ChildSessionRun,
   type ChildWorkspaceMode,
+  type WorkflowRun,
 } from './managed-child-run-record.js';
 import type { ChildAcceptance } from './managed-child-acceptance-record.js';
-import type { DefinitionPin } from './managed-extension-record.js';
+import {
+  parseDefinitionPin,
+  type DefinitionPin,
+} from './managed-extension-record.js';
 import {
   ManagedSessionRecordError,
   type ManagedSessionDurableRef,
@@ -50,16 +54,31 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
 
 /**
  * The workspace isolation policies a launch may name. `worktree` (#13753
- * I2) also needs a host that serves child Workspaces; `snapshot` waits for
- * I3.
+ * I2) also needs a host that serves child Workspaces, and `snapshot` (I3)
+ * one that serves read-only snapshots as well.
  */
 export const MANAGED_CHILD_ADMITTED_WORKSPACE_MODES: readonly ChildWorkspaceMode[] =
-  Object.freeze(['shared', 'worktree']);
+  Object.freeze(['shared', 'worktree', 'snapshot']);
 
 export interface ChildLaunchEnvelope {
   readonly description: string;
   readonly prompt: string;
   readonly definition: DefinitionPin;
+}
+
+/**
+ * The `inputRef` content of a `workflow` launch (#13803 decision 3): the
+ * workflow to run and its arguments, as the sibling closed shape of
+ * {@link ChildLaunchEnvelope}. The pin repeats the record's `run.definition`
+ * by construction — one computation site feeds both — and the script bytes
+ * it digests are the bytes the child executes.
+ */
+export interface WorkflowLaunchEnvelope {
+  readonly definition: DefinitionPin;
+  /** The deterministic JS body the ordinary path's inline mode runs. */
+  readonly script: string;
+  /** The structured value bound to the script's `args` global; null when absent. */
+  readonly args: unknown;
 }
 
 /**
@@ -148,6 +167,106 @@ export function decodeChildLaunchEnvelope(bytes: Buffer): ChildLaunchEnvelope {
   });
 }
 
+/**
+ * Encodes one workflow launch envelope: defined at commit time and immutable
+ * for the whole chain, so the bytes here are the chain's only launch evidence.
+ */
+export function encodeWorkflowLaunchEnvelope(
+  envelope: WorkflowLaunchEnvelope,
+): Buffer {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(
+      {
+        definition: envelope.definition,
+        script: envelope.script,
+        args: envelope.args ?? null,
+      },
+      // JSON.stringify silently DROPS function- and symbol-valued members
+      // and rewrites a non-finite number as null instead of throwing;
+      // without this replacer the encoder could emit bytes its own decoder
+      // refuses, or (worse) launch evidence that carries other arguments
+      // than the caller passed.
+      (_key, value: unknown) => {
+        if (
+          typeof value === 'function' ||
+          typeof value === 'symbol' ||
+          (typeof value === 'number' && !Number.isFinite(value))
+        ) {
+          throw new ManagedSessionRecordError(
+            'Workflow launch arguments must be JSON values (byte_limit).',
+          );
+        }
+        return value;
+      },
+    );
+  } catch (cause) {
+    if (cause instanceof ManagedSessionRecordError) {
+      throw cause;
+    }
+    throw new ManagedSessionRecordError(
+      'Workflow launch arguments must be JSON-serializable (byte_limit).',
+    );
+  }
+  const bytes = Buffer.from(serialized, 'utf8');
+  if (bytes.byteLength > MANAGED_CHILD_LIMITS.maxEnvelopeBytes) {
+    throw new ManagedSessionRecordError(
+      `Workflow launch envelope exceeds ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes (byte_limit).`,
+    );
+  }
+  return bytes;
+}
+
+/**
+ * Decodes one workflow launch envelope, as the child Session's creation
+ * reads it. Consumers branch on the record kind, never on the envelope's
+ * shape: this closed shape answers exactly `kind: "workflow"` records.
+ */
+export function decodeWorkflowLaunchEnvelope(
+  bytes: Buffer,
+): WorkflowLaunchEnvelope {
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw new ManagedSessionRecordError(
+      'Workflow launch envelope must be JSON.',
+    );
+  }
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    throw new ManagedSessionRecordError(
+      'Workflow launch envelope must be a JSON object.',
+    );
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.join(',') !== 'args,definition,script') {
+    throw new ManagedSessionRecordError(
+      'Workflow launch envelope must have exactly definition, script and args.',
+    );
+  }
+  // The record layer's pin parser, so the envelope cannot widen a pin the
+  // run record itself would refuse.
+  const definition = parseDefinitionPin(
+    record['definition'],
+    'Workflow launch definition',
+  );
+  if (typeof record['script'] !== 'string' || record['script'].length === 0) {
+    throw new ManagedSessionRecordError(
+      'Workflow launch script must be non-empty text.',
+    );
+  }
+  return Object.freeze({
+    definition,
+    script: record['script'],
+    args: record['args'] as unknown,
+  });
+}
+
 /** The reason a launch admission refuses, in the H0b quota vocabulary. */
 export type ChildAdmissionRefusal =
   | 'closing'
@@ -174,12 +293,19 @@ export function admitChildLaunch(params: {
   readonly workspaceMode: ChildWorkspaceMode;
   /** The control plane serves child Workspaces, so `worktree` can run. */
   readonly childWorkspaces: boolean;
+  /**
+   * The control plane also serves read-only snapshots, so `snapshot` can
+   * run; it counts only beside `childWorkspaces`.
+   */
+  readonly childSnapshots: boolean;
   readonly sameDefinition: boolean;
 }): ChildAdmission {
   if (params.closing) return { admitted: false, reason: 'closing' };
   if (
     !MANAGED_CHILD_ADMITTED_WORKSPACE_MODES.includes(params.workspaceMode) ||
-    (params.workspaceMode === 'worktree' && !params.childWorkspaces)
+    (params.workspaceMode === 'worktree' && !params.childWorkspaces) ||
+    (params.workspaceMode === 'snapshot' &&
+      !(params.childWorkspaces && params.childSnapshots))
   ) {
     return { admitted: false, reason: 'workspace_mode' };
   }
@@ -254,6 +380,30 @@ export function childLaunchBody(params: {
 }
 
 /**
+ * Revision 1 (`startChildRun` of a `workflow` launch): the launch intent
+ * before any side effect. Structurally identical to {@link childLaunchBody}
+ * except the kind and the pin's presence from this opening revision — the
+ * contract refuses a workflow chain whose first revision lacks the pin
+ * (#13803 K3, H4c's parse rule), so the builder takes the pin the admission
+ * computed from the exact script bytes the envelope carries.
+ */
+export function workflowLaunchBody(params: {
+  readonly childRunId: string;
+  readonly ownerScopeId: string;
+  readonly rootSessionId: string;
+  readonly completion: ChildCompletion;
+  readonly inputRef: ManagedSessionDurableRef;
+  readonly workingDirectory: string;
+  readonly executionCallId: string;
+  readonly definition: DefinitionPin;
+}): WorkflowRun {
+  return Object.freeze({
+    ...childLaunchBody({ ...params, workspaceMode: 'shared' }),
+    kind: 'workflow',
+  });
+}
+
+/**
  * `continueChildRun` (H4d): the launch intent of a new run that continues a
  * completed one. It keeps the predecessor's kind, scope, tree, workspace and
  * definition — the commit-time rules refuse anything else — and carries its
@@ -291,9 +441,9 @@ export function childContinuationBody(
 
 /** Revision 2: the control plane admitted the idempotent creation. */
 export function childDispatchBody(
-  previous: ChildAgentRun,
+  previous: ChildSessionRun,
   params: { readonly dispatchId: string; readonly runtime: ChildRunBinding },
-): ChildAgentRun {
+): ChildSessionRun {
   return Object.freeze({
     ...previous,
     run: Object.freeze({
@@ -308,9 +458,9 @@ export function childDispatchBody(
 
 /** Revision 3: the child Session's Harness is confirmed live. */
 export function childAttachBody(
-  previous: ChildAgentRun,
+  previous: ChildSessionRun,
   params: { readonly childSessionId: string },
-): ChildAgentRun {
+): ChildSessionRun {
   return Object.freeze({
     ...previous,
     childSessionId: params.childSessionId,
@@ -324,12 +474,12 @@ export function childAttachBody(
 /** `commitChildResult`: the unique logical terminal result, with the
  * parent-held copies and the delivery handed to accepting in one step. */
 export function childSettleCompletedBody(
-  previous: ChildAgentRun,
+  previous: ChildSessionRun,
   params: {
     readonly resultRef: ManagedSessionDurableRef;
     readonly terminalReceiptRef: ManagedSessionDurableRef;
   },
-): ChildAgentRun {
+): ChildSessionRun {
   return Object.freeze({
     ...previous,
     stopReason: 'completed',
@@ -347,7 +497,7 @@ export function childSettleCompletedBody(
 /** Whether a settlement's naming of the minted Session is replay-safe:
  * the same id restates, a different one conflicts, never overwrites. */
 function adoptChildSessionId(
-  previous: ChildAgentRun,
+  previous: ChildSessionRun,
   childSessionId: string | undefined,
   verb: string,
 ): string | null {
@@ -369,17 +519,17 @@ function adoptChildSessionId(
  * minted — the lineage is what the close cascade and the relay owe their
  * close admissions to, and an unnamed mint would orphan it. */
 export function childFailBody(
-  previous: ChildAgentRun,
+  previous: ChildSessionRun,
   params: {
     readonly stopReason: Extract<
       ChildAgentStopReason,
       'creation_failed' | 'child_failed' | 'quota_exceeded'
     >;
-    readonly reason: ChildAgentRun['run']['reason'];
+    readonly reason: ChildSessionRun['run']['reason'];
     readonly started: boolean;
     readonly childSessionId?: string;
   },
-): ChildAgentRun {
+): ChildSessionRun {
   return Object.freeze({
     ...previous,
     stopReason: params.stopReason,
@@ -399,7 +549,9 @@ export function childFailBody(
 }
 
 /** A stop was requested of the owner; set once, never cleared. */
-export function childStopRequestedBody(previous: ChildAgentRun): ChildAgentRun {
+export function childStopRequestedBody(
+  previous: ChildSessionRun,
+): ChildSessionRun {
   return Object.freeze({ ...previous, stopRequested: true });
 }
 
@@ -410,9 +562,9 @@ export function childStopRequestedBody(previous: ChildAgentRun): ChildAgentRun {
  * rides the separate {@link childStopRequestedBody} revision.
  */
 export function childCancelBody(
-  previous: ChildAgentRun,
+  previous: ChildSessionRun,
   params: { readonly started: boolean; readonly childSessionId?: string },
-): ChildAgentRun {
+): ChildSessionRun {
   return Object.freeze({
     ...previous,
     stopReason: 'stop_requested',
@@ -431,12 +583,43 @@ export function childCancelBody(
   });
 }
 
+/**
+ * #14387: the recovery-blocked settlement — the Harness generation running
+ * this child was lost and its execution's outcome stays unwitnessed (the
+ * workflow kind's in-process work leaves no witness on a new generation).
+ * The run is blocked, never ended: no stop reason, the delivery is not
+ * cancelled, and the execution stays provably unknown so a later revision
+ * could still settle the run if evidence ever arrived.
+ */
+export function childRecoveryBlockedBody(
+  previous: ChildSessionRun,
+  params: {
+    readonly reason: ChildSessionRun['run']['reason'];
+    readonly childSessionId?: string;
+  },
+): ChildSessionRun {
+  return Object.freeze({
+    ...previous,
+    childSessionId: adoptChildSessionId(
+      previous,
+      params.childSessionId,
+      'recovery_blocked',
+    ),
+    run: Object.freeze({
+      ...previous.run,
+      state: 'recovery_blocked',
+      reason: params.reason,
+      execution: 'outcome_unknown',
+    }),
+  });
+}
+
 /** One delivery step on an ended run: accepting → accepted → consumed, or
  * a pre-acceptance step into unknown (the relay's retry vocabulary). */
 export function childDeliveryBody(
-  previous: ChildAgentRun,
+  previous: ChildSessionRun,
   state: 'accepted' | 'consumed' | 'unknown',
-): ChildAgentRun {
+): ChildSessionRun {
   return Object.freeze({
     ...previous,
     run: Object.freeze({
@@ -448,7 +631,7 @@ export function childDeliveryBody(
 
 /** `acceptChildResult` revision 1: the settled, already-accepted receipt. */
 export function childAcceptanceBody(
-  child: ChildAgentRun,
+  child: ChildSessionRun,
   params: {
     readonly contentRef: ManagedSessionDurableRef;
     readonly terminalReceiptRef: ManagedSessionDurableRef;

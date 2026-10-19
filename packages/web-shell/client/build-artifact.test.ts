@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
 
@@ -131,6 +132,39 @@ describe('build artifact — package boundary', () => {
     const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
+  });
+
+  it('bundles Pierre highlighter dependencies instead of resolving the host Shiki major', () => {
+    const notices = readFileSync(resolve(DIST_DIR, '../NOTICES.txt'), 'utf8');
+    for (const name of ['diffs', 'trees', 'theming', 'theme']) {
+      expect(notices).toContain(`@pierre/${name}@`);
+    }
+    const treeAttribution = notices
+      .split('@pierre/trees@')[1]!
+      .split(
+        '============================================================',
+      )[0]!;
+    // This is the bundled tree's NOTICE credit, not a separate dependency entry.
+    expect(treeAttribution).toContain('Original license for');
+    expect(treeAttribution).toContain('headless-tree/core');
+    expect(notices).toContain('shiki@4.');
+    expect(readPackageJavascript()).not.toMatch(
+      /(?:from\s*|import\s*\()\s*["']@pierre\//,
+    );
+    const previews = readdirSync(DIST_DIR).filter((name) =>
+      /^PierreFilePreview-.*\.js$/.test(name),
+    );
+    expect(previews).toHaveLength(1);
+    const preview = readFileSync(resolve(DIST_DIR, previews[0]!), 'utf8');
+    expect(preview).not.toMatch(/from\s+["']shiki["']/);
+    expect(preview).toContain('createJavaScriptRegexEngine');
+    const hostHighlighter = readdirSync(DIST_DIR).find((name) =>
+      /^codeHighlighter-.*\.js$/.test(name),
+    );
+    expect(hostHighlighter).toBeDefined();
+    expect(readFileSync(resolve(DIST_DIR, hostHighlighter!), 'utf8')).toContain(
+      'from "shiki"',
+    );
   });
 
   it('scopes every component CSS rule to a WebShell root', () => {
@@ -476,16 +510,41 @@ describe('build artifact — transcript entry (#11031)', () => {
     // preview puts its ten excel.* strings into that same shared table in
     // both locales; its parser, worker and markup stay inside the lazily
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
-    // That is the +2,000 this branch carried over the 1,325,000 budget, so
-    // the merged ceiling is the two budgets added — 1,331,500 — rather than a
-    // fresh measurement of a merged build. The ceiling leaves a small margin
-    // around that intentional UI; re-measure and lower it if the entry gets
-    // leaner.
+    // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
+    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
+    // File-tree mutation actions are excluded from the transcript build.
+    // At 31e02ace main measures 1,330,293; the read-only artifact hook with
+    // those actions excluded measures 1,330,497, below the same ceiling.
+    // Managed home, Workspace creation, approval and model/context copy also
+    // enter the shared table. With main 17d5f774 this branch measures
+    // 1,334,173 UTF-16 units; the unchanged 1,336,000 ceiling retains 1,827
+    // units of margin. Managed interactive code remains excluded here.
+    // Approval-policy copy (#14323) measures 1,336,282 at ebf1607d8f,
+    // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
+    // increase is shared i18n copy; substituting main's table restores the
+    // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
+    // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_331_500);
+    expect(js.length).toBeLessThan(1_338_000);
+  });
+
+  it('keeps workspace mutations out of the read-only transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const method of [
+      'writeWorkspaceFile',
+      'createWorkspaceDirectory',
+      'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
+      'uploadWorkspaceFile',
+    ]) {
+      expect(packaged).toContain(method);
+      expect(transcript).not.toContain(method);
+    }
+    expect(transcript).toContain('dirList');
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
@@ -495,6 +554,20 @@ describe('build artifact — transcript entry (#11031)', () => {
     );
     expect(js).not.toContain('data-selection-copy-math');
     expect(js).not.toContain('selectionCopyListWrapper');
+  });
+
+  it('excludes Files-only messages from the transcript entry', () => {
+    const bundle = readTranscriptBundle();
+    for (const key of [
+      'files.description',
+      'files.reloadUnavailable',
+      'files.sourceTooLarge',
+    ] as const)
+      expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -552,6 +625,11 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js.includes('managed.tasks.')).toBe(false);
   });
 
+  it('keeps remote Workspace registration copy in the interactive entry', () => {
+    expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
+    expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
+  });
+
   it('carries no settings strings and looks none up', () => {
     // Same contract as the Live Voice stub above, for
     // client/settings/messages.ts: a settings.* lookup here would render as
@@ -562,6 +640,18 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]settings\./);
+  });
+
+  it('keeps MCP App message review strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]mcpApp\.message\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('mcpApp.message.title');
+    expect(interactive).toContain('Review App message');
+    expect(interactive).toContain('审阅 App 消息');
   });
 
   it('keeps trajectory filter strings in the interactive entry only', () => {

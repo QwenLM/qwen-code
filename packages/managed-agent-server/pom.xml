@@ -1,0 +1,756 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath />
+    </parent>
+
+    <groupId>com.alibaba</groupId>
+    <artifactId>qwen-managed-agent-server</artifactId>
+    <version>0.1.0-alpha</version>
+    <name>Qwen Managed Agent Server</name>
+    <description>Standalone Spring control plane for Qwen Managed Agents.</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <druid.version>1.2.25</druid.version>
+        <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
+        <fastjson2.version>2.0.65</fastjson2.version>
+        <h2.version>2.4.240</h2.version>
+        <junit-jupiter.version>5.14.1</junit-jupiter.version>
+        <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
+        <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
+        <maven-failsafe-plugin.version>3.5.6</maven-failsafe-plugin.version>
+        <json-schema-validator.version>1.5.9</json-schema-validator.version>
+        <spotbugs-maven-plugin.version>4.10.4.1</spotbugs-maven-plugin.version>
+        <!-- The gRPC client is a shaded artifact (io.grpc/com.google are
+             relocated), so the Boot BOM never re-aligns it; the dependency
+             gate is empirical (clean tree + a real-broker round-trip), not a
+             version-table check. -->
+        <rocketmq-client-java.version>5.1.0</rocketmq-client-java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.aliyun.oss</groupId>
+            <artifactId>aliyun-sdk-oss</artifactId>
+            <version>3.18.4</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-client-java</artifactId>
+            <version>${rocketmq-client-java.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwencode-sdk</artifactId>
+            <version>${qwencode-sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.fastjson2</groupId>
+            <artifactId>fastjson2</artifactId>
+            <version>${fastjson2.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.zaxxer</groupId>
+                    <artifactId>HikariCP</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid-spring-boot-3-starter</artifactId>
+            <version>${druid.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>${json-schema-validator.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>../core/src/managed-runtime/contracts</directory>
+                <includes>
+                    <include>managed-tool-result-v1.schema.json</include>
+                </includes>
+                <targetPath>contracts</targetPath>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>workspace-bundle</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-bundle</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>workspace-migration</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-migration</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceMigrationMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>workspace-maintenance-recovery</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-maintenance-recovery</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceMaintenanceRecoveryMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-session</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-session</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-runtime</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-runtime</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>operator-recovery</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>operator-recovery</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>${checkstyle-maven-plugin.version}</version>
+                <configuration>
+                    <configLocation>${project.basedir}/../sdk-java/qwencode/qwen-code-checks.xml</configLocation>
+                    <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                    <excludes>com/alibaba/qwen/code/runtimebroker/**</excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>runtime-broker-checkstyle</id>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration combine.self="override">
+                            <configLocation>${project.basedir}/../sdk-java/qwencode/checkstyle.xml</configLocation>
+                            <includes>com/alibaba/qwen/code/runtimebroker/**/*.java</includes>
+                            <includeTestSourceDirectory>false</includeTestSourceDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <failIfNoTests>true</failIfNoTests>
+                    <excludedGroups>fault-gate</excludedGroups>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco-maven-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <goals><goal>prepare-agent</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- High-confidence gate: the tree is clean at this threshold, so
+                 any new warning fails mvn verify. A false positive goes into
+                 spotbugs-excludes.xml with a justification in the PR. -->
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <version>${spotbugs-maven-plugin.version}</version>
+                <configuration>
+                    <threshold>High</threshold>
+                    <excludeFilterFile>${project.basedir}/spotbugs-excludes.xml</excludeFilterFile>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>fault-gates</id>
+            <properties>
+                <qwen.cli.entry>${project.basedir}/../../dist/cli.js</qwen.cli.entry>
+            </properties>
+            <build><plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration combine.self="override">
+                        <failIfNoTests>true</failIfNoTests>
+                        <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+                        <groups>fault-gate</groups>
+                        <systemPropertyVariables>
+                            <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
+                        </systemPropertyVariables>
+                    </configuration>
+                </plugin>
+            </plugins></build>
+        </profile>
+        <profile>
+            <id>mysql-integration</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <version>${maven-failsafe-plugin.version}</version>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/Hosted*IT.java</exclude>
+                            </excludes>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>hosted-harness-mysql</id>
+            <build>
+                <plugins>
+                    <!-- The H2 unit suite is mysql-integration's; repeating it
+                         in each Hosted job step cost ~11 min apiece. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration><skipTests>true</skipTests></configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <version>${maven-failsafe-plugin.version}</version>
+                        <configuration>
+                            <includes>
+                                <include>**/Hosted*IT.java</include>
+                            </includes>
+                            <failIfNoTests>true</failIfNoTests>
+                            <!-- The Hosted*IT classes share one fork; the file
+                                 history control calls roughly doubled the
+                                 ToolTurn driver's runtime. The channel fault
+                                 gates (five letters FG7a,b,d–f plus the FG7c
+                                 crash class) extended the fork's wall-clock by
+                                 ~150 s — ~60 s of it test time — at 2×
+                                 headroom. The L4 shell-lifecycle recovery
+                                 class (#14039) then added four cuts that each
+                                 boot a real Spring, the packaged Harness and
+                                 a durable worker — roughly another 300 s of
+                                 healthy wall-clock the FG7 sizing never
+                                 covered, so a contended main runner killed
+                                 the fork before any test reported (#14125).
+                                 1800 s restores the 2× headroom. The FG8
+                                 monitor/run fault gates grew to five
+                                 letters / twenty-one cases with drain and
+                                 cancel choreography: on #14334's lane
+                                 (run 38848525079) the first three letters
+                                 finished by ~700 s into the fork, but the
+                                 1800 s budget still killed the fork JVM
+                                 before fg8d settled, so it doubles to
+                                 keep the same 2× headroom. The FG9
+                                 session/relay fault gates
+                                 (HostedSessionRelayFaultGatesIT: two
+                                 letters measuring 166–175 s healthy
+                                 locally on JDK 21 + MariaDB 10.11 across
+                                 three acceptance runs, ~300 s budgeted
+                                 at >1.7× the heaviest measured run)
+                                 then raise the healthy sum again — the
+                                 lane-measured 3600 s fork already covers
+                                 them: one 600 s ceiling plus the
+                                 re-derived healthy runtime still fits
+                                 with headroom. Its slice 2 (FG9d, FG9e)
+                                 brings the class to four letters
+                                 measuring 308–314 s healthy locally on
+                                 JDK 21 + MySQL 8.4 (~534 s budgeted at
+                                 the same 1.7×), which the same fork
+                                 still covers. The FG8c process-crash
+                                 letter (seven cases, 144 s healthy
+                                 locally on a fresh MySQL 8.4.6) rides
+                                 inside the same envelope. The FG10a
+                                 workflow digest letter
+                                 (HostedWorkflowFaultGatesIT: four
+                                 cases, 15.9–16.2 s healthy locally on
+                                 macOS JDK 26 + MySQL 8.4.6 across four
+                                 acceptance runs, ~33 s budgeted at
+                                 2×) joins the same fork. The FG9 slice
+                                 3 letters (FG9b store failures, FG9c
+                                 Harness crashes) bring that class to
+                                 six letters measuring 528–557 s
+                                 (~950 s budgeted, ~416 s over slice
+                                 2's): with FG8c and FG10a inside it,
+                                 one 600 s ceiling plus the re-derived
+                                 3380 s healthy sum no longer fits
+                                 3600 s, so the fork moves to 3990 s and
+                                 the Verify step to 80 minutes to keep
+                                 its 600 s wrap plus margin. The FG10b
+                                 and FG10f workflow relay letters
+                                 (HostedWorkflowRelayFaultGatesIT,
+                                 81.6–81.7 s healthy locally, ~165 s
+                                 budgeted at 2×) raise the healthy sum to
+                                 3545 s, so the fork moves to 4155 s and
+                                 the Verify step to 85 minutes. Their
+                                 slice 2 (FG10c, FG10e) brings the class
+                                 to four letters measuring 181.2–181.6 s
+                                 (~363 s budgeted at 2×): the healthy sum
+                                 becomes 3743 s, so the fork moves to
+                                 4353 s and the Verify step to 90
+                                 minutes. Slice 3 (FG10d, the process
+                                 crash) brings the class to five
+                                 letters measuring 246.1–246.8 s (~494 s
+                                 budgeted at 2×): the healthy sum
+                                 becomes 3874 s and the fork 4484 s,
+                                 which the Verify step's 90 minutes
+                                 still wrap. The FG12a MCP reply-loss
+                                 letter (HostedMcpReplyLossIT, three
+                                 cases) measures 5.1-7.4 s healthy
+                                 locally on macOS JDK 21 + MariaDB
+                                 10.11 (~15 s budgeted at 2x): the
+                                 healthy sum becomes 3889 s, so the
+                                 fork moves to 4499 s. The FG12c MCP
+                                 restart matrix (HostedMcpRestartFault
+                                 GatesIT, five process-kill cases)
+                                 measures ~49 s healthy locally (~98 s
+                                 budgeted at 2x); the FG13c Hook
+                                 owner-restart cells (three cases,
+                                 issue #14449) are budgeted at 300 s:
+                                 the healthy sum becomes 4238 s, so the
+                                 fork moves to 4848 s. The FG13d
+                                 cancel/timeout cells (two cases, issue
+                                 #14449) add 200 s: the healthy sum
+                                 becomes 4438 s, so the fork moves to
+                                 5048 s. The FG11a automation lost-reply
+                                 letter (HostedAutomationFaultGatesIT,
+                                 eight cases on one minute boundary)
+                                 measures 46.3-85.0 s locally on JDK 21
+                                 + MySQL 8.4.6 (~170 s budgeted at 2x):
+                                 the healthy sum becomes 4608 s, so the
+                                 fork moves to 5218 s and the Verify
+                                 step to 100 minutes. The FG13d
+                                 worker-stop cancel cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 4758 s, so the fork moves to 5368 s.
+                                 FG11b's Spring-side store faults, a
+                                 second method of the automation class
+                                 (six cases on one minute boundary),
+                                 measure 30.8-64.5 s (~130 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 4888 s, so the fork moves to 5498 s
+                                 and the Verify step to 105 minutes.
+                                 FG11b slice 2's Harness-side store
+                                 faults, a third method of the class
+                                 (four cases, three cold restarts),
+                                 measure 62.1-72.4 s (~145 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 5033 s, so the fork moves to 5643 s,
+                                 which the Verify step's 105 minutes
+                                 still wrap. The event-stream liveness
+                                 gates (HostedEventStreamLivenessIT,
+                                 four cases on the shipped 15 s
+                                 keepalive / 45 s bound, 214.4-215.0 s
+                                 healthy locally on JDK 21 and 25
+                                 across four runs, ~440 s budgeted at
+                                 2x) raise the healthy sum to 5743 s;
+                                 these sums already include the FG13d
+                                 dropped-reply cancel cell (issue
+                                 #14449, 150 s) and the FG12b
+                                 store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases, 49.6 s measured locally on
+                                 JDK 21 + MySQL 8.0.46, ~120 s
+                                 budgeted). The FG12f stream-gap class
+                                 (HostedMcpStreamGapIT, three cases,
+                                 three cold boots) measures 121.1 s
+                                 locally on the merged base (~242 s
+                                 budgeted): the healthy sum becomes
+                                 5985 s, so the fork moves to 6585 s
+                                 and the Verify step to 120 minutes.
+                                 The FG13a execute lost-reply cell
+                                 (issue #14449) adds 150 s: the healthy
+                                 sum becomes 6135 s, so the fork moves
+                                 to 6735 s. The FG13a status lost-reply
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 6285 s; the FG11c
+                                 Harness-crash method (three cases, 144.8 s
+                                 measured, 550 s budgeted) moves it to
+                                 6835 s, so the fork moves to 7435 s and
+                                 the Verify step to 134 minutes. -->
+                            <forkedProcessTimeoutInSeconds>7435</forkedProcessTimeoutInSeconds>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>hosted-harness-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/Hosted*Gate.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Probe witnesses stay off the Hosted*IT roster; this
+                         profile collects them and turns the probe flag on. -->
+                    <systemPropertyVariables><qwen.wedge.probe>true</qwen.wedge.probe></systemPropertyVariables>
+                    <forkedProcessTimeoutInSeconds>2400</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-process-crashes</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedProcessCrashIT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>720</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-workspace-tools</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedWorkspaceToolTurnIT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>300</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-channel-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedChannel*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-monitor-run-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedMonitorRun*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- The class's six letters (fg8e/fg8f/fg8a/fg8b/fg8d
+                         and fg8c) are independent fixtures sharing one
+                         fork: each
+                         letter's @Timeout ceiling (600 s) plus the healthy
+                         runtime must fit, the per-ceiling relation the CI
+                         profile pins. Fork measured on the lane (run
+                         38848525079): four letters finished green by
+                         ~700 s, the budget still cut fg8d mid-choreography
+                         at exactly 1800 s — 3600 s keeps the 2× headroom. -->
+                    <forkedProcessTimeoutInSeconds>3600</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-session-relay-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedSessionRelay*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- The FG9 letters are independent fixtures sharing
+                         one fork — each letter boots its own Spring,
+                         Harness, and proxies on its own tenant prefix,
+                         so a stall in one letter leaves the others
+                         running — like the FG8 letters' shape. The
+                         per-ceiling relation is pinned against the
+                         hosted-harness-mysql lane's fork budget (the
+                         profile CI actually runs these letters under);
+                         this local-run profile keeps step with that
+                         budget (#14164). -->
+                    <forkedProcessTimeoutInSeconds>2100</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-workflow-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedWorkflow*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Both workflow classes' letters (FG10a's driver
+                         class and the FG10b–f relay class) are
+                         independent fixtures sharing one fork: each
+                         letter's @Timeout ceiling (600 s) plus the
+                         healthy runtime must fit, the per-ceiling
+                         relation the CI profile pins. -->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-mcp-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedMcp*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Mirrors the hosted-harness-mysql lane's
+                         per-class rule for the four MCP classes: the
+                         largest @Timeout ceiling (600 s) plus the
+                         classes' healthy runtime must fit 1200 s. -->
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-automation-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedAutomation*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Mirrors the hosted-harness-mysql lane's
+                         per-ceiling rule for this class: one @Timeout
+                         ceiling (600 s) plus the healthy runtime must
+                         fit 1200 s. -->
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>o4-mysql-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><skipTests>true</skipTests></configuration>
+            </plugin><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/O4MySqlGate.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                    <argLine>-Xmx256m</argLine>
+                    <systemPropertyVariables><qwen.o4.required>true</qwen.o4.required></systemPropertyVariables>
+                    <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>o4-oss-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/O4OssGate.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                    <argLine>-Xmx256m</argLine>
+                    <systemPropertyVariables><qwen.o4.required>true</qwen.o4.required></systemPropertyVariables>
+                    <forkedProcessTimeoutInSeconds>5400</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <!-- MQ2d: the EventTransport against a real RocketMQ LiteTopic
+                 cluster (scripts/rocketmq-lite-broker.sh start). The unit
+                 suite is the test job's; this profile runs only the gate,
+                 and the broker coordinates are required system properties
+                 (qwen.gate.rocketmq.endpoints / topic / normal-topic). -->
+            <id>event-transport-broker-gates</id>
+            <build><plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration><skipTests>true</skipTests></configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <includes><include>**/EventTransportBrokerGate.java</include></includes>
+                        <failIfNoTests>true</failIfNoTests>
+                        <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                        <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+                    </configuration>
+                    <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+                </plugin>
+            </plugins></build>
+        </profile>
+        <profile>
+            <!-- The MQ3 deployment fault matrix
+                 (docs/design/2026-10-14-managed-agent-event-transport-mq3.md):
+                 two control-plane nodes, each with its own packaged Harness,
+                 against one MySQL server and a RocketMQ 5.5 LiteTopic cluster
+                 (scripts/rocketmq-lite-broker.sh start). The gate starts the
+                 nodes itself; the MySQL server (mysql.url / user / password),
+                 the bundled CLI (qwen.cli.entry, node.executable) and the
+                 broker coordinates (qwen.gate.rocketmq.endpoints / topic /
+                 work-dir) are required system properties. -->
+            <id>event-transport-multi-node-gates</id>
+            <build><plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration><skipTests>true</skipTests></configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <includes><include>**/EventTransportMultiNodeGate.java</include></includes>
+                        <failIfNoTests>true</failIfNoTests>
+                        <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                        <forkedProcessTimeoutInSeconds>3000</forkedProcessTimeoutInSeconds>
+                    </configuration>
+                    <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+                </plugin>
+            </plugins></build>
+        </profile>
+    </profiles>
+</project>

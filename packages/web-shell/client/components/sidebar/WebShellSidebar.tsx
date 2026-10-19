@@ -519,6 +519,9 @@ interface WebShellSidebarProps {
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Replace daemon history with navigation owned by an external session provider. */
+  sessionContent?: ReactNode;
+  sessionHeader?: ReactNode;
   /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
   showSessionSourceSwitch?: boolean;
   /** Show Live conversations and, in rail layout, the Live entry. Defaults to false. */
@@ -717,16 +720,24 @@ function IconNewChat() {
  * Qwen brand mark. Same artwork as the browser-tab favicon in index.html and
  * the QwenLM GitHub avatar; inlined as an SVG rather than hot-linked because
  * the Web Shell CSP is `img-src 'self' data: blob:` (see web-shell-static.ts),
- * which blocks remote images. The purple #6D44E8 fill is legible on both the
+ * which blocks remote images. The blue #082DFF fill is legible on both the
  * light and dark sidebar backgrounds. Filled (not stroked) so it opts out of
  * the shared `.navIcon svg` stroke styling.
  */
 function IconQwenLogo() {
   return (
-    <svg viewBox="0 0 141.38 140" aria-hidden="true">
+    <svg viewBox="17.5 27.7 135.6 135.6" aria-hidden="true">
       <path
-        fill="#6D44E8"
-        d="m140.93 85-16.35-28.33-1.93-3.34 8.66-15a3.323 3.323 0 0 0 0-3.34l-9.62-16.67c-.3-.51-.72-.93-1.22-1.22s-1.07-.45-1.67-.45H82.23l-8.66-15a3.33 3.33 0 0 0-2.89-1.67H51.43c-.59 0-1.17.16-1.66.45-.5.29-.92.71-1.22 1.22L32.19 29.98l-1.92 3.33H12.96c-.59 0-1.17.16-1.66.45-.5.29-.93.71-1.22 1.22L.45 51.66a3.323 3.323 0 0 0 0 3.34l18.28 31.67-8.66 15a3.32 3.32 0 0 0 0 3.34l9.62 16.67c.3.51.72.93 1.22 1.22s1.07.45 1.67.45h36.56l8.66 15a3.35 3.35 0 0 0 2.89 1.67h19.25a3.34 3.34 0 0 0 2.89-1.67l18.28-31.67h17.32c.6 0 1.17-.16 1.67-.45s.92-.71 1.22-1.22l9.62-16.67a3.323 3.323 0 0 0 0-3.34ZM51.44 3.33 61.07 20l-9.63 16.66h76.98l-9.62 16.66H45.67l-11.54-20zM57.21 120H22.58l9.63-16.67h19.25l-38.5-66.67h19.25l9.62 16.67L68.78 100l-11.55 20Zm61.59-33.34-9.62-16.67-38.49 66.67-9.63-16.67 9.63-16.66 26.94-46.67h23.1l17.32 30z"
+        fill="#082DFF"
+        d="M130.06,43.66h-33.37c0-1.42-.37-2.84-1.1-4.11l-4.47-7.74c-1.47-2.54-4.18-4.11-7.12-4.11h-8.93c-2.94,0-5.65,1.57-7.12,4.11l-13.68,23.69c-1.47,2.54-1.47,5.67,0,8.22l4.47,7.74c1.47,2.54,4.18,4.11,7.12,4.11h64.19c2.94,0,5.65-1.57,7.12-4.11l4.47-7.74c1.47-2.54,1.47-5.67,0-8.22l-4.47-7.74c-1.47-2.54-4.18-4.11-7.12-4.11Z"
+      />
+      <path
+        fill="#082DFF"
+        d="M19.75,83.66l16.68,28.9c-1.23.71-2.27,1.74-3.01,3.01l-4.47,7.74c-1.47,2.54-1.47,5.67,0,8.22l4.47,7.74c1.47,2.54,4.18,4.11,7.12,4.11h27.35c2.94,0,5.65-1.57,7.12-4.11l4.47-7.74c1.47-2.54,1.47-5.67,0-8.22l-32.1-55.59c-1.47-2.54-4.18-4.11-7.12-4.11h-8.93c-2.94,0-5.65,1.57-7.12,4.11l-4.47,7.74c-1.47,2.54-1.47,5.67,0,8.22Z"
+      />
+      <path
+        fill="#082DFF"
+        d="M109.55,159.19l16.68-28.9c1.23.71,2.64,1.1,4.11,1.1h8.93c2.94,0,5.65-1.57,7.12-4.11l4.47-7.74c1.47-2.54,1.47-5.67,0-8.22l-13.68-23.69c-1.47-2.54-4.18-4.11-7.12-4.11h-8.93c-2.94,0-5.65,1.57-7.12,4.11l-32.1,55.59c-1.47,2.54-1.47,5.67,0,8.22l4.47,7.74c1.47,2.54,4.18,4.11,7.12,4.11h8.93c2.94,0,5.65-1.57,7.12-4.11Z"
       />
     </svg>
   );
@@ -804,7 +815,9 @@ function SidebarSessionSurface({
   open,
   onOpenChange,
   isCloseBlocked,
-  children,
+  children: defaultChildren,
+  content,
+  header,
 }: {
   collapsed: boolean;
   label: string;
@@ -815,7 +828,15 @@ function SidebarSessionSurface({
   onOpenChange: (open: boolean) => void;
   isCloseBlocked: () => boolean;
   children: ReactNode;
+  content?: ReactNode;
+  header?: ReactNode;
 }) {
+  const children = (
+    <>
+      {header}
+      {content === undefined ? defaultChildren : content}
+    </>
+  );
   const closeTimerRef = useRef<number | undefined>(undefined);
   const pointerOpenRef = useRef(false);
   const interactionOpenRef = useRef(false);
@@ -1052,6 +1073,8 @@ export function WebShellSidebar({
   lockedWorkspace: lockedWorkspaceOptions,
   branding,
   primaryNav: primaryNavOptions,
+  sessionContent,
+  sessionHeader,
   showSessionSourceSwitch = true,
   showLive = false,
   hideProjectHeader,
@@ -1180,7 +1203,8 @@ export function WebShellSidebar({
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && branding?.hideWhenCompact);
   const organizationEnabled = Boolean(
-    connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
+    sessionContent === undefined &&
+      connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
   const sourceMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('session_source_metadata'),
@@ -1233,7 +1257,9 @@ export function WebShellSidebar({
     workspace.capabilities?.features.includes('channel_management'),
   );
   const channelGroupingEnabled =
-    selectedSessionSource === 'channel' && channelManagementEnabled;
+    sessionContent === undefined &&
+    selectedSessionSource === 'channel' &&
+    channelManagementEnabled;
   const {
     data: channelCatalogData,
     catalog: channelTypeCatalog,
@@ -1253,11 +1279,14 @@ export function WebShellSidebar({
     ),
   );
   const workspaceSessionLiveStateSupported = Boolean(
-    connection.capabilities?.features?.includes(
-      'workspace_session_live_state',
-    ) && typeof workspace.client.getWorkspaceSessionLiveState === 'function',
+    sessionContent === undefined &&
+      connection.capabilities?.features?.includes(
+        'workspace_session_live_state',
+      ) &&
+      typeof workspace.client.getWorkspaceSessionLiveState === 'function',
   );
-  const sessionCatalogRequestsEnabled = connection.capabilities !== undefined;
+  const sessionCatalogRequestsEnabled =
+    sessionContent === undefined && connection.capabilities !== undefined;
   const workspaceSessionMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_session_metadata'),
   );
@@ -1298,7 +1327,8 @@ export function WebShellSidebar({
     ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
     : undefined;
   const includePrimaryWorkspaceSessions =
-    !lockedWorkspaceCwd || lockedWorkspace?.primary === true;
+    sessionContent === undefined &&
+    (!lockedWorkspaceCwd || lockedWorkspace?.primary === true);
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
   const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
@@ -2969,7 +2999,7 @@ export function WebShellSidebar({
       void (async () => {
         try {
           const created = await onNewSession(workspaceCwd);
-          if (created) {
+          if (created && sessionContent === undefined) {
             bumpWorkspaceReload();
             const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
             if (ownerCwd) {
@@ -2992,6 +3022,7 @@ export function WebShellSidebar({
       onNewSession,
       primaryWorkspaceCwd,
       sessionCatalogController,
+      sessionContent,
       t,
     ],
   );
@@ -6547,12 +6578,26 @@ export function WebShellSidebar({
               stay gated on projectFeaturesEnabled below. */}
             <SidebarSessionSurface
               collapsed={!railLayout && collapsed}
-              label={t('sidebar.project')}
-              status={collapsedSessionStatus}
-              statusLabel={collapsedSessionStatusLabel}
+              label={t(
+                sessionContent === undefined
+                  ? 'sidebar.project'
+                  : 'managed.sessions',
+              )}
+              status={
+                sessionContent === undefined
+                  ? collapsedSessionStatus
+                  : undefined
+              }
+              statusLabel={
+                sessionContent === undefined
+                  ? collapsedSessionStatusLabel
+                  : undefined
+              }
               width={sidebarWidth}
               open={collapsedSessionsOpen}
               onOpenChange={setCollapsedSessionsOpen}
+              content={sessionContent}
+              header={sessionHeader}
               isCloseBlocked={isCollapsedCloseBlocked}
             >
               {!channelNavigationEnabled &&
