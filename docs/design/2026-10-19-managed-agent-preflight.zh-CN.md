@@ -16,6 +16,7 @@
 命令绑定与 Spring 相同的输入：
 
 - classpath 中把 `QWEN_MANAGED_AGENT_*` 变量映射为属性的 `application.yml`；
+- 命令行参数（`--server.address=...`、`--qwen.managed-agent.*`），保持 Spring 的优先级；
 - `--spring.config.additional-location` 指定的外部 YAML（运维可显式传入），或 `SPRING_CONFIG_ADDITIONAL_LOCATION`（启动脚本在 `config/application.yml` 存在时会设置）；
 - 进程环境变量，其优先级高于前两者。
 

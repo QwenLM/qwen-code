@@ -4,16 +4,20 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.core.env.StandardEnvironment;
 import org.springframework.mock.env.MockEnvironment;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedAgentPreflightTest {
@@ -206,8 +210,134 @@ class ManagedAgentPreflightTest {
         properties.getHarness().setApprovalMode("yolo");
         properties.getSessionStore().setEnabled(true);
         properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsWorkspaceFilesWithoutAMountOrCreationRoot() {
+        ManagedAgentProperties properties = toolProperties();
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void warnsWhenTheToolPathUsesAnotherProvisioner() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker().setProvisioner("static");
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void commandLineArgumentsOverrideTheEnvironment() {
+        var environment = ManagedAgentPreflight.baseEnvironment(new String[] {
+                "--server.address=0.0.0.0",
+                "--qwen.managed-agent.auth.mode=open"});
+        assertEquals("0.0.0.0", environment.getProperty("server.address"));
+        assertEquals("open",
+                environment.getProperty("qwen.managed-agent.auth.mode"));
+    }
+
+    @Test
+    void laterExternalYamlOverridesEarlierWithoutDroppingKeys(
+            @TempDir Path directory) throws IOException {
+        Path first = Files.writeString(directory.resolve("first.yml"),
+                "server:\n  address: 0.0.0.0\n");
+        Path second = Files.writeString(directory.resolve("second.yml"),
+                "server:\n  port: 0\n");
+        var environment = new StandardEnvironment();
+        ManagedAgentPreflight.loadConfiguration(environment,
+                List.of(first.toString(), second.toString()),
+                new ArrayList<>());
+        assertEquals("0.0.0.0", environment.getProperty("server.address"));
+        assertEquals("0", environment.getProperty("server.port"));
+    }
+
+    @Test
+    void rejectsAMissingPerformanceSchemaGrant() {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setProperty("spring.datasource.url",
+                "jdbc:h2:mem:preflight-grant;DB_CLOSE_DELAY=-1");
+        environment.setProperty("spring.datasource.username", "sa");
+        environment.setProperty("spring.datasource.password", "");
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.databaseCheck(environment);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertTrue(check.detail().contains("performance_schema grant missing"));
+    }
+
+    @Test
+    void findsTheManifestBesideTheOuterJar(@TempDir Path distribution)
+            throws IOException {
+        Path lib = Files.createDirectories(distribution.resolve("lib"));
+        Path jar = Files.writeString(lib.resolve("server.jar"), "server");
+        Path manifest = distribution.resolve("manifest.json");
+        Files.writeString(manifest,
+                "{\"compatibility\":{\"databaseSchema\":"
+                        + "{\"latestMigrationVersion\":\"999\"}}}");
+        assertEquals(manifest,
+                ManagedAgentPreflight.findManifest(jar.toString()));
+        assertEquals("999",
+                ManagedAgentPreflight.expectedSchemaVersion(manifest));
+    }
+
+    @Test
+    void rejectsOpenModeOnANonLoopbackBind() {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setProperty("server.address", "0.0.0.0");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("open");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.authCheck(environment, properties)
+                        .status());
+    }
+
+    @Test
+    void acceptsAutoModeOnANonLoopbackBindWithInsecureOverride() {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setProperty("server.address", "0.0.0.0");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("auto");
+        properties.getAuth().setAllowInsecureBind(true);
+        assertNotEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.authCheck(environment, properties)
+                        .status());
+    }
+
+    @Test
+    void rejectsAnUnknownAuthMode() {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setProperty("server.address", "0.0.0.0");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("typo");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.authCheck(environment, properties)
+                        .status());
+    }
+
+    @Test
+    void rejectsAShortSigningKey() {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setProperty("server.address", "0.0.0.0");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey("x".repeat(31));
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.authCheck(environment, properties)
+                        .status());
+    }
+
+    private static ManagedAgentProperties toolProperties() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setApprovalMode("yolo");
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        return properties;
     }
 
     private static ManagedAgentProperties harness(String baseUrl) {
