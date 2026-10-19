@@ -299,6 +299,38 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void rejectsSshWithoutNodes() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
+        properties.getRuntimeBroker().getSsh().setEnabled(true);
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsWorkspaceCreationWithoutWorkspaceFiles() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsAnUnsupportedIsolationClass() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
+        properties.getRuntimeBroker()
+                .setVerifiedWorkspaceRecoveryEnabled(true);
+        properties.getRuntimeBroker().setIsolationClass("tenant");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
     void commandLineArgumentsOverrideTheEnvironment() {
         var environment = ManagedAgentPreflight.baseEnvironment(new String[] {
                 "--server.address=0.0.0.0",
