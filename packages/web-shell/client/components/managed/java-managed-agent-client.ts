@@ -350,6 +350,14 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getToolDetails(sessionId: string, itemId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellToolDetails']>(
+      '/tool-details/get',
+      { sessionId, itemId },
+      signal,
+    );
+  }
+
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
     return this.post<ManagedToolResultResponse>(
       '/tool-results/get',
