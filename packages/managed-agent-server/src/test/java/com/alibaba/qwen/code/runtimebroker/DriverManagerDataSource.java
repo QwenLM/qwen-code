@@ -1,19 +1,20 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import javax.sql.DataSource;
+
 import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.util.logging.Logger;
-import javax.sql.DataSource;
 
-final class DriverManagerDataSource implements DataSource {
+public final class DriverManagerDataSource implements DataSource {
     private final String url;
     private final String user;
     private final String password;
 
-    DriverManagerDataSource(String url, String user, String password) {
+    public DriverManagerDataSource(String url, String user, String password) {
         this.url = url;
         this.user = user;
         this.password = password;

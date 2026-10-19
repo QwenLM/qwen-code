@@ -1,0 +1,45 @@
+{
+  "name": "@qwen-code/generated-ui",
+  "version": "0.25.2",
+  "private": true,
+  "description": "Bounded locally interactive HTML and JavaScript views over MCP Apps",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "integrations/generated-ui"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "npm run clean && node scripts/build.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "lint": "eslint src scripts",
+    "test": "npm run build && vitest run --config vitest.config.ts",
+    "test:ci": "npm run build && vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist/main.js",
+    "dist/app.html",
+    "qwen-extension.json",
+    "README.md",
+    "skills"
+  ],
+  "devDependencies": {
+    "@jitl/quickjs-singlefile-browser-release-sync": "0.32.0",
+    "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@noble/hashes": "1.8.0",
+    "@types/node": "^22.0.0",
+    "dompurify": "3.4.14",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
+    "quickjs-emscripten-core": "0.32.0",
+    "typescript": "^5.4.5",
+    "vitest": "^3.2.4",
+    "zod": "^3.25.0"
+  }
+}
