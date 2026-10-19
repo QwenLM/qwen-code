@@ -277,6 +277,7 @@ export function ToolApproval({
           ? request.options.filter(
               (option) =>
                 option.id === 'restore_previous' ||
+                option.id === 'allow' ||
                 option.kind === 'reject_once' ||
                 option.kind === 'reject_always',
             )
@@ -307,7 +308,10 @@ export function ToolApproval({
         if (option.kind === 'allow_once') return t('approval.goal.confirm');
         if (option.kind === 'reject_once') return t('approval.goal.reject');
       }
-      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+      if (
+        hasPlanExecutionMode &&
+        (option.id === 'restore_previous' || option.id === 'allow')
+      ) {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
         });
@@ -609,6 +613,11 @@ export function ToolApproval({
   const execWarningsDisplay = execWarningsText
     ? sanitizeControlChars(execWarningsText)
     : undefined;
+  // The content text is model- or peer-supplied as well, and this block renders
+  // it in the body, in the `title` tooltip and as the `aria-describedby`
+  // target. Neutralise the text only: `showsContent` above stays on the raw
+  // value so the IDREF is still gated by whether the element renders.
+  const contentDisplay = sanitizeControlChars(contentText);
   const questionText = isGoal
     ? t('approval.goal.hint')
     : showsPlanWorkflow
@@ -701,9 +710,9 @@ export function ToolApproval({
             isExitPlanApproval ? ` ${styles.planContent}` : ''
           }`}
           id={commandId}
-          title={contentText}
+          title={contentDisplay}
         >
-          {contentText}
+          {contentDisplay}
         </pre>
       ) : null}
 

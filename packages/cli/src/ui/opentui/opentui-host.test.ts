@@ -212,6 +212,14 @@ describe('OpenTuiAppHost — shell allowlist and idle/processing', () => {
     host.setStreaming(false);
     expect(host.isIdle()).toBe(true);
   });
+
+  it('isStreaming tracks the live turn and ignores command processing', () => {
+    const { host } = makeHost();
+    host.setIsProcessing(true);
+    expect(host.isStreaming()).toBe(false);
+    host.setStreaming(true);
+    expect(host.isStreaming()).toBe(true);
+  });
 });
 
 describe('OpenTuiAppHost — forwarded shell actions', () => {

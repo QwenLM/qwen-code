@@ -53,6 +53,7 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionScheduleSessionModeEnabled,
   assertManagedSessionEventActor,
+  ManagedSessionAppendUnsettledError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   assertManagedSessionTransaction,
@@ -103,6 +104,10 @@ import {
   parseSessionMessage,
   type SessionMessage,
 } from './managed-session-message-record.js';
+import {
+  parseSessionCommand,
+  type SessionCommand,
+} from './managed-session-command-record.js';
 import {
   MANAGED_TEAM_LEADER,
   parseTeamMessage,
@@ -449,9 +454,38 @@ export class LocalManagedSessionAuthority {
   ) {}
 
   private writeFailure: Error | undefined;
+  /**
+   * The transaction whose append outcome the journal has not settled yet.
+   * While it is held the log is not dead: the next append asks the journal
+   * whether these records landed and applies them here if they did, so a
+   * writer lease that lapsed under an outage can re-attest instead of
+   * fencing the Session for good.
+   */
+  private unsettledAppend:
+    | {
+        readonly key: string;
+        readonly marker: ManagedSessionCommitMarker;
+        readonly events: readonly ManagedSessionEvent[];
+        readonly branches: ReadonlySet<string>;
+        readonly lastRecordUuid: string;
+        readonly extension?: {
+          readonly eventId: string;
+          readonly apply: () => void;
+        };
+      }
+    | undefined;
   private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly eventIds = new Set<string>();
+  /**
+   * The first committed `tool.receipt` per execution call. Shell capture
+   * resolves a call's receipt on every accept; scanning the whole log for it
+   * made each call O(history).
+   */
+  private readonly receiptsByExecutionCall = new Map<
+    string,
+    ManagedSessionEvent
+  >();
   private readonly checkpointSequences = new Map<string, number>();
   private checkpoint: ManagedSessionCheckpoint | undefined;
   private hasContinuation = false;
@@ -713,6 +747,7 @@ export class LocalManagedSessionAuthority {
         authority.recordDomainEvent(event);
       }
       authority.recordRecoveryFacts(event, branches.has(event.eventId));
+      authority.indexReceipt(event);
     }
     await authority.rebuildExtensionRecords();
     if (options.retainVerifiedResources !== true)
@@ -768,6 +803,14 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * True once the writer seal committed. A close() rejection thrown before
+   * that point left the writer open, so the Session is still usable.
+   */
+  get writerSealed(): boolean {
+    return this.journal.writerSealed;
+  }
+
+  /**
    * Discards a tail that was appended without a commit marker, after proving
    * the retained prefix reads cleanly. Repair is explicit: opening a session
    * reports the tail and refuses to write, because a read-only owner or a
@@ -797,6 +840,26 @@ export class LocalManagedSessionAuthority {
       if (this.events[index].kind === kind) return this.events[index];
     }
     return undefined;
+  }
+
+  /**
+   * The first committed `tool.receipt` for an execution call, in the same
+   * order a scan from sequence 1 would return.
+   */
+  committedReceipt(executionCallId: string): ManagedSessionEvent | undefined {
+    return this.receiptsByExecutionCall.get(executionCallId);
+  }
+
+  private indexReceipt(event: ManagedSessionEvent): void {
+    if (event.kind !== 'tool.receipt') return;
+    const executionCallId = event.payload['executionCallId'];
+    if (
+      typeof executionCallId !== 'string' ||
+      this.receiptsByExecutionCall.has(executionCallId)
+    ) {
+      return;
+    }
+    this.receiptsByExecutionCall.set(executionCallId, event);
   }
 
   /**
@@ -880,6 +943,21 @@ export class LocalManagedSessionAuthority {
     return this.runSerial(() =>
       this.commit(command, [event(this.committed + 1)], [actor]),
     );
+  }
+
+  appendExecutionEvents(
+    command: ManagedSessionCommand,
+    events: (firstSequence: number) => readonly unknown[],
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionCommitReceipt> {
+    return this.runSerial(() => {
+      const values = events(this.committed + 1);
+      return this.commit(
+        command,
+        values,
+        values.map(() => actor),
+      );
+    });
   }
 
   /** The latest committed action for this request, if any. */
@@ -1097,7 +1175,9 @@ export class LocalManagedSessionAuthority {
    * initialisation establishes before any model request.
    */
   async commitCheckpoint(
-    command: ManagedSessionCommand,
+    command:
+      | ManagedSessionCommand
+      | ((state: Buffer, coveredSequence: number) => ManagedSessionCommand),
     request: {
       state: Buffer;
       boundary: string | null;
@@ -1152,9 +1232,11 @@ export class LocalManagedSessionAuthority {
               },
             })
           : request.state;
+      const assignedCommand =
+        typeof command === 'function' ? command(state, covered) : command;
       const stateRef = await store.publish('managed-checkpoint', state);
       const receipt = await this.commit(
-        command,
+        assignedCommand,
         [
           ...(action
             ? [
@@ -1162,7 +1244,7 @@ export class LocalManagedSessionAuthority {
                   v: MANAGED_SESSION_FORMAT_VERSION,
                   sequence: this.committed + 1,
                   eventId: `action:${action.requestId}:requested`,
-                  sessionKey: command.sessionKey,
+                  sessionKey: assignedCommand.sessionKey,
                   kind: 'action.changed',
                   occurredAt: this.now(),
                   subject: {
@@ -1184,7 +1266,7 @@ export class LocalManagedSessionAuthority {
             v: MANAGED_SESSION_FORMAT_VERSION,
             sequence: this.committed + (action ? 2 : 1),
             eventId: checkpointId,
-            sessionKey: command.sessionKey,
+            sessionKey: assignedCommand.sessionKey,
             kind: 'checkpoint.committed',
             occurredAt: this.now(),
             subject: {
@@ -1660,6 +1742,13 @@ export class LocalManagedSessionAuthority {
             'An inbound session message opens together with its input, and no other revision carries one.',
           );
         }
+      }
+      if (request.domain === 'session_command' && request.input !== undefined) {
+        // H4e-b3: a command is answered by the leader, never by waking a
+        // model, so no revision of it ever carries an input.
+        throw new ManagedSessionConflictError(
+          'A session command never carries an input.',
+        );
       }
       // Refused before publishing, so a retry loop leaves no body behind.
       this.assertCommandWritable(command);
@@ -2463,6 +2552,42 @@ export class LocalManagedSessionAuthority {
         }
       }
     }
+    if (domain === 'session_command') {
+      // H4e-b3: each journal proves what it holds. The leader's receipt
+      // binds to a child run of its own journal; a member's own lineage
+      // lives with the control plane, whose store checks the outbound side.
+      const command = parsed.record as SessionCommand;
+      const self = this.sessionKey.sessionId;
+      if (
+        command.direction === 'outbound' &&
+        command.senderSessionId !== self
+      ) {
+        reject('Outbound session command must be sent by this Session.');
+      }
+      if (command.direction === 'inbound') {
+        if (command.targetSessionId !== self) {
+          reject('Inbound session command must be addressed to this Session.');
+        }
+        const named = this.extensionRecord('child_run', command.childRunId);
+        const child =
+          named === undefined ? undefined : parseChildRun(named.record);
+        if (child === undefined || !isChildSessionRun(child)) {
+          reject(
+            'Session command must name a child Session run of this Session.',
+          );
+        }
+        if (child.childSessionId === null) {
+          reject(
+            'Session command from a child arrives only once its run attached.',
+          );
+        }
+        if (command.senderSessionId !== child.childSessionId) {
+          reject(
+            'Session command from a child must come from the Session its run attached.',
+          );
+        }
+      }
+    }
     if (domain === 'team_state') {
       // H4e: a team lives in its lead's journal, and each member joins as a
       // live child Session run of the lead that no other team lists.
@@ -2851,6 +2976,9 @@ export class LocalManagedSessionAuthority {
       refs = [acceptance.contentRef, acceptance.terminalReceiptRef];
     } else if (domain === 'session_message') {
       refs = [parseSessionMessage(record).contentRef];
+    } else if (domain === 'session_command') {
+      const command = parseSessionCommand(record);
+      refs = [command.argsRef, command.replyRef];
     } else if (domain === 'team_task') {
       const task = parseTeamTask(record);
       refs = [task.descriptionRef, task.metadataRef];
@@ -2944,8 +3072,26 @@ export class LocalManagedSessionAuthority {
    * which is not enough: concurrent transactions would interleave their event
    * records around each other's commit markers.
    */
+  /**
+   * Settles a pending append for a caller that reads replay state or
+   * publishes a body before it commits. The work rides the serial queue, so
+   * a landed transaction is applied before the caller's read.
+   */
+  settlePendingAppend(): Promise<void> {
+    return this.runSerial(async () => undefined);
+  }
+
   private runSerial<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.queue.then(operation, operation);
+    const run = async () => {
+      // Settle before the operation reads replay state or publishes the body
+      // it would rebuild: a landed-but-unacknowledged attempt must be applied
+      // first, or the retry answers with the wrong record reference (or no
+      // extension record) while the commit itself replays.
+      if (this.unsettledAppend !== undefined)
+        await this.settleUnsettledAppend();
+      return operation();
+    };
+    const pending = this.queue.then(run, run);
     this.queue = pending.then(
       () => undefined,
       () => undefined,
@@ -3136,6 +3282,23 @@ export class LocalManagedSessionAuthority {
       this.lastRecordUuid = final.uuid;
     } catch (cause) {
       if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
+      if (
+        cause instanceof ManagedSessionAppendUnsettledError &&
+        this.journal.settleAppend !== undefined
+      ) {
+        // The store can prove the outcome later from its durable head, so keep
+        // the exact attempt instead of fencing a journal whose writer lease a
+        // recoverable outage lapsed.
+        this.unsettledAppend = {
+          key,
+          marker,
+          events,
+          branches,
+          lastRecordUuid: final.uuid,
+          ...(extension === undefined ? {} : { extension }),
+        };
+        throw cause;
+      }
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
       this.writeFailure =
@@ -3143,9 +3306,34 @@ export class LocalManagedSessionAuthority {
       throw cause;
     }
 
+    return this.applyCommitted(
+      key,
+      marker,
+      events,
+      branches,
+      final.uuid,
+      extension,
+    );
+  }
+
+  /**
+   * Applies one committed transaction to the in-memory authority. The normal
+   * append and the settlement of an append whose acknowledgement was lost both
+   * come through here, so the two advance the log identically.
+   */
+  private applyCommitted(
+    key: string,
+    marker: ManagedSessionCommitMarker,
+    events: readonly ManagedSessionEvent[],
+    branches: ReadonlySet<string>,
+    lastRecordUuid: string,
+    extension?: { readonly eventId: string; readonly apply: () => void },
+  ): ManagedSessionCommitReceipt {
+    this.lastRecordUuid = lastRecordUuid;
     for (const event of events) {
       this.events.push(event);
       this.eventIds.add(event.eventId);
+      this.indexReceipt(event);
       if (event.kind === 'activation.changed') {
         this.activation = managedSessionActivationStateFrom(event);
       }
@@ -3170,10 +3358,41 @@ export class LocalManagedSessionAuthority {
     };
     this.transactions.set(key, {
       receipt,
-      contentDigest: command.contentDigest,
+      contentDigest: marker.contentDigest,
     });
     extension?.apply();
     return receipt;
+  }
+
+  /**
+   * Resolves the append the journal could not acknowledge. `landed` applies
+   * those records here, `absent` drops them, and an unsettled answer keeps the
+   * attempt so the next append asks again. Any other failure proves the log
+   * cannot be trusted and fences it for good.
+   */
+  private async settleUnsettledAppend(): Promise<void> {
+    const pending = this.unsettledAppend!;
+    let outcome: 'landed' | 'absent';
+    try {
+      outcome = await this.journal.settleAppend!();
+    } catch (cause) {
+      if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
+      this.unsettledAppend = undefined;
+      this.writeFailure =
+        cause instanceof Error ? cause : new Error(String(cause));
+      throw cause;
+    }
+    this.unsettledAppend = undefined;
+    if (outcome === 'landed') {
+      this.applyCommitted(
+        pending.key,
+        pending.marker,
+        pending.events,
+        pending.branches,
+        pending.lastRecordUuid,
+        pending.extension,
+      );
+    }
   }
 
   /**

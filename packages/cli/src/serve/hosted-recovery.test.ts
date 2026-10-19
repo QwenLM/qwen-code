@@ -18,6 +18,7 @@ import {
   hostedRuntimeSessionId,
   HostedWorkspaceBroker,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import {
@@ -32,6 +33,10 @@ import {
   publishHostedModelRequest,
 } from './hosted-model-recovery.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
+import {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_READ_PROFILE,
+} from './hosted-workspace-profiles.js';
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -436,18 +441,48 @@ it('retains terminal cleanup debt across a failed release and a cold replacement
   }
 });
 
-it('releases recovered file-history work only after its durable Turn terminal', async () => {
-  const f = await fixture();
-  try {
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
-      async function (this: HostedWorkspaceBroker) {
-        this.runtime = f.broker.runtime;
-      },
-    );
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
-    let crashSnapshot = true;
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockImplementation(
-      async (operation) => {
+it.each([
+  'snapshot',
+  'retired',
+  'retired-new-call',
+  'retired-release-lost',
+  'retired-corrupt-outcome',
+  'retired-workspace-changed',
+  'retired-read-only',
+  'retired-write-history-missing',
+  'retired-multi-batch',
+  // #13753 I3: a snapshot child's read profile resumes the same way.
+  'retired-read-profile',
+  'retired-read-profile-new-call',
+])(
+  'retains original cleanup through committed-result recovery (%s)',
+  async (mode) => {
+    const f = await fixture();
+    const readProfile = mode.startsWith('retired-read-profile');
+    const profile = readProfile
+      ? HOSTED_WORKSPACE_READ_PROFILE
+      : HOSTED_WORKSPACE_FILE_PROFILE;
+    const readOnly = mode === 'retired-read-only' || readProfile;
+    try {
+      let runtime = f.broker.runtime;
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = runtime;
+        },
+      );
+      const acquire = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockResolvedValue();
+      let crashSnapshot = mode === 'snapshot';
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'fileHistory',
+      ).mockImplementation(async (operation) => {
         if (operation.action === 'snapshot' && crashSnapshot) {
           crashSnapshot = false;
           throw new Error('crash before history marker clears');
@@ -458,72 +493,85 @@ it('releases recovered file-history work only after its durable Turn terminal', 
           snapshots: [],
           files: {},
         };
-      },
-    );
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
-      'original-execution',
-    );
-    const execute = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'execute')
-      .mockResolvedValue({
-        executionStatus: 'success',
-        responseParts: [{ text: 'written once' }],
       });
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
-    const release = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'release')
-      .mockImplementation(async () => {
-        expect(
-          f.session.authority
-            .eventsInSequenceRange(1, f.session.authority.committedSequence)
-            .filter((event) => event.kind === 'turn.settled'),
-        ).toHaveLength(1);
-      });
-    const harness = createManagedHarnessHandle(f.session);
-    const commit = async (
-      type: 'assistant' | 'tool_result',
-      parts: Part[],
-      model: string,
-      identity?: { uuid: string; timestamp: string },
-    ) => {
-      const uuid = identity?.uuid ?? randomUUID();
-      await f.session.sink.write({
-        uuid,
-        parentUuid: null,
-        sessionId: f.session.authority.sessionHeader.sessionKey.sessionId,
-        timestamp: identity?.timestamp ?? new Date().toISOString(),
-        type,
-        model,
-        cwd: '/fixture',
-        version: 'test',
-        daemonPromptId: f.promptId,
-        message: { role: type === 'assistant' ? 'model' : 'user', parts },
-      });
-      return uuid;
-    };
-    const original = new HostedWorkspaceToolTurn(
-      f.brokerOptions,
-      f.session,
-      harness,
-      f.promptId,
-      commit,
-      () => true,
-      undefined,
-      undefined,
-      {
-        settings: { mode: 'yolo', timeoutMs: 15 },
-        waiters: new HostedApprovalWaiters(),
-      },
-    );
-    const call = {
-      name: 'write_file',
-      callId: 'original-call',
-      args: { file_path: 'original.txt', content: 'written once' },
-      isClientInitiated: false,
-      prompt_id: f.promptId,
-    };
-    await expect(
-      original.execute(
+      const prepare = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'prepare')
+        .mockResolvedValueOnce('original-execution')
+        .mockResolvedValue('second-execution');
+      const execute = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+        .mockResolvedValue({
+          executionStatus: 'success',
+          responseParts: [{ text: 'written once' }],
+        });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockImplementation(async () => {
+          if (mode !== 'snapshot' && release.mock.calls.length === 1) {
+            if (mode === 'retired-release-lost')
+              throw new Error('lost original release reply');
+            expect(hasHostedCleanupDebt(f.session)).toBe(true);
+            expect(
+              f.session.authority
+                .eventsInSequenceRange(1, f.session.authority.committedSequence)
+                .some((event) => event.kind === 'turn.settled'),
+            ).toBe(false);
+            return;
+          }
+          expect(
+            f.session.authority
+              .eventsInSequenceRange(1, f.session.authority.committedSequence)
+              .filter((event) => event.kind === 'turn.settled'),
+          ).toHaveLength(1);
+        });
+      const harness = createManagedHarnessHandle(f.session);
+      const commit = async (
+        type: 'assistant' | 'tool_result',
+        parts: Part[],
+        model: string,
+        identity?: { uuid: string; timestamp: string },
+      ) => {
+        const uuid = identity?.uuid ?? randomUUID();
+        await f.session.sink.write({
+          uuid,
+          parentUuid: null,
+          sessionId: f.session.authority.sessionHeader.sessionKey.sessionId,
+          timestamp: identity?.timestamp ?? new Date().toISOString(),
+          type,
+          model,
+          cwd: '/fixture',
+          version: 'test',
+          daemonPromptId: f.promptId,
+          message: { role: type === 'assistant' ? 'model' : 'user', parts },
+        });
+        return uuid;
+      };
+      const original = new HostedWorkspaceToolTurn(
+        f.brokerOptions,
+        f.session,
+        harness,
+        f.promptId,
+        commit,
+        () => true,
+        undefined,
+        undefined,
+        {
+          settings: { mode: 'yolo', timeoutMs: 15 },
+          waiters: new HostedApprovalWaiters(),
+        },
+        { profile },
+      );
+      const call = {
+        name: readOnly ? 'read_file' : 'write_file',
+        callId: 'original-call',
+        args: readOnly
+          ? { file_path: 'original.txt' }
+          : { file_path: 'original.txt', content: 'written once' },
+        isClientInitiated: false,
+        prompt_id: f.promptId,
+      };
+      const originalRun = original.execute(
         [call],
         [
           {
@@ -532,40 +580,151 @@ it('releases recovered file-history work only after its durable Turn terminal', 
         ],
         'fixture',
         new AbortController().signal,
-      ),
-    ).rejects.toThrow('Hosted tool turn requires recovery');
-    const authorization = await f.session.authority.harnessRunAuthorization();
-    expect(authorization.status).toBe('runnable');
-    if (authorization.status !== 'runnable') throw new Error('Not runnable');
-    expect(authorization.checkpoint.continuation.phase).toBe('results_ready');
-    const replacement = new HostedWorkspaceToolTurn(
-      f.brokerOptions,
-      f.session,
-      harness,
-      f.promptId,
-      async () => {
-        throw new Error('Recovery must not reexecute tools');
-      },
-      () => true,
-    );
-    await replacement.resumeCommittedResults(new AbortController().signal);
-    await replacement.consumeResults();
-    await replacement.finish();
-    expect(release).not.toHaveBeenCalled();
-    expect(hasHostedCleanupDebt(f.session)).toBe(true);
-    await f.terminal();
-    await replacement.cleanup();
-    expect(release).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledWith({
-      bindingId: 'original-binding',
-      generation: '7',
-    });
-    expect(execute).toHaveBeenCalledOnce();
-    expect(hasHostedCleanupDebt(f.session)).toBe(false);
-  } finally {
-    await f.session.close();
-  }
-});
+      );
+      if (mode === 'snapshot')
+        await expect(originalRun).rejects.toThrow(
+          'Hosted tool turn requires recovery',
+        );
+      else await originalRun;
+      if (mode === 'retired-multi-batch') {
+        await original.consumeResults();
+        original.setModelRound(1);
+        const next = {
+          ...call,
+          name: 'read_file',
+          callId: 'second-call',
+          args: { file_path: 'original.txt' },
+        };
+        await original.execute(
+          [next],
+          [
+            {
+              functionCall: {
+                id: next.callId,
+                name: next.name,
+                args: next.args,
+              },
+            },
+          ],
+          'fixture',
+          new AbortController().signal,
+        );
+      }
+      const authorization = await f.session.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status !== 'runnable') throw new Error('Not runnable');
+      expect(authorization.checkpoint.continuation.phase).toBe('results_ready');
+      if (readOnly)
+        expect(
+          f.session.authority.domainRecord('file_history'),
+        ).toBeUndefined();
+      if (mode === 'retired-write-history-missing') {
+        const domainRecord = f.session.authority.domainRecord.bind(
+          f.session.authority,
+        );
+        vi.spyOn(f.session.authority, 'domainRecord').mockImplementation(
+          (domain) =>
+            domain === 'file_history' ? undefined : domainRecord(domain),
+        );
+      }
+      if (mode !== 'snapshot')
+        runtime = {
+          bindingId: 'replacement-binding',
+          generation: '8',
+          workspaceGeneration: mode === 'retired-workspace-changed' ? '4' : '3',
+        };
+      if (mode === 'retired-corrupt-outcome') {
+        const read = f.session.resources.read.bind(f.session.resources);
+        const outcome = authorization.checkpoint.tools!.items[0].outcomeRef!;
+        vi.spyOn(f.session.resources, 'read').mockImplementation(
+          async (ref) => {
+            if (ref.resourceId === outcome.resourceId)
+              throw new Error('corrupt original outcome');
+            return read(ref);
+          },
+        );
+      }
+      const replacement = new HostedWorkspaceToolTurn(
+        f.brokerOptions,
+        f.session,
+        harness,
+        f.promptId,
+        async () => {
+          throw new Error('Recovery must not reexecute tools');
+        },
+        () => true,
+        undefined,
+        undefined,
+        undefined,
+        { profile },
+      );
+      if (
+        mode === 'retired-release-lost' ||
+        mode === 'retired-corrupt-outcome' ||
+        mode === 'retired-workspace-changed' ||
+        mode === 'retired-write-history-missing'
+      ) {
+        await expect(replacement.resumeCommittedResults()).rejects.toThrow(
+          'Hosted tool turn requires recovery',
+        );
+        await expect(replacement.finish()).rejects.toThrow(
+          'Hosted tool turn requires recovery',
+        );
+        expect(hasHostedCleanupDebt(f.session)).toBe(true);
+        expect(acquire).toHaveBeenCalledOnce();
+        expect(execute).toHaveBeenCalledOnce();
+        expect(release).toHaveBeenCalledTimes(
+          mode === 'retired-release-lost' ? 1 : 0,
+        );
+        return;
+      }
+      await replacement.resumeCommittedResults(new AbortController().signal);
+      await replacement.consumeResults();
+      if (
+        mode === 'retired-new-call' ||
+        mode === 'retired-read-profile-new-call'
+      ) {
+        const next = { ...call, callId: 'new-call' };
+        await expect(
+          replacement.execute(
+            [next],
+            [
+              {
+                functionCall: {
+                  id: next.callId,
+                  name: next.name,
+                  args: next.args,
+                },
+              },
+            ],
+            'fixture',
+            new AbortController().signal,
+          ),
+        ).rejects.toThrow('Submit remaining tool work in a new Turn');
+      }
+      await replacement.finish();
+      expect(release).toHaveBeenCalledTimes(mode === 'snapshot' ? 0 : 1);
+      expect(acquire).toHaveBeenCalledTimes(mode === 'snapshot' ? 2 : 1);
+      expect(prepare).toHaveBeenCalledTimes(
+        mode === 'retired-multi-batch' ? 2 : 1,
+      );
+      expect(hasHostedCleanupDebt(f.session)).toBe(true);
+      await f.terminal();
+      await replacement.cleanup();
+      expect(release).toHaveBeenCalledTimes(mode === 'snapshot' ? 1 : 2);
+      expect(release).toHaveBeenCalledWith({
+        bindingId: 'original-binding',
+        generation: '7',
+      });
+      expect(execute).toHaveBeenCalledTimes(
+        mode === 'retired-multi-batch' ? 2 : 1,
+      );
+      expect(hasHostedCleanupDebt(f.session)).toBe(false);
+    } finally {
+      await f.session.close();
+    }
+  },
+);
 
 const prepared: LlmPreparedRequest = {
   request: {
@@ -580,16 +739,58 @@ const prepared: LlmPreparedRequest = {
   promptTokensForClamp: 12,
 };
 
+it('restores a screenshot-sized model request from a cold session owner', async () => {
+  const f = await fixture();
+  const data = Buffer.alloc(5 * 1024 * 1024, 0x61).toString('base64');
+  const content = {
+    role: 'user',
+    parts: [{ inlineData: { mimeType: 'image/png', data } }],
+  };
+  const request = createHostedModelRequest(
+    f.session,
+    f.promptId,
+    {
+      ...prepared,
+      history: [content],
+      request: { ...prepared.request, contents: [content] },
+    },
+    0,
+    false,
+    undefined,
+    { bootId: 'source-boot', eventEpoch: 'source-epoch' },
+  );
+  await new ManagedHookActivationController(f.session).runTurn(
+    f.promptId,
+    async (scope) => {
+      const ref = await publishHostedModelRequest(f.session, request);
+      expect(ref?.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+      await scope.beginMainAttempt('fixture', ref);
+    },
+  );
+  await f.session.close();
+  const replacement = await f.reopen();
+  try {
+    expect(await findHostedModelRequest(replacement, f.promptId)).toEqual(
+      request,
+    );
+  } finally {
+    await replacement.close();
+  }
+});
+
 it.each(
   [false, true].flatMap((finished) =>
-    [undefined, false, true].map((allowPersistentRetry) => ({
-      finished,
-      allowPersistentRetry,
-    })),
+    [0, 16].flatMap((round) =>
+      [undefined, false, true].map((allowPersistentRetry) => ({
+        finished,
+        allowPersistentRetry,
+        round,
+      })),
+    ),
   ),
 )(
   'restores an unfinished request even when stream Finished was recorded (%s)',
-  async ({ finished, allowPersistentRetry }) => {
+  async ({ finished, allowPersistentRetry, round }) => {
     const f = await fixture();
     const request = createHostedModelRequest(
       f.session,
@@ -598,7 +799,7 @@ it.each(
         ...prepared,
         ...(allowPersistentRetry === undefined ? {} : { allowPersistentRetry }),
       },
-      0,
+      round,
       false,
       undefined,
       { bootId: 'source-boot', eventEpoch: 'source-epoch' },
@@ -658,7 +859,7 @@ it('does not reuse an older snapshot after a newer unsupported attempt', async (
     expect(
       await publishHostedModelRequest(f.session, {
         ...request,
-        workspaceContext: 'x'.repeat(64 * 1024),
+        workspaceContext: 'x'.repeat(32 * 1024 * 1024),
       }),
     ).toBeUndefined();
   } finally {

@@ -38,12 +38,14 @@ import {
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
+  semanticInputDigest,
 } from './hosted-hook-session.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // The absent-owner release refusal is reported on the module's debug
 // logger only, and that channel is silent unless a debug session is active:
@@ -444,6 +446,111 @@ it('commits a pinned plan before dispatch and replays the original occurrence af
   expect(session.authority.taskViews()).toEqual([]);
 });
 
+async function savedPlan(occurrenceId: string) {
+  const marker = parseHookExecution(
+    session.authority.extensionRecord(
+      'hook_execution',
+      hostedHookOccurrenceId(HookEventName.PreToolUse, occurrenceId),
+    )!.record,
+  );
+  return JSON.parse(
+    (await session.resources.read(marker.planRef)).toString(),
+  ) as { input: Record<string, unknown>; refusedInputDigest?: string };
+}
+
+it('resumes a saved occurrence on the fields an earlier release built, and plans new ones on the current fields', async () => {
+  const earlier = { tool_name: 'read_file', tool_input: { file_path: 'c' } };
+  const current = { tool_name: 'read_file', tool_input: { file_path: 'b' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    earlier,
+    signal(),
+  );
+  const replacement = new HostedHookSession(options, session, pin);
+  expect(
+    await replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      earlier,
+    ),
+  ).toEqual(output);
+  await expect(
+    replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      { ...earlier, tool_input: { file_path: 'a' } },
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  await replacement.fire(
+    HookEventName.PreToolUse,
+    'call-2',
+    current,
+    signal(),
+    undefined,
+    earlier,
+  );
+  expect((await savedPlan('call-2')).input).toMatchObject(current);
+  expect(
+    requests.flatMap((request) =>
+      request.kind === 'hook-execute'
+        ? [(request.input as unknown as Record<string, unknown>)['tool_input']]
+        : [],
+    ),
+  ).toEqual([earlier.tool_input, current.tool_input]);
+});
+
+it('resumes an oversized saved occurrence only on the digest of the fields it was planned for', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], config: { type: HookType.Function } }],
+  };
+  hooks.setMessagesProvider(() => [{ text: 'x'.repeat(8 * 1024 * 1024 + 1) }]);
+  const earlier = { tool_name: 'read_file', tool_input: { file_path: 'c' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    earlier,
+    signal(),
+  );
+  const saved = await savedPlan('call-1');
+  expect(saved.refusedInputDigest).toBe(semanticInputDigest(earlier));
+  expect(saved.input).not.toHaveProperty('tool_input');
+  const replacement = new HostedHookSession(options, session, pin);
+  const current = { ...earlier, tool_input: { file_path: 'b' } };
+  expect(
+    await replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      // Only the Session-level fields differ, which the digest leaves out.
+      { ...earlier, session_id: 'other', timestamp: 'later', messages: [] },
+    ),
+  ).toEqual(output);
+  await expect(
+    replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      { ...earlier, tool_use_id: 'call-2' },
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(0);
+  expect(await savedPlan('call-1')).toEqual(saved);
+});
+
 it('consumes once at intent even when execution fails', async () => {
   catalog = {
     ...catalog,
@@ -679,6 +786,58 @@ it.each([
     ).toHaveLength(1);
   },
 );
+
+it('hands its mount back after a recovery block once its Hook work is proven, and claims it again (#13800)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'hook-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  acquire.mockClear();
+  await hooks.acquire();
+  expect(acquire).not.toHaveBeenCalled();
+  await hooks.mountHandback()!();
+  expect(releaseMount).toHaveBeenCalledWith('hook-claim');
+  // The owner's lease stays booked for the close's full release, and the
+  // next acquire claims the handed-back mount again.
+  expect(hooks.mountHeld).toBe(true);
+  await hooks.acquire();
+  expect(acquire).toHaveBeenCalledOnce();
+});
+
+it('keeps its mount while a Hook outcome is unknown (#13800)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'hook-claim',
+  );
+  const releaseMount = vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'releaseMount',
+  );
+  execute = async () => {
+    throw new Error('lost reply');
+  };
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  // The Broker cannot see a Hook run, so the lane's own proof gates it.
+  await expect(hooks.mountHandback()!()).rejects.toThrow(/unproven/);
+  expect(releaseMount).not.toHaveBeenCalled();
+  const linked = new HostedHookSession(
+    options,
+    session,
+    pin,
+    new HostedWorkspaceBroker(
+      options,
+      session.authority.sessionHeader.sessionKey,
+      'mcp-shared',
+    ),
+  );
+  // A shared MCP broker's mount goes back through its owner.
+  expect(linked.mountHandback()).toBeUndefined();
+});
 
 it('aggregates parallel results in plan order rather than reply order', async () => {
   catalog = {
@@ -1040,7 +1199,9 @@ it('waits for Runtime admission before acknowledging an async Hook', async () =>
       completed = true;
       return result;
     });
-  await vi.waitFor(() => expect(finish).toBeDefined());
+  await vi.waitFor(() => expect(finish).toBeDefined(), {
+    timeout: isSlowTestHost() ? 30_000 : 1_000,
+  });
   expect(completed).toBe(false);
   finish!({ success: true, outcome: 'success', duration: 0 });
   await firing;
@@ -1076,7 +1237,9 @@ it('rejects a changed input while the same occurrence is still running', async (
     { tool_name: 'read_file' },
     signal(),
   );
-  await vi.waitFor(() => expect(finish).toBeDefined());
+  await vi.waitFor(() => expect(finish).toBeDefined(), {
+    timeout: isSlowTestHost() ? 30_000 : 1_000,
+  });
   await expect(
     hooks.fire(
       HookEventName.PreToolUse,
@@ -1105,7 +1268,9 @@ it('cancels an active occurrence and does not dispatch later sequential hooks', 
       finish = resolve;
     });
   const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
-  await vi.waitFor(() => expect(finish).toBeDefined());
+  await vi.waitFor(() => expect(finish).toBeDefined(), {
+    timeout: isSlowTestHost() ? 30_000 : 1_000,
+  });
   const cancelled = await hooks.status('call-1', true);
   expect(cancelled.cancelRequested).toBe(true);
   finish!({ success: false, outcome: 'cancelled', duration: 0 });
@@ -2591,25 +2756,31 @@ it('reads each saved Stop plan once however many turns check it', async () => {
   expect(plans()).toBe(24);
 });
 
-it('drains a long settled history without rescanning it per occurrence', async () => {
-  catalog = {
-    ...catalog,
-    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
-  };
-  for (let index = 0; index < 30; index++)
-    await hooks.fire(
-      HookEventName.Notification,
-      `notification-${index}`,
-      { message: `${index}` },
-      signal(),
-    );
-  const scans = vi.spyOn(session.authority, 'extensionRecordsInDomain');
-  const commits = vi.spyOn(session.authority, 'commitExtensionRecord');
-  await hooks.drain();
-  expect(commits).not.toHaveBeenCalled();
-  // A fixed number of passes over the history, not one per occurrence.
-  expect(scans.mock.calls.length).toBeLessThanOrEqual(3);
-});
+it(
+  'drains a long settled history without rescanning it per occurrence',
+  // 30 serialized fires each poll the Broker on a 100 ms tick and re-read a
+  // growing journal; a contended CI runner needs well over the 60 s default.
+  { timeout: 180_000 },
+  async () => {
+    catalog = {
+      ...catalog,
+      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
+    };
+    for (let index = 0; index < 30; index++)
+      await hooks.fire(
+        HookEventName.Notification,
+        `notification-${index}`,
+        { message: `${index}` },
+        signal(),
+      );
+    const scans = vi.spyOn(session.authority, 'extensionRecordsInDomain');
+    const commits = vi.spyOn(session.authority, 'commitExtensionRecord');
+    await hooks.drain();
+    expect(commits).not.toHaveBeenCalled();
+    // A fixed number of passes over the history, not one per occurrence.
+    expect(scans.mock.calls.length).toBeLessThanOrEqual(3);
+  },
+);
 
 it('settles an occurrence whose children were committed after an earlier status check', async () => {
   await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
