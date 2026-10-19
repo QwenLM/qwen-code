@@ -126,10 +126,8 @@ export function launchManagedStdio(
       JSON.stringify([...args]),
     ],
     env: {
-      PATH: process.env['PATH'] ?? '',
-      ...(process.env['SystemRoot']
-        ? { SystemRoot: process.env['SystemRoot'] }
-        : {}),
+      PATH: env['PATH'] ?? '',
+      ...(env['SYSTEMROOT'] ? { SYSTEMROOT: env['SYSTEMROOT'] } : {}),
       QWEN_MANAGED_STDIO_COMMAND_ENV: JSON.stringify(env),
     },
   };
