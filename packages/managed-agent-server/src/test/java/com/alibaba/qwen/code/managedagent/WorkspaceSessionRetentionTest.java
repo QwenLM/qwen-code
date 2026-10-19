@@ -1,24 +1,24 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -74,7 +74,7 @@ class WorkspaceSessionRetentionTest {
     @Autowired SessionLifecycleCoordinator lifecycle;
     @Autowired ManagedWorkspaceRegistry registry;
     @Autowired HarnessConnector harness;
-    @Autowired com.alibaba.qwen.code.managedagent.service.HarnessCoordinator coordinator;
+    @Autowired com.alibaba.qwen.code.managedagent.session.HarnessCoordinator coordinator;
 
     @ParameterizedTest
     @CsvSource({"ACTIVE, hosted-workspace-shell/1",
@@ -94,8 +94,8 @@ class WorkspaceSessionRetentionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         var enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
-        var projection = new com.alibaba.qwen.code.managedagent.service.ManagedAgentService(enabled,
-                new com.alibaba.qwen.code.managedagent.service.RequestDigests(), coordinator, harness, registry);
+        var projection = new com.alibaba.qwen.code.managedagent.session.ManagedAgentService(enabled,
+                new com.alibaba.qwen.code.managedagent.model.RequestDigests(), coordinator, harness, registry);
         org.springframework.test.util.ReflectionTestUtils.setField(projection, "runtimeWarmer", runtime);
         assertThat(projection.getPublicSession(tenant, "owner", session).capabilities().sessionClose()).isTrue();
         assertThat(projection.getWebShellSession(tenant, "owner", session).capabilities().sessionDelete()).isTrue();
@@ -198,7 +198,7 @@ class WorkspaceSessionRetentionTest {
         request(post(PUBLIC + session + "/unarchive"), tenant, "owner", "unarchive")
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("archived"));
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "b".repeat(43),
-                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+                new AcquireWriterRequest("ws", "late", 60_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
         assertThat(count(tenant, session, "session.archived")).isEqualTo(2);
         assertThat(count(tenant, session, "session.unarchived")).isEqualTo(1);
         assertThat(runtime.calls.get(session)).isEqualTo(1);
@@ -502,7 +502,7 @@ class WorkspaceSessionRetentionTest {
         @Bean @Primary HarnessConnector uninitializedHarness() {
             return new UnavailableHarnessConnector() {
                 public boolean supportsLifecycle() { return true; }
-                public void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {}
+                public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {}
             };
         }
         @Bean @Primary OnceCloseRuntime retentionRuntime() { return new OnceCloseRuntime(); }
