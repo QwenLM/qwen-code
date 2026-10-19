@@ -2609,6 +2609,60 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     ]),
   ];
 
+  it.each([false, true])(
+    'counts restored images once with positive usage (pending call: %s)',
+    async (pendingCall) => {
+      const history = screenshotSession('Analyze screenshots.', [
+        's1',
+        's2',
+        's3',
+      ]);
+      if (pendingCall) {
+        history.push(content('model', fnCall('read_file', {}, 'pending')));
+      }
+      spySideQuery('S'.repeat(2000), usage(170_000, 500));
+      const result = await compressWith(fakeChat(history), fakeConfig(), {
+        trigger: 'auto',
+      });
+      expectCompressed(result);
+      expect(result.info.newTokenCount).toBeGreaterThanOrEqual(
+        11_500 + 3 * 1600,
+      );
+      expect(result.info.newTokenCount).toBeLessThan(16_600);
+      expect(result.newHistory).toHaveLength(pendingCall ? 4 : 3);
+    },
+  );
+
+  it('rejects inflation when a restored file grows beyond the original context', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-restore-cost-'));
+    const file = join(dir, 'context.txt');
+    writeFileSync(file, 'x'.repeat(17_600));
+    try {
+      const history = [
+        userText('Read the file.'),
+        content('model', fnCall('read_file', { file_path: file }, 'read')),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'Earlier content.' }, 'read'),
+        ),
+        modelText('Done.'),
+      ];
+      spySideQuery('Summary.', usage(3000, 100));
+      const result = await compressWith(
+        fakeChat(history),
+        fakeConfig({ extra: { getTargetDir: () => dir } }),
+        { originalTokenCount: 2000 },
+      );
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      );
+      expect(result.info.newTokenCount).toBeGreaterThan(4400);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves the user prompt verbatim in summary and restores 3 most recent screenshots', async () => {
     // Reproduces the "single-turn long task" scenario the rewrite targets:
     // ONE user message kicks off many tool calls. OLD behavior with the

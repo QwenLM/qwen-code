@@ -21,6 +21,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  markCompressedHistory,
   isSkillListingReminder,
   isSystemReminderContent,
   stripSystemReminderBlocks,
@@ -32,6 +33,7 @@ import {
 import { prependToFirstTextPart } from '../utils/partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { SendMessageTool } from '../tools/send-message.js';
 import { MonitorTool } from '../tools/monitor.js';
@@ -891,6 +893,57 @@ describe('getStartupContextLength', () => {
     userText(`${text}\n\nResume the prior task...`);
   const compressionAck = () =>
     modelText('Got it. Thanks for the additional context!');
+
+  it.each([0, 1, 3, 2.5, '3'])(
+    'falls back to the detected boundary for an invalid saved prefix: %s',
+    (prefix) => {
+      const history = [summary(), compressionAck()];
+      markCompressedHistory(history, prefix as number);
+      history.push(
+        userText('<plan-mode-active>\nReal quoted input.\n</plan-mode-active>'),
+      );
+      expect(
+        getStartupContextLength(history, { includeCompressed: true }),
+      ).toBe(2);
+    },
+  );
+
+  it('recognizes saved combined-context checkpoints without changing them', () => {
+    const history = [
+      summary(),
+      modelText('Context restored. Ready to continue.'),
+      userText('<background-tasks>\nExplain this tag.'),
+    ];
+    const before = JSON.stringify(history);
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      2,
+    );
+    expect(JSON.stringify(history)).toBe(before);
+  });
+
+  it.each([
+    '<background-tasks>\nExplain this tag.',
+    'Recently accessed file (full current content embedded):',
+    '[Old inline media cleared: image/png]',
+  ])('does not count a bare restoration heading as context: %s', (text) => {
+    expect(
+      getStartupContextLength([summary(), compressionAck(), userText(text)], {
+        includeCompressed: true,
+      }),
+    ).toBe(2);
+  });
+
+  it('does not skip a prompt-identified complete restoration block', () => {
+    const input = userText(
+      '<plan-mode-active>\nYou are currently in PLAN mode.\n</plan-mode-active>',
+    );
+    markApiHistoryPrompt(input, 'real-input');
+    expect(
+      getStartupContextLength([summary(), compressionAck(), input], {
+        includeCompressed: true,
+      }),
+    ).toBe(2);
+  });
 
   it.each<[string, Content[], number]>([
     ['is 1 for a genuine reminder prelude', [userText(wrap('env'))], 1],

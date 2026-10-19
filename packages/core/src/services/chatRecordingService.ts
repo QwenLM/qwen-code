@@ -71,6 +71,7 @@ import {
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import { getApiHistoryPromptId } from './session-api-history.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 import type {
   AgentMentionRecordPayload,
   AgentMessageRecordPayload,
@@ -655,6 +656,7 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  contextPrefixLength?: number;
   /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
   completedToolCallIds?: string[];
@@ -3108,6 +3110,9 @@ export class ChatRecordingService {
         systemPayload: {
           ...payload,
           compressedHistory,
+          contextPrefixLength: getStartupContextLength(compressedHistory, {
+            includeCompressed: true,
+          }),
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
         },
       };

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import { extractRecentFilePaths } from './postCompactAttachments.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 
 function fileReadCall(path: string): Content {
   return {
@@ -786,6 +787,28 @@ describe('composePostCompactHistory', () => {
   });
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps restored file and image context in a completed summary turn', async () => {
+    const path = join(tmpDir, 'context.txt');
+    writeFileSync(path, 'Restored file contents.');
+    const image = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+    const result = await composePostCompactHistory(
+      [fileReadCall(path), { role: 'user', parts: [image] }],
+      'Summary.',
+    );
+    expect(result.map((entry) => entry.role)).toEqual([
+      'user',
+      'model',
+      'user',
+    ]);
+    expect(result[2]?.parts).toContainEqual(image);
+    expect(
+      result[2]?.parts?.some((part) =>
+        part.text?.includes('Restored file contents.'),
+      ),
+    ).toBe(true);
+    expect(detectTurnInterruption(result)).toEqual({ kind: 'none' });
   });
 
   it('returns summary + ack only when history has no files or images', async () => {

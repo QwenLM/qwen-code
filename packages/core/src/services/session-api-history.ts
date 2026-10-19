@@ -14,12 +14,21 @@ import type {
   TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
 
 const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
 
 type IdentifiedContent = Content & {
   [API_HISTORY_PROMPT_ID]?: string;
 };
+
+export function cloneApiHistory(history: Content[]): Content[] {
+  // structuredClone drops the non-serialized prompt and context boundaries.
+  return history.map((content) => ({
+    ...content,
+    ...structuredClone(content),
+  }));
+}
 
 export function markApiHistoryPrompt(
   content: Content,
@@ -355,6 +364,7 @@ export class SessionApiHistoryAccumulator {
             return copy;
           })
         : [];
+      markCompressedHistory(this.history, payload.contextPrefixLength);
       // Compressed history is raw `Content[]` with no source record behind it,
       // so no entry can claim the authoritative notification stamp.
       this.systemNotificationFlags = this.history.map(() => false);
