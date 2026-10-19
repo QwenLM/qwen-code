@@ -3,26 +3,26 @@ package com.alibaba.qwen.code.managedagent;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -115,7 +115,7 @@ class ManagedActionsTest {
     static class Configuration {
         @Bean @Primary
         ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
-                Clock clock, com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher publisher) {
+                Clock clock, com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher publisher) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
@@ -276,7 +276,7 @@ class ManagedActionsTest {
             local.options.put("v", 2);
             local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
             assertThatThrownBy(() -> local.change("requested", null))
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
                             .isEqualTo("managed_session_resource_missing"));
             assertThat(actions.find(tenant, session, local.id)).isEmpty();
             ActionJournal committed = new ActionJournal(local, 100, 1000)
@@ -369,7 +369,7 @@ class ManagedActionsTest {
                 }
             }
             assertThatThrownBy(() -> journal.change("requested", null), "invalid inputRef (%s)", fault)
-                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode())
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
                             .isEqualTo("danglingRef".equals(fault)
                                     ? "managed_session_resource_missing" : "managed_session_action_rejected"));
             assertThat(actions.find(tenant, session, journal.id)).isEmpty();
@@ -484,7 +484,7 @@ class ManagedActionsTest {
                                             "extension-writer-token-0123456789",
                                             invalid))
                     .isInstanceOfSatisfying(
-                            ApiException.class,
+                            ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo(expected));
             assertThat(actions.find(tenant, session, action.id)).isEmpty();
         }
@@ -511,7 +511,7 @@ class ManagedActionsTest {
                                 .put("policyRevision", "hosted-tool-approval/2"))) {
             assertThatThrownBy(() -> journal.change("decided", response))
                     .isInstanceOfSatisfying(
-                            ApiException.class,
+                            ManagedAgentException.class,
                             error ->
                                     assertThat(error.getCode())
                                             .isEqualTo("managed_session_action_rejected"));

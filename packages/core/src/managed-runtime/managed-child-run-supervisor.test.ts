@@ -65,6 +65,30 @@ describe.skipIf(process.platform === 'win32')(
       ).toThrow(HookCommandIsolationUnavailableError);
     });
 
+    it('does not opt a background Shell into parent-death reaping', async () => {
+      const { unit } = await fakeUnit('qwen-bg-shell-optout');
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const launch = vi.spyOn(HookCommandCgroup.prototype, 'launch');
+      const supervisor = ManagedChildRunSupervisor.create({
+        cgroupRoot: '/root',
+      });
+      const proc = await supervisor.start(
+        {
+          unitName: 'qwen-bg-shell-optout',
+          executable: '/bin/sh',
+          args: ['-c', 'sleep 30'],
+          env: { PATH: '/bin:/usr/bin' },
+          cwd: directory,
+          onOutput: () => undefined,
+        },
+        { prove: async () => true },
+      );
+      expect(launch).toHaveBeenCalled();
+      expect(launch.mock.calls[0][3]).toBeUndefined();
+      proc.child.kill('SIGKILL');
+      await new Promise((resolve) => proc.child.once('exit', resolve));
+    });
+
     it('starts a process whose output and exit evidence are captured', async () => {
       const { unit, removed } = await fakeUnit('qwen-bg-shell-1');
       const create = vi

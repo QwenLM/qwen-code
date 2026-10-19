@@ -1297,6 +1297,7 @@ export class HookRunner {
           shellConfig.executable,
           [...shellConfig.argsPrefix, command],
           env,
+          { reapOnParentExit: true },
         );
         child = spawn(
           launch?.executable ?? shellConfig.executable,
@@ -1350,6 +1351,14 @@ export class HookRunner {
             processUnit?.remove();
           } catch {
             debugLogger.warn('Failed to remove an empty hook cgroup');
+          }
+        }
+        if (child.pid) {
+          try {
+            processUnit?.removeReaper(child.pid);
+          } catch {
+            // The launcher may still be resident; the worker-start sweep
+            // owns the leftover sibling unit.
           }
         }
         if (signal && abortListenerAttached) {
@@ -1428,10 +1437,16 @@ export class HookRunner {
         if (!terminationPromise) {
           const childTermination = processUnit
             ? (async () => {
-                // Stop the trusted launcher even if cancellation raced its
-                // initial cgroup join. The unit owns all command descendants.
-                killDirectChild(child, 'SIGKILL');
+                // A launcher neither the unit nor its reaper sibling covers
+                // yet cannot be stopped by the unit's signals; stop it
+                // before it can join and spawn. Once covered, it must
+                // survive the SIGTERM sweep so its parent-death reaper
+                // covers a worker death during the grace period.
+                if (!child.pid || !processUnit.covers(child.pid)) {
+                  killDirectChild(child, 'SIGKILL');
+                }
                 await processUnit.terminate(HOOK_TERMINATE_GRACE_MS);
+                killDirectChild(child, 'SIGKILL');
               })()
             : terminateHookProcessTree(
                 child,
