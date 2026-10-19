@@ -7987,7 +7987,17 @@ export function registerHostedHarnessSessionRoutes(
               parseSessionCommandReply(body?.['reply']),
             );
           } catch (cause) {
-            if (cause instanceof ManagedSessionRecordError) {
+            // A store-side append outcome is not the request's shape: let it
+            // reach the outer catch, which answers the retryable 503.
+            if (
+              cause instanceof ManagedSessionRecordError &&
+              !(cause instanceof ManagedSessionConflictError) &&
+              !(cause instanceof ManagedSessionStoreHttpError) &&
+              !(cause instanceof ManagedSessionStoreTransportError) &&
+              !(cause instanceof ManagedSessionWritesStoppedError) &&
+              !(cause instanceof ManagedSessionAppendUnsettledError) &&
+              !(cause instanceof ManagedSessionJournalFencedError)
+            ) {
               return error(res, 400, 'invalid_command_operation');
             }
             throw cause;

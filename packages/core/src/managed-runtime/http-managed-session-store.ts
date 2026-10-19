@@ -1034,13 +1034,7 @@ class ManagedSessionStoreHttpClient {
                     error.remoteCode === 'workspace_unavailable')))))
         )
           throw new ManagedSessionCommitRejectedError(error);
-        const uncertain =
-          (error instanceof ManagedSessionStoreHttpError &&
-            (error.status === 429 || error.status >= 500)) ||
-          error instanceof ManagedSessionStoreTransportError ||
-          error instanceof TypeError ||
-          (error instanceof DOMException &&
-            ['AbortError', 'TimeoutError'].includes(error.name));
+        const uncertain = isUncertainStoreFailure(error);
         // Activation can retry beyond the usual attempt cap. A guard refusal
         // must still stop that lane once the shared budget cannot fit another
         // guard retry, even when the inner call never retried the guard.
