@@ -808,9 +808,16 @@ public class ManagedAutomationService {
 
     static ApiException translate(DaemonHttpException error) {
         String code = AutomationScanner.errorCode(error);
+        // A self-healing Harness conflict (a dead predecessor's writer
+        // lease, a busy or briefly unavailable Workspace, a closing
+        // Session) answers the retryable 503 every other unobtained
+        // outcome takes: the same request under the same key succeeds
+        // once it lapses, so a 409 would tell the caller to stop.
         HttpStatus status = switch (error.getStatusCode()) {
             case 404 -> HttpStatus.NOT_FOUND;
-            case 409 -> HttpStatus.CONFLICT;
+            case 409 -> code != null
+                    && HarnessConflictCodes.TRANSIENT.contains(code)
+                    ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.CONFLICT;
             case 400 -> HttpStatus.BAD_REQUEST;
             default -> HttpStatus.SERVICE_UNAVAILABLE;
         };
