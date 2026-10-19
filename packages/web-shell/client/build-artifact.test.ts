@@ -531,12 +531,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     // the unchanged 1,341,000 ceiling with 768 units of margin.
     // ReadFile hints, the shared detail loader and attachment recovery copy
     // stay in this entry; interactive detail HTTP transport stays excluded.
+    // Merging main at c6d97a4c7c (web-shell focus repair #14641, managed
+    // tool details #14604, incremental projection #14562) instead measures
+    // 1,342,402 UTF-16 units, so the ceiling moves to 1,344,500 and retains
+    // 2,098 units of margin, matching the historical ~1.8K headroom.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_341_000);
+    expect(js.length).toBeLessThan(1_344_500);
   });
 
   it('keeps Managed tool-detail transport out of the transcript entry', () => {
