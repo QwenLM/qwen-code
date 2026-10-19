@@ -299,6 +299,41 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void rejectsSshWithoutNodes() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                        "tenant-1", "storage-1", "/tmp/workspace-mount")));
+        properties.getRuntimeBroker().getSsh().setEnabled(true);
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.toolPathCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertTrue(check.detail().contains("SSH Runtime"));
+    }
+
+    @Test
+    void rejectsWorkspaceCreationWithoutWorkspaceFiles() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsAnUnsupportedIsolationClass() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
+        properties.getRuntimeBroker()
+                .setVerifiedWorkspaceRecoveryEnabled(true);
+        properties.getRuntimeBroker().setIsolationClass("tenant");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
     void commandLineArgumentsOverrideTheEnvironment() {
         var environment = ManagedAgentPreflight.baseEnvironment(new String[] {
                 "--server.address=0.0.0.0",

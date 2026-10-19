@@ -105,7 +105,7 @@ class HostedHarnessMySqlIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         dataSource.setConnectionProperties(timeouts);
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource);
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
         jdbc.setQueryTimeout(10);
         Map<String, Object> database = jdbc.queryForMap(
                 "SELECT VERSION() AS version, @@version_comment AS engine");
@@ -220,7 +220,7 @@ class HostedHarnessMySqlIT {
     void lifecycleOperationsCloseThePackagedHarnessSession() throws Exception {
         Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the packaged CLI first").isRegularFile();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(required("mysql.url"),
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(required("mysql.url"),
                 required("mysql.user"), System.getProperty("mysql.password", "")));
         startModel();
         startHarness(cli);
