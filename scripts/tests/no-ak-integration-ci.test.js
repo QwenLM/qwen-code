@@ -1025,6 +1025,34 @@ describe('Windows temp short-alias guard', () => {
     },
   );
 
+  it.runIf(process.platform === 'linux')(
+    'checks each temp key on its own, so the loop cannot drop one',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        // Every case above hands both keys the same value, so a guard loop
+        // narrowed to one key still passes all of them. Only a split pairing
+        // pins that the second key is visited at all, and that the failure
+        // names it.
+        expect(() => runGuard({ TEMP: canonical, TMP: alias })).toThrow(
+          /TMP carries a short alias/,
+        );
+        expect(() => runGuard({ TEMP: alias, TMP: canonical })).toThrow(
+          /TEMP carries a short alias/,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('fails loudly when temp is unset instead of throwing on undefined', () => {
     // configure-windows-runner and the hosted redirect both set TEMP and TMP,
     // so an unset value means one of them stopped running — a clear message
