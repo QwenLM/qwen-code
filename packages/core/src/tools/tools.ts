@@ -580,6 +580,8 @@ export interface ToolArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  /** Only refresh an artifact the session already has; never create one. */
+  updateOnly?: boolean;
 }
 
 export interface ToolResult {

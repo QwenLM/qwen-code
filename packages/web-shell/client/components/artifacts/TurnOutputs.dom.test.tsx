@@ -688,6 +688,48 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('marks only changed workspace artifacts as modified since recorded', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-changed"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={(['available', 'changed'] as const).map(
+              (status) =>
+                ({
+                  id: `${status}-artifact`,
+                  kind: 'file',
+                  storage: 'workspace',
+                  status,
+                  title: `${status}.csv`,
+                  workspacePath: `reports/${status}.csv`,
+                }) as DaemonSessionArtifact,
+            )}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      Array.from(
+        container.querySelectorAll(`.${styles.artifactMeta}`),
+        (meta) => meta.textContent?.includes('Modified since recorded'),
+      ),
+    ).toEqual([false, true]);
+
+    act(() => root.unmount());
+  });
+
   it('opens a recorded link through the external opener instead of the panel', () => {
     const invoke = vi.fn().mockResolvedValue(undefined);
     (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
