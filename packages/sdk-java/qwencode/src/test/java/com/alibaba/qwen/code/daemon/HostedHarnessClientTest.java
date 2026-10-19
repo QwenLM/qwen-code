@@ -2496,8 +2496,7 @@ class HostedHarnessClientTest {
                     () -> client.closeSession(session));
             Thread.sleep(60);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
@@ -2902,13 +2901,14 @@ class HostedHarnessClientTest {
                             }
                         }
                         stallOver.await(15, TimeUnit.SECONDS);
-                        // Strictly between one watchdog tick (100 ms) and
-                        // the idle budget (400 ms): with the entry stamp
+                        // Strictly between one watchdog tick (120 ms) and
+                        // the idle budget (1200 ms): with the entry stamp
                         // the first tick after the consumer parks again
-                        // measures ~250 ms and the stream survives;
+                        // measures ~650 ms and the stream survives;
                         // without it the tick measures the whole stall and
-                        // aborts the stream.
-                        Thread.sleep(250);
+                        // aborts the stream. Both values stay wide enough
+                        // for a loaded CI runner to schedule the write late.
+                        Thread.sleep(650);
                         exchange.getResponseBody().write(terminalEvent(2,
                                 PROMPT_ID).getBytes(StandardCharsets.UTF_8));
                         exchange.getResponseBody().flush();
@@ -2923,7 +2923,7 @@ class HostedHarnessClientTest {
                 .bearerToken("harness-token")
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ZERO)
-                .sseIdleTimeout(Duration.ofMillis(400))
+                .sseIdleTimeout(Duration.ofMillis(1200))
                 .build();
         try {
             HarnessSessionRef session = createSession(client);
@@ -2937,7 +2937,7 @@ class HostedHarnessClientTest {
                 // empty when the consumer parks again; three idle budgets
                 // pass between pulls, none of it charged.
                 stopKeepalives.countDown();
-                Thread.sleep(1200);
+                Thread.sleep(3600);
                 stallOver.countDown();
                 DaemonEvent second = assertTimeoutPreemptively(
                         Duration.ofSeconds(10), stream::next);
@@ -4034,8 +4034,7 @@ class HostedHarnessClientTest {
             assertTrue(failure.getMessage().contains("413"));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced"
                             + " refusal");
         } finally {
@@ -4077,8 +4076,7 @@ class HostedHarnessClientTest {
             assertTrue(failure.getMessage().contains("413"));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced"
                             + " refusal");
         } finally {
@@ -4348,8 +4346,7 @@ class HostedHarnessClientTest {
                     () -> client.detachSession(session));
             Thread.sleep(60);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
@@ -4386,8 +4383,7 @@ class HostedHarnessClientTest {
                     () -> client.closeSession(session));
             Thread.sleep(60);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
@@ -5018,6 +5014,15 @@ class HostedHarnessClientTest {
         assertTrue(heartbeats.get() > 0, "heartbeat never fired");
     }
 
+    private static void awaitHeartbeatAfter(AtomicInteger heartbeats,
+            int previous, String message) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (heartbeats.get() <= previous && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertTrue(heartbeats.get() > previous, message);
+    }
+
     private static void awaitSchedulerDrained(HostedHarnessClient client)
             throws Exception {
         // A periodic task is off the queue while it runs, so the queue is
@@ -5215,8 +5220,7 @@ class HostedHarnessClientTest {
                     () -> client.detachSession(session));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced 204");
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
@@ -5316,8 +5320,7 @@ class HostedHarnessClientTest {
                     () -> client.closeSession(session));
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after an unfenced 307");
             DaemonException veto = assertThrows(DaemonException.class,
                     () -> client.submitTurn(SubmitHarnessTurn.builder()
@@ -5815,8 +5818,7 @@ class HostedHarnessClientTest {
             // it scheduled keeps beating.
             Thread.sleep(100);
             int first = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > first,
+            awaitHeartbeatAfter(heartbeats, first,
                     "heartbeat must keep beating after the refused close");
             // ...and its admission marker survived: a different identity
             // is still vetoed locally.
@@ -6612,8 +6614,9 @@ class HostedHarnessClientTest {
             // keeps beating.
             Thread.sleep(100);
             int beating = heartbeats.get();
-            Thread.sleep(60);
-            assertTrue(heartbeats.get() > beating,
+            // A loaded runner can delay the 10ms heartbeat task past a fixed
+            // observation window; wait for the replacement's beat instead.
+            awaitHeartbeatAfter(heartbeats, beating,
                     "the re-registered attachment must keep beating");
         } finally {
             releaseDelete.countDown();

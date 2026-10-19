@@ -4132,6 +4132,243 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('session operation deadlines', () => {
+    it.each([
+      [
+        'create',
+        (client: DaemonClient) =>
+          client.createOrAttachSession({ workspaceCwd: '/work/a' }),
+      ],
+      [
+        'worktree reset',
+        (client: DaemonClient) => client.resetWorktreeSession('s-1'),
+      ],
+    ])(
+      'holds a %s open for the advertised session budget, not the request deadline',
+      async (_name, start) => {
+        // Both routes answer only after an ACP child handshake, which the
+        // daemon bounds by its initialize budget. That budget is advertised
+        // through `limits.sessionRestoreTimeoutMs`; the generic 30s request
+        // deadline aborted a create the daemon was still completing.
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (input: RequestInfo | URL, init?: RequestInit) => {
+              const url = String(input);
+              if (url.endsWith('/capabilities')) {
+                return Promise.resolve(
+                  jsonResponse(200, {
+                    v: 1,
+                    mode: 'http-bridge',
+                    features: [],
+                    modelServices: [],
+                    limits: { sessionRestoreTimeoutMs: 80_000 },
+                  }),
+                );
+              }
+              return new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  {
+                    once: true,
+                  },
+                );
+              });
+            },
+          ) as unknown as typeof globalThis.fetch;
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          await client.capabilities();
+
+          const outcome = start(client).catch((error: unknown) => error);
+          await vi.advanceTimersByTimeAsync(89_999);
+          expect(signal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('lets an explicit global timeout win over the advertised session budget', async () => {
+      // Precedence, not just the derived branch: an operator who configured a
+      // 20s client deadline must not silently get the daemon's 90s budget.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 80_000 },
+              }),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            signal = init?.signal ?? undefined;
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 20_000,
+        });
+        await client.capabilities();
+
+        const outcome = client
+          .createOrAttachSession({ workspaceCwd: '/work/a' })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(19_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to the restore default when no budget was advertised', async () => {
+      // Clients that create before reading capabilities (qwen-live, the VS
+      // Code companion) have no advertised value to size from.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        const outcome = client
+          .createOrAttachSession({ workspaceCwd: '/work/a' })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(69_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      [
+        'create',
+        (client: DaemonClient) =>
+          client.createOrAttachSession({ workspaceCwd: '/work/a' }),
+      ],
+      [
+        'worktree reset',
+        (client: DaemonClient) => client.resetWorktreeSession('s-1'),
+      ],
+    ])(
+      'never lets a short restore budget pull a %s under the request deadline',
+      async (_name, start) => {
+        // `--session-restore-timeout-ms` is an operator knob for restore, and it
+        // may sit far below the spawn cost `--initialize-timeout-ms` allows.
+        // Sized from it alone, a spawn aborted at 5s + 10s headroom = 15s, which
+        // is under the 30s generic request deadline it replaced.
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (input: RequestInfo | URL, init?: RequestInit) => {
+              const url = String(input);
+              if (url.endsWith('/capabilities')) {
+                return Promise.resolve(
+                  jsonResponse(200, {
+                    v: 1,
+                    mode: 'http-bridge',
+                    features: [],
+                    modelServices: [],
+                    limits: { sessionRestoreTimeoutMs: 5_000 },
+                  }),
+                );
+              }
+              return new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  { once: true },
+                );
+              });
+            },
+          ) as unknown as typeof globalThis.fetch;
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          await client.capabilities();
+
+          const outcome = start(client).catch((error: unknown) => error);
+          await vi.advanceTimersByTimeAsync(29_999);
+          expect(signal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('keeps a low restore pin unfloored on the restore route', async () => {
+      // The floor above is deliberately spawn-only: restore keeps the
+      // advertised budget as-is, so 5000 + 10s headroom still aborts at 15s.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 5_000 },
+              }),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            signal = init?.signal ?? undefined;
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client
+          .loadSession('s-1')
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(14_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(signal?.aborted).toBe(true);
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('prompt', () => {
     it('POSTs the prompt body and returns the agent response', async () => {
       const { fetch, calls } = recordingFetch(() =>
