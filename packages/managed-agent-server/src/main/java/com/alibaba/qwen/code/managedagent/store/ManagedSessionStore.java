@@ -645,9 +645,20 @@ public class ManagedSessionStore {
         long generation = increment(head.writerGeneration(),
                 "writer generation");
         if (csiOriginal != null) {
-            throw conflict(
-                    "csi_original_writer_unavailable",
-                    "The original CSI writer cannot be replaced.");
+            if (!"ACTIVE".equals(head.state()) || head.storageVersion() != STORAGE_VERSION
+                    || head.compactedThroughRevision() != 0 || !"READY".equals(head.recoveryStatus())
+                    || head.writerLeaseUntil() == null || head.journalRevision() < 2 || head.activationEpoch() < 1) {
+                throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
+            }
+            requireCsiHistoryOwner(csiOriginal);
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                JdbcCsiActivationAdmission.qualifyColdWriter(connection, csiOriginal, csiBindings,
+                        head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId(),
+                        head.writerGeneration(), head.activationEpoch(), epochMillis(head.writerLeaseUntil()),
+                        request.writerId());
+                return null;
+            });
+            now = databaseNow();
         }
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
         jdbc.update(

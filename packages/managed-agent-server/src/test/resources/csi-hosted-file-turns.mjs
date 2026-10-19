@@ -15,6 +15,7 @@ export async function runHostedFileTurn({
   index,
   mutation,
   files,
+  recover,
 }) {
   const failures = [];
   let requests = 0;
@@ -146,11 +147,52 @@ export async function runHostedFileTurn({
       )
     );
     const before = session.authority.committedSequence;
+    let resume;
+    if (recover) {
+      const write = session.sink.write.bind(session.sink);
+      let interrupted = false;
+      session.sink.write = async (record) => {
+        if (
+          record.type === 'tool_result' &&
+          record.message.parts[0].functionResponse.id ===
+            `owned-function-${index}-2`
+        ) {
+          interrupted = true;
+          throw new Error(
+            'Owned receipt-complete cut before the last result message',
+          );
+        }
+        return write(record);
+      };
+      try {
+        await assert.rejects(
+          runHostedCsiTextTurn(
+            { managed: session, cwd: '/workspace', files },
+            promptId,
+            prompt,
+            new AbortController(),
+          ),
+          /recovery|receipt-complete/i,
+        );
+      } finally {
+        session.sink.write = write;
+      }
+      assert.equal(interrupted, true);
+      assert.equal(requests, 1);
+      const recovered = await recover();
+      session = recovered.session;
+      resume = recovered.parts;
+      assert.deepEqual(
+        resume.map((part) => part.functionResponse.id),
+        functions.map((_, ordinal) => `owned-function-${index}-${ordinal}`),
+      );
+    }
     const terminal = await runHostedCsiTextTurn(
       { managed: session, cwd: '/workspace', files },
       promptId,
       prompt,
       new AbortController(),
+      resume,
     );
     assert.deepEqual(failures, []);
     assert.equal(requests, 2);
