@@ -332,11 +332,17 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
 }
 
 function firstMcpPositionalArg(argv: readonly string[]): string | undefined {
-  return firstPositionalArg(
-    argv.map((arg) =>
-      arg.replace(/^--managedExtensions(?==|$)/, '--managed-extensions'),
-    ),
+  const normalized = argv.map((arg) =>
+    arg.replace(/^--managedExtensions(?==|$)/, '--managed-extensions'),
   );
+  for (let i = 0; i < normalized.length; i++) {
+    const arg = normalized[i]!;
+    if (arg === '--') return undefined;
+    if (!arg.startsWith('-')) return arg;
+    if (!/^--managed-extensions(?:=|$)/.test(arg)) return undefined;
+    i = skipOptionValues(normalized, i);
+  }
+  return undefined;
 }
 
 function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
@@ -452,10 +458,8 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
   );
-  // A subcommand is the first positional after `mcp`, wherever it sits:
-  // inspecting argv[1] alone misreads `mcp --managed-extensions <root> list`
-  // as flag-only and prints help with exit 0 while the requested mutation
-  // silently never runs. firstPositionalArg skips the known value slots.
+  // Only managed options may precede the subcommand: this parser does not
+  // register other global flags, and add treats unknown options as arguments.
   const subcommand = firstMcpPositionalArg(argv.slice(1));
   if (subcommand === undefined) {
     printMcpHelp();

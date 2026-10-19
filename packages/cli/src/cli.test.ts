@@ -1087,6 +1087,46 @@ describe('runCliEntry', () => {
       },
     );
 
+    it.each([
+      { prefix: ['--model', 'gpt-x'] },
+      { prefix: ['--model=gpt-x'] },
+      { prefix: ['-m', 'gpt-x'] },
+      { prefix: ['--model', 'gpt-x', '--'] },
+      { prefix: ['--debug'] },
+    ])(
+      'does not execute MCP commands with unsupported leading options $prefix',
+      async ({ prefix }) => {
+        await runCliEntry(['mcp', ...prefix, 'add', 'fixture', 'node']);
+
+        expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+        expect(mocks.main).not.toHaveBeenCalled();
+        expect(stdout.join('')).toContain('Manage MCP servers');
+        expect(process.exitCode).toBeUndefined();
+      },
+    );
+
+    it.each(['--managed-extensions', '--managedExtensions'])(
+      'rejects unsupported leading options after %s',
+      async (flag) => {
+        await runCliEntry([
+          'mcp',
+          flag,
+          managedRoot,
+          '--model',
+          'gpt-x',
+          '--',
+          'add',
+          'fixture',
+          'node',
+        ]);
+
+        expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+        expect(mocks.main).not.toHaveBeenCalled();
+        expect(stdout.join('')).toContain('Manage MCP servers');
+        expect(process.exitCode).toBeUndefined();
+      },
+    );
+
     it('rejects a managed root that does not exist', async () => {
       await runCliEntry([
         'mcp',
