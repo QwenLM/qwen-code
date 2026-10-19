@@ -434,6 +434,32 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Boolean> releaseRetired(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            return CompletableFuture.completedFuture(true);
+        }
+        Context context = context(lease, session, false);
+        RuntimeBindingRecord binding = bindings.findById(context.runtime().getBindingId());
+        if (binding != null && binding.getState() == RuntimeBindingRecord.State.LOST) {
+            // The LOST family owns this holder; its evidence gate is stricter.
+            return CompletableFuture.completedFuture(true);
+        }
+        boolean proven = binding != null
+                && binding.getGeneration() == context.runtime().getGeneration()
+                && binding.getState() == RuntimeBindingRecord.State.DRAINING
+                && binding.getDrainReceipt() != null
+                && binding.getDrainReceipt().matches(binding);
+        if (!proven) {
+            // Held without proof is a refusal; nothing held is already settled.
+            return CompletableFuture.completedFuture(
+                    !ownership.isHeld(context.binding(), context.session()));
+        }
+        ownership.release(context.binding(), context.session());
+        detachOwed.remove(detachKey(context));
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
     public CompletionStage<Boolean> releaseMount(RuntimeLease lease, RuntimeSession session) {
         if (!managed(session)) {
             return RuntimeTransport.super.releaseMount(lease, session);

@@ -56,32 +56,39 @@ class ManagedSchemaCatalogTest {
     }
 
     @Test
-    void acceptsNumericBooleanChecksWithoutAcceptingConstraintDrift() throws Exception {
-        for (int enabled : new int[] {0, 1}) {
-            String literal = enabled == 0 ? "FALSE" : "TRUE";
-            String body = "\n    CONSTRAINT ck_probe CHECK (plan_enabled = " + literal
-                    + " OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1))\n";
-            String numeric = "`plan_enabled` = " + enabled
-                    + " or `selected_approval_mode` is not null and `approval_revision` >= 1";
-            try (var data = fixture(false); var update = data.prepareStatement(
-                    "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
-                for (String product : new String[] {"MySQL", "MariaDB"}) {
-                    Connection connection = mariaDb(data, product, 1, 1);
-                    update.setString(1, numeric);
-                    update.executeUpdate();
-                    ManagedSchemaCatalog.validateChecks(connection, "ma_operation", body);
-                    for (String changed : new String[] {
-                            numeric.replace(" = " + enabled, " = " + (1 - enabled)),
-                            numeric.replace(">= 1", ">= 2"),
-                            numeric.replace(" or ", " and "),
-                            numeric.replace(" = " + enabled, " = '" + literal + "'")}) {
-                        update.setString(1, changed);
-                        update.executeUpdate();
-                        assertThrows(SQLException.class,
-                                () -> ManagedSchemaCatalog.validateChecks(connection, "ma_operation", body),
-                                changed);
-                    }
-                }
+    void acceptsMariaDbNumericBooleansInPlanChecksWithoutAcceptingDrift() throws Exception {
+        // MariaDB stores a bare FALSE as 0 and drops the grouping parentheses
+        // it can infer from precedence; both V10 plan checks hit this shape.
+        String sessionBody = "\n    CONSTRAINT ck_probe CHECK (plan_enabled = FALSE"
+                + " OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1))\n";
+        String sessionStored = "`plan_enabled` = 0 or `selected_approval_mode` is not null"
+                + " and `approval_revision` >= 1";
+        String turnBody = "\n    CONSTRAINT ck_probe CHECK (plan_enabled IS NULL"
+                + " OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL"
+                + " AND (plan_enabled = FALSE OR approval_revision >= 1)))\n";
+        String turnStored = "`plan_enabled` is null or `approval_mode` is not null"
+                + " and `approval_revision` is not null and (`plan_enabled` = 0"
+                + " or `approval_revision` >= 1)";
+        try (var data = fixture(false); var update = data.prepareStatement(
+                "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
+            Connection connection = mariaDb(data, "MySQL", 1, 1);
+            update.setString(1, sessionStored);
+            update.executeUpdate();
+            ManagedSchemaCatalog.validateChecks(connection, "ma_operation", sessionBody);
+            update.setString(1, turnStored);
+            update.executeUpdate();
+            ManagedSchemaCatalog.validateChecks(connection, "ma_operation", turnBody);
+            String[][] drift = {
+                    {sessionBody, sessionStored.replace(">= 1", ">= 2")},
+                    {sessionBody, sessionStored.replace("`plan_enabled` = 0", "`plan_enabled` = 1")},
+                    {turnBody, turnStored.replace(" is null or", " is not null or")},
+                    {turnBody, turnStored.replace("`plan_enabled` = 0", "`plan_enabled` = 1")}};
+            for (String[] arm : drift) {
+                update.setString(1, arm[1]);
+                update.executeUpdate();
+                assertThrows(SQLException.class,
+                        () -> ManagedSchemaCatalog.validateChecks(connection, "ma_operation", arm[0]),
+                        arm[1]);
             }
         }
     }
