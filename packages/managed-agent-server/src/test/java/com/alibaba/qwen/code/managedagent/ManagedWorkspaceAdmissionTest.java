@@ -54,6 +54,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -2194,8 +2195,42 @@ class ManagedWorkspaceAdmissionTest {
                 "workspace_unavailable");
     }
 
+    @Test
+    void onlyAWorkspaceCreateWithoutInputRequestsTheSessionCreateWarm() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        var selection = new WorkspaceSelection("ws-a", ".");
+        HarnessCoordinator coordinator = mock(HarnessCoordinator.class);
+        ManagedAgentService warming = workspaceFilesService(tenant, true,
+                coordinator);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        CommandAdmission empty = transaction.execute(status ->
+                warming.createWorkspaceSession(tenant, "actor-a",
+                        "create-empty", "qwen-code", null, "empty", null,
+                        List.of(), selection));
+        CommandAdmission prompted = transaction.execute(status ->
+                warming.createWorkspaceSession(tenant, "actor-a",
+                        "create-prompted", "qwen-code", null, "prompted",
+                        null, List.of(new InputBlock("text", "go")),
+                        selection));
+        assertThat(empty.turnId()).isNull();
+        assertThat(prompted.turnId()).isNotNull();
+        verify(coordinator).warmSession(tenant, empty.sessionId());
+        verify(coordinator, never()).warmSession(tenant,
+                prompted.sessionId());
+    }
+
     private ManagedAgentService workspaceFilesService(String tenant,
             boolean workspaceFiles) {
+        return workspaceFilesService(tenant, workspaceFiles, null);
+    }
+
+    private ManagedAgentService workspaceFilesService(String tenant,
+            boolean workspaceFiles, HarnessCoordinator coordinator) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
@@ -2203,7 +2238,7 @@ class ManagedWorkspaceAdmissionTest {
                         "storage-a", "/workspace")));
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
                 Clock.systemUTC(), ignored -> {}, registry, properties);
-        return new ManagedAgentService(gated, new RequestDigests(), null,
+        return new ManagedAgentService(gated, new RequestDigests(), coordinator,
                 new UnavailableHarnessConnector() {
                     @Override
                     public boolean isWorkspaceFilesAvailable() {
