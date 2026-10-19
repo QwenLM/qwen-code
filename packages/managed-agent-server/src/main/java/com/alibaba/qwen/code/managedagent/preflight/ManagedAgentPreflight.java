@@ -339,10 +339,18 @@ public final class ManagedAgentPreflight {
             HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                     .timeout(Duration.ofMillis(TIMEOUT_MILLIS))
                     .header("Accept", "application/json")
+                    .header("Authorization", "Bearer " + harness.getToken())
                     .GET()
                     .build();
             HttpResponse<String> response = client.send(request,
                     HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 401 || response.statusCode() == 403) {
+                return new Check("harness", Status.FAIL,
+                        url + " rejected the configured token ("
+                                + response.statusCode() + ")",
+                        "set QWEN_MANAGED_AGENT_HARNESS_TOKEN to the token the"
+                                + " Harness accepts");
+            }
             if (response.statusCode() != 200) {
                 return new Check("harness", Status.FAIL,
                         url + " answered " + response.statusCode(),

@@ -93,6 +93,9 @@ public class HarnessEventProjector {
         copyScalar(update, safe, "title");
         copyScalar(update, safe, "status");
         copyScalar(update, safe, "name");
+        if (sourceId != null && sourceId > 0) {
+            safe.put("sourceSequence", sourceId);
+        }
         String callId = string(update.get("toolCallId"));
         if (callId == null) {
             callId = string(update.get("callId"));
