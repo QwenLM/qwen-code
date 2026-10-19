@@ -1,23 +1,31 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
+import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.PropertySource;
+import org.springframework.core.env.SimpleCommandLinePropertySource;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 
+import java.io.File;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -69,7 +77,7 @@ public final class ManagedAgentPreflight {
      */
     public static int run(String[] args) {
         List<Check> checks = new ArrayList<>();
-        ConfigurableEnvironment environment = new StandardEnvironment();
+        ConfigurableEnvironment environment = baseEnvironment(args);
         List<String> locations = configLocations(args, environment);
         loadConfiguration(environment, locations, checks);
         ManagedAgentProperties properties = bind(environment, checks);
@@ -94,6 +102,15 @@ public final class ManagedAgentPreflight {
         print(checks);
         return checks.stream().anyMatch(check ->
                 check.status() == Status.FAIL) ? 1 : 0;
+    }
+
+    static ConfigurableEnvironment baseEnvironment(String[] args) {
+        StandardEnvironment environment = new StandardEnvironment();
+        if (args.length > 0) {
+            environment.getPropertySources().addFirst(
+                    new SimpleCommandLinePropertySource(args));
+        }
+        return environment;
     }
 
     static List<String> configLocations(
@@ -123,11 +140,12 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static void loadConfiguration(
+    static void loadConfiguration(
             ConfigurableEnvironment environment, List<String> locations,
             List<Check> checks) {
         YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
-        for (String location : locations) {
+        for (int index = locations.size() - 1; index >= 0; index--) {
+            String location = locations.get(index);
             boolean optional = location.startsWith(OPTIONAL_PREFIX);
             String path = optional
                     ? location.substring(OPTIONAL_PREFIX.length()) : location;
@@ -144,7 +162,8 @@ public final class ManagedAgentPreflight {
                 }
                 continue;
             }
-            addYaml(loader, environment, resource, "external", checks);
+            addYaml(loader, environment, resource, "external-" + index,
+                    checks);
         }
         addYaml(loader, environment, new ClassPathResource("application.yml"),
                 "defaults", checks);
@@ -237,7 +256,7 @@ public final class ManagedAgentPreflight {
                 properties.getRuntimeBroker();
         String active = broker.getCredentialKeyId();
         Set<String> previous = broker.getPreviousCredentialKeys().keySet();
-        if (isBlank(active)) {
+        if (StringUtils.isBlank(active)) {
             return previous.isEmpty()
                     ? new Check("key-ring", Status.SKIP,
                             "no Runtime credential key configured", null)
@@ -256,17 +275,21 @@ public final class ManagedAgentPreflight {
             ManagedAgentProperties properties) {
         String address = environment.getProperty("server.address",
                 "127.0.0.1");
-        String mode = properties.getAuth().getMode();
-        String signingKey = properties.getAuth().getSigningKey();
-        if (!isLoopback(address) && "auto".equalsIgnoreCase(mode)) {
+        try {
+            ServerProperties server = new ServerProperties();
+            server.setAddress(InetAddress.getByName(address));
+            Integer port = environment.getProperty("server.port",
+                    Integer.class);
+            if (port != null) {
+                server.setPort(port);
+            }
+            new BrokerSecurity(properties, server, new WebMvcProperties());
+        } catch (IllegalStateException error) {
+            return new Check("auth", Status.FAIL, error.getMessage(),
+                    "correct the auth or bind configuration");
+        } catch (UnknownHostException error) {
             return new Check("auth", Status.FAIL,
-                    "mode=auto refuses a non-loopback bind (" + address + ")",
-                    "set QWEN_MANAGED_AGENT_AUTH_MODE=signed and a signing key");
-        }
-        if ("signed".equalsIgnoreCase(mode) && isBlank(signingKey)) {
-            return new Check("auth", Status.FAIL,
-                    "signed mode without a signing key",
-                    "set QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY");
+                    "cannot resolve " + address, "fix the bind address");
         }
         if (properties.getAuth().isAllowInsecureBind()) {
             return new Check("auth", Status.WARN,
@@ -274,7 +297,9 @@ public final class ManagedAgentPreflight {
                     "remove QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND");
         }
         return new Check("auth", Status.PASS,
-                "address=" + address + " mode=" + mode, null);
+                "address=" + address + " mode="
+                        + String.valueOf(properties.getAuth().getMode()),
+                null);
     }
 
     static Check harnessCheck(ManagedAgentProperties properties) {
@@ -282,7 +307,7 @@ public final class ManagedAgentPreflight {
         if (!harness.isEnabled()) {
             return new Check("harness", Status.SKIP, "disabled", null);
         }
-        if (isBlank(harness.getToken())) {
+        if (StringUtils.isBlank(harness.getToken())) {
             return new Check("harness", Status.FAIL, "token is empty",
                     "set QWEN_MANAGED_AGENT_HARNESS_TOKEN");
         }
@@ -292,7 +317,7 @@ public final class ManagedAgentPreflight {
                     "set QWEN_MANAGED_AGENT_CAPABILITY_DIGEST");
         }
         String baseUrl = harness.getBaseUrl();
-        if (isBlank(baseUrl)) {
+        if (StringUtils.isBlank(baseUrl)) {
             return new Check("harness", Status.FAIL, "base URL is empty",
                     "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL");
         }
@@ -370,6 +395,11 @@ public final class ManagedAgentPreflight {
         }
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
+        if ("static".equals(broker.getProvisioner())) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace files cannot use the static provisioner",
+                    "use the local-process provisioner");
+        }
         if (!"local-process".equals(broker.getProvisioner())) {
             return new Check("tool-path", Status.WARN,
                     "not evaluated for provisioner " + broker.getProvisioner(),
@@ -383,7 +413,7 @@ public final class ManagedAgentPreflight {
                     "use session isolation");
         }
         if (broker.getWorkspaceMounts().isEmpty()
-                && isBlank(broker.getWorkspaceCreationRoot())
+                && StringUtils.isBlank(broker.getWorkspaceCreationRoot())
                 && broker.getSsh().getNodes().isEmpty()) {
             return new Check("tool-path", Status.FAIL,
                     "no Workspace mount, creation root or SSH node",
@@ -403,12 +433,12 @@ public final class ManagedAgentPreflight {
             checks.add(new Check("broker", Status.SKIP, "disabled", null));
             return checks;
         }
-        if (isBlank(broker.getToken())) {
+        if (StringUtils.isBlank(broker.getToken())) {
             checks.add(new Check("broker", Status.FAIL, "token is empty",
                     "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN"));
         }
-        if (isBlank(broker.getCredentialKeyId())
-                || isBlank(broker.getCredentialKey())) {
+        if (StringUtils.isBlank(broker.getCredentialKeyId())
+                || StringUtils.isBlank(broker.getCredentialKey())) {
             checks.add(new Check("broker", Status.FAIL,
                     "credential key pair is incomplete",
                     "set runtime-broker.credential-key-id and credential-key"));
@@ -433,8 +463,8 @@ public final class ManagedAgentPreflight {
             checks.add(readableCheck("worker-entry",
                     broker.getWorkerEntry()));
         } else if ("static".equals(broker.getProvisioner())) {
-            if (isBlank(broker.getStaticEndpoint())
-                    || isBlank(broker.getStaticToken())) {
+            if (StringUtils.isBlank(broker.getStaticEndpoint())
+                    || StringUtils.isBlank(broker.getStaticToken())) {
                 checks.add(new Check("broker", Status.FAIL,
                         "static provisioner needs endpoint and token",
                         "set static-endpoint and static-token"));
@@ -449,7 +479,7 @@ public final class ManagedAgentPreflight {
 
     private static Check workspaceCheck(ManagedAgentProperties properties) {
         String cwd = properties.getRuntimeBroker().getWorkspaceCwd();
-        if (isBlank(cwd)) {
+        if (StringUtils.isBlank(cwd)) {
             return new Check("workspace", Status.SKIP,
                     "no Workspace cwd configured", null);
         }
@@ -462,7 +492,7 @@ public final class ManagedAgentPreflight {
     }
 
     private static Check directoryCheck(String name, String path) {
-        if (isBlank(path)) {
+        if (StringUtils.isBlank(path)) {
             return new Check(name, Status.FAIL, "not configured",
                     "set the directory");
         }
@@ -479,7 +509,7 @@ public final class ManagedAgentPreflight {
     }
 
     private static Check executableCheck(String name, String path) {
-        if (isBlank(path)) {
+        if (StringUtils.isBlank(path)) {
             return new Check(name, Status.FAIL, "not configured",
                     "set the executable path");
         }
@@ -490,7 +520,7 @@ public final class ManagedAgentPreflight {
     }
 
     private static Check readableCheck(String name, String path) {
-        if (isBlank(path)) {
+        if (StringUtils.isBlank(path)) {
             return new Check(name, Status.FAIL, "not configured",
                     "set the worker entry path");
         }
@@ -520,12 +550,12 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static Check databaseCheck(ConfigurableEnvironment environment) {
+    static Check databaseCheck(ConfigurableEnvironment environment) {
         String url = environment.getProperty("spring.datasource.url");
         String user = environment.getProperty("spring.datasource.username", "");
         String password =
                 environment.getProperty("spring.datasource.password", "");
-        if (isBlank(url)) {
+        if (StringUtils.isBlank(url)) {
             return new Check("database", Status.FAIL,
                     "no datasource URL", "set SPRING_DATASOURCE_URL");
         }
@@ -541,7 +571,16 @@ public final class ManagedAgentPreflight {
             try (Statement statement = connection.createStatement()) {
                 statement.execute("SELECT 1");
             }
-            String grants = grantProbe(connection);
+            try {
+                requirePerformanceSchemaGrant(connection);
+            } catch (SQLException error) {
+                return new Check("database", Status.FAIL,
+                        "performance_schema grant missing ("
+                                + error.getErrorCode() + ")",
+                        "grant SELECT ON "
+                                + "performance_schema.user_variables_by_thread"
+                                + " to the datasource user");
+            }
             String schema = schemaVersion(connection);
             String expected = expectedSchemaVersion();
             if (expected != null && schema != null
@@ -553,7 +592,7 @@ public final class ManagedAgentPreflight {
             }
             return new Check("database", Status.PASS,
                     "schema=" + (schema == null ? "not migrated yet" : schema)
-                            + "; " + grants,
+                            + "; performance_schema grant ok",
                     null);
         } catch (SQLException error) {
             return new Check("database", Status.FAIL,
@@ -563,16 +602,13 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static String grantProbe(Connection connection) {
+    private static void requirePerformanceSchemaGrant(Connection connection)
+            throws SQLException {
         try (Statement statement = connection.createStatement();
                 ResultSet result = statement.executeQuery(
                         "SELECT COUNT(*) FROM "
                                 + "performance_schema.user_variables_by_thread")) {
             result.next();
-            return "performance_schema grant ok";
-        } catch (SQLException error) {
-            return "performance_schema grant missing (" + error.getErrorCode()
-                    + ")";
         }
     }
 
@@ -589,9 +625,10 @@ public final class ManagedAgentPreflight {
 
     static String expectedSchemaVersion() {
         Path manifest = manifestPath();
-        if (manifest == null) {
-            return null;
-        }
+        return manifest == null ? null : expectedSchemaVersion(manifest);
+    }
+
+    static String expectedSchemaVersion(Path manifest) {
         try {
             JsonNode root = new ObjectMapper().readTree(manifest.toFile());
             JsonNode value = root.path("compatibility")
@@ -602,7 +639,34 @@ public final class ManagedAgentPreflight {
         }
     }
 
+    static Path findManifest(String classPath) {
+        if (classPath == null) {
+            return null;
+        }
+        for (String entry : classPath.split(File.pathSeparator)) {
+            Path file = Path.of(entry);
+            if (!entry.endsWith(".jar") || !Files.isRegularFile(file)) {
+                continue;
+            }
+            Path lib = file.getParent();
+            Path root = lib == null ? null : lib.getParent();
+            if (root == null) {
+                continue;
+            }
+            Path manifest = root.resolve("manifest.json");
+            if (Files.isRegularFile(manifest)) {
+                return manifest;
+            }
+        }
+        return null;
+    }
+
     private static Path manifestPath() {
+        Path fromClassPath = findManifest(
+                System.getProperty("java.class.path", ""));
+        if (fromClassPath != null) {
+            return fromClassPath;
+        }
         try {
             Path code = Path.of(ManagedAgentPreflight.class
                     .getProtectionDomain().getCodeSource().getLocation()
@@ -642,7 +706,7 @@ public final class ManagedAgentPreflight {
     }
 
     static boolean isLoopback(String address) {
-        return isBlank(address)
+        return StringUtils.isBlank(address)
                 || "127.0.0.1".equals(address)
                 || "::1".equals(address)
                 || "localhost".equalsIgnoreCase(address);
@@ -653,7 +717,7 @@ public final class ManagedAgentPreflight {
     }
 
     static boolean isCredentialKey(String value) {
-        if (isBlank(value)) {
+        if (StringUtils.isBlank(value)) {
             return false;
         }
         try {
@@ -661,10 +725,6 @@ public final class ManagedAgentPreflight {
         } catch (IllegalArgumentException error) {
             return false;
         }
-    }
-
-    private static boolean isBlank(String value) {
-        return value == null || value.isBlank();
     }
 
     private static String trimTrailingSlash(String value) {
