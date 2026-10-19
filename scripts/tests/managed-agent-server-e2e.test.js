@@ -274,6 +274,20 @@ describe('managed-agent-server e2e runner', () => {
     }
   });
 
+  // The reviewer's probe: a 202 only admits the response operation, so the
+  // Action row is still `requested` with a null receipt. The after-decision
+  // barrier must reject that answer, or a crash proves delivery, not commit.
+  it('refuses an admitted but undelivered decision as the after-decision barrier', () => {
+    const { approvalDecisionCommitted } = load(
+      ['approvalDecisionCommitted'],
+      'approvalDecisionCommitted',
+    )();
+    expect(approvalDecisionCommitted('requested\t0\t0')).toBe(false);
+    expect(approvalDecisionCommitted('decided\t0\t0')).toBe(false);
+    expect(approvalDecisionCommitted('decided\t1\t0')).toBe(false);
+    expect(approvalDecisionCommitted('decided\t1\t1')).toBe(true);
+  });
+
   it('pins the #14481 approval fault arms to durable barriers', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const workflow = read('.github/workflows/sdk-java.yml');
@@ -317,6 +331,21 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain("execution === 'PREPARED\\t0'");
     expect(source).toContain(
       'replacementBrokerProxy?.heldPath() !== undefined',
+    );
+    // The after-decision crash must read the durable decision row, not the
+    // 202: hold :start so it cannot reach dispatch, and require the state,
+    // receipt and digest together.
+    expect(source).toContain('Approval decision durably committed');
+    expect(source).toMatch(/approvalDecisionCommitted\(\s*runMysql\(/);
+    expect(source).toContain(
+      'IF(decision_receipt_id IS NULL, 0, 1), IF(decision_digest IS NULL, 0, 1)',
+    );
+    const proxy = source.indexOf(
+      'replacementBrokerProxy = await startHeldExecutionStartProxy',
+    );
+    expect(proxy).toBeGreaterThan(-1);
+    expect(source.slice(proxy - 500, proxy)).toContain(
+      "approvalFault === 'after-decision'",
     );
   });
 

@@ -700,6 +700,15 @@ async function startHeldExecutionStartProxy(
   };
 }
 
+// A 202 only admits the response operation (`PENDING` / `JAVA_DURABLE`);
+// the Action row stays `requested` until the coordinator's delivery commits
+// the decision. The after-decision barrier must therefore read the durable
+// row, not the HTTP answer.
+function approvalDecisionCommitted(row: string): boolean {
+  const [state, receipt, digest] = row.split('\t');
+  return state === 'decided' && receipt === '1' && digest === '1';
+}
+
 // The control plane answers 202 only after the decision or admission is
 // committed, so dropping the reply here is a lost response, not a weaker
 // request: the server keeps the committed row, and the caller retries the
@@ -2077,10 +2086,16 @@ try {
       replacementSpring = spring;
       replacementSpringUrl = springUrl;
       replacementHarnessPort = harnessPort;
-      // The partial-prepare barrier needs the approved execution's :start
-      // held before the Broker sees it, so the crash lands between the
-      // durable PREPARED row and the physical dispatch.
-      if (approvalFault === 'after-prepare') {
+      // Both crash barriers hold the approved execution's :start before the
+      // Broker sees it: after-prepare waits for the durable PREPARED row,
+      // while after-decision only needs the decision to commit and must not
+      // let that generation reach dispatch or result commit before the
+      // crash. Without the hold a fast Harness could make the arm prove a
+      // later barrier while still calling itself "after decision".
+      if (
+        approvalFault === 'after-decision' ||
+        approvalFault === 'after-prepare'
+      ) {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
           `http://127.0.0.1:${brokerPort}`,
         );
@@ -2365,10 +2380,22 @@ try {
             120_000,
             replacementHarness,
           );
+        } else {
+          // The 202 admitted the response operation, not the decision. Wait
+          // for the durable decision row and its receipt before SIGKILL.
+          await waitUntil(
+            'Approval decision durably committed',
+            () =>
+              approvalDecisionCommitted(
+                runMysql(
+                  mysqlPort,
+                  `SELECT state, IF(decision_receipt_id IS NULL, 0, 1), IF(decision_digest IS NULL, 0, 1) FROM qwen_managed_agent.ma_session_record WHERE ${actionFilter}`,
+                ),
+              ),
+            120_000,
+            replacementHarness,
+          );
         }
-        // after-decision needs no poll: the response is 202 only after the
-        // decision commits, and polling would race the Harness into a later
-        // barrier while still calling the arm "after decision".
         const executionAtCrash = runMysql(
           mysqlPort,
           'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
