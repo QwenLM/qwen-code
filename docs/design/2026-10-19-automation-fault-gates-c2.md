@@ -67,11 +67,18 @@ The facts come from the Session journal, the run records
 
 Each witness runs alone against its own case and is restored byte for byte.
 
-| Witness | Mutation                                                                     | Expected red at                                                          |
-| ------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| s1      | `automationRunId` gains a per-call nonce, so a re-drive derives a new run id | `spring-kill-before-answer`: a second run chain beside the re-driven one |
-| s2      | The lease claim drops the owner and fence predicate                          | `two-scanner-race`: two run chains, or a second model Turn               |
-| s3      | Removed with the deferred cell (settle order stays pinned by slice 1)        | -                                                                        |
+| Witness | Mutation                                                                                     | Expected red at                                                          |
+| ------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| s1      | `automationRunId` gains a per-call nonce, so a re-drive derives a new run id                 | `spring-kill-before-answer`: a second run chain beside the re-driven one |
+| s2      | `CronSlots.occurrenceKey` gains a per-call nonce, so the two scanners derive different slots | `two-scanner-race`: two occurrence rows and two run chains               |
+| s3      | Removed with the deferred cell (settle order stays pinned by slice 1)                        | -                                                                        |
+
+Both witnesses were run against the case alone and went red at the sites
+above. The first s2 candidate — forcing the lease claim's free-lease
+predicate true — stayed green: both scanners then claim, but the run id
+derives from the same occurrence key, so the ledger still holds one chain.
+The witness therefore targets the occurrence key, which is what makes the
+loser's write a second row.
 
 ## Budget
 
