@@ -295,6 +295,7 @@ describe('managed-agent-server e2e runner', () => {
     const scripts = [
       'test:e2e:managed-harness-restart-approval-after-decision',
       'test:e2e:managed-harness-restart-approval-after-prepare',
+      'test:e2e:managed-harness-restart-approval-after-result',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
     ];
@@ -347,6 +348,18 @@ describe('managed-agent-server e2e runner', () => {
     expect(source.slice(proxy - 500, proxy)).toContain(
       "approvalFault === 'after-decision'",
     );
+    // The result-commit crash waits for the settled result and the held
+    // model round, then releases the hold; its reissue must reuse the same
+    // saved request or the proof is about a rewritten one.
+    expect(source).toContain(
+      'Approved result committed before the model round',
+    );
+    expect(source).toContain("execution === 'SETTLED\\t1'");
+    expect(source).toContain('releaseApprovalResultHold()');
+    expect(source).toContain(
+      'Result-commit recovery changed the saved model request',
+    );
+    expect(source).toContain("approvalFault === 'after-result'\n          ? 2");
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

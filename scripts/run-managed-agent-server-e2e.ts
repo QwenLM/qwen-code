@@ -76,6 +76,7 @@ let g3VerifyArgument: string | undefined;
 const approvalFaults = [
   'after-decision',
   'after-prepare',
+  'after-result',
   'decision-reply-lost',
   'admission-reply-lost',
 ] as const;
@@ -1164,6 +1165,10 @@ let releaseContinuationHold = () => {};
 const continuationHold = new Promise<void>((resolve) => {
   releaseContinuationHold = resolve;
 });
+// after-result arms a fresh hold after the decision: the continuation hold
+// above is already released by the time the approved call runs.
+let approvalResultHold: Promise<void> | undefined;
+let releaseApprovalResultHold = () => {};
 const modelRoundMarker = 'MANAGED_SESSION_MODEL_ROUND_FAILOVER';
 const modelRoundResponse = 'MODEL_ROUND_TURN_RECOVERED';
 const modelRoundNextMarker = 'MANAGED_SESSION_MODEL_ROUND_NEXT_TURN';
@@ -1263,7 +1268,19 @@ try {
             ],
           };
         }
-        if (approvalRecovery) return { content: continuationResponse };
+        if (approvalRecovery) {
+          if (approvalFault === 'after-result' && approvalResultHold) {
+            // Publish a prefix and park the round so the crash lands after
+            // the execution result commits but before the assistant output
+            // commits; the reissue must reuse this exact saved request.
+            return {
+              contentChunks: [continuationPartial],
+              holdAfterChunks: 1,
+              holdUntil: approvalResultHold,
+            };
+          }
+          return { content: continuationResponse };
+        }
         if (!acceptReplacementContinuation) {
           return {
             contentChunks: [continuationPartial],
@@ -2336,6 +2353,11 @@ try {
           policy_revision: originalApprovalOptions!.policyRevision,
           option_id: verificationMode,
         });
+        if (approvalFault === 'after-result') {
+          approvalResultHold = new Promise<void>((resolve) => {
+            releaseApprovalResultHold = resolve;
+          });
+        }
         if (approvalFault === 'decision-reply-lost') {
           await postAndDropReply(decisionUrl, decisionBody, decisionHeaders);
         }
@@ -2382,11 +2404,13 @@ try {
       }
       if (
         approvalFault === 'after-decision' ||
-        approvalFault === 'after-prepare'
+        approvalFault === 'after-prepare' ||
+        approvalFault === 'after-result'
       ) {
-        // A5/A5a: kill the generation that holds the committed decision (and,
-        // for after-prepare, the durable PREPARED execution) so the next
-        // generation must resume the stage instead of replaying the approval.
+        // A5/A5a: kill the generation that holds the committed decision (or,
+        // for after-result, the committed result with its model round still
+        // open) so the next generation must resume the stage instead of
+        // replaying the approval.
         const crashedBootId = runMysql(
           mysqlPort,
           `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
@@ -2403,6 +2427,28 @@ try {
                 execution === 'PREPARED\t0' &&
                 replacementBrokerProxy?.heldPath() !== undefined
               );
+            },
+            120_000,
+            replacementHarness,
+          );
+        } else if (approvalFault === 'after-result') {
+          await waitUntil(
+            'Approved result committed before the model round',
+            () => {
+              const execution = runMysql(
+                mysqlPort,
+                'SELECT execution_state, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.ma_tool_execution',
+              );
+              const heldResultRequest = (fake?.requests ?? []).some(
+                ({ body }) => {
+                  const messages = JSON.stringify(body['messages']);
+                  return (
+                    messages.includes(continuationMarker) &&
+                    messages.includes('"role":"tool"')
+                  );
+                },
+              );
+              return execution === 'SETTLED\t1' && heldResultRequest;
             },
             120_000,
             replacementHarness,
@@ -2437,6 +2483,10 @@ try {
           replacementHarness.child,
           'Replacement Hosted Harness (fault barrier)',
         );
+        if (approvalFault === 'after-result') {
+          releaseApprovalResultHold();
+          approvalResultHold = undefined;
+        }
         if (replacementBrokerProxy) {
           await replacementBrokerProxy.close();
           replacementBrokerProxy = undefined;
@@ -2497,6 +2547,19 @@ try {
         );
       }
       verifiedOriginalTerminal = terminals[0].type;
+      if (approvalFault === 'after-result') {
+        // The reissue must retract the held prefix: only the recovered
+        // answer may remain in the public transcript.
+        const transcript = await publicTranscript(
+          replacementSpringUrl,
+          tenant,
+          session.id,
+        );
+        if (transcript.text !== continuationResponse)
+          throw new Error(
+            `Result-commit recovery left ${JSON.stringify(transcript.text)}, not the recovered answer`,
+          );
+      }
       const rows = runMysql(
         mysqlPort,
         `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
@@ -2606,17 +2669,28 @@ try {
       const modelAfterResults = requestBodies.filter((request) =>
         JSON.stringify(request.body.messages).includes('"role":"tool"'),
       );
-      const expectedModelsAfterResults = ['allow', 'deny'].includes(
-        verificationMode,
-      )
-        ? 1
-        : 0;
+      const expectedModelsAfterResults =
+        approvalFault === 'after-result'
+          ? 2
+          : ['allow', 'deny'].includes(verificationMode)
+            ? 1
+            : 0;
       if (
         initialRequests.length !== 1 ||
         modelAfterResults.length !== expectedModelsAfterResults
       )
         throw new Error(
           `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
+        );
+      if (
+        approvalFault === 'after-result' &&
+        !isDeepStrictEqual(
+          modelAfterResults[0]?.body,
+          modelAfterResults[1]?.body,
+        )
+      )
+        throw new Error(
+          'Result-commit recovery changed the saved model request',
         );
       if (responseOperation) {
         await waitUntil(
