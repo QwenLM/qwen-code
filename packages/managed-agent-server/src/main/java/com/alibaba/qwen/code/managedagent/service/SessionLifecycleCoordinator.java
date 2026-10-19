@@ -46,16 +46,19 @@ import java.util.concurrent.ExecutorService;
  * reaches a terminal failure that keeps the failure code and leaves
  * the Session in its pending status, rather than retrying forever
  * or certifying a settle that never happened. The budget counts
- * only attempts that could have made progress; two conditions keep
+ * only attempts that could have made progress; three conditions keep
  * waiting instead, and their attempts stay budget-exempt: a live
  * journal writer while the failure is still retryable (the close
  * can still succeed once the writer stops; past the budget the
  * wait is published as recovery_blocked with the
- * session_close_writer_live code), and a generation error from
+ * session_close_writer_live code), a generation error from
  * Java's stale view of a restarted Harness (the close can still
  * succeed once this replica refreshes; past the budget that wait
  * is published as recovery_blocked with the
- * hosted_harness_generation_mismatch code). A cwd change is settled
+ * hosted_harness_generation_mismatch code), and the daemon's own
+ * hosted_lifecycle_recovery_required refusal while it settles a
+ * previous prompt (past the budget that wait is published as
+ * recovery_blocked with its own code). A cwd change is settled
  * without Harness or worker involvement — a read-only mount probe
  * and one revision-CAS commit. A structural probe refusal or a
  * moved fact is a terminal failure that is never retried; a
@@ -88,6 +91,13 @@ public class SessionLifecycleCoordinator {
     // unsettled, instead of wedging the Session behind the open-operation
     // barrier forever (review round 9, R9-4).
     private static final int SETTLED_COMPLETION_BUDGET_FACTOR = 4;
+    // The daemon refuses a lifecycle phase until the cleanup debt of a
+    // previous prompt is settled. That refusal names its own wait: the
+    // debt clears through the daemon's recovery, not by anything the
+    // caller changes, so it must neither be read as a permanent hook
+    // refusal nor spend the close's retry budget.
+    private static final String HOSTED_LIFECYCLE_RECOVERY_REQUIRED =
+            "hosted_lifecycle_recovery_required";
     private final AgentStateStore store;
     private com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore lifecycle;
 
@@ -267,6 +277,7 @@ public class SessionLifecycleCoordinator {
             // original worker can change; it keeps its failure code through
             // every attempt and through the terminal record.
             String blocked = null;
+            boolean hostedRecoveryWait = false;
             String failureCode = "session_lifecycle_delivery_failed";
             if (cause instanceof HostedHarnessCapabilityMismatchException mismatch) {
                 failureCode = mismatch.getCode();
@@ -287,34 +298,42 @@ public class SessionLifecycleCoordinator {
                     && (apiError.getCode().startsWith("workspace_lifecycle") || apiError.getCode().startsWith("workspace_close"))) {
                 blocked = apiError.getCode();
             }
-            if ((cause instanceof com.alibaba.qwen.code.daemon.DaemonHttpException
+            if ((cause instanceof DaemonHttpException
                     || cause instanceof com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException)
                     && operationIsLifecycle(claimed)) {
-                blocked = cause instanceof com.alibaba.qwen.code.daemon.DaemonHttpException httpError
-                        && httpError.getErrorCode() != null
-                        && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
-                                || "runtime_admission_closed".equals(httpError.getErrorCode()))
-                        ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
+                if (HOSTED_LIFECYCLE_RECOVERY_REQUIRED.equals(
+                        daemonRefusalCode(cause))) {
+                    hostedRecoveryWait = true;
+                } else {
+                    blocked = cause instanceof DaemonHttpException httpError
+                            && httpError.getErrorCode() != null
+                            && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
+                                    || "runtime_admission_closed".equals(httpError.getErrorCode()))
+                            ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
+                }
             }
             if (blocked != null) {
                 failureCode = blocked;
             }
-            // Two settle outcomes wait on a condition the retry itself or
+            // Three settle outcomes wait on a condition the retry itself or
             // an operator can still change, so the budget must not
             // terminate them and their attempts must not consume it: a live
             // journal writer while the failure is still retryable (the
             // close can still succeed once the writer stops — a permanent
             // refusal thrown before the Harness was asked to stop would
-            // otherwise wait on its own writer lease forever), and a
+            // otherwise wait on its own writer lease forever), a
             // generation error from Java's stale view of a restarted
             // Harness — the connector adopts the new generation on that
             // signal (G3), so the next attempt renegotiates and the close
             // can still succeed; only a Harness that restarts between every
-            // attempt keeps the wait alive. Both reschedule through the
-            // budget-exempt baseline, and past the budget both are
-            // published as recovery_blocked with their own code: an
-            // unbounded wait has to stay visible, because neither row is
-            // otherwise distinguishable from a healthy pending retry.
+            // attempt keeps the wait alive — and the daemon's recovery
+            // refusal while it settles the previous prompt, which clears
+            // through its own recovery rather than by this retry changing
+            // anything. All three reschedule through the budget-exempt
+            // baseline, and past the budget all three are published as
+            // recovery_blocked with their own code: an unbounded wait has
+            // to stay visible, because none of these rows is otherwise
+            // distinguishable from a healthy pending retry.
             // A cwd change never reaches settle(): the close-specific
             // waits (live writer, stale boot) and the terminal budget arm
             // are not its semantics — its rethrown probe refusal takes the
@@ -350,7 +369,7 @@ public class SessionLifecycleCoordinator {
                             * SETTLED_COMPLETION_BUDGET_FACTOR
                     : adjustedAttempts >= maxOperationRetries;
             if (!cwdChange && budgetSpent && valid.get() && !exemptWait
-                    && !staleBoot) {
+                    && !staleBoot && !hostedRecoveryWait) {
                 String terminalCode = settleReachedHarness
                         ? "session_close_completion_unsettled" : failureCode;
                 if (writerLive) {
@@ -489,7 +508,17 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "hosted_harness_generation_mismatch",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && (exemptWait || staleBoot)) {
+            } else if (valid.get() && hostedRecoveryWait
+                    && claimed.attemptCount() >= maxOperationRetries) {
+                // The daemon's recovery wait is published the same way: the
+                // row reads recovery_blocked with the daemon's own code and
+                // the recovery scan still re-drives it, so the close resumes
+                // once the daemon has settled the prompt it owed.
+                store.blockLifecycleOperation(tenantId, sessionId,
+                        operationId, owner, claimed.claimGeneration(),
+                        HOSTED_LIFECYCLE_RECOVERY_REQUIRED,
+                        Math.addExact(clock.millis(), delay), true);
+            } else if (valid.get() && (exemptWait || staleBoot || hostedRecoveryWait)) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(),
                         Math.addExact(clock.millis(), delay), true);
@@ -567,6 +596,19 @@ public class SessionLifecycleCoordinator {
 
     private static boolean operationIsLifecycle(OperationRecord operation) {
         return com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion());
+    }
+
+    // The SDK wraps a daemon refusal in MutationOutcomeUnknownException once
+    // the non-idempotent request may have been delivered, so the wire code
+    // is read from the cause chain rather than the thrown type alone.
+    private static String daemonRefusalCode(Throwable failure) {
+        for (Throwable cause = failure; cause != null;
+                cause = cause.getCause()) {
+            if (cause instanceof DaemonHttpException httpError) {
+                return httpError.getErrorCode();
+            }
+        }
+        return null;
     }
 
     // A cwd change settles without Harness or worker involvement: the probe
