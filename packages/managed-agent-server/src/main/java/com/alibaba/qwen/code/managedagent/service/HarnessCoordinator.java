@@ -240,9 +240,12 @@ public class HarnessCoordinator {
         if (!harness.isAvailable()) {
             return;
         }
-        for (DispatchTarget target : store.findDispatchable(clock.millis(),
-                50)) {
+        long now = clock.millis();
+        for (DispatchTarget target : store.findDispatchable(now, 50)) {
             dispatch(target.tenantId(), target.sessionId(), target.turnId());
+        }
+        for (DispatchTarget target : store.findRuntimeRecoveryParked(now, 50)) {
+            executor.execute(() -> recoverParkedRuntime(target));
         }
     }
 
@@ -1233,10 +1236,17 @@ public class HarnessCoordinator {
     }
 
     private boolean fail(TurnRecord turn, String code, String message) {
-        return fail(turn, code, message, null);
+        // The unknown gate is the only caller that may park an unresolved
+        // Runtime outcome; a terminal write keeps its existing handling.
+        return fail(turn, code, message, null, true);
     }
 
     private boolean fail(TurnRecord turn, String code, String message, RuntimeException error) {
+        return fail(turn, code, message, error, false);
+    }
+
+    private boolean fail(TurnRecord turn, String code, String message,
+            RuntimeException error, boolean parkUnreconciled) {
         // The terminal record makes an admitted Turn unreachable: failTurn
         // clears the dispatch owner and leaves the active states, so
         // nothing could later cancel it or re-attach to journal its
@@ -1254,6 +1264,9 @@ public class HarnessCoordinator {
             boolean reconciled = cancelAdmittedTurnBeforeTerminalFail(current, recoveryBlocked);
             if (!reconciled && recoveryBlocked
                     && store.requireSession(turn.tenantId(), turn.sessionId()).workspace() != null) {
+                if (parkUnreconciled && !"CANCELLING".equals(current.status())) {
+                    return parkRuntimeRecovery(current);
+                }
                 return transientFailure(current, true,
                         new IllegalStateException("Recovery cancellation remains unsettled"), true);
             }
@@ -1274,6 +1287,63 @@ public class HarnessCoordinator {
                     message, error);
         }
         return true;
+    }
+
+    // D7-2: a Turn whose parked Runtime execution still cannot be proved
+    // either way parks on its own code and waits for the reconciler's
+    // recheck. It is never written FAILED, and it no longer spends the
+    // budget-exempt retry lane on every backoff.
+    private boolean parkRuntimeRecovery(TurnRecord turn) {
+        long retryAfter = Math.addExact(clock.millis(),
+                OperationReconciler.RECHECK.toMillis());
+        if (!store.parkTurnForRuntimeRecovery(turn.tenantId(),
+                turn.sessionId(), turn.turnId(), owner,
+                "The parked Runtime execution's acceptance is still"
+                        + " unknown; reconcile before re-executing.",
+                retryAfter)) {
+            LOG.warn("Managed runtime recovery park lost to a lease CAS"
+                            + " tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId());
+        }
+        return true;
+    }
+
+    // D7-2: the recheck drives the cancellation load again, never the
+    // continuation: the Turn was parked because its evidence was unknown.
+    // The cached takeover snapshot is discarded first, so the load asks the
+    // Broker instead of answering from the report the park was decided on.
+    private void recoverParkedRuntime(DispatchTarget target) {
+        TurnRecord claimed = null;
+        try {
+            claimed = store.claimTurn(target.tenantId(),
+                    target.sessionId(), target.turnId(), owner, leaseDuration)
+                    .orElse(null);
+            if (claimed == null) {
+                return;
+            }
+            if ("CANCELLING".equals(claimed.status())) {
+                // A user cancel landed between the park scan and the claim.
+                // The normal sweep owns that lane; releasing the lease lets
+                // it drive the cancel instead of settling the Turn as FAILED
+                // here.
+                store.releaseTurnLease(claimed.tenantId(), claimed.sessionId(),
+                        claimed.turnId(), owner);
+                return;
+            }
+            harness.discardManagedRecovery(claimed.tenantId(),
+                    claimed.sessionId());
+            fail(claimed, "managed_runtime_recovery_blocked",
+                    "The parked Runtime execution is still unknown after"
+                            + " reconciliation.");
+        } catch (RuntimeException error) {
+            LOG.warn("Managed runtime recovery recheck failed tenant={}"
+                            + " session={} turn={}",
+                    target.tenantId(), target.sessionId(), target.turnId(),
+                    error);
+            if (claimed != null && !"CANCELLING".equals(claimed.status())) {
+                parkRuntimeRecovery(claimed);
+            }
+        }
     }
 
     // Terminal failures leave the Turn row as their only trace; log the
