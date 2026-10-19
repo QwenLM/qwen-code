@@ -10,7 +10,11 @@ import {
   hostedTurnApproval,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
-import { parseHostedInput, readHostedInput } from './hosted-input.js';
+import {
+  HOSTED_ATTACHMENT_INPUT_BYTES,
+  parseHostedInput,
+  readHostedInput,
+} from './hosted-input.js';
 import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
@@ -2208,6 +2212,7 @@ async function verifyWorkspaceRestore(
           : parseHostedRecoveryResource(
               bytes,
               authority.sessionHeader.sessionKey,
+              ref.kind,
             );
       for (const nested of hostedRecoveryReferences(body))
         await readRef(nested);
@@ -6442,7 +6447,11 @@ export function registerHostedHarnessSessionRoutes(
     const text = workflowLaunch
       ? workflowLaunchSummaryText(workflowLaunch)
       : promptInput!.text;
-    const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const attachments = (promptInput?.attachments.length ?? 0) > 0;
+    const maxBytes = attachments
+      ? HOSTED_ATTACHMENT_INPUT_BYTES
+      : HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const maxUserRecordBytes = attachments ? maxBytes + 1024 * 1024 : maxBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
       daemonPromptId: promptId,
@@ -6450,7 +6459,7 @@ export function registerHostedHarnessSessionRoutes(
     });
     if (
       Buffer.byteLength(JSON.stringify(prompt)) > maxBytes ||
-      Buffer.byteLength(JSON.stringify(userRecord)) > maxBytes
+      Buffer.byteLength(JSON.stringify(userRecord)) > maxUserRecordBytes
     )
       return error(res, 413, 'hosted_prompt_too_large');
     const existing = session.admissions.get(promptId);
