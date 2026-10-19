@@ -420,6 +420,36 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13fDenyReplyLossReplaysTheBlockedDecisionOnMySql() throws Exception {
+        boot("60000", "1000", "hook-deny");
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+                (method, path, body) -> path.contains("/control")
+                        && body.contains("\"kind\":\"hook-execute\""),
+                "hook-deny-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_DENY_LOSS");
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("settled");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("settled");
+        });
+        assertThat(events("hook.call")).hasSize(1);
+        assertThat(events("hook.deny")).hasSize(1);
+        assertThat(events("hook.allow")).isEmpty();
+        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("blocking");
+        // The deny is persisted and replayed after the lost dispatch reply:
+        // the tool never reads the file and the model sees the deny reason.
+        waitFor(() -> assertThat(modelRequests.toString()).contains("FG13_DENIED"));
+        assertThat(modelRequests.toString()).doesNotContain(PROOF);
+        assertThat(Files.readString(temporary.resolve("proxy.log")))
+                .contains("PROXY dropped hook-deny-reply");
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
@@ -503,7 +533,8 @@ class HostedHookReplyLossFaultGatesIT {
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
                     && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS",
-                            "FG13_CATALOG_LOSS", "FG13_HTTP_LOSS").contains(prompt);
+                            "FG13_CATALOG_LOSS", "FG13_HTTP_LOSS",
+                            "FG13_DENY_LOSS").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
