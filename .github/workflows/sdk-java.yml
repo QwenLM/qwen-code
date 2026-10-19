@@ -38,7 +38,12 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    timeout-minutes: 90
+    # The fast tier runs on a shared ECS host, where sibling Maven lanes hold
+    # sdk-java-tests.lock in turn. Run 39239175909's Java 21 job exhausted the
+    # 60-minute wait on both attempts before Maven started, so an acquisition
+    # now waits 90 minutes. Ceiling: ~6 minutes of setup + 90 of wait + the
+    # fast tier's own ~15-minute hold + margin.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -216,8 +221,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 3600 9; then
-            echo "::error::sdk-java host lock not acquired within 60 minutes"
+          if ! flock --wait 5400 9; then
+            echo "::error::sdk-java host lock not acquired within 90 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
@@ -415,11 +420,12 @@ jobs:
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Run 39097018288 held the host lock for 47m26s during verification;
-    # its sibling fast gate exhausted the old 40-minute wait before Maven
-    # started. Each of these two Maven steps can now wait one hour. Allow
-    # both waits, 50 minutes of verification and 30 minutes of setup/margin.
-    timeout-minutes: 200
+    # Run 39097018288 held the host lock for 47m26s during verification, and
+    # run 39239175909's fast gate exhausted the old 60-minute wait on both
+    # attempts before Maven started. Each of these two Maven steps can now
+    # wait 90 minutes. Allow both waits, 50 minutes of verification, 30
+    # minutes of setup and 20 minutes of margin.
+    timeout-minutes: 280
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -619,8 +625,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 3600 9; then
-            echo "::error::sdk-java host lock not acquired within 60 minutes"
+          if ! flock --wait 5400 9; then
+            echo "::error::sdk-java host lock not acquired within 90 minutes"
             exit 1
           fi
           # Seed from the host-shared repo (cache-restored on hosted runners)
@@ -637,8 +643,8 @@ jobs:
           set -o pipefail
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 3600 9; then
-            echo "::error::sdk-java host lock not acquired within 60 minutes"
+          if ! flock --wait 5400 9; then
+            echo "::error::sdk-java host lock not acquired within 90 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
