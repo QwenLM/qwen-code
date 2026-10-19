@@ -72,10 +72,18 @@ Each witness must turn its cell red before the slice merges.
   events, so `SessionEnd` runs while the unit is still populated; the
   drain-order and unit assertions fail.
 
+## Pre-dispatch cancel (unit instrument)
+
+The `intent` window between the record commit and `dispatch_started` is too
+short to observe by polling, and the first-turn `executionBroker` makes no
+network call. A unit test blocks `executionBroker`, cancels while the Hook
+execution record is still `intent`, and asserts `cancelled` /
+`not_started_proven` with zero `hook-execute` requests.
+
 ## Non-goals
 
-Cancel before dispatch stays on #14449. Also out: FG13a, FG13b, FG13e,
-FG13f, local non-managed Hooks, Windows/macOS and #13133's design items.
+Pre-dispatch cancel is pinned by the unit test above. Also out: FG13a, FG13b,
+FG13e, FG13f, local non-managed Hooks, Windows/macOS and #13133's design items.
 
 ## Validation
 
