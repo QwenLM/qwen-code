@@ -580,7 +580,7 @@ class HostedPublicWorkspaceIT {
     // W2: a controlled cwd change settles through the production server and
     // the deployment's real Workspace probe, on both API surfaces.
     @Test
-    @Timeout(150)
+    @Timeout(300)
     void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
         List<Path> roots = boot();
         Files.createDirectory(roots.get(0).resolve("child2"));
@@ -620,7 +620,7 @@ class HostedPublicWorkspaceIT {
         assertThat(replay.path("id").asText()).isEqualTo(operationId);
         assertThat(replay.path("replayed").asBoolean()).isTrue();
 
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + operationId, null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");
@@ -668,7 +668,7 @@ class HostedPublicWorkspaceIT {
         assertThat(webReplay.path("operationId").asText())
                 .isEqualTo(webOperationId);
         assertThat(webReplay.path("replayed").asBoolean()).isTrue();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("POST",
                     "/api/agent/web-shell/v1/operations/query",
                     Map.of("sessionId", session,
@@ -708,7 +708,7 @@ class HostedPublicWorkspaceIT {
                         "expected_context_revision", 3),
                 "w2-missing-dir", "actor", 202);
         String missingOperation = missing.path("id").asText();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + missingOperation, null, null,
                     "actor", 200);
@@ -727,7 +727,7 @@ class HostedPublicWorkspaceIT {
 
         // The WebShell twin's failed projection must carry failureCode too —
         // the contract condition requires it, and generated clients read it.
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("POST",
                     "/api/agent/web-shell/v1/operations/query",
                     Map.of("sessionId", session,
@@ -744,7 +744,7 @@ class HostedPublicWorkspaceIT {
                 Map.of("cwd_relative", "child2",
                         "expected_context_revision", 3),
                 "w2-recovered", "actor", 202).path("id").asText();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + recovered, null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");

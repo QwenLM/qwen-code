@@ -44,6 +44,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -186,9 +187,25 @@ class HostedMcpStoreFaultGatesIT {
         baseline(session);
         String configuration = uuid();
         storeFault().arm(StoreFaultGate.Phase.INTENT, configuration);
-        HttpResponse<String> refused = configure(session, configuration, 2);
+        // Under CI load the first configure can answer a retryable refusal
+        // before the intent commit; re-drive the same idempotent revision
+        // until the armed phase fires, as the sibling released gate does.
+        long deadline = System.nanoTime() + Duration.ofSeconds(90).toNanos();
+        List<Integer> answers = new ArrayList<>();
+        HttpResponse<String> refused = null;
+        while (storeFault().attempts() == 0
+                && System.nanoTime() < deadline) {
+            refused = configure(session, configuration, 2);
+            answers.add(refused.statusCode());
+            if (storeFault().attempts() == 0) {
+                Thread.sleep(1_000);
+            }
+        }
+        assertThat(refused).isNotNull();
         assertThat(refused.statusCode()).isIn(202, 409, 503);
-        waitForRejection();
+        assertThat(storeFault().attempts())
+                .as("the store wrapper fired; configure answers: %s", answers)
+                .isPositive();
         // A rejected intent never reaches the owner or the wire; the retry
         // chain the store client runs dies at the same phase.
         Thread.sleep(1_000);
