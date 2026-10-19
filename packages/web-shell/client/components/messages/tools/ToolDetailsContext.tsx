@@ -5,6 +5,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../../adapters/types';
 import { isActiveToolStatus } from '../toolFormatting';
 import { useI18n } from '../../../i18n';
@@ -71,7 +72,9 @@ export function useToolDetails(tool: ACPToolCall, expanded: boolean) {
       ? {
           ...tool,
           args: args ?? current.details.args,
-          rawOutput: rawOutput ?? current.details.rawOutput,
+          rawOutput: isShellResultDisplay(current.details.rawOutput)
+            ? current.details.rawOutput
+            : (rawOutput ?? current.details.rawOutput),
         }
       : tool,
     loading: needed && current === undefined,

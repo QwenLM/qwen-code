@@ -11449,6 +11449,67 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "shellResult": {
+            "$ref": "#/components/schemas/WebShellShellResult",
+            "description": "Validated saved Shell display, when available. Text fields share an 8 KiB/200-line budget; directory and output-file paths share an 8 KiB UTF-8 budget. Legacy text remains in output."
+          }
+        }
+      },
+      "WebShellShellResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "version",
+          "text",
+          "output",
+          "directory",
+          "exitCode",
+          "signal",
+          "pid",
+          "error",
+          "outcome",
+          "notices",
+          "truncated",
+          "outputFiles"
+        ],
+        "properties": {
+          "type": { "type": "string", "const": "shell_result" },
+          "version": { "type": "integer", "const": 1 },
+          "text": { "type": "string" },
+          "output": { "type": "string" },
+          "directory": { "type": "string" },
+          "exitCode": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "signal": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "pid": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "error": { "type": ["string", "null"] },
+          "outcome": {
+            "type": "string",
+            "enum": ["completed", "failed", "cancelled", "timed_out"]
+          },
+          "notices": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string" }
+          },
+          "truncated": { "type": "boolean" },
+          "outputFiles": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string" }
           }
         }
       }

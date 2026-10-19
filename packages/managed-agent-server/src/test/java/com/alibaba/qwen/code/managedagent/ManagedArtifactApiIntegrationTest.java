@@ -161,6 +161,116 @@ class ManagedArtifactApiIntegrationTest {
     }
 
     @Test
+    void readsSavedStructuredShellResultsThroughTheExistingDetailsRoute() throws Exception {
+        var display = savedShellDisplay();
+        display.put("privateCaptureRef", "must-not-leave-history");
+        savedDetails("run_shell_command", JSON.createObjectNode().put("command", "exit 7"),
+                JSON.createObjectNode().put("output", "legacy text"), display, "model-1");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("legacy text"))
+                .andExpect(jsonPath("$.shellResult.type").value("shell_result"))
+                .andExpect(jsonPath("$.shellResult.version").value(1))
+                .andExpect(jsonPath("$.shellResult.output").value("saved stdout"))
+                .andExpect(jsonPath("$.shellResult.directory").value("/workspace/project"))
+                .andExpect(jsonPath("$.shellResult.exitCode").value(7))
+                .andExpect(jsonPath("$.shellResult.pid").value(123))
+                .andExpect(jsonPath("$.shellResult.signal").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.shellResult.outcome").value("failed"))
+                .andExpect(jsonPath("$.shellResult.error").value("saved failure"))
+                .andExpect(jsonPath("$.shellResult.notices[0]").value("saved notice"))
+                .andExpect(jsonPath("$.shellResult.outputFiles[0]").value("/tmp/saved.log"))
+                .andExpect(jsonPath("$.shellResult.truncated").value(false))
+                .andExpect(jsonPath("$.shellResult.privateCaptureRef").doesNotExist())
+                .andExpect(response -> contract("getWebShellToolDetails", "WebShellToolDetails",
+                        response.getResponse().getContentAsString()));
+    }
+
+    @Test
+    void structuredShellResultsPreserveTimeoutSignalAndUpstreamTruncationWithoutLegacyText() throws Exception {
+        var display = savedShellDisplay().put("outcome", "timed_out").put("signal", 15).put("truncated", true);
+        display.putNull("exitCode").putNull("pid");
+        savedDetails("run_shell_command", JSON.createObjectNode(), JSON.createObjectNode(), display, "model-1");
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("saved display text"))
+                .andExpect(jsonPath("$.shellResult.outcome").value("timed_out"))
+                .andExpect(jsonPath("$.shellResult.signal").value(15))
+                .andExpect(jsonPath("$.shellResult.truncated").value(true))
+                .andExpect(jsonPath("$.truncated").value(true));
+    }
+
+    @Test
+    void boundsCombinedStructuredShellTextWithoutDroppingExecutionMetadata() throws Exception {
+        var display = savedShellDisplay().put("text", "界\n".repeat(3000)).put("output", "界".repeat(5000))
+                .put("error", "error\n".repeat(3000));
+        display.putArray("notices").add("notice\n".repeat(3000));
+        savedDetails("run_shell_command", JSON.createObjectNode(), JSON.createObjectNode().put("output", "legacy"), display, "model-1");
+        String body = mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.shellResult.exitCode").value(7))
+                .andExpect(jsonPath("$.shellResult.truncated").value(true))
+                .andExpect(jsonPath("$.truncated").value(false))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        JsonNode result = JSON.readTree(body).path("shellResult");
+        int bytes = 0;
+        int lines = 0;
+        for (String field : new String[] {"text", "output", "error"}) {
+            String value = result.path(field).textValue();
+            bytes += value.getBytes(StandardCharsets.UTF_8).length;
+            lines += (int) value.lines().count();
+            assertThat(value).doesNotContain("\uFFFD");
+        }
+        for (JsonNode value : result.path("notices")) {
+            bytes += value.textValue().getBytes(StandardCharsets.UTF_8).length;
+            lines += (int) value.textValue().lines().count();
+        }
+        assertThat(bytes).isLessThanOrEqualTo(8192);
+        assertThat(lines).isLessThanOrEqualTo(200);
+    }
+
+    @Test
+    void malformedUnsupportedAndMismatchedShellDisplaysFallBackToText() throws Exception {
+        var invalid = new java.util.ArrayList<JsonNode>();
+        invalid.add(savedShellDisplay().put("version", 2));
+        invalid.add(savedShellDisplay().put("version", new java.math.BigInteger("18446744073709551617")));
+        invalid.add(savedShellDisplay().put("exitCode", "7"));
+        invalid.add(savedShellDisplay().put("signal", 9007199254740992L));
+        invalid.add(savedShellDisplay().put("outcome", "unknown"));
+        invalid.add(savedShellDisplay().put("output", 42));
+        invalid.add(savedShellDisplay().put("directory", "x".repeat(8193)));
+        var oversizedList = savedShellDisplay();
+        for (int index = 0; index < 33; index++) {
+            oversizedList.withArray("notices").add("notice");
+        }
+        invalid.add(oversizedList);
+        invalid.add(savedShellDisplay().set("outputFiles", JSON.createArrayNode().add(123)));
+        var missingError = savedShellDisplay();
+        missingError.remove("error");
+        invalid.add(missingError);
+        for (JsonNode display : invalid) {
+            assertShellDisplayFallback("run_shell_command", display, "model-1");
+        }
+        assertShellDisplayFallback("run_shell_command", savedShellDisplay(), "other-call");
+        assertShellDisplayFallback("read_file", savedShellDisplay(), "model-1");
+    }
+
+    private void assertShellDisplayFallback(String tool, JsonNode display, String callId) throws Exception {
+        fixture.jdbc().update("DELETE FROM ma_resource WHERE resource_id IN (?, ?)", "details-call", "details-result");
+        savedDetails(tool, JSON.createObjectNode(), JSON.createObjectNode().put("output", "legacy text"), display, callId);
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("legacy text"))
+                .andExpect(jsonPath("$.shellResult").doesNotExist());
+    }
+
+    private com.fasterxml.jackson.databind.node.ObjectNode savedShellDisplay() {
+        var display = JSON.createObjectNode().put("type", "shell_result").put("version", 1)
+                .put("text", "saved display text").put("output", "saved stdout").put("directory", "/workspace/project")
+                .put("exitCode", 7).putNull("signal").put("pid", 123).put("error", "saved failure")
+                .put("outcome", "failed").put("truncated", false);
+        display.putArray("notices").add("saved notice");
+        display.putArray("outputFiles").add("/tmp/saved.log");
+        return display;
+    }
+
+    @Test
     void toolDetailsRequireActorAndCurrentWorkspaceGrant() throws Exception {
         savedDetails("read_file", "error", "private error");
         mvc.perform(toolDetails().header(TenantContextFilter.HEADER, "tenant-1"))
@@ -289,6 +399,10 @@ class ManagedArtifactApiIntegrationTest {
     }
 
     private void savedDetails(String tool, JsonNode input, JsonNode result) throws Exception {
+        savedDetails(tool, input, result, null, null);
+    }
+
+    private void savedDetails(String tool, JsonNode input, JsonNode result, JsonNode display, String displayCallId) throws Exception {
         String prompt = fixture.jdbc().queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
                 String.class, "tenant-1", "session-1");
         var attributes = (com.fasterxml.jackson.databind.node.ObjectNode) JSON.readTree(fixture.jdbc().queryForObject(
@@ -302,6 +416,9 @@ class ManagedArtifactApiIntegrationTest {
         callRecord.putObject("message").putArray("parts").addObject().set("functionCall", call);
         var resultRecord = JSON.createObjectNode().put("uuid", "details-result").put("daemonPromptId", prompt);
         resultRecord.putObject("message").putArray("parts").addObject().set("functionResponse", response);
+        if (display != null) {
+            resultRecord.putObject("toolCallResult").put("callId", displayCallId).set("resultDisplay", display);
+        }
         String records = detailsEvent("assistant", callRecord) + "\n" + detailsEvent("tool_result", resultRecord);
         byte[] bytes = records.getBytes(StandardCharsets.UTF_8);
         fixture.jdbc().update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",

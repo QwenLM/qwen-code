@@ -26,11 +26,15 @@ Each query scans at most 512 journal transactions and reads at most 8 MiB of jou
 
 Return only scalar display arguments: `file_path`, `path`, `offset`, `limit` for ReadFile, and `command`, `directory`, `timeout` for Shell. Filter unknown fields and malformed scalar types. Omit arguments exceeding 4 KiB instead of marking otherwise complete output truncated. Bound saved text to 8 KiB and 200 lines, reporting both local and upstream output truncation. Media, private capture references and raw stdout/stderr downloads remain outside this route.
 
+For Shell, also return optional `shellResult` from the matching committed record's `toolCallResult.resultDisplay`, requiring the same call ID and an exact matching function response. Use the existing version-1 `ShellResultDisplay` shape: output/display text, directory, nullable safe-integer exit code/signal/PID, nullable error, outcome, notices, truncation and output-file paths. Validate field types and outcome, allow at most 32 notices and 32 paths, and copy only those display fields. Divide a separate combined 8 KiB/200-line text budget between output, display text, error and notices; directory and output-file paths share an 8 KiB UTF-8 budget. Preserve saved truncation and flag additional shortening. Invalid, unsupported, oversized-path or mismatched displays fall back to legacy text. Keep the existing `output` field for older clients; if response text is missing, use the saved display text. Reading structure uses the same private message and adds no history scan or publication.
+
 ## Client behavior
 
 The Managed transcript supplies a detail loader to ReadFile/Shell cards. Closed cards issue no detail requests. An expanded settled card missing input or output shows a loading state, reads its own Session/Item, then reuses existing renderers. Already available input/output need no additional read. Missing output has an unavailable hint; recorded empty output has a distinct empty hint.
 
 Closing a card or changing provider, Session or tool identity aborts outstanding reads. Check response identity and lifecycle revision before display so a late response cannot expose another Session's content. A newer completion source sequence reloads details even when a terminal receipt arrived first. Shell execution details render only when actual rows exist; elapsed time remains in the status header.
+
+Pass a loaded `shellResult` unchanged as `rawOutput` to the shared daemon Shell renderer. It takes precedence over an existing plain-text preview when a detail read occurs, so the existing card displays execution metadata, errors and notices with its normal success/failure/timeout/cancellation semantics. With no valid structure, retain the legacy text behavior. Existing complete inline input/output still needs no extra request; this does not introduce live output or attempt to infer execution fields from text.
 
 ## Validation and acceptance
 
@@ -40,6 +44,7 @@ Closing a card or changing provider, Session or tool identity aborts outstanding
 - Obsolete feature-switch configuration cannot disable authorized reads.
 - Wrong tenants, missing actors, revoked Workspace grants, deleting Sessions and unsupported tools return no private details.
 - Exact matching, corruption, chunked resources, byte limits, allowlisted arguments, late results and cancelled/stale client requests have focused coverage.
+- Saved structured Shell results reach the shared renderer with execution metadata intact; malformed/wrong-call displays fall back to text, unknown private fields never leave the route, and combined text/path budgets are enforced. Browser checks cover success, failure, timeout and cancellation while preserving lazy requests.
 - Run root build/typecheck/bundle, affected producer/reducer/component and browser checks, API/surface contract tests, Maven verification and disposable MySQL 8.4 integration checks. Do not send a prompt to the user's running Session or modify its database.
 
 ## Limits

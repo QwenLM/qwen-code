@@ -671,7 +671,12 @@ public final class ApiModels {
 
     public record ToolResultResponse(JsonNode result, ArtifactAccess access) { }
 
-    public record WebShellToolDetails(JsonNode input, String output, boolean truncated) { }
+    public record WebShellToolDetails(JsonNode input, String output, boolean truncated,
+            @JsonInclude(JsonInclude.Include.NON_NULL) WebShellShellResult shellResult) { }
+
+    public record WebShellShellResult(String type, int version, String text, String output,
+            String directory, Long exitCode, Long signal, Long pid, String error,
+            String outcome, List<String> notices, boolean truncated, List<String> outputFiles) { }
 
     public record ArtifactResponse(JsonNode artifact, ArtifactAccess access) { }
 

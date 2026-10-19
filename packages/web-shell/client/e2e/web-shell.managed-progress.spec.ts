@@ -3,6 +3,7 @@ import type {
   JavaAgentEvent,
   JavaAgentSession,
 } from '../components/managed/java-managed-agent-client';
+import type { components } from '../components/managed/generated/managed-agent-api';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -26,11 +27,7 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
   const detailRequests: Array<{ sessionId: string; itemId: string }> = [];
   const toolDetails = new Map<
     string,
-    {
-      input: Record<string, string | number> | null;
-      output: string | null;
-      truncated: boolean;
-    }
+    components['schemas']['WebShellToolDetails']
   >();
   page.on('pageerror', (error) => errors.push(error.message));
   let summary: JavaAgentSession = {
@@ -374,6 +371,93 @@ test('Managed tool details load only after expansion and remain readable after r
   expect(fixture.daemon.promptRequests()).toHaveLength(0);
   expect(fixture.errors).toEqual([]);
 });
+
+for (const scenario of [
+  { outcome: 'completed', exitCode: 0, signal: null, status: 'Succeeded' },
+  {
+    outcome: 'failed',
+    exitCode: 7,
+    signal: null,
+    status: 'Exited with code 7',
+  },
+  { outcome: 'timed_out', exitCode: null, signal: 15, status: 'Timed out' },
+  { outcome: 'cancelled', exitCode: null, signal: 15, status: 'Cancelled' },
+] as const) {
+  test(`Managed saved structured Shell ${scenario.outcome} uses the shared result card @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const fixture = await installManagedScenario(page, testInfo);
+    fixture.toolDetails.set('item-structured-shell', {
+      input: { command: 'synthetic command' },
+      output: 'legacy display text',
+      truncated: false,
+      shellResult: {
+        type: 'shell_result',
+        version: 1,
+        text: 'saved display text',
+        output: 'structured stdout',
+        directory: '/workspace/project',
+        exitCode: scenario.exitCode,
+        signal: scenario.signal,
+        pid: 123,
+        error: scenario.outcome === 'completed' ? null : 'saved failure',
+        outcome: scenario.outcome,
+        notices: ['saved notice'],
+        truncated: true,
+        outputFiles: ['/tmp/saved.log'],
+      },
+    });
+    await fixture.emit('item.tool_call.updated', {
+      itemId: 'item-structured-shell',
+      toolCallId: 'structured-shell',
+      name: 'run_shell_command',
+      status: scenario.outcome === 'completed' ? 'completed' : 'failed',
+    });
+    await fixture.emit('turn.completed');
+    await page.reload();
+    expect(fixture.detailRequests).toEqual([]);
+    await page.getByRole('button', { name: 'Shell', exact: true }).click();
+    const shell = page.locator(
+      '[data-transcript-tool-call-id="p1:item-structured-shell"]',
+    );
+    await expect(shell).toContainText(scenario.status);
+    await expect(
+      shell.getByText('structured stdout', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      shell.getByText('saved notice', { exact: true }),
+    ).toBeVisible();
+    await expect(shell).toContainText('Output preview truncated');
+    await expect(shell).not.toContainText('legacy display text');
+    await shell.getByText('Execution details', { exact: true }).click();
+    await expect(
+      shell.getByText('/workspace/project', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      shell.getByText('/tmp/saved.log', { exact: true }),
+    ).toBeVisible();
+    if (scenario.exitCode !== null) {
+      await expect(
+        shell
+          .locator('dl')
+          .getByText(String(scenario.exitCode), { exact: true }),
+      ).toBeVisible();
+    } else {
+      await expect(shell).toContainText('Signal: 15');
+    }
+    if (scenario.outcome !== 'completed') {
+      await expect(
+        shell.getByText('saved failure', { exact: true }),
+      ).toBeVisible();
+    }
+    expect(fixture.detailRequests).toEqual([
+      { sessionId: SESSION_ID, itemId: 'item-structured-shell' },
+    ]);
+    expect(fixture.prompts).toHaveLength(0);
+    expect(fixture.daemon.promptRequests()).toHaveLength(0);
+    expect(fixture.errors).toEqual([]);
+  });
+}
 
 test('Managed details distinguish saved empty output from unavailable output @smoke', async ({
   page,

@@ -3,6 +3,7 @@
 import { act, useContext, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
 import { I18nProvider } from '../../i18n';
@@ -327,6 +328,40 @@ describe('ManagedSessionsPage', () => {
       clientId: getManagedClientId(provider.storageKey),
       signal: abort.signal,
     });
+  });
+
+  it('passes saved structured Shell results to the shared daemon renderer', async () => {
+    const shellResult = {
+      type: 'shell_result',
+      version: 1,
+      text: 'saved display text',
+      output: 'saved stdout',
+      directory: '/workspace/project',
+      exitCode: 7,
+      signal: null,
+      pid: 123,
+      error: 'saved failure',
+      outcome: 'failed',
+      notices: ['saved notice'],
+      truncated: true,
+      outputFiles: ['/tmp/saved.log'],
+    };
+    const get = vi.fn().mockResolvedValue({
+      input: { command: 'exit 7' },
+      output: 'legacy text',
+      truncated: true,
+      shellResult,
+    });
+    provider = { ...provider, toolDetails: { get } };
+    await render('s1');
+    expect(get).not.toHaveBeenCalled();
+    const detail = await mocks.loadToolDetails!(
+      'p1:item-1',
+      new AbortController().signal,
+    );
+    expect(detail.args).toEqual({ command: 'exit 7' });
+    expect(detail.rawOutput).toBe(shellResult);
+    expect(isShellResultDisplay(detail.rawOutput)).toBe(true);
   });
 
   it('connects the Session Skill catalog to the composer without enabling other Workspace features', async () => {

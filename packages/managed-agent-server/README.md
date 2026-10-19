@@ -88,7 +88,12 @@ Lifecycle events remain metadata-only. Existing retained private results can be
 read without backfilling public events. Allowlisted input is limited to 4 KiB;
 text is limited to 8 KiB and 200 lines, with truncation reported. Closed cards do
 not fetch details. Reads stay inside the saved Session/Workspace and have a
-bounded history budget. See the complete design:
+bounded history budget.
+Saved version-1 Shell display records also supply structured execution details to
+the shared daemon card. Their text fields share a separate 8 KiB/200-line budget,
+and directory/output-file paths share an 8 KiB budget. Unsupported or malformed
+structures retain the legacy text fallback; private fields are excluded.
+See the complete design:
 [English](../../docs/design/2026-10-19-managed-inline-tool-details.md) |
 [简体中文](../../docs/design/2026-10-19-managed-inline-tool-details.zh-CN.md).
 

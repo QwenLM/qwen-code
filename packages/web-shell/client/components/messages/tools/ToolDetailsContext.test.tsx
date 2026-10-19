@@ -190,6 +190,45 @@ it('reloads an opened Shell card when its result arrives after the completed rec
   expect(container.textContent).not.toContain('Output is unavailable');
 });
 
+it('uses a loaded structured Shell result when a legacy preview was already present', async () => {
+  const load = vi.fn<ToolDetailsLoader>().mockResolvedValue({
+    args: { command: 'exit 7' },
+    rawOutput: {
+      type: 'shell_result',
+      version: 1,
+      text: 'display text',
+      output: 'structured stdout',
+      directory: '/workspace/project',
+      exitCode: 7,
+      signal: null,
+      pid: null,
+      error: null,
+      outcome: 'failed',
+      notices: [],
+      truncated: false,
+      outputFiles: [],
+    },
+  });
+  await act(async () =>
+    render(
+      <ToolDetailsContext.Provider value={load}>
+        <ToolLine
+          tool={tool({
+            toolName: 'run_shell_command',
+            rawOutput: 'legacy preview',
+          })}
+          forceExpanded
+        />
+      </ToolDetailsContext.Provider>,
+    ),
+  );
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain('structured stdout');
+  expect(container.textContent).toContain('/workspace/project');
+  expect(container.textContent).toContain('Exited with code 7');
+  expect(container.textContent).not.toContain('legacy preview');
+});
+
 it('hides the previous Session output and ignores a late response after switching loaders', async () => {
   const first = deferred();
   const second = deferred();

@@ -233,10 +233,11 @@ function ManagedSessionsContent({
       return {
         args: detail.input ?? undefined,
         rawOutput:
-          detail.output === null
+          detail.shellResult ??
+          (detail.output === null
             ? undefined
             : detail.output +
-              (detail.truncated ? `\n${t('managed.truncated')}` : ''),
+              (detail.truncated ? `\n${t('managed.truncated')}` : '')),
       };
     };
   }, [provider, sessionId, clientId, t]);

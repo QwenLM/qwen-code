@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellShellResult;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellToolDetails;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Repository;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 @Repository
@@ -50,6 +52,7 @@ public class ManagedToolDetailsStore {
         JsonNode input = null;
         String output = null;
         boolean truncated = false;
+        WebShellShellResult shellResult = null;
         long before = beforeRevision(tenant, workspace, session, itemId, attributes);
         int remaining = READ_LIMIT;
         for (int page = 0; page < 512; page++) {
@@ -103,16 +106,24 @@ public class ManagedToolDetailsStore {
                         if (output == null && callId.equals(response.path("id").asText())
                                 && name.equals(response.path("name").asText())) {
                             JsonNode value = response.path("response");
+                            JsonNode result = record.path("toolCallResult");
+                            if ("run_shell_command".equals(name) && callId.equals(result.path("callId").asText())) {
+                                shellResult = shellResult(result.path("resultDisplay"));
+                            }
                             String text = text(value);
+                            if (text == null && shellResult != null) {
+                                text = result.path("resultDisplay").path("text").textValue();
+                                truncated = result.path("resultDisplay").path("truncated").booleanValue();
+                            }
                             if (text != null) {
                                 output = ManagedToolResultProjector.boundPreview(text);
-                                truncated = !output.equals(text) || value.path("previewTruncated").asBoolean()
+                                truncated = truncated || !output.equals(text) || value.path("previewTruncated").asBoolean()
                                         || value.path("capture").path("previewTruncated").asBoolean();
                             }
                         }
                     }
                     if (input != null && output != null) {
-                        return new WebShellToolDetails(input, output, truncated);
+                        return new WebShellToolDetails(input, output, truncated, shellResult);
                     }
                 }
             }
@@ -120,7 +131,75 @@ public class ManagedToolDetailsStore {
         if (input == null && output == null) {
             throw unavailable();
         }
-        return new WebShellToolDetails(input, output, truncated);
+        return new WebShellToolDetails(input, output, truncated, shellResult);
+    }
+
+    private WebShellShellResult shellResult(JsonNode display) {
+        if (!"shell_result".equals(display.path("type").asText())
+                || !display.path("version").isIntegralNumber() || !display.path("version").canConvertToInt()
+                || display.path("version").intValue() != 1
+                || !display.path("truncated").isBoolean()
+                || !List.of("completed", "failed", "cancelled", "timed_out").contains(display.path("outcome").asText())) {
+            return null;
+        }
+        for (String field : List.of("text", "output", "directory")) {
+            if (!display.path(field).isTextual()) {
+                return null;
+            }
+        }
+        JsonNode error = display.path("error");
+        if (!error.isNull() && !error.isTextual()) {
+            return null;
+        }
+        for (String field : List.of("exitCode", "signal", "pid")) {
+            JsonNode value = display.path(field);
+            if (!value.isNull() && (!value.isIntegralNumber() || !value.canConvertToLong()
+                    || value.longValue() < -9007199254740991L || value.longValue() > 9007199254740991L)) {
+                return null;
+            }
+        }
+        List<String> notices = shellStrings(display.path("notices"));
+        List<String> files = shellStrings(display.path("outputFiles"));
+        if (notices == null || files == null) {
+            return null;
+        }
+        String directory = display.path("directory").textValue();
+        int pathBytes = directory.getBytes(StandardCharsets.UTF_8).length;
+        for (String file : files) {
+            pathBytes += file.getBytes(StandardCharsets.UTF_8).length;
+        }
+        if (pathBytes > 8192) {
+            return null;
+        }
+        int count = 2 + notices.size() + (error.isNull() ? 0 : 1);
+        int bytes = 8192 / count;
+        int lines = 200 / count;
+        String text = ManagedToolResultProjector.boundPreview(display.path("text").textValue(), bytes, lines);
+        String output = ManagedToolResultProjector.boundPreview(display.path("output").textValue(), bytes, lines);
+        String boundedError = error.isNull() ? null : ManagedToolResultProjector.boundPreview(error.textValue(), bytes, lines);
+        List<String> boundedNotices = notices.stream().map(value -> ManagedToolResultProjector.boundPreview(value, bytes, lines)).toList();
+        boolean truncated = display.path("truncated").booleanValue() || !text.equals(display.path("text").textValue())
+                || !output.equals(display.path("output").textValue())
+                || !error.isNull() && !boundedError.equals(error.textValue()) || !notices.equals(boundedNotices);
+        return new WebShellShellResult("shell_result", 1, text, output, directory,
+                display.path("exitCode").isNull() ? null : display.path("exitCode").longValue(),
+                display.path("signal").isNull() ? null : display.path("signal").longValue(),
+                display.path("pid").isNull() ? null : display.path("pid").longValue(),
+                boundedError, display.path("outcome").textValue(), boundedNotices, truncated, files);
+    }
+
+    private List<String> shellStrings(JsonNode values) {
+        if (!values.isArray() || values.size() > 32) {
+            return null;
+        }
+        List<String> strings = new ArrayList<>();
+        for (JsonNode value : values) {
+            if (!value.isTextual()) {
+                return null;
+            }
+            strings.add(value.textValue());
+        }
+        return strings;
     }
 
     private JsonNode input(String name, JsonNode args) {

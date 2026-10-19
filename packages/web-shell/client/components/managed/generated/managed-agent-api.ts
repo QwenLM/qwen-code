@@ -1574,6 +1574,26 @@ export interface components {
             /** @description Recorded text or error, bounded to 8 KiB and 200 lines; null means unavailable, an empty string means recorded empty output. */
             output: string | null;
             truncated: boolean;
+            /** @description Validated saved Shell display, when available. Text fields share an 8 KiB/200-line budget; directory and output-file paths share an 8 KiB UTF-8 budget. Legacy text remains in output. */
+            shellResult?: components["schemas"]["WebShellShellResult"];
+        };
+        WebShellShellResult: {
+            /** @constant */
+            type: "shell_result";
+            /** @constant */
+            version: 1;
+            text: string;
+            output: string;
+            directory: string;
+            exitCode: number | null;
+            signal: number | null;
+            pid: number | null;
+            error: string | null;
+            /** @enum {string} */
+            outcome: "completed" | "failed" | "cancelled" | "timed_out";
+            notices: string[];
+            truncated: boolean;
+            outputFiles: string[];
         };
     };
     responses: {
