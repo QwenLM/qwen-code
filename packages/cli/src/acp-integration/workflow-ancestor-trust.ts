@@ -23,12 +23,24 @@ export function createParentWorkflowAncestorTrustProvider(
   options: {
     readonly isParentTrusted: () => boolean;
     readonly getSessionId: () => string | undefined;
+    readonly getCwdState: () =>
+      | { readonly canonicalTargetDir: string; readonly epoch: number }
+      | undefined;
   },
 ): WorkflowAncestorTrustProvider {
   return async (ancestorDirs, canonicalTargetDir) => {
     const denied = () => ancestorDirs.map(() => false);
     const sessionId = options.getSessionId();
-    if (!options.isParentTrusted() || !sessionId) return denied();
+    const cwdState = options.getCwdState();
+    if (
+      !options.isParentTrusted() ||
+      !sessionId ||
+      !cwdState ||
+      cwdState.canonicalTargetDir !== canonicalTargetDir ||
+      cwdState.epoch % 2 !== 0
+    )
+      return denied();
+    const { epoch } = cwdState;
     const request = parseWorkflowAncestorTrustRequest({
       v: 1,
       sessionId,
@@ -48,9 +60,12 @@ export function createParentWorkflowAncestorTrustProvider(
           );
         }),
       ]);
+      const currentCwdState = options.getCwdState();
       if (
         !options.isParentTrusted() ||
         options.getSessionId() !== sessionId ||
+        currentCwdState?.canonicalTargetDir !== canonicalTargetDir ||
+        currentCwdState?.epoch !== epoch ||
         !isWorkflowAncestorTrustResponse(response, ancestorDirs.length)
       ) {
         return denied();

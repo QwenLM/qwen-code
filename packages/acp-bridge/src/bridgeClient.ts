@@ -758,6 +758,7 @@ export interface BridgeClientSessionEntry {
    */
   workspaceChangeFence?: number;
   closing?: boolean;
+  cwdChangeEpoch?: number;
 }
 
 export interface BridgeClientDeferredArtifactBatch {
@@ -1889,12 +1890,15 @@ export class BridgeClient implements Client {
     const entry = this.resolveEntry(sessionId);
     if (!entry || entry.sessionId !== sessionId) return denied();
     const { effectiveCwd, workspaceCwd } = entry;
+    const cwdChangeEpoch = entry.cwdChangeEpoch ?? 0;
     const isCurrent = () =>
       this.ownsSession(sessionId) &&
       this.resolveEntry(sessionId) === entry &&
       entry.sessionId === sessionId &&
       entry.effectiveCwd === effectiveCwd &&
       entry.workspaceCwd === workspaceCwd &&
+      cwdChangeEpoch % 2 === 0 &&
+      (entry.cwdChangeEpoch ?? 0) === cwdChangeEpoch &&
       !entry.closing &&
       entry.workspaceChangeFence === undefined;
     if (!isCurrent()) return denied();

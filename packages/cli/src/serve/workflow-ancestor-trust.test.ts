@@ -109,14 +109,19 @@ describe('daemon workflow ancestor trust handler', () => {
     });
   });
 
-  it('cannot replace a newer policy with an older supplied admission', async () => {
+  it('cannot replace a newer publication with a genuinely older admission read', async () => {
+    published = { publication: 1, snapshot: policy };
+    const admission = await readWorkflowTrustAdmission(
+      async () => policy,
+      () => published,
+    );
     published = {
-      publication: 0,
-      snapshot: { ...policy, trustedFolders: {} },
+      publication: 2,
+      snapshot: { ...policy, revision: 'newer-revocation', trustedFolders: {} },
     };
-    await expect(
-      createHandler({ publication: -1, snapshot: policy })(context),
-    ).resolves.toMatchObject({ trusted: [false, false] });
+    await expect(createHandler(admission)(context)).resolves.toMatchObject({
+      trusted: [false, false],
+    });
   });
 
   it.each(['owner', 'closed', 'session'] as const)(

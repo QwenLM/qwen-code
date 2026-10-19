@@ -4564,7 +4564,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it.each([undefined, '', 'private-parent'])(
     'H01/H04 selects local or parent ancestor trust for provenance %s',
     async (capability) => {
-      await setupSessionMocks('ancestor-session');
+      const innerConfig = await setupSessionMocks('ancestor-session');
+      const target = await fs.realpath(process.cwd());
+      const linkRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-ancestor-alias-'),
+      );
+      const alias = path.join(linkRoot, 'alias');
+      await fs.symlink(target, alias, 'junction');
+      innerConfig.getTargetDir = vi.fn().mockReturnValue(alias);
       const extMethod = vi.fn().mockResolvedValue({ v: 1, trusted: [true] });
       const { agent, agentPromise } = await bootAcpAgent(
         {
@@ -4599,26 +4606,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         if (capability === undefined) {
           expect(provider).toBeTypeOf('function');
           await expect(
-            provider?.([process.cwd()], path.join(process.cwd(), 'project')),
+            provider?.([path.dirname(target)], target),
           ).resolves.toEqual([true]);
         } else {
           expect(provider).toBeTypeOf('function');
           await expect(
-            provider?.([process.cwd()], path.join(process.cwd(), 'project')),
+            provider?.([path.dirname(target)], target),
           ).resolves.toEqual([true]);
           expect(extMethod).toHaveBeenCalledWith(
             'qwen/control/workflow/ancestor-trust',
             {
               v: 1,
               sessionId: 'ancestor-session',
-              canonicalTargetDir: path.join(process.cwd(), 'project'),
-              ancestorDirs: [process.cwd()],
+              canonicalTargetDir: target,
+              ancestorDirs: [path.dirname(target)],
             },
           );
+        }
+        const caseAlias = path.join(
+          path.dirname(target),
+          path.basename(target).toUpperCase(),
+        );
+        if ((await fs.realpath(caseAlias).catch(() => undefined)) === target) {
+          innerConfig.getTargetDir.mockReturnValue(caseAlias);
+          await expect(
+            provider?.([path.dirname(target)], target),
+          ).resolves.toEqual([true]);
         }
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
+        await fs.rm(linkRoot, { recursive: true, force: true });
       }
     },
   );
@@ -8257,6 +8275,101 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['success', 'failure', 'cancelled', 'partial-failure'])(
+    'invalidates private ancestor replies across a %s cwd transition',
+    async (outcome) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const root = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ancestor-cd-')),
+      );
+      const target = path.join(root, 'nested');
+      await fs.mkdir(target);
+      let currentDir = root;
+      const innerConfig = await setupSessionMocks(sessionId);
+      let releaseCd!: () => void;
+      const cdBlocked = new Promise<void>((resolve) => {
+        releaseCd = resolve;
+      });
+      let enteredCd!: () => void;
+      const cdEntered = new Promise<void>((resolve) => {
+        enteredCd = resolve;
+      });
+      Object.assign(innerConfig, {
+        getTargetDir: vi.fn(() => currentDir),
+        isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+        relocateWorkingDirectory: vi.fn(async () => {
+          currentDir = target;
+          enteredCd();
+          await cdBlocked;
+          if (outcome !== 'success') {
+            if (outcome !== 'partial-failure') currentDir = root;
+            throw new Error('cd ' + outcome);
+          }
+          return {};
+        }),
+      });
+      Object.assign(innerConfig.getLlmClient(), {
+        addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+      });
+      const extMethod = vi.fn().mockResolvedValue({ v: 1, trusted: [true] });
+      const { agent, agentPromise } = await bootAcpAgent(
+        { privateParentCapability: 'private-parent' },
+        extMethod,
+      );
+      try {
+        await agent.initialize({
+          clientCapabilities: {},
+          _meta: { 'qwen-code/private-parent-capability': 'private-parent' },
+        });
+        await agent.newSession({ cwd: root, mcpServers: [] });
+        const provider =
+          vi.mocked(loadCliConfig).mock.calls[0]![9]!
+            .workflowAncestorTrustProvider!;
+        let releaseTrust!: (value: Record<string, unknown>) => void;
+        extMethod.mockReturnValueOnce(
+          new Promise((resolve) => {
+            releaseTrust = resolve;
+          }),
+        );
+        const pending = provider([path.dirname(root)], root);
+        const cd = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: target,
+        });
+        const settledCd = cd.then(
+          () => undefined,
+          () => undefined,
+        );
+        await cdEntered;
+        releaseTrust({ v: 1, trusted: [true] });
+        await expect(pending).resolves.toEqual([false]);
+        extMethod.mockClear();
+        await expect(provider([root], target)).resolves.toEqual([false]);
+        expect(extMethod).not.toHaveBeenCalled();
+        releaseCd();
+        if (outcome === 'success')
+          await expect(cd).resolves.toMatchObject({ newCwd: target });
+        else await expect(cd).rejects.toThrow('cd ' + outcome);
+        await settledCd;
+        if (outcome === 'partial-failure') {
+          extMethod.mockClear();
+          await expect(provider([path.dirname(root)], root)).resolves.toEqual([
+            false,
+          ]);
+          expect(extMethod).not.toHaveBeenCalled();
+        }
+        await expect(
+          provider([path.dirname(currentDir)], currentDir),
+        ).resolves.toEqual([true]);
+      } finally {
+        releaseCd();
+        mockConnectionState.resolve();
+        await agentPromise;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rechecks a no-op working-directory change after a concurrent relocation', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';

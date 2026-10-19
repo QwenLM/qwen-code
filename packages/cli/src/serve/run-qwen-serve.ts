@@ -5244,6 +5244,20 @@ async function runQwenServeImpl(
       publication: 0,
       snapshot: bootTrustSnapshot,
     };
+    const workflowTrustAdmissions = new WeakMap<
+      DaemonTrustPolicySnapshot,
+      WorkflowTrustAdmission
+    >();
+    workflowTrustAdmissions.set(bootTrustSnapshot, bootWorkflowTrustAdmission);
+    const readWorkflowTrustAdmission = async () => {
+      const admission = await workflowTrust.readWorkflowTrustAdmission(
+        trustPolicy.readDaemonTrustPolicySnapshot,
+        () => publishedWorkflowTrustPolicy,
+      );
+      // Preserve the read's publication when reconciliation retries a build.
+      workflowTrustAdmissions.set(admission.snapshot, admission);
+      return admission;
+    };
     const workflowTrustIdeScopeCwd = process.cwd();
     const bootPrimaryTrustDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
       bootTrustSnapshot,
@@ -7406,18 +7420,11 @@ async function runQwenServeImpl(
       }
       const workflowTrustAdmission: WorkflowTrustAdmission =
         buildOptions?.snapshot
-          ? {
+          ? (workflowTrustAdmissions.get(buildOptions.snapshot) ?? {
               snapshot: buildOptions.snapshot,
-              publication:
-                publishedWorkflowTrustPolicy.snapshot?.revision ===
-                buildOptions.snapshot.revision
-                  ? publishedWorkflowTrustPolicy.publication
-                  : -1,
-            }
-          : await workflowTrust.readWorkflowTrustAdmission(
-              trustPolicy.readDaemonTrustPolicySnapshot,
-              () => publishedWorkflowTrustPolicy,
-            );
+              publication: -1,
+            })
+          : await readWorkflowTrustAdmission();
       const snapshot = workflowTrustAdmission.snapshot;
       const decision =
         buildOptions?.decision ??
@@ -8727,7 +8734,8 @@ async function runQwenServeImpl(
         app.locals?.['acpHandle'] as AcpHttpHandle | undefined;
       const trustReconciler = createWorkspaceTrustReconciler({
         registry: workspaceRegistry,
-        readLatestSnapshot: trustPolicy.readDaemonTrustPolicySnapshot,
+        readLatestSnapshot: async () =>
+          (await readWorkflowTrustAdmission()).snapshot,
         materializationKey: ({ entry, snapshot, decision }) =>
           materializationFor(entry, snapshot, decision).key,
         isTrustDecrease: ({
@@ -8861,6 +8869,10 @@ async function runQwenServeImpl(
             publication: publishedWorkflowTrustPolicy.publication + 1,
             snapshot,
           };
+          workflowTrustAdmissions.set(snapshot, {
+            publication: publishedWorkflowTrustPolicy.publication,
+            snapshot,
+          });
           return runWorkspaceTrustOperation(() =>
             trustReconciler.reconcile(snapshot),
           );

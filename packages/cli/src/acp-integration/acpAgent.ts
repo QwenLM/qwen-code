@@ -4005,6 +4005,10 @@ class QwenAgent implements Agent {
   >();
   private managedShuttingDown = false;
   private workflowAncestorTrustConnected = true;
+  private readonly workflowAncestorTrustCwdEpochs = new WeakMap<
+    Config,
+    number
+  >();
   /**
    * A workspace change is being applied. New prompts wait for it, so no turn
    * is admitted under the revision the change replaces.
@@ -12625,6 +12629,8 @@ class QwenAgent implements Agent {
           session,
           SESSION_DRAIN_TIMEOUT_MS,
         );
+        const cwdEpoch = this.workflowAncestorTrustCwdEpochs.get(config) ?? 0;
+        this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 1);
         try {
           const settledPreviousCwd = config.getTargetDir();
           if (
@@ -12719,6 +12725,7 @@ class QwenAgent implements Agent {
             warnings,
           };
         } finally {
+          this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 2);
           releaseGate();
         }
       }
@@ -15673,8 +15680,8 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
-    const workflowAncestorTrustSession: { sessionId: string | undefined } = {
-      sessionId: undefined,
+    const workflowAncestorTrustSession: { config: Config | undefined } = {
+      config: undefined,
     };
     const workflowAncestorTrustProvider =
       this.expectedPrivateParentCapability === undefined
@@ -15687,7 +15694,22 @@ class QwenAgent implements Agent {
                 this.isTrustedManagedParent() &&
                 this.workflowAncestorTrustConnected &&
                 !this.managedShuttingDown,
-              getSessionId: () => workflowAncestorTrustSession.sessionId,
+              getSessionId: () =>
+                workflowAncestorTrustSession.config?.getSessionId(),
+              getCwdState: () => {
+                const config = workflowAncestorTrustSession.config;
+                if (!config) return undefined;
+                try {
+                  return {
+                    canonicalTargetDir: realpathSync.native(
+                      config.getTargetDir(),
+                    ),
+                    epoch: this.workflowAncestorTrustCwdEpochs.get(config) ?? 0,
+                  };
+                } catch {
+                  return undefined;
+                }
+              },
             })
           : undefined;
     const config = await loadCliConfig(
@@ -15765,7 +15787,7 @@ class QwenAgent implements Agent {
         : undefined,
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
     );
-    workflowAncestorTrustSession.sessionId = config.getSessionId();
+    workflowAncestorTrustSession.config = config;
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }

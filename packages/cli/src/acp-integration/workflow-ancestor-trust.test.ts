@@ -21,6 +21,8 @@ describe('private parent workflow ancestor trust', () => {
   function setup() {
     let trusted = false;
     let sessionId: string | undefined;
+    let targetDir = target;
+    let epoch = 0;
     const extMethod = vi
       .fn()
       .mockResolvedValue({ v: 1, trusted: [true, false] });
@@ -31,6 +33,7 @@ describe('private parent workflow ancestor trust', () => {
         {
           isParentTrusted: () => trusted,
           getSessionId: () => sessionId,
+          getCwdState: () => ({ canonicalTargetDir: targetDir, epoch }),
         },
       ),
       authenticate() {
@@ -41,6 +44,10 @@ describe('private parent workflow ancestor trust', () => {
       },
       close() {
         trusted = false;
+      },
+      setCwd(directory: string, revision: number) {
+        targetDir = directory;
+        epoch = revision;
       },
     };
   }
@@ -79,6 +86,7 @@ describe('private parent workflow ancestor trust', () => {
     state.bind();
     await state.provider(ancestors, target);
     const next = path.join(target, 'nested');
+    state.setCwd(next, 2);
     state.extMethod.mockResolvedValue({ v: 1, trusted: [false] });
     await expect(state.provider([target], next)).resolves.toEqual([false]);
     expect(state.extMethod).toHaveBeenLastCalledWith(
@@ -158,6 +166,65 @@ describe('private parent workflow ancestor trust', () => {
     await Promise.resolve();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('denies during a cwd transition without querying the parent', async () => {
+    const state = setup();
+    state.authenticate();
+    state.bind();
+    state.setCwd(target, 1);
+    await expect(state.provider(ancestors, target)).resolves.toEqual([
+      false,
+      false,
+    ]);
+    expect(state.extMethod).not.toHaveBeenCalled();
+    state.setCwd(target, 2);
+    await expect(state.provider(ancestors, target)).resolves.toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  it('denies a lookup captured before the current cwd without querying', async () => {
+    const state = setup();
+    state.authenticate();
+    state.bind();
+    state.setCwd(path.join(target, 'nested'), 2);
+    await expect(state.provider(ancestors, target)).resolves.toEqual([
+      false,
+      false,
+    ]);
+    expect(state.extMethod).not.toHaveBeenCalled();
+  });
+
+  it.each(['target', 'transition', 'settled', 'roundtrip'])(
+    'rejects a late reply after cwd %s changes',
+    async (change) => {
+      const state = setup();
+      state.authenticate();
+      state.bind();
+      let release!: (value: Record<string, unknown>) => void;
+      state.extMethod.mockReturnValue(
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+      );
+      const pending = state.provider(ancestors, target);
+      state.setCwd(
+        change === 'target' || change === 'transition'
+          ? path.join(target, 'nested')
+          : target,
+        change === 'target'
+          ? 0
+          : change === 'transition'
+            ? 1
+            : change === 'settled'
+              ? 2
+              : 4,
+      );
+      release({ v: 1, trusted: [true, true] });
+      await expect(pending).resolves.toEqual([false, false]);
+    },
+  );
 
   it('does not send empty or oversized batches', async () => {
     const state = setup();

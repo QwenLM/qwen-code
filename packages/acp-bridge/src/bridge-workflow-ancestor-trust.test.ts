@@ -8,8 +8,10 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RequestError } from '@agentclientprotocol/sdk';
 import { BridgeClient, type BridgeClientSessionEntry } from './bridgeClient.js';
 import { makeBridge, makeChannel } from './internal/testUtils.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import {
   WORKFLOW_ANCESTOR_TRUST_METHOD,
   type WorkflowAncestorTrustDecision,
@@ -156,6 +158,7 @@ describe('workflow ancestor trust bridge dispatch', () => {
     'workspace-cwd',
     'closing',
     'fence',
+    'cwd-epoch',
   ])('discards a late grant after %s changes', async (change) => {
     const handler = vi.fn(async () => {
       if (change === 'ownership') owned = false;
@@ -166,6 +169,7 @@ describe('workflow ancestor trust bridge dispatch', () => {
         entry!.workspaceCwd = path.dirname(directory);
       if (change === 'closing') entry!.closing = true;
       if (change === 'fence') entry!.workspaceChangeFence = 1;
+      if (change === 'cwd-epoch') entry!.cwdChangeEpoch = 2;
       return decision([true]);
     });
     const { client } = makeClient(handler);
@@ -315,4 +319,93 @@ describe('workflow ancestor trust bridge dispatch', () => {
       await secondBridge.shutdown();
     }
   });
+
+  it.each(['success', 'failure', 'cancelled'])(
+    'invalidates pending grants during cd and recovers after %s',
+    async (outcome) => {
+      const nextCwd = path.join(directory, 'nested');
+      await fs.mkdir(nextCwd);
+      let releaseTrust!: () => void;
+      const trustBlocked = new Promise<void>((resolve) => {
+        releaseTrust = resolve;
+      });
+      let enteredTrust!: () => void;
+      const trustEntered = new Promise<void>((resolve) => {
+        enteredTrust = resolve;
+      });
+      let releaseCd!: () => void;
+      const cdBlocked = new Promise<void>((resolve) => {
+        releaseCd = resolve;
+      });
+      let enteredCd!: () => void;
+      const cdEntered = new Promise<void>((resolve) => {
+        enteredCd = resolve;
+      });
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+            enteredCd();
+            await cdBlocked;
+            if (outcome !== 'success') {
+              throw new RequestError(
+                outcome === 'cancelled' ? -32800 : -32603,
+                outcome === 'cancelled' ? 'cd cancelled' : 'cd failed',
+              );
+            }
+            return { previousCwd: directory, newCwd: nextCwd, warnings: [] };
+          }
+          return {};
+        },
+      });
+      const handler = vi.fn(async () => {
+        enteredTrust();
+        await trustBlocked;
+        return decision([true]);
+      });
+      const bridge = makeBridge({
+        boundWorkspace: directory,
+        channelFactory: async () => handle.channel,
+        onWorkflowAncestorTrust: handler,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: directory });
+        const query = (cwd = directory) =>
+          handle.agentConnection.extMethod(WORKFLOW_ANCESTOR_TRUST_METHOD, {
+            ...request(),
+            sessionId: session.sessionId,
+            canonicalTargetDir: cwd,
+          });
+        const pending = query();
+        await trustEntered;
+        const cd = bridge.changeSessionCwd(session.sessionId, {
+          path: nextCwd,
+        });
+        const settledCd = cd.then(
+          () => undefined,
+          () => undefined,
+        );
+        await cdEntered;
+        releaseTrust();
+        await expect(pending).resolves.toMatchObject({ trusted: [false] });
+        handler.mockClear();
+        await expect(query()).resolves.toMatchObject({ trusted: [false] });
+        expect(handler).not.toHaveBeenCalled();
+        releaseCd();
+        if (outcome === 'success')
+          await expect(cd).resolves.toMatchObject({ newCwd: nextCwd });
+        else
+          await expect(cd).rejects.toMatchObject({
+            code: outcome === 'cancelled' ? -32800 : -32603,
+          });
+        await settledCd;
+        await expect(
+          query(outcome === 'success' ? nextCwd : directory),
+        ).resolves.toMatchObject({ trusted: [true] });
+      } finally {
+        releaseTrust();
+        releaseCd();
+        await bridge.shutdown();
+      }
+    },
+  );
 });
