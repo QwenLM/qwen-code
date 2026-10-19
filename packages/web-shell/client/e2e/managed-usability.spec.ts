@@ -8,6 +8,8 @@ for (const width of [1280, 390]) {
     const requests: Record<string, unknown>[] = [];
     let summary: JavaAgentSession | undefined;
     let laterInputs = 0;
+    let skillQueries = 0;
+    let skillInput: unknown;
     let loseResponse = width === 390;
     const workspaces = ['a', 'b'].map((id) => ({
       workspaceId: `ws-${id}`,
@@ -86,7 +88,33 @@ for (const width of [1280, 390]) {
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
-      if (path.endsWith('/turns/submit')) laterInputs++;
+      if (path.endsWith('/session-skills/query')) {
+        expect(body).toEqual({ sessionId: 'managed-ui-session' });
+        skillQueries++;
+        return route.fulfill({
+          json: {
+            skills: [
+              {
+                name: 'repository-review',
+                description: 'Review using the pinned guide.',
+              },
+            ],
+          },
+        });
+      }
+      if (path.endsWith('/turns/submit')) {
+        laterInputs++;
+        skillInput = body.input;
+        return route.fulfill({
+          status: 202,
+          json: {
+            sessionId: summary!.sessionId,
+            turnId: 'skill-turn',
+            status: 'accepted',
+            replayed: false,
+          },
+        });
+      }
       return route.fulfill({
         status: 500,
         json: { error: `Unexpected request: ${path}` },
@@ -142,6 +170,19 @@ for (const width of [1280, 390]) {
       expect(second).toEqual(first);
     }
     expect(laterInputs).toBe(0);
+    expect(skillQueries).toBe(0);
+    await editor.fill('inspect the patch');
+    await page.getByTestId('composer-add-menu-trigger').click();
+    await page.getByTestId('composer-add-menu-skills').click();
+    await page.getByTestId('composer-add-menu-skills-item').click();
+    await expect(editor).toHaveText('/repository-review inspect the patch');
+    expect(skillQueries).toBe(1);
+    await editor.press('Enter');
+    await expect
+      .poll(() => skillInput)
+      .toEqual([
+        { type: 'input_text', text: '/repository-review inspect the patch' },
+      ]);
     expect(errors).toEqual([]);
     expect(
       await page.evaluate(
