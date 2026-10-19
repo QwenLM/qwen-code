@@ -98,9 +98,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 3600 9');
+    expect(block).toContain('flock --wait 5400 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 60 minutes',
+      '::error::sdk-java host lock not acquired within 90 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -703,30 +703,52 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       'Install Managed Agent dependencies',
       'Run Managed Agent tests, Checkstyle, and MySQL integration',
     ]);
-    const lockWaits = mavenSteps.map((s) => {
+    for (const s of mavenSteps) {
       expect(s.run, s.name).toContain(
         'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
       );
-      const seconds = Number(s.run.match(/flock --wait (\d+) 9/)?.[1]);
-      expect(seconds, s.name).toBeGreaterThanOrEqual(50 * 60);
-      return seconds;
-    });
-    // The ceiling must absorb one full lock wait per acquisition — this job
-    // takes the lock once per Maven step — plus the ~50 minutes of measured
-    // Maven work. Run 39097018288 held it for 47m26s, longer than the old
-    // 40-minute acquisition budget. Derive the ceiling from the step count
-    // so another locked step cannot silently overdraw it.
+      expect(s.run, s.name).toContain('flock --wait 5400 9');
+      // Main requires at least an hour per acquisition; 5400 s is 90 minutes.
+      expect(
+        Number(s.run.match(/flock --wait (\d+) 9/)?.[1]),
+        s.name,
+      ).toBeGreaterThanOrEqual(50 * 60);
+    }
+    // The wait budget is read back from the workflow so the arithmetic below
+    // cannot drift from it: the value pins above still force a deliberate
+    // update when the literal moves, but a re-size can no longer miss these
+    // sums and silently under-demand.
+    const waitSeconds = [
+      ...parsed.jobs.test.steps,
+      ...parsed.jobs['mysql-integration'].steps,
+    ]
+      .filter((s) => typeof s.run === 'string')
+      .flatMap((s) =>
+        [...s.run.matchAll(/flock --wait (\d+) 9/g)].map((m) => Number(m[1])),
+      );
+    expect(new Set(waitSeconds).size, 'one wait budget per lock').toBe(1);
+    const lockWait = waitSeconds[0];
+    // The ceiling must absorb one full wait per acquisition — this job takes
+    // the lock once per Maven step — plus the measured Maven work inside the
+    // lock plus the uncapped setup the wait does not cover. Run 39097018288
+    // held the host lock for 47m26s, and the sibling test job's fast-tier leg
+    // now also runs the full managed-agent H2 suite inside the lock: 925 s of
+    // Maven work per hold in job 117729316936 (run 39145783034), where the
+    // step waited 1515 s and held 925 s. Main run 39143975111 then starved on
+    // both attempts because the 40-minute budget lost to a queue of holds, not
+    // to one hold (#14608). The wait now covers about 5.8 such holds, 5400 s.
+    const measuredMavenSeconds = 50 * 60;
+    const mavenSetupSeconds = 30 * 60;
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
-      lockWaits.reduce((total, seconds) => total + seconds, 0) + 50 * 60,
+      mavenSteps.length * lockWait + measuredMavenSeconds + mavenSetupSeconds,
     );
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured locked work (~5 minutes on
-    // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
-    // now consume part of that wait budget.
+    // cover one full wait plus one measured hold (925 s of Maven work in job
+    // 117729316936) plus the ~11 minutes of uncapped setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      3600 + 10 * 60,
+      lockWait + 925 + 11 * 60,
     );
   });
 
