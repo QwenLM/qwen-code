@@ -55,24 +55,29 @@ let requests: Array<Record<string, unknown>>;
 let members: Array<Record<string, unknown>>;
 let paths: string[];
 let runtimeError: boolean;
+let runtimeErrorMessage: string;
 const messageFitsInline = vi.fn();
 
-it('reuses a complete settled error receipt without another Runtime request', async () => {
-  runtimeError = true;
-  const { text, successor } = await interruptedReceiptTurn('before_message');
-  const originalRequests = paths.slice();
-  const responses = await recoverHostedCsiReceipts(
-    successor,
-    { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
-    promptId,
-    text,
-  );
-  expect(responses.parts.at(-1)?.functionResponse?.response).toMatchObject({
-    executionStatus: 'error',
-    runtimeError: { message: 'Owned original error' },
-  });
-  expect(paths).toEqual(originalRequests);
-});
+it.each(['Owned original error', 'Long original error '.repeat(300)])(
+  'reuses a complete settled error receipt without another Runtime request (%#)',
+  async (message) => {
+    runtimeError = true;
+    runtimeErrorMessage = message;
+    const { text, successor } = await interruptedReceiptTurn('before_message');
+    const originalRequests = paths.slice();
+    const responses = await recoverHostedCsiReceipts(
+      successor,
+      { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+      promptId,
+      text,
+    );
+    expect(responses.parts.at(-1)?.functionResponse?.response).toMatchObject({
+      executionStatus: 'error',
+      runtimeError: { message },
+    });
+    expect(paths).toEqual(originalRequests);
+  },
+);
 
 async function interruptedReceiptTurn(cut: 'before_message' | 'after_message') {
   await history.commitInitialHostedCsiHistory(managed, emptyHistory());
@@ -361,6 +366,7 @@ beforeEach(async () => {
   members = [];
   paths = [];
   runtimeError = false;
+  runtimeErrorMessage = 'Owned original error';
   // Control/worker history is a seam here; the history client has separate wire tests.
   vi.spyOn(history, 'requestHostedCsiHistory').mockImplementation(async () =>
     emptyHistory(),
@@ -391,7 +397,7 @@ beforeEach(async () => {
                 ? {
                     executionStatus: 'error',
                     responseParts: [],
-                    error: { message: 'Owned original error' },
+                    error: { message: runtimeErrorMessage },
                   }
                 : {
                     executionStatus: 'success',

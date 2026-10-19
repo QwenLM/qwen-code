@@ -267,7 +267,7 @@ final class CsiNativeToolReservation {
                         "SELECT execution_call_id, result_json, native_authorization_json FROM ma_tool_execution WHERE execution_call_id_hash = ? FOR UPDATE")) {
                     statement.setString(1, JdbcRepositorySupport.valueKey(execution.getExecutionCallId()));
                     try (ResultSet row = statement.executeQuery()) {
-                        require(row.next() && execution.getExecutionCallId().equals(row.getString(1)));
+                        require(row.next() && execution.getExecutionCallId().equals(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "execution_call_id")));
                         member.put("resultBytesBase64", Base64.getEncoder().encodeToString(recoveryBytes(row.getString(2))));
                         member.put("authorizationBytesBase64", Base64.getEncoder().encodeToString(recoveryBytes(row.getString(3))));
                         require(!row.next());

@@ -874,7 +874,8 @@ public final class ToolPublicationStore {
                 var target = DataSourceUtils.getTargetConnection(connection);
                 require(DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()),
                         "Local publication requires the original transaction connection");
-                JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId);
+                ManagedSessionStore.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc,
+                        tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
                 var originalBinding = nativeBindings.findByIdForUpdate(target, text(b, "runtimeBindingId"));
                 require(originalBinding != null, "Original Runtime binding is missing");
                 var originalExecution = nativeExecutions.findByExecutionCallIdForUpdate(

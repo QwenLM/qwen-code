@@ -632,34 +632,59 @@ public final class JdbcRuntimeBindingRepository
         });
     }
 
-    Map<String, Object> readCsiBatch(RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+    Map<String, Object> readCsiBatch(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             RuntimeBindingRecord hint, String promptId, String batchId) {
         return readCsiBatch(sessions, executions, hint, promptId, batchId, null);
     }
 
-    Map<String, Object> readCsiBatch(RuntimeSessionRepository sessions, ToolExecutionRepository executions,
-            RuntimeBindingRecord hint, String promptId, String batchId, Map<String, Object> recoveryOwner) {
+    Map<String, Object> readCsiBatch(
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions,
+            RuntimeBindingRecord hint,
+            String promptId,
+            String batchId, Map<String, Object> recoveryOwner) {
         requireCsiRepositories(sessions, executions);
-        return JdbcRepositorySupport.transaction(dataSource, connection -> {
-            var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
-            var original = admission.original();
-            var resources = CsiNativeToolReservation.inventory(connection, original);
-            JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
-            RuntimeAdmission.requireReady(selectById(connection, original.bindingId(), true), original.generation());
-            RuntimeSessionRecord runtime = JdbcRuntimeSessionRepository.selectSession(connection,
-                    original.request().getScope(), original.request().getIsolationKey(), true);
-            original.requireSession(runtime);
-            if (runtime.getState() != RuntimeSessionRecord.State.READY) {
-                throw new RuntimeBrokerException(409, "runtime_admission_closed", "Original CSI Runtime Session is not ready", false);
-            }
-            if (recoveryOwner != null) {
-                admission.head().requireRecoveryOwner(recoveryOwner);
-                JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
-            }
-            var result = CsiNativeToolReservation.read(connection, original, admission.prefix(), resources, promptId, batchId, recoveryOwner != null);
-            admission.head().requireCurrentTime(connection);
-            return result;
-        });
+        return JdbcRepositorySupport.transaction(
+                dataSource,
+                connection -> {
+                    var admission =
+                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
+                    var original = admission.original();
+                    var resources = CsiNativeToolReservation.inventory(connection, original);
+                    JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+                    RuntimeAdmission.requireReady(
+                            selectById(connection, original.bindingId(), true),
+                            original.generation());
+                    RuntimeSessionRecord runtime =
+                            JdbcRuntimeSessionRepository.selectSession(
+                                    connection,
+                                    original.request().getScope(),
+                                    original.request().getIsolationKey(),
+                                    true);
+                    original.requireSession(runtime);
+                    if (runtime.getState() != RuntimeSessionRecord.State.READY) {
+                        throw new RuntimeBrokerException(
+                                409,
+                                "runtime_admission_closed",
+                                "Original CSI Runtime Session is not ready",
+                                false);
+                    }
+                    if (recoveryOwner != null) {
+                        admission.head().requireRecoveryOwner(recoveryOwner);
+                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
+                    }
+                    var result =
+                            CsiNativeToolReservation.read(
+                                    connection,
+                                    original,
+                                    admission.prefix(),
+                                    resources,
+                                    promptId,
+                                    batchId, recoveryOwner != null);
+                    admission.head().requireCurrentTime(connection);
+                    return result;
+                });
     }
 
     private void requireCsiRepositories(RuntimeSessionRepository sessions, ToolExecutionRepository executions) {

@@ -516,7 +516,7 @@ export function registerHostedCsiSessionRoutes(
                 activationEpoch: managed.activation.epoch,
               })
             : undefined;
-          if (!resumed) {
+          if (resumed === undefined) {
             const contentRef = await managed.resources.publish(
               'managed-input',
               Buffer.from(JSON.stringify(prompt)),

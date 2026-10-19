@@ -272,6 +272,64 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
+    public List<RuntimeSessionRecord> findHistoricalByIds(String tenantId,
+            String harnessSessionId, java.util.Collection<String> runtimeSessionIds) {
+        String tenant = BrokerValues.requireId(tenantId, "tenantId");
+        String harness = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+        for (String runtimeSessionId : runtimeSessionIds) {
+            ids.add(BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
+        }
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        List<String> ordered = List.copyOf(ids);
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            java.util.Map<String, RuntimeSessionRecord> found = new java.util.HashMap<>();
+            for (int from = 0; from < ordered.size(); from += 100) {
+                List<String> chunk = ordered.subList(from,
+                        Math.min(from + 100, ordered.size()));
+                String placeholders = String.join(", ",
+                        java.util.Collections.nCopies(chunk.size(), "?"));
+                String sql = "SELECT " + SESSION_COLUMNS
+                        + " FROM ma_runtime_session WHERE tenant_id = ?"
+                        + " AND harness_session_id = ? AND runtime_session_id IN ("
+                        + placeholders + ")";
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    JdbcRepositorySupport.setIdentity(statement, 1, tenant);
+                    JdbcRepositorySupport.setIdentity(statement, 2, harness);
+                    for (int index = 0; index < chunk.size(); index++) {
+                        JdbcRepositorySupport.setIdentity(statement, 3 + index,
+                                chunk.get(index));
+                    }
+                    try (ResultSet rows = statement.executeQuery()) {
+                        while (rows.next()) {
+                            var record = mapSession(rows);
+                            if (!tenant.equals(record.getSession().getScope().getTenantId())
+                                    || !harness.equals(record.getSession().getHarnessSessionId())
+                                    || !ids.contains(record.getRuntimeSessionId())) {
+                                continue;
+                            }
+                            if (found.putIfAbsent(record.getRuntimeSessionId(), record) != null) {
+                                throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                                        "Historical Runtime Session is ambiguous", false);
+                            }
+                        }
+                    }
+                }
+            }
+            List<RuntimeSessionRecord> orderedResult = new ArrayList<>();
+            for (String id : ordered) {
+                RuntimeSessionRecord record = found.get(id);
+                if (record != null) {
+                    orderedResult.add(record);
+                }
+            }
+            return orderedResult;
+        });
+    }
+
+    @Override
     public RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement) {
         requireReplacement(expected, replacement);

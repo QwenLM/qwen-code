@@ -38,6 +38,8 @@ it.each([
 
 it.each([
   { executionStatus: 'cancelled', responseParts: [] },
+  { executionStatus: ['success'], responseParts: [] },
+  { executionStatus: ['error'], responseParts: [] },
   { executionStatus: 'success', responseParts: [], capture: null },
   {
     executionStatus: 'success',
@@ -51,7 +53,7 @@ it.each([
   {
     executionStatus: 'error',
     responseParts: [],
-    error: { message: 'x'.repeat(4097) },
+    error: { message: 'valid message', type: 1 },
   },
   {
     executionStatus: 'success',

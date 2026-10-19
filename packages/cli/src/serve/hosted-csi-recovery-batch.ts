@@ -80,7 +80,8 @@ export function readCsiRecoveryResult(
     ...(Object.hasOwn(object(value), 'error') ? ['error'] : []),
   ]);
   ensure(
-    ['success', 'error'].includes(String(result['executionStatus'])) &&
+    (result['executionStatus'] === 'success' ||
+      result['executionStatus'] === 'error') &&
       Array.isArray(result['responseParts']),
   );
   for (const candidate of result['responseParts']) {
@@ -118,8 +119,7 @@ export function readCsiRecoveryResult(
     ]);
     ensure(
       Object.values(error).every(
-        (entry) =>
-          typeof entry === 'string' && entry.length > 0 && entry.length <= 4096,
+        (entry) => typeof entry === 'string' && entry.length > 0,
       ),
     );
   }

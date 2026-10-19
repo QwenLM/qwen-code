@@ -110,6 +110,34 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         }
     }
 
+    @Test
+    void hostedProducerRecoversMissingSettledReceiptWithoutRepeatingFileEffects() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "missing_receipt");
+        }
+    }
+
+    @Test
+    void hostedProducerConsumesCommittedFinalOutputWithoutAnotherModelRequest() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "final_output");
+        }
+    }
+
+    @Test
+    void coldWriterContentionAtReadCommittedHasOneInstalledWinner() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "receipt_complete", Connection.TRANSACTION_READ_COMMITTED);
+        }
+    }
+
+    @Test
+    void coldWriterContentionAtWarmedRepeatableReadHasOneInstalledWinner() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "receipt_complete", Connection.TRANSACTION_REPEATABLE_READ);
+        }
+    }
+
     private void run(boolean retire, int isolation) throws Exception {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             run(database.source(), directory, retire, isolation, false, false);
@@ -121,7 +149,17 @@ class WorkspaceCsiSqlWorkerMySqlIT {
     }
 
     static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery) throws Exception {
-        run(source, directory, false, 0, hostedProducer, coldRecovery);
+        acceptance(source, directory, hostedProducer, coldRecovery, "receipt_complete");
+    }
+
+    static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
+            String recoveryCut) throws Exception {
+        acceptance(source, directory, hostedProducer, coldRecovery, recoveryCut, 0);
+    }
+
+    static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
+            String recoveryCut, int isolation) throws Exception {
+        run(source, directory, false, isolation, hostedProducer, coldRecovery, null, recoveryCut);
     }
 
     static void legacyAcceptance(DataSource source, Path directory, boolean missingValid) throws Exception {
@@ -135,7 +173,12 @@ class WorkspaceCsiSqlWorkerMySqlIT {
 
     private static void run(DataSource source, Path directory, boolean retire, int isolation,
             boolean hostedProducer, boolean coldRecovery, String legacyMode) throws Exception {
-        boolean coldRun = isolation != 0;
+        run(source, directory, retire, isolation, hostedProducer, coldRecovery, legacyMode, "receipt_complete");
+    }
+
+    private static void run(DataSource source, Path directory, boolean retire, int isolation,
+            boolean hostedProducer, boolean coldRecovery, String legacyMode, String recoveryCut) throws Exception {
+        boolean coldRun = isolation != 0 && !hostedProducer;
         Path scenario = directory;
         String evidence = System.getProperty("csi.acceptance.evidence");
         if ((coldRun || legacyMode != null) && evidence != null) {
@@ -152,7 +195,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var manager = new DataSourceTransactionManager(source);
         var transaction = new TransactionTemplate(manager);
         transaction.setTimeout(10);
-        if (coldRun) {
+        if (isolation != 0) {
             transaction.setIsolationLevel(isolation);
         }
         var cold = new ColdContention(source, manager, isolation);
@@ -288,8 +331,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                             });
                             case "/fixture:cold-refusals" -> {
                                 var before = databaseImage(source, jdbc);
-                                String execution = jdbc.queryForObject("SELECT execution_call_id FROM ma_tool_execution"
-                                        + " ORDER BY execution_call_id LIMIT 1", String.class);
+                                String execution = jdbc.queryForObject("SELECT e.execution_call_id FROM ma_tool_execution e"
+                                        + " WHERE EXISTS (SELECT 1 FROM ma_session_journal_tx t WHERE t.operation = 'recordToolResult'"
+                                        + " AND t.command_id = e.execution_call_id) ORDER BY e.execution_call_id LIMIT 1", String.class);
                                 for (String mutation : List.of("execution_state = 'UNKNOWN', result_json = NULL, execution_status = NULL, settled_at = NULL",
                                         "cancel_requested = TRUE", "native_authorization_json = NULL",
                                         "execution_status = 'error', result_json = '{\"executionStatus\":\"error\",\"responseParts\":[],\"error\":{\"message\":\"changed\"}}'")) {
@@ -333,7 +377,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                             : suffix.equals("/writers:acquire")
                             ? cold.acquire(journal, token, sessionId, read(raw, ManagedSessionStoreModels.AcquireWriterRequest.class))
                             : transaction.execute(status -> {
-                                if (coldRun) {
+                                if (isolation != 0) {
                                     jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                                         assertThat(connection.getAutoCommit()).isFalse();
                                         assertThat(connection.getTransactionIsolation()).isEqualTo(isolation);
@@ -410,7 +454,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         Map.entry("foreignOwnerSessionId", foreignOwner),
                         Map.entry("foreignOwnerOperationId", UUID.nameUUIDFromBytes(foreignOwner.getBytes(StandardCharsets.UTF_8)).toString()),
                         Map.entry("retirement", retire),
-                        Map.entry("cold", isolation),
+                        Map.entry("cold", coldRun ? isolation : 0),
+                        Map.entry("isolation", hostedProducer ? isolation : 0),
+                        Map.entry("recoveryCut", recoveryCut),
                         Map.entry("hostedProducer", hostedProducer),
                         Map.entry("coldRecovery", coldRecovery),
                         Map.entry("legacyAcceptedOnly", legacyMode != null),

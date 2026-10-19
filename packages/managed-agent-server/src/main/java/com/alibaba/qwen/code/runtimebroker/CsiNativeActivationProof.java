@@ -454,10 +454,12 @@ public final class CsiNativeActivationProof {
             Set<String> refused = new HashSet<>(batch.refusedFunctionIds());
             require(refused.add(functionId));
             boolean complete = refused.size() == batch.calls().size();
+            var updated = new PendingBatch(batch.messageId(), batch.contentRef(), batch.calls(), refused);
+            Map<String, OriginalBatch> batches = new HashMap<>(previous.batches());
+            batches.put(batch.messageId(), new OriginalBatch(previous.batches().get(batch.messageId()).promptId(), updated));
             return new Prefix(previous.input(), previous.checkpoint(), messageId, complete ? null : previous.attempt(), false,
-                    previous.stream(), useId(previous, messageId), complete ? null
-                            : new PendingBatch(batch.messageId(), batch.contentRef(), batch.calls(), refused),
-                    previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
+                    previous.stream(), useId(previous, messageId), complete ? null : updated,
+                    batches, previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
         }
         var receipt = entry.getValue();
         require(receipt.messageSequence() == 0 && receipt.sequence() < previousSequence + 1);

@@ -1230,6 +1230,7 @@ try {
         prompt,
         index,
         mutation,
+        recoveryCut: input.recoveryCut,
         files: {
           broker: { baseUrl: input.broker, token: input.operatorToken },
           runtime: input.runtime,
@@ -1335,7 +1336,57 @@ try {
                 );
                 coldRefusalChecks++;
                 await waitForExpiry();
-                const successorWriter = randomUUID();
+                let successorWriter = randomUUID();
+                if (input.isolation) {
+                  const writers = [successorWriter, randomUUID()];
+                  await fixture('/fixture:cold-arm', { writers });
+                  const pending = writers.map(async (candidate) => {
+                    const response = await fetch(
+                      `${input.adapter}${prefix}/writers:acquire`,
+                      {
+                        method: 'POST',
+                        headers: storeHeaders,
+                        signal: AbortSignal.timeout(20000),
+                        body: JSON.stringify({
+                          workspaceId: key.workspaceId,
+                          writerId: candidate,
+                          leaseMillis: 300000,
+                        }),
+                      },
+                    );
+                    return {
+                      writerId: candidate,
+                      status: response.status,
+                      body: await response.json(),
+                    };
+                  });
+                  const contention = await fixture('/fixture:cold-release');
+                  const responses = await Promise.all(pending);
+                  assert.deepEqual(
+                    responses.map((response) => response.status).sort(),
+                    [200, 409],
+                  );
+                  const winner = responses.find(
+                    (response) => response.status === 200,
+                  );
+                  successorWriter = winner.writerId;
+                  assert.equal(winner.body.writerGeneration, 3);
+                  assert.equal(winner.body.activationEpoch, 1);
+                  const warmed = Object.values(contention.warmed);
+                  assert.equal(warmed.length, 2);
+                  assert.ok(
+                    warmed.every(
+                      (entry) =>
+                        entry.isolation === input.isolation &&
+                        entry.autoCommit === false &&
+                        entry.writerGeneration === 2,
+                    ),
+                  );
+                  await fs.writeFile(
+                    path.join(output, 'cold-contention.json'),
+                    JSON.stringify({ contention, responses }, null, 2),
+                  );
+                }
                 stores = createHttpManagedSessionStores({
                   baseUrl: input.adapter,
                   sessionKey: key,
@@ -1399,11 +1450,17 @@ try {
                 const { recoverHostedCsiReceipts } = await import(
                   cli('hosted-csi-cold-recovery')
                 );
-                const { parts } = await recoverHostedCsiReceipts(
+                const recovered = await recoverHostedCsiReceipts(
                   session,
                   { baseUrl: input.broker, token: input.operatorToken },
                   promptId,
                   prompt,
+                  {
+                    ...input.runtime,
+                    ...(await stores.publication.owner()),
+                    activationId: session.activation.activationId,
+                    activationEpoch: session.activation.epoch,
+                  },
                 );
                 assert.deepEqual(
                   (await fixture('/fixture:inspect')).executions,
@@ -1413,7 +1470,7 @@ try {
                   await fs.readFile(path.join(workspace, 'marker.txt')),
                   working,
                 );
-                return { session, parts };
+                return { session, ...recovered };
               },
             }
           : {}),
@@ -2141,6 +2198,7 @@ try {
           writerGeneration,
           coldRecovery: input.coldRecovery === true,
           coldRefusalChecks,
+          recoveryCut: input.recoveryCut,
           originalActivation: initialActivation,
           platformFixture: `${actualPlatform.value} real inodes; explicit mount/proc-fd and placement mapping`,
           nativeCsiDeployment: false,
