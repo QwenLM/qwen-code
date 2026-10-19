@@ -347,8 +347,10 @@ export function enforceFunctionResponseBudget(
       partIndex++
     ) {
       const part = reduced[index].responseParts[partIndex];
+      // The only caller is the chat send boundary; stamp the real source so
+      // the injection event does not attribute the cut to the batch layer.
       if (part !== entries[index].responseParts[partIndex])
-        updateToolOutputBudget([part], budget, 'batch');
+        updateToolOutputBudget([part], budget, 'send_guard');
     }
   return reduced;
 }

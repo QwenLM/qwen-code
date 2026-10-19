@@ -143,7 +143,7 @@ describe('tool response finalization', () => {
       ).toMatchObject({
         truncated: true,
         budget: 1000,
-        budgetSource: 'batch',
+        budgetSource: boundary === 'send' ? 'send_guard' : 'batch',
       });
     },
   );

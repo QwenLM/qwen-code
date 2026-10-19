@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, it } from 'vitest';
+import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { estimatePartChars } from '../services/compactionInputSlimming.js';
 import {
@@ -64,6 +65,32 @@ describe('result-size provenance', () => {
     ]);
     expect(bigintSize.chars).toBe(0);
     expect(bigintSize.estimatedTokens).toBe(Math.ceil(64 / 4));
+  });
+
+  it('degrades to counted chars for parts the shared estimator cannot serialize', () => {
+    // A part with no text/functionResponse reaches estimatePartChars's
+    // JSON.stringify fallback, which throws on a circular structure.
+    const weird: Record<string, unknown> = { functionCall: { name: 'x' } };
+    weird['self'] = weird;
+    expect(measureToolOutput([weird as unknown as Part])).toEqual({
+      chars: 0,
+      estimatedTokens: 0,
+    });
+    // A throw mid-recursion (circular nested media part) keeps the outer
+    // part's counted text as the estimate basis.
+    const nested: Record<string, unknown> = {};
+    nested['self'] = nested;
+    const size = measureToolOutput([
+      {
+        functionResponse: {
+          name: 'mcp',
+          response: { output: 'abcd' },
+          parts: [nested],
+        },
+      } as unknown as Part,
+    ]);
+    expect(size.chars).toBe(4);
+    expect(size.estimatedTokens).toBe(Math.ceil(4 / 4));
   });
 
   it('survives live shallow copies, stays off the wire, and never invents restored raw size', () => {

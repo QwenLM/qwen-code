@@ -22,7 +22,8 @@ export type ToolOutputBudgetSource =
   | 'per_tool'
   | 'global'
   | 'explicit'
-  | 'batch';
+  | 'batch'
+  | 'send_guard';
 
 export interface ToolOutputProvenance {
   callId: string;
@@ -79,9 +80,18 @@ export function measureToolOutput(
     chars += partChars;
     // ponytail: estimatePartChars bills a structured functionResponse only its
     // wrapper floor, so bill the structured values here instead of changing the
-    // estimator that compaction, retention and /context all share.
-    estimatedChars +=
-      estimatePartChars(part, imageTokenEstimate) + structuredChars;
+    // estimator that compaction, retention and /context all share. The guard
+    // keeps this helper total: a part the estimator cannot serialize (circular,
+    // BigInt) degrades to its counted textual chars instead of failing the tool
+    // or model request this measurement only observes.
+    let estimated: number;
+    try {
+      estimated = estimatePartChars(part, imageTokenEstimate) + structuredChars;
+    } catch {
+      /* Telemetry is observational. */
+      estimated = partChars;
+    }
+    estimatedChars += estimated;
   }
   return {
     chars,
