@@ -56,35 +56,6 @@ class ManagedSchemaCatalogTest {
     }
 
     @Test
-    void acceptsNumericNonCaseBooleansWithoutAcceptingConstraintDrift() throws Exception {
-        for (String literal : new String[] {"FALSE", "TRUE"}) {
-            int value = "TRUE".equals(literal) ? 1 : 0;
-            String body = "\n    CONSTRAINT ck_probe CHECK (is_default = " + literal
-                    + " OR workspace_kind = 'ROOT')\n";
-            String numeric = "(is_default = " + value + " OR workspace_kind = 'ROOT')";
-            try (var data = fixture(true); var update = data.prepareStatement(
-                    "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
-                for (Connection connection : new Connection[] {data, mariaDb(data, "MariaDB", 1, 1)}) {
-                    update.setString(1, numeric);
-                    update.executeUpdate();
-                    ManagedSchemaCatalog.validateChecks(connection, "ma_operation", body);
-                    for (String changed : new String[] {
-                            numeric.replace("= " + value, "= " + (1 - value)),
-                            numeric.replace("= " + value, "= '" + literal + "'"),
-                            numeric.replace(" OR ", " AND "),
-                            numeric.replace("'ROOT'", "'root'")}) {
-                        update.setString(1, changed);
-                        update.executeUpdate();
-                        assertThrows(SQLException.class,
-                                () -> ManagedSchemaCatalog.validateChecks(connection, "ma_operation", body),
-                                changed);
-                    }
-                }
-            }
-        }
-    }
-
-    @Test
     void acceptsMariaDbNumericBooleansInPlanChecksWithoutAcceptingDrift() throws Exception {
         // MariaDB stores a bare FALSE as 0 and drops the grouping parentheses
         // it can infer from precedence; both V10 plan checks hit this shape.

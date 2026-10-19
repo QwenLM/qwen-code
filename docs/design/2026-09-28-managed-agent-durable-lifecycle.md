@@ -381,7 +381,7 @@ later version. Upgrade tests apply the ordered sequence before service
 startup. Uniqueness across both migration locations and all scanned Maven
 modules is enforced without a database by `scripts/check-flyway-migrations.js`,
 which runs in Qwen Code CI on every pull request, merge queue run, and push
-(#12940); the daily and manual SDK Java runs retain the uniqueness check.
+(#12940).
 On `pull_request`, it also requires newly added versions to be strictly above
 the fetched base snapshot's newest version, passed via `FLYWAY_BASE_REF`;
 on `merge_group`, it fetches the event's pinned `merge_group.base_sha` and

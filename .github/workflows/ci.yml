@@ -3,13 +3,18 @@
 name: 'Qwen Code CI'
 
 on:
-  # Keep post-merge validation of main independent of merge-queue activity.
-  # The merge_group trigger validates prospective trees when the queue runs.
+  # This trigger was removed on the premise that the merge queue validates the
+  # merged tree before it lands. No queue is enabled (none since 2026-07-02),
+  # so nothing validated that tree on either side of a merge: `main` had no
+  # gate before one and nothing faster than the ~40-minute E2E after one.
   # `test`, `lint_and_static`, and the `classify_pr` they depend on accept
   # it (see their `if`s); every other job excludes push, so a post-merge run
   # is exactly those three. The no-AK integration gate is its own
   # `integration_no_ak` job on pull_request / merge_group, so this lane is
-  # lint, static analysis and unit tests.
+  # lint, static analysis and unit tests. Removing it once the queue is
+  # enabled means dropping the trigger AND the push arm from ALL THREE
+  # `if`s: a partial removal leaves every merge running the survivors alone,
+  # publishing outputs nothing consumes.
   push:
     branches:
       - 'main'
@@ -19,11 +24,13 @@ on:
       - 'release/**'
       - 'omni-experiment'
   merge_group:
-  # Validate macOS and Windows daily even when no merge_group event is emitted.
-  # Their pull-request trigger is off until the standing Windows failures are
-  # fixed (see test_macos). The nightly keeps both platforms visible without a
-  # queue.
-  # Treat a red nightly as a blocker, not as noise.
+  # The macOS and Windows lanes' ONLY remaining trigger, and therefore this
+  # repository's only signal about a host that is not Linux with a GNU
+  # userland. Those two are otherwise gated on `merge_group`, and the merge
+  # queue is not enabled here — no queue run since 2026-07-02 — while their
+  # pull-request trigger is off until the standing Windows failures are fixed
+  # (see test_macos). A regression therefore surfaces here, one day later, on
+  # `main`, and nowhere else: treat a red nightly as a blocker, not as noise.
   # Every other job here excludes `schedule` explicitly, so a nightly run is
   # exactly two jobs.
   schedule:
@@ -57,8 +64,8 @@ concurrency:
   # run, and a newer pending run REPLACES the older one even with
   # cancel-in-progress: false, so back-to-back merges still coalesce onto the
   # newest tree — but the in-flight run always finishes and reports. Merges
-  # land every ~18min (median) against this ~30min lane, which remains a fast
-  # witness of merged trees independently of queue activity; cancelling it
+  # land every ~18min (median) against this ~30min lane, and with no merge
+  # queue this run is the only fast witness of a merged tree; cancelling it
   # starved the suite once already — e2e.yml measured 67 of 100 push runs
   # cancelled and only 25 ever reported (#5859). The coverage upload is
   # `always()`-gated, so a cancelled run would also publish partial coverage
@@ -372,8 +379,8 @@ jobs:
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     # Accepts push on `main`: one of the two post-merge checks faster than the
     # ~40-minute E2E — the lint/static half lives in `lint_and_static` — and
-    # runs whether or not a queue validates the tree before it lands.
-    # The expensive and PR-shaped steps stay off it on their own
+    # with no merge queue enabled nothing validates the merged tree before it
+    # lands either. The expensive and PR-shaped steps stay off it on their own
     # gates, each by its own mechanism — the checkout-head verifier is
     # restricted to pull_request / merge_group, while the test reporter
     # carries no event gate at all: its same-repo clause (head.repo.full_name
@@ -1663,11 +1670,13 @@ jobs:
   # macOS/Windows: slowest/costliest runners, and the only signal this
   # repository has about a host that is not Linux with a GNU userland.
   #
-  # They originally ran on merge_group alone. Without queue events, that gate
-  # reported "skipped" on every pull request and had no regular path to main.
-  # A macOS-only failure could ship and sit in main indefinitely, which is what
-  # happened in #9220 (a GNU-only `realpath -m` in a workflow guard, with the
-  # suite that pinned it red on every Mac).
+  # They used to run in the merge queue alone. That queue is not enabled here —
+  # no `merge_group` run since 2026-07-02, and merges land as squashes — so the
+  # gate meant they never ran at all: reported as "skipped" on every pull
+  # request, and never reached afterwards. A macOS-only failure could ship and
+  # sit in `main` indefinitely, which is what happened in #9220 (a GNU-only
+  # `realpath -m` in a workflow guard, with the suite that pinned it red on
+  # every Mac).
   #
   # The pull-request trigger is OFF, and this is the whole reason the nightly
   # above exists. Over the 18 hours measured before it was pulled, the Windows
@@ -1681,9 +1690,10 @@ jobs:
   # read a red X no diff of theirs caused and waited on checks that never had
   # to pass.
   #
-  # The lanes accept merge_group, a nightly run on main, and explicit dispatch.
-  # The nightly provides regular coverage without depending on queue activity
-  # or a manual dispatch. Read a red nightly as a blocker.
+  # Two triggers remain, in cost order: the merge queue if it is ever enabled
+  # again, and a nightly run on `main` — which is now the only thing keeping
+  # macOS and Windows visible at all, so it is load-bearing rather than a
+  # backstop. Read a red nightly as a blocker; nothing else will report it.
   #
   # Restoring the pull-request trigger is the last step of fixing those
   # failures, not a separate decision — and it is a REVERT of the commit that
@@ -2002,16 +2012,16 @@ jobs:
           npm run test:integration:hosted:sandbox:none -- --reporter=default --reporter=json --outputFile.json=hosted-process-suite.json
           node -e "const r = require('./integration-tests/hosted-process-suite.json'); if (r.numTotalTests === 0 || r.numPassedTests !== r.numTotalTests) { console.error('::error::' + r.numPassedTests + ' of ' + r.numTotalTests + ' Hosted cases passed; Windows must run every case'); process.exit(1); }"
 
-  # The integration_cli lane below runs only on merge_group, not every PR push.
-  # The CLI suite previously ran only in the nightly Release pipeline
-  # (`release.yml`), so regressions stayed hidden until release time. When a
-  # queue run occurs, it checks the prospective merged tree while keeping the
-  # per-PR critical path fast. The
+  # Integration tests run only in the merge queue, not on every PR push.
+  # They are the suite that previously ran *only* in the nightly Release
+  # pipeline (`release.yml`), so regressions stayed hidden until release
+  # time. Gating them on `merge_group` catches the failure before the PR
+  # lands on `main`, while keeping the per-PR critical path fast. The
   # `merge_group` event runs in the base-repo context, so the same model
   # secrets used by the release jobs are available here.
   #
-  # Without merge_group events, integration_cli does not run. The
-  # integration_no_ak job also covers pull_request. The CLI lane reuses the exact
+  # Until merge queue is enabled on `main` this job simply never triggers,
+  # so adding it is a no-op for existing PR/push runs. Reuses the exact
   # `test:integration:cli:sandbox:none` script from `release.yml`.
   integration_no_ak:
     name: 'Integration Tests (no-AK, No Sandbox)'

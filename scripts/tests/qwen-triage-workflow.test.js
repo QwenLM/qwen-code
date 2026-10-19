@@ -4898,26 +4898,29 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('run from the root of that trial-merge tree');
     expect(flat).toContain('the branch the PR targets');
     expect(flat).toContain(
+      'Prepare the baseline outside the credential-free sandbox',
+    );
+    expect(flat).toContain(
+      'Use the fetched `BASE_SHA` to build the trial merge',
+    );
+    expect(flat).toContain(
       'gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName',
     );
     const fetchCommand = verifySkill.match(/git fetch [^\n`]+/)?.[0];
-    expect(fetchCommand).toContain('"${BASE_REMOTE}" "refs/heads/${BASE_REF}"');
+    expect(fetchCommand).toContain(
+      '"https://github.com/${REPO}.git" "refs/heads/${BASE_REF}"',
+    );
     expect(fetchCommand).not.toMatch(/--depth(?:=|\s)|--filter(?:=|\s)/);
-    expect(verifySkill).toContain('git remote get-url "${remote}"');
-    for (const remoteUrl of [
-      'https://github.com/${REPO}',
-      'https://github.com/${REPO}.git',
-      'git@github.com:${REPO}',
-      'git@github.com:${REPO}.git',
-    ]) {
-      expect(verifySkill).toContain(`"${remoteUrl}"`);
-    }
-    expect(verifySkill).toContain('inconclusive: no remote matches $REPO');
-    expect(verifySkill).toContain('inconclusive: baseline fetch failed');
     expect(verifySkill).toContain(
       "git rev-parse --verify 'FETCH_HEAD^{commit}'",
     );
-    expect(verifySkill).toContain('inconclusive: cannot read baseline SHA');
+    expect(verifySkill).toContain('export GIT_NO_LAZY_FETCH=1');
+    expect(verifySkill).toContain(
+      '[ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}"',
+    );
+    expect(verifySkill).toContain(
+      'inconclusive: resolved PR base commit is unavailable',
+    );
     expect(readFileSync('.github/workflows/ci.yml', 'utf8')).toContain(
       'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode',
     );

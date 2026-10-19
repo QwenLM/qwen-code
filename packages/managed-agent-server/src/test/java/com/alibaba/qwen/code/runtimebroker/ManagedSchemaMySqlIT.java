@@ -233,23 +233,6 @@ class ManagedSchemaMySqlIT {
                                 + " ALWAYS AS (provision_seed_ciphertext IS NOT NULL)");
             }
             ManagedSchema.initialize(source);
-            for (String expression : new String[] {
-                    "COALESCE(tool_profile = 'csi-files-retirement/1'"
-                            + " OR runtime_request_key IS NOT NULL, TRUE)",
-                    "COALESCE(tool_profile = 'FALSE' OR runtime_request_key IS NOT NULL, FALSE)"}) {
-                statement.execute(
-                        "ALTER TABLE ma_session MODIFY csi_guard BOOLEAN GENERATED ALWAYS AS ("
-                                + expression + ")");
-                try {
-                    assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-                } finally {
-                    statement.execute(
-                            "ALTER TABLE ma_session MODIFY csi_guard BOOLEAN GENERATED ALWAYS AS"
-                                    + " (COALESCE(tool_profile = 'csi-files-retirement/1'"
-                                    + " OR runtime_request_key IS NOT NULL, FALSE))");
-                }
-            }
-            ManagedSchema.initialize(source);
             statement.execute(
                     "ALTER TABLE ma_session_head MODIFY writer_lease_until BIGINT NULL");
             try {

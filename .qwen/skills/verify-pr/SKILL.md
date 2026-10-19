@@ -1044,38 +1044,34 @@ still named the old columns, so on a real stack built from the merge every
 child creation failed on `bad SQL grammar`. If the PR adds a database
 migration, also run `scripts/check-flyway-migrations.js` on the trial-merge
 tree, using the branch the PR targets as the baseline, including `release/**`.
-For the baseline preparation and check, run from the root of that trial-merge tree.
-Read the target branch from the explicit repository and select a remote whose
-URL matches that repository exactly; a fork's `origin` is not a valid substitute.
-If no remote matches, or fetching or reading the baseline fails, stop with an
-inconclusive result rather than reuse an old `FETCH_HEAD`:
+Prepare the baseline outside the credential-free sandbox, alongside metadata
+from the explicit repository. Fetch its actual target branch directly; a PR's
+recorded `baseRefOid` can lag behind the current branch tip:
 
 ```bash
 BASE_REF=$(gh pr view <pr> --repo "$REPO" --json baseRefName --jq .baseRefName) ||
   { echo "inconclusive: cannot read PR base branch"; exit 1; }
-BASE_REMOTE=$(
-  for remote in $(git remote); do
-    case "$(git remote get-url "${remote}")" in
-      "https://github.com/${REPO}"|"https://github.com/${REPO}.git"|"git@github.com:${REPO}"|"git@github.com:${REPO}.git")
-        printf '%s\n' "${remote}"
-        break
-        ;;
-    esac
-  done
-)
-[ -n "${BASE_REMOTE}" ] ||
-  { echo "inconclusive: no remote matches $REPO"; exit 1; }
-git fetch "${BASE_REMOTE}" "refs/heads/${BASE_REF}" ||
+git fetch "https://github.com/${REPO}.git" "refs/heads/${BASE_REF}" ||
   { echo "inconclusive: baseline fetch failed"; exit 1; }
 BASE_SHA=$(git rev-parse --verify 'FETCH_HEAD^{commit}') ||
   { echo "inconclusive: cannot read baseline SHA"; exit 1; }
 ```
 
+Keep the fetch full and unfiltered: shallow history and partial-clone
+configuration affect all linked worktrees. Use the fetched `BASE_SHA` to build
+the trial merge. Then run from the root of that trial-merge tree:
+
+```bash
+export GIT_NO_LAZY_FETCH=1
+[ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null ||
+  { echo "inconclusive: resolved PR base commit is unavailable"; exit 1; }
+```
+
 Then run
 `FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js <modules>`,
 using the module list `ci.yml` passes it.
-Those module paths are repo-root-relative. Keep the fetch full and unfiltered:
-shallow history and partial-clone configuration affect all linked worktrees.
+Those module paths are repo-root-relative. Keep lazy fetching disabled for the
+check too, so a partial clone cannot silently fetch through the wrong remote.
 Omitting `FLYWAY_BASE_REF`
 checks uniqueness only; the script reports that ordering was not checked.
 The PR's own green check is only as fresh as the `main` it ran against.
