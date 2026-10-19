@@ -3549,13 +3549,19 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const popped = popAllMessages();
       if (popped) {
-        restoredSubmissionRef.current = popped;
+        // Same contract as the auto-restore path below: the buffer holds the
+        // user's own text, and the model-bound copy rides along so an
+        // unchanged resubmit keeps the one-shot notice (#11553).
+        const restoredText = popped.submittedPrompt ?? popped.modelText;
+        restoredSubmissionRef.current = {
+          modelText: restoredText,
+          submittedPrompt: popped.submittedPrompt,
+          modelSubmission: popped.modelText,
+        };
         submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
         buffer.setText(
-          currentText
-            ? `${popped.modelText}\n${currentText}`
-            : popped.modelText,
+          currentText ? `${restoredText}\n${currentText}` : restoredText,
         );
       }
 
