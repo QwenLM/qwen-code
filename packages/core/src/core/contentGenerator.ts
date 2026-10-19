@@ -209,9 +209,13 @@ export type ContentGeneratorConfig = {
   // `parameters` object. Servers that type `tools[].function.parameters` as a
   // required field reject the request when a parameterless tool omits it —
   // `missing field parameters` on serde/litellm routers (#11956), `Field
-  // required` on Pydantic-typed ones. The field is omitted by default because
-  // llama.cpp / LM Studio / vLLM reject the replacement shapes
-  // (QwenLM/qwen-code#11431, #11410), so this stays an explicit per-route opt-in.
+  // required` on Pydantic-typed ones. Omitted by default because #10080 exists
+  // to keep empty `properties` off older llama.cpp grammars. That shape returns
+  // HTTP 200 on the three llama.cpp builds #10080 verified (b10068/b10745/b10425)
+  // and LM Studio's validator accepts it, but that rejection was never reproduced
+  // live and no wider engine survey exists. #11410's 400 named an absent
+  // `parameters.properties` on the bare `{"type":"object"}` shape, not this one.
+  // So this stays an explicit per-route opt-in.
   toolParametersMandatory?: boolean;
 };
 

@@ -25,8 +25,10 @@ tools[5].function: missing field parameters`（#11956）。Pydantic 一族的服
 
 - `relaxSchemaForFunctionCalling` 会删除空的 `properties` 对象，因此零参数 schema
   到达线上时是裸的 `{ "type": "object" }`。
-- 这个裸形状正是 #11410 报告的 HTTP 400，出现在 llama.cpp、LM Studio 与 vLLM 上 ——
-  即 #10080 当初所针对的那些端点。
+- 这个裸形状正是 #11410 报告的 HTTP 400：LM Studio 的校验器指明
+  `function.parameters.properties` 缺失，因为请求里 `parameters` 存在却没有
+  `properties`。#11410 只涉及 LM Studio —— #11410 与 #11431 的正文和全部评论
+  都完全没有提到 vLLM。
 - MiniMax 相反地要求该字段存在，并且需要 `{ "type": "object", "properties": {} }`
   （#11834），已经在自己的 provider 里于下一层注入。
 
@@ -99,10 +101,12 @@ SDK 会把它发布为 `{ "type": "object", "properties": {} }`，
 采用 `{ "type": "object", "properties": {} }`，即 MiniMax 已为其自身端点注入的
 空对象 schema（#11834）。开关修复与 MiniMax 的无条件注入现在共用同一形状，
 因此开启该开关的路由无论由哪一个 provider 持有，行为都相同。
-只校验字段是否存在的服务器可以接受这一形状。
-本分支最初发出的裸 `{ "type": "object" }` 正是 #11410 在 llama.cpp、
-LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路由，
-因此从不开启该开关。
+只校验字段是否存在的服务器可以接受这一形状；LM Studio 公布的校验器同样接受它：
+其中 `function.parameters` 是可选的，一旦存在就需要 object 值的 `properties`，
+而空的 record 即可满足（#11431）。本分支最初发出的裸 `{ "type": "object" }`
+才是 #11410 报告的 HTTP 400。必须继续省略、因此从不开启该开关的，
+是 #10080 当初所针对的那些基于 grammar 的 llama.cpp 路由；
+这一形状实际被测到的范围见「限制与风险」。
 
 ### 不再使用独立 provider
 
@@ -150,6 +154,18 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
 - 注入的 `properties` 对象发生在转换之后，因此它不会被
   `relaxSchemaForFunctionCalling` 在转换中删除空 `properties` 的那一步影响。
   拒绝空 `properties` 对象的服务器不应开启该开关。
+- 这一注入形状被测到的范围是有界的，而这个边界才是 `default: false` 之所以关键
+  的真实理由。#10080 删除空对象形状，是因为早年的 llama.cpp 构建被报告拒绝它
+  （llama.cpp#25923）；但它的验证者在自己能编译的任何 llama.cpp 构建上，都没有
+  找到这一半放宽的真实复现：在 `llama-server` b10068（LM Studio 0.4.21 所用的
+  那一代）、b10745 与 b10425 上，该形状都能编译 grammar 并返回 HTTP 200，
+  其中在 b10068 上经过 60 个真实 chat template 也是零失败。#11956、#11431、
+  #11410、#10080、#10065、#11834 上记录到的真实拒绝，只指向裸
+  `{ "type": "object" }` 形状、`maxLength` 重复规则，或 MiniMax 要求该字段必须
+  存在 —— 没有一条是服务器拒绝空 `properties` 对象，也没有任何一条提到 vLLM。
+  所以省略作为默认值，理由是「跨版本未被测量」，而不是「已知会让 llama.cpp、
+  LM Studio 或 vLLM 出问题」——后者是本改动此前在注释、设置说明与用户文档中
+  发布的说法。
 - 判断条件读取的是 `parameters === undefined` 这个值，而非键是否存在：
   converter 会带着 `undefined` 值发出该键，
   若只判断键是否存在，就会跳过每一个需要修复的工具。

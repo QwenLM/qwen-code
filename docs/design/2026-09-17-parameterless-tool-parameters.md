@@ -27,8 +27,10 @@ the grammar relaxation from #10080, and the lineage in that commit message runs
 
 - `relaxSchemaForFunctionCalling` strips an empty `properties` object, so a
   zero-argument schema reaches the wire as a bare `{ "type": "object" }`.
-- That bare shape is what #11410 reports as an HTTP 400 on llama.cpp, LM Studio
-  and vLLM — the endpoints #10080 was written for.
+- That bare shape is what #11410 reports as an HTTP 400: LM Studio's validator
+  names `function.parameters.properties` as absent, because `parameters` was
+  present without `properties`. #11410 covers LM Studio alone — neither #11410
+  nor #11431 mentions vLLM anywhere.
 - MiniMax needs the field to be present instead, with `{ "type": "object",
 "properties": {} }` (#11834), and already injects it one layer down in its own
   provider.
@@ -116,9 +118,13 @@ same way.
 already injects for its own endpoint (#11834). One shape now serves both the
 opt-in repair and MiniMax's unconditional injection, so an opted-in route
 behaves the same whichever provider owns it. A server that only checks field
-presence accepts this schema. The bare `{ "type": "object" }` this branch first
-shipped with is what #11410 reports as an HTTP 400 on llama.cpp, LM Studio and
-vLLM — routes that must keep the omission, and therefore never opt in.
+presence accepts this schema, and so does LM Studio's published validator:
+there `function.parameters` is optional, and when present it needs an
+object-valued `properties`, which an empty record satisfies (#11431). The bare
+`{ "type": "object" }` this branch first shipped with is the shape #11410
+reports as an HTTP 400. The routes that must keep the omission are the
+grammar-based llama.cpp ones #10080 was written for, and they never opt in; how
+far this shape has actually been measured is under Limits and risks.
 
 ### No separate provider
 
@@ -178,6 +184,21 @@ hostname-gated, so it applies wherever the user opted in.
   step where `relaxSchemaForFunctionCalling` strips an empty `properties` from a
   schema whose source validated locally. A server that rejects an empty
   `properties` object must not opt in.
+- How far the injected shape has been measured is bounded, and that bound is the
+  honest reason `default: false` is load-bearing. #10080 strips the empty-object
+  shape because older llama.cpp builds were reported to reject it
+  (llama.cpp#25923), yet its own verification found no live reproducer for that
+  half of the relaxation on any llama.cpp build it could compile: on three builds
+  — `llama-server` b10068 (the generation LM Studio 0.4.21 ships), b10745 and
+  b10425 — the shape compiles a grammar and returns HTTP 200, including through
+  60 real chat templates on b10068 with zero failures. The only live rejections
+  recorded across #11956, #11431, #11410, #10080, #10065 and #11834 name the bare
+  `{ "type": "object" }` shape, a `maxLength` repetition rule, or MiniMax's demand
+  that the field be present — none is a server rejecting an empty `properties`
+  object, and none mentions vLLM at all. So the omission stays the default as the
+  unmeasured-across-versions choice, not as a shape known to break llama.cpp, LM
+  Studio or vLLM — a claim this change previously shipped in its comments,
+  settings description and user docs.
 - Reading `parameters === undefined` tests the value, not key presence: the
   converter emits the key with an `undefined` value, and a key-presence test
   would skip every tool that needs the repair.
