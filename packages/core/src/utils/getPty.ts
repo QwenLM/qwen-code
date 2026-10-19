@@ -56,6 +56,10 @@ export const loadPty = async (): Promise<PtyLoadResult> => {
     }
     try {
       const module = await import('./bun-pty.js');
+      // The import alone proves nothing: the addon is loaded by path from
+      // the platform package, so probe it here and let a missing prebuild
+      // degrade to null like the Node arm's import-time failure.
+      module.loadAddon();
       return { impl: { module, name: 'qwen-bun-pty' }, loadError: null };
     } catch (error) {
       return { impl: null, loadError: getErrorMessage(error) };

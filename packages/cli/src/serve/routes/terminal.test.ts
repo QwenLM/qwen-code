@@ -324,6 +324,11 @@ describe('terminal WebSocket route', () => {
       request,
     );
 
+    // The snapshot handshake must come first: the client drops binary
+    // frames that arrive while it is awaiting one.
+    expect(ws.sent[0]).toBe(
+      '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+    );
     // The retained scrollback is replayed before the failure frame, the
     // same way the exited path replays it.
     expect(sentOutput(ws)).toEqual(['held\r\n']);

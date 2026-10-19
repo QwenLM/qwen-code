@@ -630,8 +630,13 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       }),
     );
     const { errors } = nextError(pty);
+    const order: string[] = [];
+    pty.on('error', () => order.push('error'));
     let exit: { exitCode: number; signal?: number } | undefined;
-    pty.onExit((e) => (exit = e));
+    pty.onExit((e) => {
+      order.push('exit');
+      exit = e;
+    });
     try {
       expect(await waitForChildGone(pty)).toBe(true);
       killSpy.mockClear();
@@ -642,6 +647,9 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       expect(errors[0]!.code).toBe('QWEN_PTY_WRITE_LIMIT');
       // The real terminal status is delivered, not overwritten by the limit.
       expect(await waitFor(() => exit !== undefined)).toBe(true);
+      // The structured failure must reach consumers before the parked exit:
+      // they settle once, and the exit listener detaches the failure one.
+      expect(order).toEqual(['error', 'exit']);
       expect(exit!.exitCode).toBe(3);
       expect(pty.stats.nativeExitRecord).toEqual({ exitCode: 3, signal: 0 });
       // No SIGTERM/SIGKILL at the reaped pid or its group — not even the
@@ -920,6 +928,50 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
       expect(pty.stats.readInFlight).toBe(true);
 
       fsCapture.reads.shift()!.callback(eio(), 0);
+      expectFdClosed(pty);
+      pty.kill();
+    } finally {
+      disarm();
+    }
+  });
+
+  it('retries an EAGAIN write on a timer instead of spinning the event loop', async () => {
+    const disarm = armFsCapture();
+    try {
+      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const errors: Error[] = [];
+      pty.on('error', (error: Error) => errors.push(error));
+      pty.write('keystroke');
+      expect(fsCapture.writes).toHaveLength(1);
+
+      fsCapture.writes
+        .shift()!
+        .callback(
+          Object.assign(new Error('write EAGAIN'), { code: 'EAGAIN' }),
+          0,
+        );
+
+      // A bare setImmediate retry would have issued the next fs.write by
+      // the next check-phase turn; the timer-backed retry must not.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(fsCapture.writes).toHaveLength(0);
+      expect(errors).toHaveLength(0);
+
+      // The retry lands on the read side's cadence rather than never.
+      expect(await waitFor(() => fsCapture.writes.length === 1)).toBe(true);
+
+      // Ending the pump cancels the armed retry: nothing may write after
+      // the fd is closed.
+      fsCapture.writes
+        .shift()!
+        .callback(
+          Object.assign(new Error('write EAGAIN'), { code: 'EAGAIN' }),
+          0,
+        );
+      fsCapture.reads.shift()!.callback(eio(), 0);
+      const writesAtClose = fsCapture.writes.length;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(fsCapture.writes).toHaveLength(writesAtClose);
       expectFdClosed(pty);
       pty.kill();
     } finally {

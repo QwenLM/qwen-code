@@ -337,6 +337,15 @@ function parseEnv(env: { [key: string]: string | undefined }): string[] {
   return pairs;
 }
 
+/**
+ * Load (and cache) the pinned native addon, throwing when its platform
+ * prebuild is absent or unloadable. `loadPty()` calls this so a backend it
+ * reports as loaded is one `spawn()` can actually use.
+ */
+export function loadAddon(): void {
+  loadNativeAddon();
+}
+
 export function spawn(
   file?: string,
   args?: string[],
@@ -404,6 +413,7 @@ export class BunPtyProcess extends EventEmitter {
   private readonly writeQueue: Array<{ buffer: Buffer; offset: number }> = [];
   private writeQueuedBytes = 0;
   private writeActive = false;
+  private writeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private exited = false;
   private exitFired = false;
   private fdClosed = false;
@@ -793,6 +803,14 @@ export class BunPtyProcess extends EventEmitter {
     }
   }
 
+  private scheduleWriteRetry(): void {
+    if (this.writeRetryTimer) return;
+    this.writeRetryTimer = setTimeout(() => {
+      this.writeRetryTimer = null;
+      if (!this.resourceFailed && !this.fdClosed) this.drainWriteQueue();
+    }, READ_RETRY_MS);
+  }
+
   private schedulePumpRetry(): void {
     if (this.retryTimer) return;
     this.retryTimer = setTimeout(() => {
@@ -806,6 +824,10 @@ export class BunPtyProcess extends EventEmitter {
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
+    }
+    if (this.writeRetryTimer) {
+      clearTimeout(this.writeRetryTimer);
+      this.writeRetryTimer = null;
     }
     // The wrapper's paused ReadStream loses its buffered data when the
     // socket is destroyed on exit; the pause hold is discarded for parity —
@@ -836,6 +858,10 @@ export class BunPtyProcess extends EventEmitter {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
+    if (this.writeRetryTimer) {
+      clearTimeout(this.writeRetryTimer);
+      this.writeRetryTimer = null;
+    }
     if (this.pendingExit) {
       // The native exit was already observed and reaped — waitpid fired and
       // only the trailing-output drain was still pending — so there is no
@@ -850,8 +876,10 @@ export class BunPtyProcess extends EventEmitter {
       this.clearWriteQueue();
       this.closeFd();
       this.finishOutput();
-      this.fireExit(exitCode, signal);
+      // Failure first: consumers settle once per session, and the exit
+      // listener detaches the failure listener before it can run.
       this.reportError(error);
+      this.fireExit(exitCode, signal);
       return;
     }
     this.discardPausedHold();
@@ -887,7 +915,10 @@ export class BunPtyProcess extends EventEmitter {
       this.settleCloseAfterOp();
       if (error) {
         if (error.code === 'EAGAIN') {
-          setImmediate(() => this.drainWriteQueue());
+          // Same bounded-cadence retry as the read side: a bare
+          // setImmediate turns a child that stops draining stdin into a
+          // hot write spin on the event loop every other pty shares.
+          this.scheduleWriteRetry();
           return;
         }
         this.clearWriteQueue();

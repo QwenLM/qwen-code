@@ -79,8 +79,8 @@ describe('getPty', () => {
       const restoreBun = markBunRuntime();
 
       try {
-        // Loading must not spawn anything or dlopen a native module — the
-        // backend only touches the addon inside spawn().
+        // Loading probes the addon but must not spawn anything — the
+        // child is only created inside spawn().
         const { impl, loadError } = await loadPty();
 
         expect(loadError).toBeNull();
@@ -107,6 +107,31 @@ describe('getPty', () => {
       expect(loadError).toMatch(/Windows/);
       await expect(getPty()).resolves.toBeNull();
     } finally {
+      restorePlatform();
+      restoreBun();
+    }
+  });
+
+  it('reports a Bun prebuild that fails to load as no backend', async () => {
+    const restoreBun = markBunRuntime();
+    const restorePlatform = markPosix();
+    vi.resetModules();
+    vi.doMock('./bun-pty.js', () => ({
+      loadAddon: () => {
+        throw new Error("Cannot find module '@lydell/node-pty-linux-x64'");
+      },
+    }));
+
+    try {
+      const fresh = await import('./getPty.js');
+      const { impl, loadError } = await fresh.loadPty();
+
+      expect(impl).toBeNull();
+      expect(loadError).toMatch(/Cannot find module/);
+      await expect(fresh.getPty()).resolves.toBeNull();
+    } finally {
+      vi.doUnmock('./bun-pty.js');
+      vi.resetModules();
       restorePlatform();
       restoreBun();
     }

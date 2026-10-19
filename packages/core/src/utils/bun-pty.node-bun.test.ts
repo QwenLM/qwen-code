@@ -200,6 +200,110 @@ console.log(
 );
 `;
 
+// The write-limit fixture is the Bun-leg regression for the bounded write
+// queue: an input burst past the configured cap must converge through
+// exactly one structured QWEN_PTY_WRITE_LIMIT error, keep onExit reserved
+// for real native exits, kill the child tree, release the master fd, and
+// leave the host event loop free to drain (the fixture never calls
+// process.exit on its success path).
+const writeLimitFixtureSource = `
+import * as fs from 'node:fs';
+import { loadPty } from ${JSON.stringify(getPtyModulePath)};
+
+const result = await loadPty();
+if (!result.impl) {
+  console.error('loadPty returned no backend: ' + result.loadError);
+  process.exit(1);
+}
+if (result.impl.name !== 'qwen-bun-pty') {
+  console.error('unexpected backend: ' + result.impl.name);
+  process.exit(1);
+}
+const LIMIT = 4096;
+const errors = [];
+const pty = result.impl.module.spawn('/bin/sh', ['-c', 'sleep 30'], {
+  cols: 80,
+  rows: 24,
+  cwd: process.cwd(),
+  env: process.env,
+  limits: { writeQueueBytes: LIMIT },
+});
+pty.on('error', (e) => {
+  errors.push({
+    name: e.name,
+    code: e.code,
+    limitKind: e.limitKind,
+    limit: e.limit,
+    acceptedBytes: e.acceptedBytes,
+    hasUndeliveredData: e.hasUndeliveredData,
+  });
+});
+let exits = 0;
+pty.onExit(() => { exits += 1; });
+pty.write(Buffer.alloc(8192, 0x57));
+const deadline = Date.now() + 20_000;
+while (errors.length === 0 && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (errors.length !== 1) {
+  console.error('expected exactly one limit error, got ' + errors.length);
+  process.exit(1);
+}
+const failure = errors[0];
+if (
+  failure.code !== 'QWEN_PTY_WRITE_LIMIT' ||
+  failure.limitKind !== 'write-queue-per-pty' ||
+  failure.limit !== LIMIT ||
+  failure.acceptedBytes !== 0 ||
+  failure.hasUndeliveredData !== false
+) {
+  console.error('unexpected limit error: ' + JSON.stringify(failure));
+  process.exit(1);
+}
+if (pty.stats.writeQueuedBytes !== 0) {
+  console.error('write queue not released: ' + pty.stats.writeQueuedBytes);
+  process.exit(1);
+}
+await new Promise((resolve) => setTimeout(resolve, 900));
+if (exits !== 0) {
+  console.error('onExit must stay reserved for real native exits');
+  process.exit(1);
+}
+let fdState = 'OPEN';
+try {
+  fs.fstatSync(pty.fd);
+} catch (e) {
+  fdState = 'closed(' + (e.code || '') + ')';
+}
+if (fdState !== 'closed(EBADF)') {
+  console.error('master fd not released: ' + fdState);
+  process.exit(1);
+}
+let childGone = false;
+while (!childGone && Date.now() < deadline) {
+  try {
+    process.kill(pty.pid, 0);
+  } catch {
+    childGone = true;
+  }
+  if (!childGone) await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (!childGone) {
+  console.error('child process tree survived the limit termination');
+  process.exit(1);
+}
+console.log(
+  JSON.stringify({
+    backend: result.impl.name,
+    limitKind: failure.limitKind,
+    exits,
+    childGone,
+    fd: fdState,
+    writeQueuedBytes: pty.stats.writeQueuedBytes,
+  }),
+);
+`;
+
 // The paused-exit fixture is the P1/P2 regression: a child that exits (or
 // is cancelled) while the backend is paused must still deliver onExit
 // exactly once, close the master fd, and — because the fixture never calls
@@ -404,6 +508,56 @@ describe.skipIf(!bunAvailable || process.platform === 'win32')(
         expect(parsed.exits).toBe(0);
         expect(parsed.childGone).toBe(true);
         expect(parsed.fd).toBe('closed(EBADF)');
+        // Reaching a spawnSync result at all proves the host drained: the
+        // fixture never calls process.exit on its success path.
+      },
+    );
+  },
+);
+
+describe.skipIf(!bunAvailable || process.platform === 'win32')(
+  'bounded write queue under the real Bun runtime',
+  () => {
+    let tempRoot: string;
+    let fixturePath: string;
+
+    beforeEach(() => {
+      tempRoot = mkdtempSync(path.join(tmpdir(), 'bun-pty-write-limit-test-'));
+      fixturePath = path.join(tempRoot, 'pty-write-limit-fixture.mjs');
+      writeFileSync(fixturePath, writeLimitFixtureSource);
+    });
+
+    afterEach(() => {
+      rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    it(
+      'terminates an input burst past the cap with one explicit structured error',
+      { timeout: 60_000 },
+      () => {
+        const result = spawnSync(bunBin, [fixturePath], {
+          encoding: 'utf8',
+          timeout: 55_000,
+        });
+        if (result.status !== 0) {
+          throw new Error(
+            `write-limit fixture failed (code ${result.status}):\n${result.stdout}${result.stderr}`,
+          );
+        }
+        const parsed = JSON.parse(result.stdout.trim()) as {
+          backend: string;
+          limitKind: string;
+          exits: number;
+          childGone: boolean;
+          fd: string;
+          writeQueuedBytes: number;
+        };
+        expect(parsed.backend).toBe('qwen-bun-pty');
+        expect(parsed.limitKind).toBe('write-queue-per-pty');
+        expect(parsed.exits).toBe(0);
+        expect(parsed.childGone).toBe(true);
+        expect(parsed.fd).toBe('closed(EBADF)');
+        expect(parsed.writeQueuedBytes).toBe(0);
         // Reaching a spawnSync result at all proves the host drained: the
         // fixture never calls process.exit on its success path.
       },

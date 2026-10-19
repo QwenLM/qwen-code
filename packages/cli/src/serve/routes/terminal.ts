@@ -344,6 +344,14 @@ export function createTerminalWsHandler(
         return;
       }
       if (snapshot.failed) {
+        // The client only accepts binary output after the handshake, so the
+        // failure replay must send it first — exactly like the exited path
+        // below. cleanup() detaches the failure listener, so it runs after.
+        sendControl(ws, {
+          type: 'snapshot',
+          replay: !created,
+          handlesPrimaryDa: snapshot.handlesPrimaryDa === true,
+        });
         cleanup();
         // The registry keeps a failed session's buffer for exactly this
         // replay; route it through the same backpressure guard as the

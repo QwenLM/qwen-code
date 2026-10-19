@@ -415,6 +415,10 @@ export class WebTerminalRegistry {
         earlyExit = e;
         return;
       }
+      // `failed` is the exclusive terminal state: a native exit that races
+      // a resource failure (the backend's parked-exit path) must not also
+      // latch `exited`, or a snapshot would report both.
+      if (session.failure) return;
       session.exited = true;
       session.exitCode = e.exitCode;
       for (const listener of [...session.exitListeners]) listener(e);

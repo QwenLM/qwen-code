@@ -214,6 +214,10 @@ node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一
   第一个保持原样；写队列上限以 `QWEN_PTY_WRITE_LIMIT` 终止（不伪造
   背压确认）；活跃 pty 上限以 `QWEN_PTY_ACTIVE_LIMIT` 拒绝下一次
   `spawn`，关闭后槽位释放；预算计数可经 `getPtyBudgetStats()` 观察。
+  fd 生命周期套件分别在逻辑关闭时保持一个在途 read 和一个在途 write，
+  覆盖两种完成顺序（第一个完成不得关闭 fd），并断言最后一次持有者
+  收敛前仅有一次 close 尝试且 fd 仍打开。这些测试区分逻辑终止与最终
+  物理关闭，不声称 close 系统调用成功。
 - `packages/core/src/utils/bun-pty.node-bun.test.ts` — 跨运行时一侧
   （S1 harness 模式）：fixture 导入真实的 `getPty.ts`，在真实 `bun`
   二进制（BUN_TEST_BIN）下断言 `qwen-bun-pty` 后端可加载并完成
@@ -223,8 +227,10 @@ node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一
   5000 行洪流中做 300 次无间隔 pause/resume，断言两个运行时下字节流
   均逐字节且逐行完整；第四个 fixture 在真实 Bun 运行时下驱动有界保持
   超限（恰好一次 `QWEN_PTY_OUTPUT_LIMIT`、无 `onExit`、fd 释放、
-  子进程树消失、无重放、宿主自然收尾）。无 `bun` 时与 S1 套件一样
-  跳过。
+  子进程树消失、无重放、宿主自然收尾）；第五个 fixture 在真实 Bun
+  运行时下驱动写队列上限（恰好一次 `QWEN_PTY_WRITE_LIMIT`、队列清空、
+  无 `onExit`、fd 释放、子进程树消失、宿主自然收尾）。无 `bun` 时与
+  S1 套件一样跳过。
 - `packages/core/src/utils/getPty.test.ts` — Bun 分支从"返回 null 并报
   disabled 原因"翻转为"加载 `qwen-bun-pty` 且不 spawn"；Bun 下的
   Windows 保持如实门控；可失败分支的按调用 `loadError` 契约（#11881）

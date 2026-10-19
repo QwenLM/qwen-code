@@ -264,7 +264,12 @@ null`, process title, `clear()`, plus the pause-lifecycle regressions:
   `QWEN_PTY_WRITE_LIMIT` (no fabricated backpressure ack); the active-pty
   cap rejects the next `spawn` with `QWEN_PTY_ACTIVE_LIMIT` and frees the
   slot on close; and the budget counters are observable via
-  `getPtyBudgetStats()`.
+  `getPtyBudgetStats()`. The fd-lifetime suite holds an in-flight read and,
+  separately, an in-flight write at logical close, covers both settlement
+  orders (the first must not close), and asserts one close attempt with the
+  fd still open until the last owner settles. Those tests distinguish
+  logical termination from eventual physical close; they do not claim
+  close-syscall success.
 - `packages/core/src/utils/bun-pty.node-bun.test.ts` — cross-runtime leg
   (S1 harness pattern): a fixture imports the real `getPty.ts`, and under a
   real `bun` binary (BUN_TEST_BIN) asserts the `qwen-bun-pty` backend loads
@@ -276,7 +281,10 @@ null`, process title, `clear()`, plus the pause-lifecycle regressions:
   **both** runtimes; a fourth fixture drives the bounded-hold overflow
   under the real Bun runtime (one structured `QWEN_PTY_OUTPUT_LIMIT`, no
   `onExit`, fd released, child tree gone, no replay, host drains
-  naturally). Skips when no `bun` is available, like the S1 suite.
+  naturally); a fifth fixture drives the write-queue cap under the real Bun
+  runtime (one structured `QWEN_PTY_WRITE_LIMIT`, empty queue, no `onExit`,
+  fd released, child tree gone, host drains naturally). Skips when no `bun`
+  is available, like the S1 suite.
 - `packages/core/src/utils/getPty.test.ts` — Bun arm flipped from "resolves
   null with a disabled reason" to "loads `qwen-bun-pty` without spawning";
   Windows-under-Bun keeps the honest gate; the per-call `loadError`
