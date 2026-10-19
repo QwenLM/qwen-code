@@ -12,9 +12,9 @@ ReadFile 和 Shell 详情应仅在用户展开已结束的卡片时加载。为�
 
 契约版本 `1.67.0` 新增 `POST /api/agent/web-shell/v1/tool-details/get`，复用已有 Session/Item 请求结构。这是以持久化 Workspace 为作用域的读取：要求可信 actor、当前 Session 可见性及 Workspace 读取授权，并在返回前重新校验。响应使用 `Cache-Control: private, no-store`。路由不启动 Harness、不获取 Runtime、不执行命令，也不回退到其他 Workspace。
 
-读取默认启用。管理员可通过 `qwen.managed-agent.harness.tool-details-enabled=false` 或 `QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=false` 关闭。所有获准读取 Session/Workspace 的用户均可读取这些有界工具详情。Artifact 发布与原始下载权限保持独立，不需要额外发布开关或对象存储。保存的文本可能包含敏感内容，不会自动脱敏。
+所有获准读取 Session/Workspace 的用户均可直接读取这些有界工具详情，无需功能开关。Artifact 发布与原始下载权限保持独立，不需要额外发布开关或对象存储。保存的文本可能包含敏感内容，不会自动脱敏。
 
-关闭配置会拒绝新的详情请求，不删除先前发布的内联历史，也不改变已批准的 O3 预览。既有内联数据继续按原方式渲染。新的生命周期事件不携带详情文本或参数，服务端也不回填公共事件。
+既有内联数据和已批准的 O3 预览继续按原方式渲染。新的生命周期事件不携带详情文本或参数，服务端也不回填公共事件。
 
 ## 保留历史与边界
 
@@ -37,7 +37,8 @@ Managed 会话向 ReadFile/Shell 卡片提供详情加载器。关闭的卡片�
 - 展开之前不发生详情 HTTP 请求、为获取参数而回扫在先历史，或内联发布详情。
 - 展开已保存的失败 ReadFile 和完成 Shell 卡片可显示各自的诊断、命令和输出；刷新后重开无需执行工具。
 - 保留的旧结果无需公共回填即可读取；空、缺失及截断结果保持可区分。
-- 其他 tenant、缺失 actor、已撤销 Workspace 授权、正在删除的 Session、关闭读取及不支持的工具均不返回私有详情。
+- 旧功能开关配置不会阻止已授权的读取。
+- 其他 tenant、缺失 actor、已撤销 Workspace 授权、正在删除的 Session 及不支持的工具均不返回私有详情。
 - 精确匹配、数据损坏、分块资源、字节上限、参数白名单、晚到结果，以及客户端取消和过期请求均有定向覆盖。
 - 运行根目录 build/typecheck/bundle、受影响生产者/reducer/组件和浏览器检查、API/路由契约测试、Maven 验证，以及可销毁的 MySQL 8.4 集成检查。不向用户正在运行的 Session 发送提示，也不修改其数据库。
 

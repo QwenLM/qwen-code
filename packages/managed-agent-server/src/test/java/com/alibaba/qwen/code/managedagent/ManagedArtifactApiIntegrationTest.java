@@ -23,6 +23,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
@@ -35,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -106,7 +110,7 @@ class ManagedArtifactApiIntegrationTest {
         };
         var service = new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
                 policy, fixture.properties());
-        var details = new ManagedToolDetailsService(sessions, fixture.properties(),
+        var details = new ManagedToolDetailsService(sessions,
                 new ManagedToolDetailsStore(fixture.jdbc(), new ManagedExtensionRecordStore(fixture.jdbc()), JSON));
         mvc = MockMvcBuilders.standaloneSetup(new ManagedArtifactController(service), new ManagedToolDetailsController(details))
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver())
@@ -170,12 +174,15 @@ class ManagedArtifactApiIntegrationTest {
     }
 
     @Test
-    void toolDetailsAreEnabledByDefaultAndCanBeDisabled() throws Exception {
+    void toolDetailsIgnoreObsoleteDisableConfiguration() throws Exception {
         savedDetails("read_file", "error", "saved error");
-        assertThat(fixture.properties().getHarness().isToolDetailsEnabled()).isTrue();
-        fixture.properties().getHarness().setToolDetailsEnabled(false);
-        mvc.perform(asReader(toolDetails())).andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("tool_details_disabled"));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("saved error"));
+        var source = new MapConfigurationPropertySource(Map.of(
+                "qwen.managed-agent.harness.tool-details-enabled", "false"));
+        new Binder(source).bind("qwen.managed-agent", Bindable.ofInstance(fixture.properties()));
+        mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.output").value("saved error"));
     }
 
     @Test

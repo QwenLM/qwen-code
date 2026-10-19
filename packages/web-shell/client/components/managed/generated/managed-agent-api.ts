@@ -2895,7 +2895,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Bounded saved ReadFile/Shell input and text output, read on demand; requires a trusted actor and current Session/Workspace read access. Enabled by default; an administrator may disable reads. */
+            /** @description Bounded saved ReadFile/Shell input and text output, read on demand; requires a trusted actor and current Session/Workspace read access. Available to authorized readers without a feature switch. */
             200: {
                 headers: {
                     "Cache-Control"?: "private, no-store";

@@ -78,12 +78,11 @@ AgentDefinition revisions: [English](../../docs/design/2026-10-01-managed-agent-
 ## On-demand tool details
 
 Managed ReadFile and Shell cards read saved arguments, output and errors only
-when expanded, through `/api/agent/web-shell/v1/tool-details/get`. The default
-is enabled; set `qwen.managed-agent.harness.tool-details-enabled=false`
-(`QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=false`) to disable these reads.
-Each request requires a trusted actor and current Session/Workspace read access,
-rechecked before returning. It does not require Artifact publication or download
-permissions and never executes a tool or starts a Harness.
+when expanded, through `/api/agent/web-shell/v1/tool-details/get`, without a
+feature switch. Each request requires a trusted actor and current
+Session/Workspace read access, rechecked before returning. It does not require
+Artifact publication or download permissions and never executes a tool or starts
+a Harness.
 
 Lifecycle events remain metadata-only. Existing retained private results can be
 read without backfilling public events. Allowlisted input is limited to 4 KiB;

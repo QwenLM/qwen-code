@@ -12,9 +12,9 @@ ReadFile and Shell details should be loaded only when a user expands a settled c
 
 Contract version `1.67.0` adds `POST /api/agent/web-shell/v1/tool-details/get`, using the existing Session/Item request. It is a persisted Workspace-scoped read: require a trusted actor, current Session visibility and Workspace read grant, and recheck them before returning. Responses use `Cache-Control: private, no-store`. The route never starts a Harness, acquires a Runtime, executes a command or falls back to another Workspace.
 
-The read is enabled by default. Administrators can disable it with `qwen.managed-agent.harness.tool-details-enabled=false`, or `QWEN_MANAGED_AGENT_TOOL_DETAILS_ENABLED=false`. Any authorized Session/Workspace reader may read these bounded tool details. Artifact publication and original-download permissions remain independent; no extra publication switch or object storage is required. Saved text can contain sensitive content and is not automatically redacted.
+Any authorized Session/Workspace reader may read these bounded tool details without a feature switch. Artifact publication and original-download permissions remain independent; no extra publication switch or object storage is required. Saved text can contain sensitive content and is not automatically redacted.
 
-Disabling the setting denies new detail requests. It does not remove previously published inline history or change approved O3 previews. Existing inline data retains its current rendering. New lifecycle events contain no detail text or arguments, and the server does not backfill public events.
+Existing inline data and approved O3 previews retain their current rendering. New lifecycle events contain no detail text or arguments, and the server does not backfill public events.
 
 ## Retained history and bounds
 
@@ -37,7 +37,8 @@ Closing a card or changing provider, Session or tool identity aborts outstanding
 - Before expansion, no detail HTTP request, preceding-history argument lookup or inline detail publication occurs.
 - Expanding saved failed ReadFile and completed Shell cards shows their own diagnostics, command and output; refresh and reopen work without executing a tool.
 - Old retained results work without public backfill; empty, missing and truncated results remain distinguishable.
-- Wrong tenants, missing actors, revoked Workspace grants, deleting Sessions, disabled reads and unsupported tools return no private details.
+- Obsolete feature-switch configuration cannot disable authorized reads.
+- Wrong tenants, missing actors, revoked Workspace grants, deleting Sessions and unsupported tools return no private details.
 - Exact matching, corruption, chunked resources, byte limits, allowlisted arguments, late results and cancelled/stale client requests have focused coverage.
 - Run root build/typecheck/bundle, affected producer/reducer/component and browser checks, API/surface contract tests, Maven verification and disposable MySQL 8.4 integration checks. Do not send a prompt to the user's running Session or modify its database.
 
