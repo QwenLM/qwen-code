@@ -135,6 +135,10 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - **复查。** 现有的一秒扫描同时读取到期的挂起 Turn。每次复查认领 Turn，先通过连接器丢弃缓存的 takeover 快照，再重新驱动取消加载——绝不驱动继续加载，因为 Turn 正是因为继续无法证明安全才挂起的。已就绪：现有取消路由把观测到的结果记入 journal，并把 Turn 标为 `managed_runtime_recovery_blocked`。终态围栏走现有的 cancel-over-abandoned 路径。仍未知：再次挂起。复查抛错时也重新挂起，不在同一行上空转。
 - **快照。** `discardManagedRecovery` 丢弃缓存的 attachment 与 pending-recovery 标记，下一次加载会重新向 Broker 询问，而不是拿挂起时的报告作答。
 
+### 11. 未观察到执行的 cancel 停车
+
+一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 将其记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。若 Turn 在准入前就已结束，cancel 仍以 `turn_already_settled` 失败，因为没有任何执行见过它。
+
 ## 验证
 
 - `OperationReconcilerTest`：挂起的 cancel 只按任务记录结算（先未知，后已提交）；任务未收到停止就结束的 cancel 以 `task_already_settled` 失败；证据读不出来时挂起一整个复查周期；挂起的输入只按 store 返回的 journal 结论结算；已不在挂起状态的行不被处理；一种 kind 只能有一个证据源。所有用例都不发送、不认领，也不调用 Harness。
@@ -146,6 +150,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - 第三阶段：`ManagedRenameReconciliationTest`（H2，以及 InnoDB 上的 `ManagedRenameReconciliationMySqlIT`）覆盖：提交时抛错的投递带着认领和已退役的回执挂起，不再被认领或投递，也不挡住关闭；因崩溃挂起的标题在扫描把它挂起之前挡住后续改名，之后被替换；遗留的 `UNKNOWN` 行被转换；没有 journal、head 为 `ACTIVE`、另一个标题的 digest 时结论为未知，之后变为已提交，回执、这一行和标题都记为完成并只产生一个事件，key 重放结果；已提交的标题在已关闭的 Session 上展示，在删除中的 Session 上不展示；head 为 `DELETING` 时证明未提交，压缩开始后证明不了任何事，失败的 key 用新 revision 重试且不会被标为已替换；未知结论重新挂起并多计一次尝试；认领自己的迟到应答能完成挂起的标题；未提交之前的失败仍然重试并保持生命周期屏障；请求里缺少标题的行永远不会被判为已提交，但完整的 journal 仍能让它失败；通过 store 的 `@Transactional` 代理注入语句故障，挂起与回执退役、已提交结算与标题、事件和回执都整体回滚。`OperationReconcilerTest.aParkedTitleSettlesThroughItsOwnSettle` 覆盖标题经由自己的结算、从不走通用结算。`ManagedSessionLifecycleTest` 现在会在标题挂起时关闭 Session，且不重发标题。`WorkspaceMigrationStoreTest` 统计挂起和遗留的标题，不再统计已完成、已替换或已失败的标题。
 - Turn 层读取：`hosted-workspace-broker.test.ts` 固定了恢复读取上的 reconcile 查询、每个未知记录恰好一次 reconcile 尝试、一次性决策（已结算才返回，仍在执行或仍未知都不轮询），以及终态围栏。`hosted-runtime-recovery.test.ts` 覆盖被动加载逐执行对账、证据读不出来时报未知，以及继续加载把已结算结果记入 journal、或报未知/abandoned 且不写 journal。
 - Turn 挂起：`HarnessCoordinatorTest` 覆盖用挂起替代 budget-exempt 重试、复查丢弃快照并重新询问、仍未知时再次挂起，以及取消就绪后的终止。
+- 未观察到执行的 cancel：`ManagedTurnCommandOperationTest.aCancelOfAnUnknownExecutionParksInsteadOfFailingAlreadySettled` 覆盖已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，cancel 停车为 `recovery_blocked`/`cancel_unconfirmed`；准入前与结果已知的用例仍保持 `turn_already_settled`。
 
 ## 验收（来自 #14166）
 
@@ -154,3 +159,4 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - 对准入未知的种类，`recovery_blocked` 的下一步由一条规则决定；生命周期等待被命名为另一个概念（决定 1）。binding、Session head 和扩展 run 的词表，已在 #14166 上说明是不同的概念。
 - Turn 层接管读取原命令的 Broker 记录（决定 9）：两个加载都会对账，已结算的答案被观测，仍无法证明的结果报为未知，而不是当作瞬时故障失败或再次派发。
 - 结果仍未知的 Turn 会挂起，并按对账器周期复查，而不是继续 budget-exempt 重试或再次派发（决定 10）。
+- 已准入的 Turn 因未观察到的执行失败时，cancel 报 `recovery_blocked`/`cancel_unconfirmed`，而不是假的 `turn_already_settled`（决定 11）。
