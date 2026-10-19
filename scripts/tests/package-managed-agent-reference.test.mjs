@@ -13,6 +13,7 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -358,6 +359,119 @@ test('bootstrap writes private files without printing secrets', async () => {
       [script, '--directory', directory, '--force'],
       { encoding: 'utf8' },
     );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('bootstrap runs through a symlinked entry point', async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-bootstrap-link-'),
+  );
+  try {
+    const script = fileURLToPath(
+      new URL(
+        '../../packages/managed-agent-server/distribution/bin/' +
+          'qwen-managed-agent-bootstrap.mjs',
+        import.meta.url,
+      ),
+    );
+    const link = path.join(temporary, 'bootstrap-link.mjs');
+    await symlink(script, link);
+    const directory = path.join(temporary, 'config');
+    execFileSync(process.execPath, [link, '--directory', directory], {
+      encoding: 'utf8',
+    });
+    const harness = await readFile(path.join(directory, 'harness.env'), 'utf8');
+    assert.match(harness, /QWEN_SERVER_TOKEN=[0-9a-f]{64}/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('bootstrap quotes the configuration path for shell sourcing', async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-bootstrap-path-'),
+  );
+  try {
+    const script = fileURLToPath(
+      new URL(
+        '../../packages/managed-agent-server/distribution/bin/' +
+          'qwen-managed-agent-bootstrap.mjs',
+        import.meta.url,
+      ),
+    );
+    const directory = path.join(temporary, 'config-$PR14634');
+    execFileSync(process.execPath, [script, '--directory', directory], {
+      encoding: 'utf8',
+    });
+    const value = execFileSync(
+      'sh',
+      [
+        '-c',
+        'set -a; . "$1"; printf %s "$SPRING_CONFIG_ADDITIONAL_LOCATION"',
+        'sh',
+        path.join(directory, 'server.env'),
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(value, `file:${path.join(directory, 'application.yml')}`);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('bootstrap rejects a configuration path it cannot quote', async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-bootstrap-quote-'),
+  );
+  try {
+    const script = fileURLToPath(
+      new URL(
+        '../../packages/managed-agent-server/distribution/bin/' +
+          'qwen-managed-agent-bootstrap.mjs',
+        import.meta.url,
+      ),
+    );
+    const directory = path.join(temporary, "config-'");
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [script, '--directory', directory], {
+          stdio: 'pipe',
+        }),
+      (error) => error.status === 1,
+    );
+    await assert.rejects(readFile(path.join(directory, 'harness.env')));
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('bootstrap refuses to run while another bootstrap holds the lock', async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-bootstrap-lock-'),
+  );
+  try {
+    const script = fileURLToPath(
+      new URL(
+        '../../packages/managed-agent-server/distribution/bin/' +
+          'qwen-managed-agent-bootstrap.mjs',
+        import.meta.url,
+      ),
+    );
+    const directory = path.join(temporary, 'config');
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, '.bootstrap.lock'), '', {
+      mode: 0o600,
+    });
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [script, '--directory', directory], {
+          stdio: 'pipe',
+        }),
+      (error) => error.status === 1,
+    );
+    await assert.rejects(readFile(path.join(directory, 'harness.env')));
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
