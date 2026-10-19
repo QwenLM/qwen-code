@@ -233,7 +233,7 @@ public final class ManagedCsiFilesProtocol {
         return parse(bytes, 32 * 1024);
     }
 
-    static Map<String, Object> parse(byte[] bytes, int limit) {
+    public static Map<String, Object> parse(byte[] bytes, int limit) {
         try {
             require(bytes != null && bytes.length <= limit);
             String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
