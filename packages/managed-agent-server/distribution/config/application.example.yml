@@ -1,0 +1,32 @@
+# Qwen Managed Agent Server — reference distribution configuration template.
+#
+# Copy this file to config/application.yml when a setting cannot be supplied
+# through a QWEN_MANAGED_AGENT_* environment variable, then restrict it to the
+# service account:
+#
+#   cp config/application.example.yml config/application.yml
+#   chmod 600 config/application.yml
+#
+# bin/qwen-managed-agent-server and bin/qwen-managed-agent-operator-recovery
+# export SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml
+# when that file exists and the variable is unset. No option is added to the
+# command's positional arguments.
+#
+# Mapped values can be overridden through their QWEN_MANAGED_AGENT_* variable.
+# A literal value written here replaces the mapped placeholder and therefore
+# wins over the corresponding variable; the placeholders below keep the
+# environment override for the active key pair.
+#
+# The Runtime credential key ring is the documented case: relaxed binding
+# normalises map keys supplied as environment variables, so a rotated key ID
+# can silently stop matching. Map keys must keep the bracket form shown below.
+# The example illustrates a rotation; a first deployment configures only the
+# active pair.
+#
+# qwen:
+#   managed-agent:
+#     runtime-broker:
+#       credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:reference-v2}'
+#       credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:<base64-encoded-32-byte-v2-key>}'
+#       previous-credential-keys:
+#         '[reference-v1]': <base64-encoded-32-byte-v1-key>

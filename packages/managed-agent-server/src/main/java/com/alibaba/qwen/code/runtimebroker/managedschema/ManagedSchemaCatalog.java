@@ -495,7 +495,7 @@ final class ManagedSchemaCatalog {
             String token = matcher.group();
             tokens.add(token.startsWith("'") ? token : lower(token));
         }
-        return booleanShape(tokens);
+        return booleanShape(numericBooleans(tokens));
     }
 
     private static List<String> booleanShape(List<String> tokens) {
@@ -587,8 +587,9 @@ final class ManagedSchemaCatalog {
         return result;
     }
 
-    // MariaDB stores a bare FALSE/TRUE in a generation expression as 0/1,
-    // while MySQL keeps the keyword, so boolean literals compare numerically.
+    // MariaDB stores a bare FALSE/TRUE in a generation expression or check
+    // clause as 0/1, while MySQL keeps the keyword, so boolean literals
+    // compare numerically.
     private static List<String> numericBooleans(List<String> tokens) {
         return tokens.stream().map(token -> switch (token) {
             case "false" -> "0";
