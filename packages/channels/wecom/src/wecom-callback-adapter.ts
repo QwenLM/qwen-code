@@ -114,13 +114,13 @@ export class WeComCallbackChannel extends ChannelBase {
       await new Promise<void>((resolve, reject) => {
         onAbort = () => reject(new Error('WeCom Callback is disconnected'));
         signal.addEventListener('abort', onAbort, { once: true });
-        server.once('error', reject);
+        server.on('error', (error) => {
+          process.stderr.write('[WeCom Callback] HTTP server error.\n');
+          reject(error);
+        });
         server.listen(
           { port: this.callback.port, host: this.callback.host, signal },
-          () => {
-            server.removeListener('error', reject);
-            resolve();
-          },
+          resolve,
         );
       });
     } catch (error) {
@@ -236,18 +236,23 @@ export class WeComCallbackChannel extends ChannelBase {
       throw new Error('Invalid callback message');
     }
     const now = Date.now();
-    for (const [key, received] of this.seen) {
-      if (now - received > REPLAY_WINDOW_MS) this.seen.delete(key);
+    for (const [key, expiresAt] of this.seen) {
+      if (now > expiresAt) this.seen.delete(key);
     }
     if (this.seen.has(id)) {
       res.end('success');
       return;
     }
-    if (this.seen.size >= 10_000) {
-      res.writeHead(503).end();
-      return;
+    if (this.senderGateFor({ chatId: sender }).isAllowed(sender)) {
+      if (this.seen.size >= 10_000) {
+        res.writeHead(503).end();
+        return;
+      }
+      this.seen.set(
+        id,
+        Math.max(now, Number(timestamp) * 1000) + REPLAY_WINDOW_MS,
+      );
     }
-    this.seen.set(id, now);
     res.end('success');
     if (this.abort.signal.aborted) return;
     void this.handleInbound({

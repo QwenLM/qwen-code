@@ -42,7 +42,9 @@ receiver Corp ID, XML recipient and Agent ID. Use `saxes` to parse flat XML,
 rejecting DTDs, duplicate fields and nested structures. Use Node crypto for the
 protocol's AES-256-CBC framing and constant-time signature comparison. Accept
 only recent signed requests to bound replay; maintain a bounded in-memory
-message-ID cache to deduplicate platform retries during the same process.
+message-ID cache to deduplicate platform retries during the same process. Only
+admitted senders reserve entries, retained for at least five minutes and until
+the signed request's timestamp window expires, including positive clock skew.
 
 Authenticated text messages become direct-message envelopes and enter
 `ChannelBase.handleInbound`, preserving existing access policies, pairing,

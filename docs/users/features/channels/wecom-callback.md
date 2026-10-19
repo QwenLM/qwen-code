@@ -84,8 +84,10 @@ Application secrets and callback keys must never be posted in logs or issues.
   application events and streaming replies are not supported.
 - Callbacks are authenticated, decrypted and acknowledged before agent execution
   finishes. Replies use the application message API, rather than the callback's
-  synchronous response. Duplicate message IDs are suppressed in memory for five
-  minutes; requests outside the five-minute signature timestamp window fail.
+  synchronous response. Admitted message IDs are suppressed in memory for at
+  least five minutes and until their signed timestamp window expires; requests
+  outside the five-minute signature timestamp window fail. Rejected senders do
+  not consume retry-cache capacity.
 - In-flight work is not durably queued. Restarting the process after an
   acknowledgement can lose that task, and restarting clears the retry cache.
 

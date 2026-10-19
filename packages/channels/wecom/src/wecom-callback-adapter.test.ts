@@ -1,4 +1,5 @@
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
+import type { Server } from 'node:http';
 import { createServer } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -134,6 +135,7 @@ describe('WeCom Callback adapter', () => {
 
   afterEach(async () => {
     await channel.disconnect();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -183,6 +185,79 @@ describe('WeCom Callback adapter', () => {
     expect(await (await post(address, payload())).text()).toBe('success');
     expect(inbound).toHaveBeenCalledOnce();
     finish();
+  });
+
+  it('deduplicates future-dated callbacks throughout their acceptance window', async () => {
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const request = signed(payload(), {
+      timestamp: String((now + 300_000) / 1000),
+    });
+    const deliver = () =>
+      realFetch(`${address}?${request.params}`, {
+        method: 'POST',
+        body: request.body,
+      });
+    expect((await deliver()).status).toBe(200);
+    await vi.waitFor(() => expect(channel.received).toHaveLength(1));
+    for (const elapsed of [300_001, 600_000]) {
+      clock.mockReturnValue(now + elapsed);
+      expect((await deliver()).status).toBe(200);
+      expect(channel.received).toHaveLength(1);
+    }
+    clock.mockReturnValue(now + 600_001);
+    expect((await deliver()).status).toBe(400);
+  });
+
+  it('keeps denied senders out of the bounded retry cache', async () => {
+    const seen = (channel as unknown as { seen: Map<string, number> }).seen;
+    for (let index = 0; index < 9_999; index++) {
+      seen.set(`existing-${index}`, Date.now() + 300_000);
+    }
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(
+      (
+        await post(
+          address,
+          payload({ FromUserName: 'denied', MsgId: 'denied' }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(stderr).toHaveBeenCalledWith(
+      '[Channel:callback] preflight rejected reason=sender_denied\n',
+    );
+    expect(seen.size).toBe(9_999);
+    expect((await post(address, payload())).status).toBe(200);
+    await vi.waitFor(() => expect(channel.received).toHaveLength(1));
+    expect(
+      (await post(address, payload({ MsgId: 'over-capacity' }))).status,
+    ).toBe(503);
+    expect(channel.received).toHaveLength(1);
+  });
+
+  it('preserves pairing for senders outside the retry cache', async () => {
+    await channel.disconnect();
+    channel = new RecordingChannel(
+      'callback',
+      { ...config, privatePolicy: 'pairing' },
+      bridge,
+    );
+    const pairing = vi
+      .spyOn(
+        channel as unknown as { onPairingRequired: () => Promise<void> },
+        'onPairingRequired',
+      )
+      .mockResolvedValue();
+    await channel.connect();
+    expect(
+      (await post(address, payload({ FromUserName: 'bob', MsgId: 'pairing' })))
+        .status,
+    ).toBe(200);
+    await vi.waitFor(() => expect(pairing).toHaveBeenCalledOnce());
+    expect(channel.received).toHaveLength(0);
+    expect(
+      (channel as unknown as { seen: Map<string, number> }).seen.size,
+    ).toBe(0);
   });
 
   it('rejects forged, stale, misrouted and broadcast messages before dispatch', async () => {
@@ -238,6 +313,19 @@ describe('WeCom Callback adapter', () => {
       code: 'EADDRINUSE',
     });
     await second.disconnect();
+  });
+
+  it('handles listener errors after startup without exposing error details', async () => {
+    const server = (channel as unknown as { server: Server }).server;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(() =>
+      server.emit('error', new Error('private error detail')),
+    ).not.toThrow();
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom Callback] HTTP server error.\n',
+    );
+    expect((await post(address, payload())).status).toBe(200);
+    await vi.waitFor(() => expect(channel.received).toHaveLength(1));
   });
 
   it('can stop while startup is pending without leaving a listener', async () => {
