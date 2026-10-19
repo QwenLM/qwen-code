@@ -4269,12 +4269,22 @@ export class DaemonClient {
    * different work, so floor the derived budget at the generic request deadline
    * these routes used before: a short restore budget must not shorten a create.
    * Restore keeps the unfloored budget, where pinning it low is deliberate.
+   *
+   * An explicit client deadline is returned verbatim, `0` included — that `0`
+   * is the operator asking for no deadline. Any other `0` is
+   * `resolveSessionOperationTimeoutMs` reporting that the advertised budget
+   * plus headroom overflowed `MAX_TIMER_DELAY_MS`, and `fetchWithTimeout` reads
+   * it as the same "no deadline": the spawn would arm no timer and attach no
+   * AbortSignal, so a stalled daemon retained the create or worktree reset for
+   * the process lifetime. The floor below covers it, so a spawn is always
+   * bounded.
    */
   private resolveSessionSpawnTimeoutMs(): number {
     const timeoutMs = this.resolveSessionOperationTimeoutMs();
-    return timeoutMs === 0 || this.hasExplicitFetchTimeout
-      ? timeoutMs
-      : Math.max(timeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
+    if (this.hasExplicitFetchTimeout) {
+      return timeoutMs;
+    }
+    return Math.max(timeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
   }
 
   /**
