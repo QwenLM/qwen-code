@@ -20,6 +20,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -405,9 +406,25 @@ public final class WorkspaceCsiReservationStore {
         if (json == null || intent == null || registration == null || binding == null || intent.reservation() == null
                 || !"RESERVED".equals(intent.reservation().phase()) || !CsiOwnershipRevision.reserved(intent.reservation().revision())
                 || !matchesHolder(registration, binding, intent.reservation()) || intent.sealedBindingVersion() <= 0
-                || binding.getVersion() < intent.sealedBindingVersion() || !intent.physicalKey().equals(registration.physicalKey())
-                || !intent.equals(snapshot(json, intent.operationId(), registration, binding, intent.reservation(),
-                        intent.sealedBindingVersion(), intent.startedAt()))) {
+                || binding.getVersion() < intent.sealedBindingVersion() || !intent.physicalKey().equals(registration.physicalKey())) {
+            throw unavailable();
+        }
+        var expected = snapshot(json, intent.operationId(), registration, binding, intent.reservation(),
+                intent.sealedBindingVersion(), intent.startedAt());
+        if (intent.equals(expected)) {
+            return;
+        }
+        try {
+            if (intent.resourceHandleJson() == null || expected.resourceHandleJson() == null
+                    || !WorkspaceCsiApplicationJson.object(intent.resourceHandleJson().getBytes(StandardCharsets.UTF_8), 256 * 1024)
+                            .equals(WorkspaceCsiApplicationJson.object(expected.resourceHandleJson().getBytes(StandardCharsets.UTF_8), 256 * 1024))
+                    || !intent.equals(new Retirement(expected.operationId(), expected.physicalKey(), expected.phase(),
+                            expected.reservation(), expected.sealedBindingVersion(), expected.resourceHandleKind(),
+                            expected.resourceHandleVersion(), intent.resourceHandleJson(), expected.runtimeInstanceId(),
+                            expected.leaseId(), expected.epoch(), expected.leaseDigest(), expected.attestationGeneration(), expected.startedAt()))) {
+                throw unavailable();
+            }
+        } catch (IllegalArgumentException malformed) {
             throw unavailable();
         }
     }
