@@ -48,6 +48,26 @@ class CsiNativeToolReservationTest {
     }
 
     @Test
+    void qualifiesSurvivingCallsWithoutTreatingRefusalProgressAsBatchIdentity() throws Exception {
+        var parts = capturedParts();
+        ((ObjectNode) parts.get(3).path("functionCall").path("args")).put("file_path", ".");
+        var before = prefix(parts);
+        var pending = before.pendingBatch();
+        var refused = pending.calls().get(1);
+        assertEquals("CSI file input is invalid.", CsiNativeToolReservation.refusalReason(request, refused));
+        var after = new CsiNativeActivationProof.Prefix(before.input(), before.checkpoint(), before.lastMessageId(),
+                before.attempt(), before.assistantCommitted(), before.stream(), before.usedIds(),
+                new CsiNativeActivationProof.PendingBatch(pending.messageId(), pending.contentRef(), pending.calls(),
+                        Set.of(refused.id())),
+                before.batches(), before.fileHistory(), before.intents(), before.receipts(), before.nextDeltaOrdinal());
+        for (int index : List.of(0, 2)) {
+            var tuple = tuple(after, index);
+            assertDoesNotThrow(() -> CsiNativeToolReservation.qualify(original, after,
+                    tuple.execution(), tuple.input(), tuple.definition()));
+        }
+    }
+
+    @Test
     void refusesChangedPartFunctionOrdinalOwnerAndDefinitionWithMatchingMetadata() throws Exception {
         var prefix = prefix(capturedParts());
         var tuple = tuple(prefix, 0);
