@@ -214,7 +214,9 @@ node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一
   第一个保持原样；写队列上限以 `QWEN_PTY_WRITE_LIMIT` 终止（不伪造
   背压确认）；活跃 pty 上限以 `QWEN_PTY_ACTIVE_LIMIT` 拒绝下一次
   `spawn`，关闭后槽位释放；预算计数可经 `getPtyBudgetStats()` 观察。
-  fd 生命周期套件分别在逻辑关闭时保持一个在途 read 和一个在途 write，
+  fd 生命周期套件（`defers the fd close while a read is still owned by the
+threadpool` 与 `defers the fd close while a write is still owned by the
+threadpool`）分别在逻辑关闭时保持一个在途 read 和一个在途 write，
   覆盖两种完成顺序（第一个完成不得关闭 fd），并断言最后一次持有者
   收敛前仅有一次 close 尝试且 fd 仍打开。这些测试区分逻辑终止与最终
   物理关闭，不声称 close 系统调用成功。

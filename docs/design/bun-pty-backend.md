@@ -264,7 +264,9 @@ null`, process title, `clear()`, plus the pause-lifecycle regressions:
   `QWEN_PTY_WRITE_LIMIT` (no fabricated backpressure ack); the active-pty
   cap rejects the next `spawn` with `QWEN_PTY_ACTIVE_LIMIT` and frees the
   slot on close; and the budget counters are observable via
-  `getPtyBudgetStats()`. The fd-lifetime suite holds an in-flight read and,
+  `getPtyBudgetStats()`. The fd-lifetime suite (`defers the fd close while
+  a read is still owned by the threadpool` and `defers the fd close while a
+  write is still owned by the threadpool`) holds an in-flight read and,
   separately, an in-flight write at logical close, covers both settlement
   orders (the first must not close), and asserts one close attempt with the
   fd still open until the last owner settles. Those tests distinguish
