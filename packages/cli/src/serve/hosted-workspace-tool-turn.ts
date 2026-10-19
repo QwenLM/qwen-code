@@ -71,6 +71,8 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionWritesStoppedError,
   type ManagedSessionDomain,
   type ManagedSessionDurableRef,
@@ -311,17 +313,19 @@ function shellHistoryId(executionCallId: string): string {
 }
 
 // H4d-b: a refusal the store makes at commit (a closing Session, a rule the
-// authority holds) is a send_message call's answer, never a failed turn. A
-// conflict and the store's own transient faults fail the call like any
-// other store fault: a refusal answer would tell the model a message that
-// may yet commit was never sent.
+// authority holds) is a send_message or member-command call's answer, never
+// a failed turn. A conflict and the store's own transient faults fail the
+// call like any other store fault: a refusal answer would tell the model a
+// command that may yet commit was never sent.
 function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
   return (
     cause instanceof ManagedSessionRecordError &&
     !(cause instanceof ManagedSessionConflictError) &&
     !(cause instanceof ManagedSessionStoreHttpError) &&
     !(cause instanceof ManagedSessionStoreTransportError) &&
-    !(cause instanceof ManagedSessionWritesStoppedError)
+    !(cause instanceof ManagedSessionWritesStoppedError) &&
+    !(cause instanceof ManagedSessionAppendUnsettledError) &&
+    !(cause instanceof ManagedSessionJournalFencedError)
   );
 }
 
@@ -691,6 +695,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
 const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
   'read_file',
   'glob',
+  'skill',
   'task_list',
   'send_message',
 ]);
@@ -700,7 +705,7 @@ const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
  * (decision 5): it says the run may only read and never names it.
  */
 function hostedPlanModeRefusal(): string {
-  return `This run is in plan mode until the leader approves its plan: only read_file, glob, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
+  return `This run is in plan mode until the leader approves its plan: only read_file, glob, static skill loading, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
 }
 
 export const HOSTED_MEMBER_PLAN_TOOL: FunctionDeclaration = {
@@ -1846,16 +1851,7 @@ export class HostedWorkspaceToolTurn {
               parametersJsonSchema: schema,
             };
           }
-          return ['write_file', 'edit'].includes(tool.name ?? '')
-            ? {
-                ...tool,
-                description:
-                  tool.description +
-                  (this.mcp
-                    ? ' This MCP profile provides no file backups or undo for Write/Edit.'
-                    : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
-              }
-            : tool;
+          return hostedWorkspaceDeclarations([tool], Boolean(this.mcp))[0];
         }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
@@ -6320,7 +6316,7 @@ export class HostedWorkspaceToolTurn {
     } catch (cause) {
       // byte_limit and budget_exhausted are the funnel's member-facing
       // refusals; a store fault is recovery's, never the call's answer.
-      if (cause instanceof ManagedSessionRecordError) {
+      if (isMessageRefusal(cause)) {
         const parts = await answer(cause.message, true);
         // A normal local refusal still owes the parked wait its fold —
         // a durable wait it leaves behind turns the Turn's next call
@@ -7714,4 +7710,22 @@ export function truncateHostedGlobResponse(
     lines.pop();
   }
   return undefined;
+}
+
+export function hostedWorkspaceDeclarations(
+  tools: readonly FunctionDeclaration[],
+  mcp: boolean,
+): FunctionDeclaration[] {
+  return tools.map((tool) =>
+    ['write_file', 'edit'].includes(tool.name ?? '')
+      ? {
+          ...tool,
+          description:
+            tool.description +
+            (mcp
+              ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+              : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+        }
+      : tool,
+  );
 }
