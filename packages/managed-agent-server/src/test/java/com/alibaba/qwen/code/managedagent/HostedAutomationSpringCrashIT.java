@@ -409,6 +409,93 @@ class HostedAutomationSpringCrashIT {
         });
     }
 
+    private boolean watermarkReached() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder(
+                            URI.create(controlUrl
+                                    + "/control/watermark-reached"))
+                    .timeout(Duration.ofSeconds(5)).GET().build();
+            HttpResponse<String> response = HttpClient.newHttpClient()
+                    .send(request, HttpResponse.BodyHandlers.ofString());
+            return response.statusCode() == 200
+                    && response.body().contains("\"reached\":true");
+        } catch (Exception unavailable) {
+            return false;
+        }
+    }
+
+    private Long watermarkSlot(String scheduleId) {
+        return jdbc.queryForObject(
+                "SELECT watermark_slot FROM ma_schedule WHERE tenant_id = ?"
+                        + " AND schedule_id = ?", Long.class, tenant,
+                scheduleId);
+    }
+
+    private void triggerScanAsync() {
+        Thread.ofPlatform().daemon().start(() -> {
+            try {
+                control("scan", "");
+            } catch (Exception parked) {
+                // The scanner thread is parked on the watermark row; the
+                // kill ends it, so the control answer never arrives.
+            }
+        });
+    }
+
+    @Test
+    @Timeout(900)
+    void fg11c2SpringKillBeforeWatermarkNeverFiresTwice() throws Exception {
+        assertThat(System.getProperty("os.name"))
+                .as("FG11c slice 2 sends POSIX signals")
+                .doesNotContainIgnoringCase("windows");
+        assertThat(System.getProperty("mysql.url"))
+                .as("FG11c slice 2 requires -Dmysql.url")
+                .startsWith("jdbc:mysql:");
+        String databaseUrl = freshDatabaseUrl();
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+                new DriverManagerDataSource(databaseUrl,
+                        required("mysql.user"),
+                        System.getProperty("mysql.password", "")));
+        jdbc.setQueryTimeout(10);
+        temporary = temporary.toRealPath();
+        String tenantName = "hosted-automation-kill-watermark-"
+                + UUID.randomUUID();
+        startModel();
+        harnessPort = freePort();
+        brokerPort = freePort();
+        Path root = Files.createDirectories(
+                temporary.resolve("kill-watermark"));
+        startFixture(root, tenantName);
+        startHarness();
+        String session = createSession("kill-watermark");
+        String definition = apiRequest("POST", "/v1/agent-automations",
+                definition(session, "FG11C2_KILL_WATERMARK"),
+                "fg11c2-kw-def", 202).path("id").asText();
+        control("arm-watermark", "");
+        triggerScanAsync();
+        await("the occurrence settled before the watermark move", 120,
+                () -> "fired".equals(occurrenceOutcome(definition))
+                        ? true : null);
+        await("the watermark advance reached the hold", 60,
+                () -> watermarkReached() ? true : null);
+        // The answer landed; the covered marker has not moved yet.
+        killFixture();
+        startFixture(root, tenantName);
+        await("the watermark catches up without a second fire", 240, () -> {
+            Integer chains = jdbc.queryForObject(
+                    "SELECT COUNT(DISTINCT run_id) FROM ma_schedule_occurrence"
+                            + " WHERE tenant_id = ? AND schedule_id = ?"
+                            + " AND run_id IS NOT NULL",
+                    Integer.class, tenant, definition);
+            return watermarkSlot(definition) != null && chains != null
+                    && chains == 1 ? true : null;
+        });
+        // The kill also drops the Harness's Session connection, so the
+        // wake turn may be aborted before its model call; the turn count is
+        // the kill-before-answer cell's property, not this one's.
+        assertThat(occurrenceOutcome(definition)).isEqualTo("fired");
+    }
+
     private String freshDatabaseUrl() {
         String base = required("mysql.url");
         String name = "fg11c2_" + UUID.randomUUID().toString().replace("-", "");

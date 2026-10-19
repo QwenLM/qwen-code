@@ -8,6 +8,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.AutomationScanner;
+import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -17,6 +18,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
@@ -46,6 +48,11 @@ public final class HostedAutomationCrashFixtureMain {
     private static final CountDownLatch FIRE_REACHED =
             new CountDownLatch(1);
     private static final CountDownLatch FIRE_RELEASE =
+            new CountDownLatch(1);
+    private static final AtomicBoolean ARM_WATERMARK = new AtomicBoolean();
+    private static final CountDownLatch WATERMARK_REACHED =
+            new CountDownLatch(1);
+    private static final CountDownLatch WATERMARK_RELEASE =
             new CountDownLatch(1);
 
     public static void main(String[] args) throws Exception {
@@ -130,6 +137,21 @@ public final class HostedAutomationCrashFixtureMain {
             exchange.getResponseBody().write(body);
             exchange.close();
         });
+        control.createContext("/control/arm-watermark", exchange -> {
+            ARM_WATERMARK.set(true);
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        control.createContext("/control/watermark-reached", exchange -> {
+            byte[] body = ("{\"reached\":"
+                    + (WATERMARK_REACHED.getCount() == 0) + "}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type",
+                    "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
         control.createContext("/control/scan", exchange -> {
             try {
                 spring.getBean(AutomationScanner.class).scan();
@@ -155,8 +177,39 @@ public final class HostedAutomationCrashFixtureMain {
     // `firing` and then calls runAutomationOperation; holding that call
     // leaves the occurrence in exactly the state a Spring crash between the
     // occurrence and its answer produces, without touching the wire.
+    // The watermark window: the answer is already committed as `fired`,
+    // and the covered marker has not moved yet. Locking the schedule row
+    // cannot express it (the settle's HELD proof reads the same row), so
+    // the fixture parks the store's own advanceWatermark call instead.
+    static class HoldStore extends AutomationLedgerStore {
+        HoldStore(JdbcTemplate jdbc) {
+            super(jdbc);
+        }
+
+        @Override
+        public boolean advanceWatermark(String tenantId, String scheduleId,
+                String owner, long fence, long slot, long now) {
+            if (ARM_WATERMARK.get()) {
+                WATERMARK_REACHED.countDown();
+                try {
+                    WATERMARK_RELEASE.await(180, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return super.advanceWatermark(tenantId, scheduleId, owner, fence,
+                    slot, now);
+        }
+    }
+
     @Configuration
     static class FireHold {
+        @Bean
+        @Primary
+        AutomationLedgerStore holdStore(JdbcTemplate jdbc) {
+            return new HoldStore(jdbc);
+        }
+
         @Bean
         static BeanPostProcessor holdHarnessConnector() {
             return new BeanPostProcessor() {

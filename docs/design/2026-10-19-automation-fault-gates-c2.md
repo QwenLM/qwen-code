@@ -10,12 +10,9 @@ the three SIGKILL points on a run's revisions, all on the packaged stack.
 This slice covers the cells that live in Spring, where the scanner and its
 lease run:
 
-| Case                           | Injection                                                                                                                                                      | Expected                                                                                                                                                                   |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spring-kill-before-answer`    | The occurrence row is `firing`; the Harness's fire answer is held by a test proxy; SIGKILL the Spring child. Restart it.                                       | The re-driven fire meets the same derived `arun_` id. One run chain, one accepted input, one model Turn. The occurrence is `fired` exactly once.                           |
-| `spring-kill-before-watermark` | The answer landed (revision 2 committed) and the schedule row is locked so the watermark write blocks; SIGKILL the Spring child. Release the lock and restart. | No second fire for the same slot. The watermark catches up, one run chain, one model Turn.                                                                                 |
-| `two-scanner-race`             | Two Spring children on one MySQL and tenant, with a short lease and one due slot.                                                                              | Exactly one child claims the slot. The loser writes no occurrence, no run and no watermark; the ledger holds one chain.                                                    |
-| `parked-tool-harness-kill`     | The wake turn is parked on a Runtime tool call; SIGKILL the Harness child.                                                                                     | The run settles once as `failed`/`outcome_unknown`, its parked executions are cancelled, its Workspace lease is released and its input is consumed. No replay of the tool. |
+| Case                        | Injection                                                                                                                               | Expected                                                                                                                                         |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spring-kill-before-answer` | The occurrence row is `firing` and the fixture parks the scanner's `runAutomationOperation` call; SIGKILL the Spring child. Restart it. | The re-driven fire meets the same derived `arun_` id. One run chain, one accepted input, one model Turn. The occurrence is `fired` exactly once. |
 
 The live-run reconcile case ("a wake turn is live past its first transcript
 write, drive `reconcile_run` through an overlap-`skip` slot, the run stays
@@ -43,16 +40,16 @@ This slice reuses that shape with an automation fixture main, and adds:
 - **Automation enabled.** `--qwen.managed-agent.automation.enabled=true`
   with a test-scaled `scan-delay`, `lease` and `late-tolerance`; the
   scanner is `AutomationScanner`, scheduled on `managedAutomationScheduler`.
-- **A Harness proxy.** The fixture's `FG7C_HARNESS_URL` points at a
-  test-owned HTTP proxy in front of the real packaged Harness. The proxy
-  forwards every request and holds only `POST
-/session/:id/automations/operations` for the armed run until the test
-  releases it. This is what opens the `firing`-before-answer window
-  deterministically instead of polling.
-- **A watermark lock.** For `spring-kill-before-watermark` the test holds
-  the schedule row with `SELECT ... FOR UPDATE` on its own connection, so
-  the scanner's watermark write blocks after the answer has committed; the
-  kill happens in that window, and the lock is released afterwards.
+- **A fire hold.** The fixture wraps `HarnessConnector` in a
+  `BeanPostProcessor` and parks `runAutomationOperation` behind a latch
+  the control plane arms. A test-side proxy cannot express this window:
+  relaying the Spring-to-Harness connection breaks its streaming channel,
+  so the warm turn never completes.
+- **A watermark hold.** For `spring-kill-before-watermark` the fixture
+  registers a primary `AutomationLedgerStore` whose `advanceWatermark`
+  parks on a latch. A schedule-row lock cannot express this window: the
+  settle's `HELD` proof reads the same row, so an outside lock blocks the
+  occurrence write too and the crash point never arrives.
 - **Two children.** `two-scanner-race` starts two fixture JVMs against the
   same MySQL and tenant, each with its own internal port and its own
   `ready.json`, and points both at the same Harness.
@@ -61,9 +58,7 @@ This slice reuses that shape with an automation fixture main, and adds:
 
 The facts come from the Session journal, the run records
 (`ma_session_record.task_state`), `ma_schedule_occurrence` and
-`ma_schedule` (watermark and lease), plus the model stub's prompts and the
-proxy's request log. The proxy records every fire it saw, so a second fire
-is visible even when both were answered.
+`ma_schedule` (watermark and lease), plus the model stub's prompts.
 
 ## Mutation witnesses
 
