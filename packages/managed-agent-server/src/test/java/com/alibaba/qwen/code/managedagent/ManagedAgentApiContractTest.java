@@ -164,6 +164,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.ArtifactAccess.class, List.of("ArtifactAccess")),
                     entry(ApiModels.ArtifactResponse.class, List.of("ArtifactResponse")),
                     entry(ApiModels.ToolResultResponse.class, List.of("ToolResultResponse")),
+                    entry(ApiModels.WebShellToolDetails.class, List.of("WebShellToolDetails")),
+                    entry(ApiModels.WebShellShellResult.class, List.of("WebShellShellResult")),
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
@@ -263,6 +265,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
+                    entry(ApiModels.WebShellSkill.class, List.of("WebShellSkill")),
+                    entry(ApiModels.WebShellSessionSkills.class, List.of("WebShellSessionSkills")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
                     entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
@@ -617,6 +621,9 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getArtifactContent", 401,
                 get("/v1/agents/sessions/%s/artifacts/artifact_missing/content".formatted(sessionId))
                         .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellToolDetails", 401,
+                post("/api/agent/web-shell/v1/tool-details/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
         exchange(drift, "getWebShellToolResult", 401,
                 post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
@@ -1228,6 +1235,14 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/directories/query")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesQuery", 409,
+                post(WEB_SHELL + "/workspaces/files/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"directory\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesRead", 409,
+                post(WEB_SHELL + "/workspaces/files/read")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"path\":\"a.txt\",\"expectedScopeRevision\":\"old\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1281,6 +1296,12 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 200,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 401,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
         exchange(drift, "queryWebShellSessionModels", 401,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant),

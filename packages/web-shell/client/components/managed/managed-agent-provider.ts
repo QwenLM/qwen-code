@@ -21,6 +21,8 @@ export type ManagedAgentRuntimeState =
 
 export type ManagedApprovalMode = 'default' | 'auto-edit' | 'yolo';
 export type ManagedInputBlock = components['schemas']['InputBlock'];
+export type ManagedSessionSkills =
+  components['schemas']['WebShellSessionSkills'];
 
 export function isManagedApprovalMode(
   value: unknown,
@@ -228,6 +230,12 @@ export interface ManagedAgentProvider {
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly skills?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionSkills>;
+  };
   /** Present when the provider can serve Hosted permission Actions. */
   readonly actions?: {
     listPending(
@@ -241,6 +249,13 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly toolDetails?: {
+    get(
+      sessionId: string,
+      itemId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellToolDetails']>;
+  };
   readonly tasks?: {
     list(
       sessionId: string,
@@ -307,6 +322,16 @@ export interface ManagedAgentProvider {
       request: { modelId: string; expectedRevision: number },
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedModelChangeResult>;
+  };
+  readonly workspaceFiles?: {
+    query(
+      request: components['schemas']['WebShellWorkspaceFileQueryRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFilePage']>;
+    read(
+      request: components['schemas']['WebShellWorkspaceFileReadRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
   };
   readonly workspaceBinding?: {
     readonly agentId: string;

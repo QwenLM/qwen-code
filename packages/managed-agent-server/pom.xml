@@ -465,8 +465,33 @@
                                  locally on the merged base (~242 s
                                  budgeted): the healthy sum becomes
                                  5985 s, so the fork moves to 6585 s
-                                 and the Verify step to 120 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6585</forkedProcessTimeoutInSeconds>
+                                 and the Verify step to 120 minutes.
+                                 The FG13a execute lost-reply cell
+                                 (issue #14449) adds 150 s: the healthy
+                                 sum becomes 6135 s, so the fork moves
+                                 to 6735 s. The FG13a status lost-reply
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 6285 s; the FG11c
+                                 Harness-crash method (three cases, 144.8 s
+                                 measured, 550 s budgeted) moves it to
+                                 6835 s, so the fork moves to 7435 s and
+                                 the Verify step to 134 minutes. The FG13d
+                                 DELETE-drain cell (issue #14449) adds
+                                 150 s: the healthy sum becomes 6985 s,
+                                 so the fork moves to 7585 s and the
+                                 Verify step to 137 minutes. The FG11c
+                                 Spring-crash class (five cases, 262.0 s
+                                 measured) is budgeted at 524 s: the healthy
+                                 sum becomes 7509 s, so the fork moves to
+                                 8109 s and the Verify step to 146 minutes.
+                                 The FG13a catalog lost-reply cell (issue
+                                 #14449) adds 150 s: the healthy sum becomes
+                                 7659 s, so the fork moves to 8259 s and the
+                                 Verify step to 148 minutes. The FG13a HTTP
+                                 lost-reply cell adds 150 s: the healthy sum
+                                 becomes 7809 s, so the fork moves to 8409 s
+                                 and the Verify step to 151 minutes. -->
+                            <forkedProcessTimeoutInSeconds>8409</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
