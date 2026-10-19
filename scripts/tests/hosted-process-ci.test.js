@@ -463,9 +463,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (156 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (159 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 236, 249],
+    ['hosted-harness-mysql', 239, 252],
     // Nineteen failover arms at 10 each.
     ['hosted-failover-e2e', 190, 205],
   ])(
@@ -666,14 +666,16 @@ describe('Hosted real-process gates', () => {
       // the FG11c Spring-crash class (262.0 s measured, ~524 s budgeted at
       // 2x) moves the fork to 8109; the FG13a catalog lost-reply cell adds
       // 150 s, so the fork moves to 8259 and the Verify step to 148 minutes;
-      // the FG13a HTTP lost-reply cell adds 150 s, so the fork moves to 8409;
-      // the FG11d disabled-span cell adds 336 s, so the fork moves to 8745
-      // and the Verify step to 156 minutes):
+      // the FG13a HTTP lost-reply cell adds 150 s, so the fork moves to 8409
+      // and the Verify step to 151 minutes; the FG13f deny lost-reply cell
+      // adds 150 s, so the fork moves to 8559 and the Verify step to 153
+      // minutes; the FG11d disabled-span cell adds 336 s, so the fork moves
+      // to 8895 and the Verify step to 159 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(8745);
+        expect(forkSeconds).toBe(8895);
       }
     },
   );
@@ -734,13 +736,14 @@ describe('Hosted real-process gates', () => {
   // cell adds 150s, so it becomes 6985s; the FG11c Spring-crash class
   // (262.0s measured, ~524s budgeted at 2x) becomes 7509s; the FG13a
   // catalog lost-reply cell adds 150s, so it becomes 7659s; the FG13a HTTP
-  // lost-reply cell adds 150s, so it becomes 7809s; the FG11d disabled-span
-  // cell adds 336s (2x its measured 168.1s), so it becomes 8145s. The largest
+  // lost-reply cell adds 150s, so it becomes 7809s; the FG13f deny lost-reply
+  // cell adds 150s, so it becomes 7959s; the FG11d disabled-span cell adds
+  // 336s (2x its measured 168.1s), so it becomes 8295s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 8145;
+  const hostedForkHealthySeconds = 8295;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
