@@ -222,6 +222,40 @@ class HostedHookCancelFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(600)
+    void fg13dDeleteDrainsHeldAsyncHookThenRunsSessionEndAndSessionDeleteOnceOnMySql() throws Exception {
+        boot("60000", "-1", "hook-ignore-term", true);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_DELETE_DRAIN");
+        waitFor(() -> {
+            assertThat(events("hook.call")).hasSize(1);
+            assertThat(events("hook.child")).hasSize(1);
+        });
+        JsonNode hook = events("hook.call").getFirst();
+        JsonNode child = events("hook.child").getFirst();
+        assertThat(running(hook)).isTrue();
+        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+
+        String operation = api("DELETE", "/v1/agents/sessions/" + session, null, "delete-" + session, 202)
+                .path("id").asText();
+        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+                null, null, 200).path("status").asText()).isEqualTo("completed"));
+
+        // DELETE drains the held async command before the lifecycle Hooks run,
+        // and each lifecycle event runs exactly once.
+        assertThat(running(hook)).isFalse();
+        assertThat(running(child)).isFalse();
+        assertHookUnitsEmpty();
+        assertThat(events("hook.done").stream()
+                .filter(event -> "SessionEnd".equals(event.path("eventName").asText())).count()).isEqualTo(1);
+        assertThat(events("hook.done").stream()
+                .filter(event -> "SessionDelete".equals(event.path("eventName").asText())).count()).isEqualTo(1);
+        assertThat(events("hook.allow")).isEmpty();
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The record may report a terminal state only once the unit is empty:
     // inspect the first observation, not a later poll, so a regression that
     // settles early while the drain continues still fails the cell.
@@ -242,6 +276,10 @@ class HostedHookCancelFaultGatesIT {
     }
 
     private void boot(String timeoutMs, String holdMs, String signalMode) throws Exception {
+        boot(timeoutMs, holdMs, signalMode, false);
+    }
+
+    private void boot(String timeoutMs, String holdMs, String signalMode, boolean lifecycle) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("Hook fault gates require disposable MySQL 8.4")
                 .startsWith("jdbc:mysql:");
         node = System.getProperty("node.executable");
@@ -265,14 +303,15 @@ class HostedHookCancelFaultGatesIT {
             Files.copy(resource, program);
         }
         hookDigest = DigestUtils.sha256Hex("hook:" + Files.readString(program));
-        Map<String, Object> hook = new java.util.LinkedHashMap<>(Map.of("hookId", "pre", "eventName", "PreToolUse",
-                "sequential", false, "failClosed", true, "async", false, "config", Map.of("type", "command", "command",
-                        quote(node) + " " + quote(program.toString()) + " hook " + quote(evidence.toString())
-                                + " " + quote(holdMs) + " " + quote(signalMode), "timeout", Integer.parseInt(timeoutMs))));
-        hook.put("onceKey", null);
+        List<Map<String, Object>> hooks = new ArrayList<>();
+        hooks.add(hook("pre", "PreToolUse", lifecycle, program, timeoutMs, holdMs, signalMode));
+        if (lifecycle) {
+            hooks.add(hook("session-end", "SessionEnd", false, program, timeoutMs, "0", "hook-solo"));
+            hooks.add(hook("session-delete", "SessionDelete", false, program, timeoutMs, "0", "hook-solo"));
+        }
         json.writeValue(temporary.resolve("hooks.json").toFile(), Map.of("version", 1, "catalogs", List.of(
                 Map.of("tenantId", tenant, "workspaceId", "workspace", "catalogId", "fg13-hooks",
-                        "catalogRevision", 1, "definitionDigest", catalogDigest(), "hooks", List.of(hook)))));
+                        "catalogRevision", 1, "definitionDigest", catalogDigest(), "hooks", hooks))));
         Path worker = temporary.resolve("worker.mjs");
         Files.writeString(worker, "process.env.QWEN_MANAGED_HOOK_CONFIG="
                 + json.writeValueAsString(temporary.resolve("hooks.json").toString())
@@ -333,6 +372,16 @@ class HostedHookCancelFaultGatesIT {
         proxy = HostedSessionRelayForwardingProxy.start("hook-broker", temporary.resolve("proxy.log"));
         proxy.forwardTo(URI.create("http://127.0.0.1:" + brokerPort));
         startHarness();
+    }
+
+    private Map<String, Object> hook(String id, String event, boolean async, Path program,
+            String timeoutMs, String holdMs, String signalMode) {
+        Map<String, Object> hook = new java.util.LinkedHashMap<>(Map.of("hookId", id, "eventName", event,
+                "sequential", false, "failClosed", true, "async", async, "config", Map.of("type", "command", "command",
+                        quote(node) + " " + quote(program.toString()) + " hook " + quote(evidence.toString())
+                                + " " + quote(holdMs) + " " + quote(signalMode), "timeout", Integer.parseInt(timeoutMs))));
+        hook.put("onceKey", null);
+        return hook;
     }
 
     private String catalogDigest() {
