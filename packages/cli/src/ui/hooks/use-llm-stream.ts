@@ -1645,11 +1645,21 @@ export const useLlmStream = (
         }
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
+        // Handle UI-only commands first
+        const isSlash = isSlashCommand(trimmedQuery);
+        // One-shot notices the TUI folded into this prompt stay on the model
+        // side only: the recall log, the transcript row and the cancel-restore
+        // buffer use the user-authored text (#11553). Slash commands keep
+        // their own text, since a command's arguments may legitimately start
+        // with an envelope-shaped block. Logged here, before the slash and
+        // shell arms below can return, so handled commands stay recallable.
+        const userText = isSlash
+          ? trimmedQuery
+          : stripLeadingSystemReminders(trimmedQuery);
+        await logger?.logMessage(MessageSenderType.USER, userText);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
-        // Handle UI-only commands first
-        const isSlash = isSlashCommand(trimmedQuery);
         const slashCommandResult = isSlash
           ? await handleSlashCommand(
               trimmedQuery,
@@ -1756,16 +1766,6 @@ export const useLlmStream = (
         }
 
         localQueryToSendToLlm = trimmedQuery;
-
-        // One-shot notices the TUI folded into this prompt stay on the model
-        // side only: the transcript row, the recall log and the cancel-restore
-        // buffer all use the user-authored text (#11553). Slash commands keep
-        // their own text, since a command's arguments may legitimately start
-        // with an envelope-shaped block.
-        const userText = isSlash
-          ? trimmedQuery
-          : stripLeadingSystemReminders(trimmedQuery);
-        await logger?.logMessage(MessageSenderType.USER, userText);
 
         // Cron prompts are already rendered as a `● …` notification by
         // their queue drain, so skip the user-message history item to

@@ -12773,7 +12773,9 @@ describe('useLlmStream', () => {
       // content before cancel; that's covered by a separate test below.)
       expect(info?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
-        text: '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
+        // #11553: the envelope stays in the model prompt but not in the
+        // recorded user text the cancel handler restores.
+        text: 'what time is it?',
         submittedPrompt: 'what time is it?',
       });
       expect(info?.canUndoLastLoggedUserMessage).toBe(true);
@@ -18618,7 +18620,7 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
         });
         expect(
@@ -18712,7 +18714,7 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
         });
       } finally {
