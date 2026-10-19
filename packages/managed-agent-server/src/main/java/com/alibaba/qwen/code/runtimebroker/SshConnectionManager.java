@@ -113,6 +113,11 @@ public final class SshConnectionManager implements AutoCloseable {
             command.add(node.sshHost());
             command.add(quote(node.nodeExecutable()) + " " + quote(node.qwenEntry())
                     + " managed-runtime-bootstrap");
+            if (fields.containsKey("files")) {
+                List<String> help = new ArrayList<>(command);
+                help.set(help.size() - 1, help.getLast() + " --help");
+                WorkspaceFileProcess.requireCapability(runner.run(List.copyOf(help), new byte[]{'{', '}'}, COMMAND_TIMEOUT));
+            }
             exchange = runner.run(List.copyOf(command), input, COMMAND_TIMEOUT);
         } finally {
             bootstraps.readLock().unlock();
