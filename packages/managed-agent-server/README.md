@@ -75,6 +75,28 @@ Actions (Hosted permission approvals): [English](../../docs/design/2026-09-30-ma
 AgentDefinition revisions: [English](../../docs/design/2026-10-01-managed-agent-definitions.md) |
 [简体中文](../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
+## On-demand tool details
+
+Managed ReadFile and Shell cards read saved arguments, output and errors only
+when expanded, through `/api/agent/web-shell/v1/tool-details/get`, without a
+feature switch. Each request requires a trusted actor and current
+Session/Workspace read access, rechecked before returning. It does not require
+Artifact publication or download permissions and never executes a tool or starts
+a Harness.
+
+Lifecycle events remain metadata-only. Existing retained private results can be
+read without backfilling public events. Allowlisted input is limited to 4 KiB;
+text is limited to 8 KiB and 200 lines, with truncation reported. Closed cards do
+not fetch details. Reads stay inside the saved Session/Workspace and have a
+bounded history budget.
+Saved version-1 Shell display records also supply structured execution details to
+the shared daemon card. Their text fields share a separate 8 KiB/200-line budget,
+and directory/output-file paths share an 8 KiB budget. Unsupported or malformed
+structures retain the legacy text fallback; private fields are excluded.
+See the complete design:
+[English](../../docs/design/2026-10-19-managed-inline-tool-details.md) |
+[简体中文](../../docs/design/2026-10-19-managed-inline-tool-details.zh-CN.md).
+
 ## Tool publication storage
 
 Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
@@ -166,10 +188,10 @@ Design and client migration contract:
 
 The independent Hosted Java reference distribution packages the runnable
 server, operator-recovery entry point, embedded Broker component, a
-configuration template, provenance manifest, checksums, and deployment/upgrade
-instructions. Pull requests and manual dry runs build and boot the same Linux
-archive; only a protected-main production dispatch publishes an immutable
-prerelease. See
+configuration template, systemd unit templates, provenance manifest, checksums,
+and deployment/upgrade instructions. Pull requests and manual dry runs build
+and boot the same Linux archive; only a protected-main production dispatch
+publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
 The bundled launcher also supports `--check`, a read-only preflight for

@@ -527,14 +527,21 @@ describe('build artifact — transcript entry (#11031)', () => {
     // 251 units of shared copy above its base, while Managed interactive code
     // stays excluded. Teammate activity notices add attributed tool and
     // inter-agent message bubbles to this entry on top of that shared table;
-    // with both landed the merged entry measures 1,340,232 UTF-16 units, so
-    // the bound moves to 1,342,000 and retains 1,768 units of margin.
+    // with both landed the merged entry measures 1,340,232 UTF-16 units, below
+    // the unchanged 1,341,000 ceiling with 768 units of margin.
+    // ReadFile hints, the shared detail loader and attachment recovery copy
+    // stay in this entry; interactive detail HTTP transport stays excluded.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_342_000);
+    expect(js.length).toBeLessThan(1_341_000);
+  });
+
+  it('keeps Managed tool-detail transport out of the transcript entry', () => {
+    expect(readPackageJavascript()).toContain('/tool-details/get');
+    expect(readTranscriptBundle()).not.toContain('/tool-details/get');
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {

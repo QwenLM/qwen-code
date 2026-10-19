@@ -69,6 +69,7 @@ export interface DaemonMessageToolCall {
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   toolResult?: components['schemas']['PublicToolResult'];
+  toolDetailsRevision?: number;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
