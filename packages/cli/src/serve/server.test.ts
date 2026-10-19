@@ -41025,6 +41025,10 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     return {
       workspaceId: 'ws-registry',
       workspaceCwd: '/work/registry-primary',
+      sessionRuntimeBaseDir: path.join(
+        serverTestEnvironmentRoot,
+        'registry-runtime',
+      ),
       primary: true,
       trusted: true,
       env: { mode: 'parent-process', overlayKeys: [] },
