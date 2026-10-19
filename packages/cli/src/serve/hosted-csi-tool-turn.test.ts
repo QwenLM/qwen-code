@@ -172,6 +172,9 @@ beforeEach(async () => {
         'batchId',
       ].sort(),
     );
+    expect(body['protocolVersion']).toBe(1);
+    expect(body['promptId']).toBe(promptId);
+    expect(body['batchId']).toBe(batchId);
     return new Response(
       JSON.stringify({
         protocolVersion: 1,
@@ -234,6 +237,7 @@ function batch() {
 
 it('fixes full Parts, original IDs, exact input bytes and final definitions before reservation', async () => {
   const { calls, parts } = batch();
+  const originalParts = structuredClone(parts);
   const declarations = await turn.declarations(new AbortController().signal);
   for (const declaration of declarations) {
     if (declaration.name !== 'write_file') {
@@ -265,7 +269,12 @@ it('fixes full Parts, original IDs, exact input bytes and final definitions befo
   expect(responses.map((part) => part.functionResponse?.id)).toEqual(
     calls.map((call) => call.callId),
   );
-  expect(commit).toHaveBeenNthCalledWith(1, 'assistant', parts, 'unit-model');
+  expect(commit).toHaveBeenNthCalledWith(
+    1,
+    'assistant',
+    originalParts,
+    'unit-model',
+  );
   expect(commit).toHaveBeenCalledTimes(4);
   expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(3);
   expect(
@@ -664,9 +673,23 @@ it('records complete broker results and tool history before explicit Harness con
   ).toBe('turn_settled');
 });
 
-it.each(['short', 'executing'])(
+it.each([
+  ['short', 'Original CSI batch is incomplete.'],
+  ['executing', 'Original CSI batch is not prepared.'],
+  ...['prompt', 'batch', 'binding', 'generation', 'members'].map((fault) => [
+    fault,
+    'Original CSI batch read differs.',
+  ]),
+  ...[
+    'duplicate-execution',
+    'duplicate-call',
+    'unknown-call',
+    'input',
+    'definition',
+  ].map((fault) => [fault, 'Original CSI member read differs.']),
+])(
   'refuses a %s batch before dispatch for the intended reason',
-  async (fault) => {
+  async (fault, reason) => {
     const { calls, parts } = batch();
     const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
@@ -674,7 +697,24 @@ it.each(['short', 'executing'])(
       if (String(args[0]).endsWith('/executions:read-batch')) {
         const body = await response.json();
         if (fault === 'short') body.members.pop();
-        else body.members[0].state = 'executing';
+        else if (fault === 'executing') body.members[0].state = 'executing';
+        else if (fault === 'prompt') body.promptId = randomUUID();
+        else if (fault === 'batch') body.batchId = randomUUID();
+        else if (fault === 'binding') body.runtimeBindingId = randomUUID();
+        else if (fault === 'generation') body.bindingGeneration = '2';
+        else if (fault === 'members') body.members = null;
+        else if (fault === 'duplicate-execution')
+          body.members[1].executionCallId = body.members[0].executionCallId;
+        else if (fault === 'duplicate-call')
+          body.members[1] = {
+            ...structuredClone(body.members[0]),
+            executionCallId: 'unit-execution-extra',
+          };
+        else if (fault === 'unknown-call')
+          body.members[0].reference.callId = randomUUID();
+        else if (fault === 'input') body.members[0].inputBytesBase64 = 'e30=';
+        else if (fault === 'definition')
+          body.members[0].toolDefinitionBytesBase64 = 'e30=';
         return new Response(JSON.stringify(body));
       }
       return response;
@@ -682,14 +722,122 @@ it.each(['short', 'executing'])(
     await expect(
       turn.execute(calls, parts, 'unit-model', new AbortController().signal),
     ).rejects.toMatchObject({
-      cause: {
-        message:
-          fault === 'short'
-            ? 'Original CSI batch is incomplete.'
-            : 'Original CSI batch is not prepared.',
-      },
+      cause: { message: reason },
     });
     expect(requests).toHaveLength(3);
+    expect(paths.some((route) => route.endsWith(':start'))).toBe(false);
+    expect(commit).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(['count', 'duplicate', 'id', 'name', 'args'])(
+  'refuses an original function %s mismatch before reservation',
+  async (fault) => {
+    const { calls, parts } = batch();
+    if (fault === 'count') calls.pop();
+    else if (fault === 'duplicate') calls[1].callId = calls[0].callId;
+    else if (fault === 'id') calls[1].callId = 'replaced-function';
+    else if (fault === 'name') calls[1].name = 'read_file';
+    else calls[1].args = { file_path: 'different.txt', content: '' };
+    await expect(
+      turn.execute(calls, parts, 'unit-model', new AbortController().signal),
+    ).rejects.toMatchObject({
+      cause: {
+        message: ['count', 'duplicate'].includes(fault)
+          ? 'Original CSI functions differ.'
+          : 'Original CSI function identity differs.',
+      },
+    });
+    expect(requests).toEqual([]);
+    expect(paths).toEqual([]);
+    expect(commit).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(['function', 'error'])(
+  'retains pending work and refuses a malformed %s result before publishing a receipt',
+  async (fault) => {
+    const { calls, parts } = batch();
+    const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+      const response = await fetch(...args);
+      if (!String(args[0]).endsWith(':start')) return response;
+      const body = await response.json();
+      body.status.result =
+        fault === 'function'
+          ? {
+              executionStatus: 'success',
+              responseParts: [
+                {
+                  text: 'owned',
+                  functionResponse: {
+                    id: 'foreign',
+                    name: 'edit',
+                    response: { output: 'replaced' },
+                  },
+                },
+              ],
+            }
+          : {
+              executionStatus: 'error',
+              responseParts: [],
+              error: { message: '' },
+            };
+      return new Response(JSON.stringify(body));
+    });
+    const publish = vi.spyOn(managed.resources, 'publish');
+    await expect(
+      turn.execute(calls, parts, 'unit-model', new AbortController().signal),
+    ).rejects.toMatchObject({
+      cause: { message: 'Runtime returned an unsupported tool result.' },
+    });
+    expect(paths.filter((route) => route.endsWith(':start'))).toHaveLength(1);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(
+      publish.mock.calls.some(([kind]) => kind === 'managed-tool-outcome'),
+    ).toBe(false);
+    expect(
+      managed.authority
+        .eventsInSequenceRange(1, managed.authority.committedSequence)
+        .filter((event) => event.kind === 'tool.receipt'),
+    ).toEqual([]);
+    const checkpoint = parseHarnessCheckpointV1(
+      (await managed.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.continuation.phase).toBe('await_runtime');
+    expect(
+      checkpoint.tools!.items.every(
+        (item) => !item.consumed && item.outcomeRef === null,
+      ),
+    ).toBe(true);
+  },
+);
+
+it.each(['transport', 'invalid'])(
+  'keeps the prepare failure instance when its independent read-back is %s',
+  async (fault) => {
+    const { calls, parts } = batch();
+    const reason = new Error('owned prepare failure');
+    const fetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    let reads = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+      const response = await fetch(...args);
+      if (String(args[0]).endsWith('/executions:prepare')) throw reason;
+      if (String(args[0]).endsWith('/executions:read-batch')) {
+        reads++;
+        if (fault === 'transport')
+          throw new TypeError('owned read-back failure');
+        return new Response('{}');
+      }
+      return response;
+    });
+    const failure: unknown = await turn
+      .execute(calls, parts, 'unit-model', new AbortController().signal)
+      .catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect((failure as Error).cause).toBe(reason);
+    expect(reads).toBe(1);
+    expect(requests).toHaveLength(1);
     expect(paths.some((route) => route.endsWith(':start'))).toBe(false);
     expect(commit).toHaveBeenCalledTimes(1);
   },

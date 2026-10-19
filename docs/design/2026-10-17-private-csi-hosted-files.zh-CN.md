@@ -38,12 +38,15 @@ checkpoint，只声明三个受支持的文件工具。
 一次；已准入的工作仍须提供 receipt 证明。修改历史关联到最新提交的拒绝消息，
 同时保持原始 batch 身份。批次身份比较 message ID、content reference 和 calls；
 拒绝进度不会改变该身份，也不会阻止其余调用被预留。正常预留请求响应回合取消；
-prepare 响应丢失或取消后，仍以独立且有时限的请求读取成员身份。
+prepare 响应丢失或取消后，仍独立读取一次成员身份，上限为五秒。回读失败或回包
+不合法时保留原始 preparation 或取消错误，不据此授权再次派发。
 发布历史前检查完整持久化 envelope 的大小，包括面向 reader
 的快照副本。容量拒绝保留不确定工作，不截断证据，也不重放修改。
 
 经认证 Broker 在固定原 Runtime Session 上执行。保留每份完整 Broker outcome
-及转换后的 tool-result message，再完成相应 Harness wait。将结果返回模型前保存
+及转换后的 tool-result message，再完成相应 Harness wait。发布 receipt 前校验
+原生结果的封闭 schema，包括错误元数据及 text/media Parts；拒绝外部提供的
+functionResponse 或 functionCall，不保存原生 reader 无法验证的 outcome。将结果返回模型前保存
 工作后的 file-history 观察；仅在模型消费结果后标记 consumed，并结算正常
 continuation，不释放 Runtime。超限、不完整或不确定结果阻止 Session。取消和
 本地停止不能证明远端工作从未执行。

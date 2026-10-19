@@ -12,7 +12,10 @@ import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtim
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import { readCsiNativeRequest } from './managed-csi-native-readback.js';
-import { parseManagedCsiFileJson } from './managed-csi-file-envelope.js';
+import {
+  MANAGED_CSI_FILE_PROTOCOL,
+  parseManagedCsiFileJson,
+} from './managed-csi-file-envelope.js';
 import {
   csiHistoryContentDigest,
   readCsiFileHistoryObservation,
@@ -105,7 +108,7 @@ export async function requestHostedCsiHistory(
   ]);
   if (
     result['protocolVersion'] !== 2 ||
-    result['managedCsi'] !== 'managed-csi/2' ||
+    result['managedCsi'] !== MANAGED_CSI_FILE_PROTOCOL ||
     !isDeepStrictEqual(result['operation'], operation)
   )
     throw new Error('CSI history response differs.');

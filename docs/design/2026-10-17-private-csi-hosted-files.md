@@ -48,14 +48,19 @@ refusal message while preserving the original batch identity. Batch identity
 compares the message ID, content reference and calls; refusal progress does not
 change that identity or prevent the surviving calls from being reserved.
 Normal reservation requests follow turn cancellation, while a lost or cancelled
-prepare answer still requires an independent bounded membership read.
+prepare answer still requires one independent membership read bounded to five
+seconds. A failed read or invalid reply preserves the original preparation or
+cancellation error; it never authorizes another dispatch.
 Check the size of the complete persisted history envelope, including the
 reader-facing snapshot copy, before publishing it. Capacity refusal retains
 uncertain work; it never truncates evidence or replays a mutation.
 
 Execute through the authenticated Broker with the fixed original Runtime
 Session. Retain each complete Broker outcome and the converted tool-result
-message, then resolve the corresponding Harness wait. Persist the post-work
+message, then resolve the corresponding Harness wait. Before publishing a
+receipt, validate the closed native result schema, including error metadata and
+text/media Parts; reject supplied function responses or calls rather than
+persisting an outcome the native reader cannot verify. Persist the post-work
 file-history observation before returning results to the model. Mark results
 consumed only after the model consumes them; settle the normal continuation
 without releasing the Runtime. Oversized, partial or uncertain results block

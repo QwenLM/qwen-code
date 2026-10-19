@@ -192,11 +192,16 @@ export class HostedCsiToolTurn {
           await this.request('/executions:prepare', reservation, signal);
         } catch (cause) {
           // A lost answer cannot establish absence or justify new identities.
-          const batch = await this.request('/executions:read-batch', {
-            promptId: this.promptId,
-            batchId,
-          });
-          this.verifyBatch(batch, batchId, reservations);
+          try {
+            const batch = await this.request(
+              '/executions:read-batch',
+              { promptId: this.promptId, batchId },
+              AbortSignal.timeout(5_000),
+            );
+            this.verifyBatch(batch, batchId, reservations);
+          } catch {
+            throw cause;
+          }
           throw cause;
         }
       }

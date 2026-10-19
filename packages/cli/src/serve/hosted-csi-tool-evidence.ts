@@ -113,13 +113,51 @@ export function convertHostedCsiToolResult(
   result: Awaited<ReturnType<HostedWorkspaceBroker['execute']>>,
 ): Part[] {
   const responseParts = result.responseParts as Part[];
+  const error = result.error;
   if (
-    responseParts.some(
-      (part) =>
-        !part ||
-        typeof part !== 'object' ||
-        (typeof part.text !== 'string' && !part.inlineData && !part.fileData),
-    )
+    Object.keys(result).some(
+      (key) => !['executionStatus', 'responseParts', 'error'].includes(key),
+    ) ||
+    !['success', 'error'].includes(result.executionStatus) ||
+    (error !== undefined &&
+      (!error ||
+        typeof error !== 'object' ||
+        Array.isArray(error) ||
+        Object.keys(error).some((key) => !['message', 'type'].includes(key)) ||
+        typeof error.message !== 'string' ||
+        !error.message ||
+        (Object.hasOwn(error, 'type') &&
+          (typeof error.type !== 'string' || !error.type)))) ||
+    !Array.isArray(responseParts) ||
+    responseParts.some((part: unknown) => {
+      if (!part || typeof part !== 'object' || Array.isArray(part)) return true;
+      const value = part as Record<string, unknown>;
+      if (Object.hasOwn(value, 'text'))
+        return (
+          typeof value['text'] !== 'string' ||
+          Object.keys(value).some((key) => !['text', 'type'].includes(key)) ||
+          (Object.hasOwn(value, 'type') && value['type'] !== 'text')
+        );
+      const field = Object.hasOwn(value, 'inlineData')
+        ? 'inlineData'
+        : 'fileData';
+      const content = value[field] as Record<string, unknown> | undefined;
+      const data = field === 'inlineData' ? 'data' : 'fileUri';
+      return (
+        Object.keys(value).length !== 1 ||
+        !content ||
+        typeof content !== 'object' ||
+        Array.isArray(content) ||
+        Object.keys(content).sort().join(',') !==
+          [data, 'mimeType'].sort().join(',') ||
+        typeof content['mimeType'] !== 'string' ||
+        !content['mimeType'] ||
+        content['mimeType'].length > 4096 ||
+        typeof content[data] !== 'string' ||
+        !content[data] ||
+        content[data].length > 4096
+      );
+    })
   )
     throw new Error('Runtime returned an unsupported tool result.');
   const converted =
@@ -132,7 +170,12 @@ export function convertHostedCsiToolResult(
           result.error?.message ?? `Runtime tool ${result.executionStatus}.`,
         );
   const response = converted[0]?.functionResponse;
-  if (!response || converted.length !== 1)
+  if (
+    !response ||
+    converted.length !== 1 ||
+    response.id !== callId ||
+    response.name !== toolName
+  )
     throw new Error('Runtime result cannot be represented durably.');
   response.response = {
     ...response.response,
