@@ -929,7 +929,6 @@ class ManagedActionsTest {
         // slack per period — keep scheduler jitter on a loaded CI runner
         // from lapsing the lease mid-hold (#14476).
         properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
-        assertThat(properties.getDispatch().getLeaseRenewInterval()).isGreaterThan(lease);
         // Deriving the hold as lease + 6 clamped renewal periods keeps "hold
         // outlasts the lease" structural under rescale and leaves six renewal
         // ticks past the lease deadline, so a renewal loop that stops after
@@ -946,6 +945,7 @@ class ManagedActionsTest {
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;
         try {
+            assertThat(properties.getDispatch().getLeaseRenewInterval()).isGreaterThan(lease);
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
