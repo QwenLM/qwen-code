@@ -525,13 +525,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
     // ReadFile hints, the shared detail loader and attachment recovery copy
     // stay in this entry; interactive detail HTTP transport stays excluded.
-    // Keep the measured remainder below 1,341,000 UTF-16 units.
+    // At 81e83de6b6 main measures 1,340,582 UTF-16 units. Advanced-table
+    // toolbar menus, icons, literal-text Markdown copying and drag scrolling
+    // enter this shared component even in the basic transcript renderer.
+    // The result measures 1,352,388 (+11,806 over main), leaving
+    // 1,612 units of headroom.
+    // Keep the measured remainder below 1,354,000 UTF-16 units.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_341_000);
+    expect(js.length).toBeLessThan(1_354_000);
   });
 
   it('keeps Managed tool-detail transport out of the transcript entry', () => {
