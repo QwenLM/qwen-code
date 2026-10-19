@@ -289,6 +289,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
   realUserPromptTexts,
+  stripLeadingSystemReminders,
 } from './utils/historyUtils.js';
 import {
   MAIN_CONTENT_HEIGHT_RESERVATION,
@@ -3138,14 +3139,22 @@ export const AppContainer = (props: AppContainerProps) => {
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
+      // Without `submittedPrompt` the history row falls back to the queued
+      // text, which carries the reminders prepended below (or by a restored
+      // draft). Hand the same value `stripLeadingSystemReminders` derives so
+      // the model still reads the notice while the row shows what was typed
+      // (#11553). Reminders that `useMessageQueue` prepends to a queued entry
+      // have no composer-side copy and still reach the model only.
       const submittedPrompt =
-        submittedPromptProvenanceUnavailable || !provenanceEnabled
+        submittedPromptProvenanceUnavailable
           ? undefined
-          : restoredSubmission === null
-            ? trimmedSubmittedPrompt || undefined
-            : restoredSubmission.modelText === submittedValue
-              ? restoredSubmission.submittedPrompt
-              : undefined;
+          : !provenanceEnabled
+            ? stripLeadingSystemReminders(submittedValue)
+            : restoredSubmission === null
+              ? trimmedSubmittedPrompt || undefined
+              : restoredSubmission.modelText === submittedValue
+                ? restoredSubmission.submittedPrompt
+                : undefined;
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
       }

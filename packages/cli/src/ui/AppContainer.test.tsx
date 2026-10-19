@@ -3274,6 +3274,8 @@ describe('AppContainer State Management', () => {
         '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
           '</system-reminder>\n\ncontinue the review',
         false,
+        // #11553: no composer provenance on this submit, so the history row
+        // must still show the user's text without the injected envelope.
         'continue the review',
         false,
       );

@@ -101,7 +101,10 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
-import { findLastUserItemIndex } from '../utils/historyUtils.js';
+import {
+  findLastUserItemIndex,
+  stripLeadingSystemReminders,
+} from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -1642,12 +1645,12 @@ export const useLlmStream = (
         }
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
-        await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
         // Handle UI-only commands first
-        const slashCommandResult = isSlashCommand(trimmedQuery)
+        const isSlash = isSlashCommand(trimmedQuery);
+        const slashCommandResult = isSlash
           ? await handleSlashCommand(
               trimmedQuery,
               undefined,
@@ -1754,6 +1757,16 @@ export const useLlmStream = (
 
         localQueryToSendToLlm = trimmedQuery;
 
+        // One-shot notices the TUI folded into this prompt stay on the model
+        // side only: the transcript row, the recall log and the cancel-restore
+        // buffer all use the user-authored text (#11553). Slash commands keep
+        // their own text, since a command's arguments may legitimately start
+        // with an envelope-shaped block.
+        const userText = isSlash
+          ? trimmedQuery
+          : stripLeadingSystemReminders(trimmedQuery);
+        await logger?.logMessage(MessageSenderType.USER, userText);
+
         // Cron prompts are already rendered as a `● …` notification by
         // their queue drain, so skip the user-message history item to
         // avoid a duplicate `> …` line. Preprocessing (@/slash/shell)
@@ -1763,7 +1776,7 @@ export const useLlmStream = (
           const insertedId = addItem(
             {
               type: MessageType.USER,
-              text: trimmedQuery,
+              text: userText,
               promptId: prompt_id,
             } as HistoryItemWithoutId,
             userMessageTimestamp,
@@ -1776,7 +1789,7 @@ export const useLlmStream = (
           if (!preserveTurnOwnership) {
             lastTurnUserItemRef.current = {
               id: insertedId,
-              text: trimmedQuery,
+              text: userText,
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             };
           }
