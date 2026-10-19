@@ -39,6 +39,7 @@ export async function runHostedCsiTextTurn(
   promptId: string,
   text: string,
   abort: AbortController,
+  resumeFromToolResults?: readonly Part[],
 ): Promise<ChatRecord> {
   const { managed, cwd, files } = session;
   const authority = managed.authority;
@@ -75,19 +76,24 @@ export async function runHostedCsiTextTurn(
         );
         const history = projected.filter(
           (entry) =>
-            settled.has(entry.daemonPromptId) &&
-            !(
-              entry.type === 'user' &&
-              settled.get(entry.daemonPromptId) !== 'completed'
-            ),
+            (resumeFromToolResults !== undefined &&
+              entry.daemonPromptId === promptId) ||
+            (settled.has(entry.daemonPromptId) &&
+              !(
+                entry.type === 'user' &&
+                settled.get(entry.daemonPromptId) !== 'completed'
+              )),
         );
-        const user = record('user', projected.at(-1)?.uuid ?? null, {
-          daemonPromptId: promptId,
-          message: { role: 'user', parts: [{ text }] },
-        });
-        await managed.sink.write(user);
+        let parentUuid = projected.at(-1)?.uuid ?? null;
+        if (resumeFromToolResults === undefined) {
+          const user = record('user', parentUuid, {
+            daemonPromptId: promptId,
+            message: { role: 'user', parts: [{ text }] },
+          });
+          await managed.sink.write(user);
+          parentUuid = user.uuid;
+        }
         const deltas = new HostedTextDeltaStream(managed, promptId);
-        let parentUuid = user.uuid;
         const messageRecord = (
           type: 'assistant' | 'tool_result',
           parts: Part[],
@@ -128,6 +134,13 @@ export async function runHostedCsiTextTurn(
                 fitsInline(messageRecord(type, parts, model)),
             )
           : undefined;
+        if (resumeFromToolResults !== undefined) {
+          if (!toolTurn)
+            throw new HostedToolRecoveryRequiredError(
+              'CSI file recovery is unavailable.',
+            );
+          await toolTurn.resumeCommittedResults(abort.signal);
+        }
         let state: 'completed' | 'error' = 'completed';
         let stopReason = 'end_turn';
         let result: HostedHarnessModelResult | undefined;
@@ -142,6 +155,9 @@ export async function runHostedCsiTextTurn(
             signal: abort.signal,
             modelScope,
             textDeltas: deltas,
+            ...(resumeFromToolResults !== undefined
+              ? { resumeFromToolResults }
+              : {}),
             ...(toolTurn
               ? {
                   toolTurn,

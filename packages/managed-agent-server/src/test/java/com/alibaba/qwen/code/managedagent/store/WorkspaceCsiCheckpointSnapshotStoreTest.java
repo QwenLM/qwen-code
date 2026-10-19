@@ -289,7 +289,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
                         bytes, bytes.length, hash(bytes));
             }
             if ("rows".equals(limit) || "total".equals(limit)) {
-                int count = "rows".equals(limit) ? 4097 : 5;
+                int count = "rows".equals(limit) ? 4097 : 17;
                 List<Object[]> rows = new ArrayList<>();
                 for (int revision = 2; revision <= count; revision++) {
                     rows.add(new Object[]{revision, String.format("%064d", revision), "transaction-" + revision,
