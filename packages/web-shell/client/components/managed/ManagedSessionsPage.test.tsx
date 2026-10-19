@@ -591,6 +591,30 @@ describe('ManagedSessionsPage', () => {
         'may already have been submitted',
       );
       expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(
+        false,
+      );
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(
+        'Could not discard this request.',
+      );
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      await act(async () => {
+        mocks.editorProps!.onSubmit(
+          'blocked request',
+          undefined,
+          undefined,
+          vi.fn(),
+        );
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
       await act(async () => {
         const discard = [...container.querySelectorAll('button')].find(
           (item) => item.textContent === 'Discard this request',
@@ -599,6 +623,9 @@ describe('ManagedSessionsPage', () => {
         await flush();
       });
       expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'Could not discard this request.',
+      );
       expect(container.textContent).not.toContain(
         'may already have been submitted',
       );

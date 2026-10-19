@@ -722,6 +722,22 @@ describe('WorkspaceBindingCreator', () => {
         'may already have been submitted',
       );
       expect(createSession).not.toHaveBeenCalled();
+      vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(
+        false,
+      );
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(
+        'Could not discard this request.',
+      );
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      await sendInitial('blocked request');
+      expect(createSession).not.toHaveBeenCalled();
       await act(async () => {
         const discard = [...container.querySelectorAll('button')].find(
           (item) => item.textContent === 'Discard this request',
@@ -730,6 +746,9 @@ describe('WorkspaceBindingCreator', () => {
         await flush();
       });
       expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'Could not discard this request.',
+      );
       expect(container.textContent).not.toContain(
         'may already have been submitted',
       );

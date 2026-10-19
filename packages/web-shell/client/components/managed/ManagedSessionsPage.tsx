@@ -811,11 +811,12 @@ function ManagedSessionsContent({
             onClick={async () => {
               const abort = lifetime.current;
               if (!abort || abort.signal.aborted) return;
-              if (
-                !(await persistPending(pendingKey, undefined)) ||
-                abort.signal.aborted
-              )
+              const discarded = await persistPending(pendingKey, undefined);
+              if (abort.signal.aborted) return;
+              if (!discarded) {
+                setError(t('managed.pendingDiscardFailed'));
                 return;
+              }
               pendingRef.current = undefined;
               setPending(undefined);
               setPendingRestoreFailed(false);

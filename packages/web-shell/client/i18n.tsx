@@ -163,6 +163,8 @@ const EN: Messages = {
   'managed.discard': 'Discard this request',
   'managed.pendingRestoreFailed':
     'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
+  'managed.pendingDiscardFailed':
+    'Could not discard this request. Browser storage is unavailable. Retry or reload the page.',
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
@@ -4566,6 +4568,8 @@ const ZH: Messages = {
   'managed.discard': '丢弃本次请求',
   'managed.pendingRestoreFailed':
     '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
+  'managed.pendingDiscardFailed':
+    '无法丢弃此请求，浏览器存储不可用。请重试或刷新页面。',
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',

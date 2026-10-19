@@ -865,8 +865,12 @@ export function WorkspaceBindingCreator({
             onClick={async () => {
               const abort = commandLifetime.current;
               if (!abort || abort.signal.aborted) return;
-              if (!(await savePending(pendingKey)) || abort.signal.aborted)
+              const discarded = await savePending(pendingKey);
+              if (abort.signal.aborted) return;
+              if (!discarded) {
+                setError(t('managed.pendingDiscardFailed'));
                 return;
+              }
               pendingRef.current = undefined;
               setPending(undefined);
               setPendingRestoreFailed(false);
