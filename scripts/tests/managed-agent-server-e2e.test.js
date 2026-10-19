@@ -352,14 +352,16 @@ describe('managed-agent-server e2e runner', () => {
     // model round, then releases the hold; its reissue must reuse the same
     // saved request or the proof is about a rewritten one.
     expect(source).toContain(
-      'Approved result committed before the model round',
+      'Approved result committed and its prefix published',
     );
-    expect(source).toContain("execution === 'SETTLED\\t1'");
+    expect(source).toContain('SETTLED\\t1');
     expect(source).toContain('releaseApprovalResultHold()');
     expect(source).toContain(
       'Result-commit recovery changed the saved model request',
     );
-    expect(source).toContain("approvalFault === 'after-result'\n          ? 2");
+    expect(source).toContain('publishedPrefixSequences');
+    expect(source).toContain("approvalFault === 'after-result'");
+    expect(source).toContain('? 2');
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

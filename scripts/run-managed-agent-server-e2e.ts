@@ -2433,8 +2433,8 @@ try {
           );
         } else if (approvalFault === 'after-result') {
           await waitUntil(
-            'Approved result committed before the model round',
-            () => {
+            'Approved result committed and its prefix published',
+            async () => {
               const execution = runMysql(
                 mysqlPort,
                 'SELECT execution_state, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.ma_tool_execution',
@@ -2448,7 +2448,18 @@ try {
                   );
                 },
               );
-              return execution === 'SETTLED\t1' && heldResultRequest;
+              if (execution !== 'SETTLED\t1' || !heldResultRequest)
+                return false;
+              // The request log is written before the fake server sends its
+              // response, so it alone does not prove the Harness consumed and
+              // published the held prefix. Require the public feed to carry
+              // it; otherwise a no-op retraction would pass vacuously.
+              const view = await publicTranscript(
+                replacementSpringUrl,
+                tenant,
+                session.id,
+              );
+              return view.text.includes(continuationPartial);
             },
             120_000,
             replacementHarness,
@@ -2473,11 +2484,29 @@ try {
           mysqlPort,
           'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
         );
+        const publishedPrefix =
+          approvalFault === 'after-result'
+            ? await publicTranscript(replacementSpringUrl, tenant, session.id)
+            : undefined;
+        const publishedPrefixSequences = (publishedPrefix?.events ?? [])
+          .filter(
+            (event) =>
+              event.type === 'item.output_text.delta' &&
+              eventText(event).includes(continuationPartial),
+          )
+          .map((event) => event.sequence);
         saveEvidence('approval-crash-barrier.json', {
           fault: approvalFault,
           crashedHarnessBootId: crashedBootId,
           executionAtCrash,
           heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
+          publishedPrefix:
+            approvalFault === 'after-result'
+              ? {
+                  sequences: publishedPrefixSequences,
+                  text: publishedPrefix?.text,
+                }
+              : undefined,
         });
         await crashChild(
           replacementHarness.child,
