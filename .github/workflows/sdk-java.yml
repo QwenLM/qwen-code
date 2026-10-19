@@ -38,7 +38,15 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    timeout-minutes: 90
+    # The fast-tier leg shares sdk-java-tests.lock with the full-tier MySQL
+    # job, whose verify step held it for 1h36m in run 39238346243. A sibling
+    # hold can therefore outlast the old 60-minute wait; main run
+    # 39235911469's Java 21 leg starved the full wait without running a test
+    # (#14794). The wait is two hours; the ceiling adds this leg's ~41
+    # minutes of locked Maven work, ~11 minutes of uncapped setup and
+    # margin: 200.
+    # Hosted lanes never take the lock and inherit this ceiling as a bound.
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
@@ -216,8 +224,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 3600 9; then
-            echo "::error::sdk-java host lock not acquired within 60 minutes"
+          if ! flock --wait 7200 9; then
+            echo "::error::sdk-java host lock not acquired within 120 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test

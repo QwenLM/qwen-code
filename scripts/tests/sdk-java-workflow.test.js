@@ -98,9 +98,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 3600 9');
+    expect(block).toContain('flock --wait 7200 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 60 minutes',
+      '::error::sdk-java host lock not acquired within 120 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -721,12 +721,12 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     ).toBeGreaterThanOrEqual(
       lockWaits.reduce((total, seconds) => total + seconds, 0) + 50 * 60,
     );
-    // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured locked work (~5 minutes on
-    // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
-    // now consume part of that wait budget.
+    // The sibling test job shares the same per-host lock, and a full-tier
+    // MySQL verify step held it for 1h36m in run 39238346243. Its ceiling
+    // covers one full 2-hour wait plus its own 41-minute hold and ~11
+    // minutes of uncapped setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      3600 + 10 * 60,
+      7200 + 41 * 60 + 11 * 60,
     );
   });
 
