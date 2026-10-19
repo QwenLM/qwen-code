@@ -28,6 +28,7 @@ import type { HookExecution, HookRegistration } from './managed-hook-record.js';
 import {
   MANAGED_SESSION_EVENT_SUBTYPE,
   MANAGED_SESSION_HEADER_SUBTYPE,
+  ManagedSessionAppendUnsettledError,
   managedSessionEventRefs,
   managedSessionEventsDigest,
   parseManagedSessionEvent,
@@ -2496,6 +2497,65 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('settles a pending append on demand before a caller reads replay state', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const server = new FakeManagedSessionStore();
+    const originalFetch = server.fetch.getMockImplementation()!;
+    let unavailable = false;
+    let loseFirstAck = true;
+    server.fetch.mockImplementation(async (input, init) => {
+      const url = requestUrl(input);
+      if (unavailable) {
+        if (
+          loseFirstAck &&
+          /\/transactions:commit(?:-v2)?$/.test(url) &&
+          (JSON.parse(String(init?.body)) as Record<string, unknown>)[
+            'operation'
+          ] === 'renewActivation'
+        ) {
+          loseFirstAck = false;
+          await originalFetch(input, init);
+        }
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'outage' } },
+          503,
+        );
+      }
+      const response = await originalFetch(input, init);
+      if (url.endsWith('/writers:acquire')) {
+        return jsonResponse({
+          ...(await response.json()),
+          leaseUntil: Date.now() + 50_000,
+        });
+      }
+      return response;
+    });
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const committedBefore = session.authority.committedSequence;
+      unavailable = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(session.authority.writesStopped).toBe(false);
+      unavailable = false;
+      // The funnel's new entry settles on demand before it reads replay.
+      await session.authority.settlePendingAppend();
+      expect(session.authority.writesStopped).toBe(false);
+      expect(session.authority.committedSequence).toBe(committedBefore + 1);
+      expect(session.authority.currentActivation?.renewalSeq).toBe(1);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'renewActivation',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await stores.close().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1000);
+      await session.close().catch(() => undefined);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("fences a journal whose append position holds another writer's transaction", async () => {
     vi.useFakeTimers({ now: 1_790_000_000_000 });
     const server = new FakeManagedSessionStore();
@@ -4932,9 +4992,18 @@ describe('HTTP Managed Session store', () => {
       MESSAGE_BODY,
     );
     const started = Date.now();
-    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
-      /POST \/transactions:commit failed after \d+ attempts: held/,
+    // A contended refusal past the shared budget is a definite non-commit,
+    // not an unknown outcome: the type must stay the store's own error.
+    const failed = await appendMessage(session, 1, messageRef).then(
+      () => undefined,
+      (error: unknown) => error,
     );
+    expect(failed).toBeInstanceOf(ManagedSessionStoreHttpError);
+    expect(failed).toMatchObject({
+      status: 503,
+      remoteCode: 'tenant_guard_contended',
+    });
+    expect(failed).not.toBeInstanceOf(ManagedSessionAppendUnsettledError);
     // Each of the commit's three attempts restarting its own 1 200 ms of
     // guard retries would take ~3.6 s and ~15 fetches.
     expect(Date.now() - started).toBeLessThan(1_200 + 1_000);

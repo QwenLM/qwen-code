@@ -473,6 +473,7 @@ export class HostedSessionCommandSession {
     readonly reply: SessionCommandReply;
   }): Promise<void> {
     await this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const existing = this.command(params.commandId);
       if (existing !== undefined) {
         if (
@@ -926,6 +927,7 @@ export class HostedSessionCommandSession {
     step: (previous: SessionCommand) => SessionCommand,
   ): Promise<void> {
     return this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const existing = this.store.authority.extensionRecord(
         'session_command',
         commandId,

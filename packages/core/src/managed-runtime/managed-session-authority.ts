@@ -3023,6 +3023,15 @@ export class LocalManagedSessionAuthority {
    * which is not enough: concurrent transactions would interleave their event
    * records around each other's commit markers.
    */
+  /**
+   * Settles a pending append for a caller that reads replay state or
+   * publishes a body before it commits. The work rides the serial queue, so
+   * a landed transaction is applied before the caller's read.
+   */
+  settlePendingAppend(): Promise<void> {
+    return this.runSerial(async () => undefined);
+  }
+
   private runSerial<T>(operation: () => Promise<T>): Promise<T> {
     const run = async () => {
       // Settle before the operation reads replay state or publishes the body
@@ -3076,7 +3085,6 @@ export class LocalManagedSessionAuthority {
     actors: readonly ManagedSessionActor[],
     extension?: { readonly eventId: string; readonly apply: () => void },
   ): Promise<ManagedSessionCommitReceipt> {
-    if (this.unsettledAppend !== undefined) await this.settleUnsettledAppend();
     this.assertCommandWritable(command);
     const key = managedSessionCommandKey(command.operation, command.commandId);
     const previous = this.transactions.get(key);
