@@ -43,7 +43,7 @@ SHA256SUMS
 LICENSE
 ```
 
-The launchers use bundle-relative JAR paths. When the operator creates `config/application.yml` at the bundle root, they pass `--spring.config.additional-location` for it ahead of the operator's arguments unless `SPRING_CONFIG_ADDITIONAL_LOCATION` is already set; otherwise they pass arguments unchanged to Java. The template carries no active settings, so copying it changes nothing until it is edited. The server JAR includes Broker classes and resources; no separate Broker artifact or process is introduced.
+The launchers use bundle-relative JAR paths. When the operator creates `config/application.yml` at the bundle root, they export `SPRING_CONFIG_ADDITIONAL_LOCATION` for it unless the variable is already set, so positional arguments reach Java unchanged. The template carries no active settings, so copying it changes nothing until it is edited. The server JAR includes Broker classes and resources; no separate Broker artifact or process is introduced.
 
 The release also publishes a detached copy of `manifest.json` and `SHA256SUMS.txt`. The detached checksum file covers the archive and detached manifest. The in-bundle checksum file covers every payload file and `manifest.json`.
 
