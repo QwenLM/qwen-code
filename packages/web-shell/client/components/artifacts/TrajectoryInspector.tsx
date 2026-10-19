@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { getShadowAwareActiveElement, isFocusUnclaimed } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import type { TrajectoryLifecycleEntry } from '../../trajectory/project-trajectory-lifecycle';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
@@ -50,6 +58,7 @@ export function TrajectoryInspector({
   onReveal,
   onClearRange,
   onClose,
+  onFocusedUnmount,
 }: {
   row?: TrajectoryRow;
   lifecycle?: TrajectoryLifecycleEntry;
@@ -65,11 +74,17 @@ export function TrajectoryInspector({
   onReveal: () => void;
   onClearRange: () => void;
   onClose: () => void;
+  onFocusedUnmount?: () => void;
 }) {
   const { t, language } = useI18n();
   const [tab, setTab] = useState<Tab>('summary');
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'failed'>();
+  const sectionRef = useRef<HTMLElement>(null);
+  const onFocusedUnmountRef = useRef(onFocusedUnmount);
+  useLayoutEffect(() => {
+    onFocusedUnmountRef.current = onFocusedUnmount;
+  }, [onFocusedUnmount]);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const alive = useRef(true);
   const copyVersion = useRef(0);
@@ -80,6 +95,20 @@ export function TrajectoryInspector({
     return () => {
       alive.current = false;
     };
+  }, []);
+
+  const setSectionElement = useCallback((node: HTMLElement | null) => {
+    const previous = sectionRef.current;
+    if (!node && previous?.contains(getShadowAwareActiveElement(previous))) {
+      // Wait for the commit; simulated cleanup leaves the node connected.
+      const root = previous.getRootNode();
+      queueMicrotask(() => {
+        if (!previous.isConnected && isFocusUnclaimed(root)) {
+          onFocusedUnmountRef.current?.();
+        }
+      });
+    }
+    sectionRef.current = node;
   }, []);
 
   const rowKind = row?.kind;
@@ -375,6 +404,7 @@ export function TrajectoryInspector({
 
   return (
     <section
+      ref={setSectionElement}
       className={styles.inspector}
       aria-label={t('trajectory.inspector.title')}
       data-testid="trajectory-inspector"

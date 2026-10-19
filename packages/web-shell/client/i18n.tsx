@@ -161,6 +161,10 @@ const EN: Messages = {
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
   'managed.discard': 'Discard this request',
+  'managed.pendingRestoreFailed':
+    'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
+  'managed.pendingDiscardFailed':
+    'Could not discard this request. Browser storage is unavailable. Retry or reload the page.',
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
@@ -1863,6 +1867,7 @@ const EN: Messages = {
   'codeReview.failureScenario': 'Failure scenario',
   'codeReview.witness': 'Witness',
   'codeReview.suggestedFix': 'Suggested fix',
+  'codeReview.fixWitness': 'Fix witness',
   'codeReview.outcome': 'Outcome',
   'codeReview.locations': 'Locations',
   'codeReview.evidence': 'Evidence',
@@ -1977,6 +1982,7 @@ const EN: Messages = {
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
   'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactChanged': 'Modified since recorded',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path
       ? `File not found in the workspace · ${v.path}`
@@ -3399,6 +3405,9 @@ const EN: Messages = {
     'Context usage has not been observed for this session yet.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
+  'tokenUsage.firstTokenLatency': (v) =>
+    `First-token latency ${v?.duration ?? ''}`,
+  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
   'tokenUsage.input': 'Input',
   'tokenUsage.loadError': 'Failed to load token usage.',
   'tokenUsage.models': 'By model',
@@ -3407,6 +3416,7 @@ const EN: Messages = {
   'tokenUsage.noTools': 'No tool calls in this session yet.',
   'tokenUsage.open': 'Session token usage',
   'tokenUsage.output': 'Total output',
+  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
   'tokenUsage.refresh': 'Refresh',
   'tokenUsage.requests': 'Requests',
   'tokenUsage.retry': 'Retry',
@@ -4562,6 +4572,10 @@ const ZH: Messages = {
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.discard': '丢弃本次请求',
+  'managed.pendingRestoreFailed':
+    '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
+  'managed.pendingDiscardFailed':
+    '无法丢弃此请求，浏览器存储不可用。请重试或刷新页面。',
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
@@ -6216,6 +6230,7 @@ const ZH: Messages = {
   'codeReview.failureScenario': '失败场景',
   'codeReview.witness': '实测证据',
   'codeReview.suggestedFix': '建议修复',
+  'codeReview.fixWitness': '修复验收标准',
   'codeReview.outcome': '处理结果',
   'codeReview.locations': '位置',
   'codeReview.evidence': '证据',
@@ -6322,6 +6337,7 @@ const ZH: Messages = {
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactChanged': '登记后已被修改',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
@@ -7628,6 +7644,8 @@ const ZH: Messages = {
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
+  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
+  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
   'tokenUsage.input': '输入',
   'tokenUsage.loadError': 'Token 消耗加载失败。',
   'tokenUsage.models': '按模型',
@@ -7636,6 +7654,7 @@ const ZH: Messages = {
   'tokenUsage.noTools': '本会话还没有工具调用。',
   'tokenUsage.open': '会话 Token 消耗',
   'tokenUsage.output': '总输出',
+  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
   'tokenUsage.refresh': '刷新',
   'tokenUsage.requests': '请求',
   'tokenUsage.retry': '重试',
