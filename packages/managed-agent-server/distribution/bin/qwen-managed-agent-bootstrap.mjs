@@ -10,9 +10,18 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { access, chmod, mkdir, rename, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import {
+  access,
+  chmod,
+  mkdir,
+  open,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const TOKEN_BYTES = 32;
@@ -53,7 +62,7 @@ export function renderServerEnv(secrets, applicationConfigPath) {
     `QWEN_MANAGED_AGENT_HARNESS_TOKEN=${secrets.token}`,
     `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST=${secrets.digest}`,
     `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN=${secrets.brokerToken}`,
-    `SPRING_CONFIG_ADDITIONAL_LOCATION="file:${applicationConfigPath}"`,
+    `SPRING_CONFIG_ADDITIONAL_LOCATION='file:${applicationConfigPath}'`,
     '',
   ].join('\n');
 }
@@ -109,23 +118,49 @@ async function main() {
   ];
 
   await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
-  if (!values.force) {
-    const existing = [];
-    for (const [name] of files) {
-      if (await exists(path.join(directory, name))) {
-        existing.push(name);
-      }
-    }
-    if (existing.length > 0) {
+  if (applicationConfig.includes("'") || /[\r\n]/.test(applicationConfig)) {
+    console.error(
+      'The configuration directory cannot contain a single quote or newline.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const lockPath = path.join(directory, '.bootstrap.lock');
+  let lock;
+  try {
+    lock = await open(lockPath, 'wx', 0o600);
+  } catch (error) {
+    if (error.code === 'EEXIST') {
       console.error(
-        `Refusing to overwrite ${existing.join(', ')}; pass --force.`,
+        'Another bootstrap is running; remove .bootstrap.lock if it is stale.',
       );
       process.exitCode = 1;
       return;
     }
+    throw error;
   }
-  for (const [name, content] of files) {
-    await writeAtomic(path.join(directory, name), content);
+  try {
+    if (!values.force) {
+      const existing = [];
+      for (const [name] of files) {
+        if (await exists(path.join(directory, name))) {
+          existing.push(name);
+        }
+      }
+      if (existing.length > 0) {
+        console.error(
+          `Refusing to overwrite ${existing.join(', ')}; pass --force.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
+    for (const [name, content] of files) {
+      await writeAtomic(path.join(directory, name), content);
+    }
+  } finally {
+    await lock.close();
+    await rm(lockPath, { force: true });
   }
   console.log(
     `Wrote ${files.map(([name]) => path.join(directory, name)).join(', ')}`,
@@ -134,10 +169,21 @@ async function main() {
   console.log('  bin/qwen-managed-agent-server --check');
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+function invokedAsMain() {
+  if (!process.argv[1]) {
+    return false;
+  }
+  try {
+    return (
+      realpathSync(process.argv[1]) ===
+      realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
