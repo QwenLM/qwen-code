@@ -393,7 +393,11 @@ function judgeGroupIdentity(
   // start time is still evidence that this is the recorded group, and a live
   // child created later than the record must not erase that evidence.
   if (groupMatchesRecord(rows, record, now, platform)) return 'ours';
-  const leader = members.find((member) => member.pid === record.pgid);
+  // The leader lookup must also see a zombie leader: a young zombie on a
+  // reused pgid proves the recorded group is gone ('recycled'), while
+  // filtering it out leaves an unrelated live child to be signalled in
+  // witnessed mode or the stale ledger held in unwitnessed mode.
+  const leader = rows.find((member) => member.pid === record.pgid);
   if (
     leader !== undefined &&
     leader.runningMs !== undefined &&

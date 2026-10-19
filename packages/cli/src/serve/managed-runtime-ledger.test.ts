@@ -1686,6 +1686,54 @@ describe('Managed Runtime ledger', () => {
       expect(existsSync(workFile)).toBe(true);
     });
 
+    it.each([false, true])(
+      'treats a reused pgid with a young zombie leader as recycled (witnessed=%s)',
+      async (exitWitnessed) => {
+        // A younger zombie leader on the recorded pgid proves the original
+        // group is gone; without the leader row the verdict would be
+        // 'unknown', signalling an unrelated child in witnessed mode or
+        // holding the stale ledger in unwitnessed mode.
+        const workFile = path.join(root, 'ledger.json');
+        makeLedgerFile(workFile, { pid: 42424246 }, [
+          { pgid: 202, startedAt: Date.now() - 150_000 },
+        ]);
+        const signal = vi.fn(() => 'sent' as const);
+        await sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          ...(exitWitnessed ? { exitWitnessed: true } : {}),
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 30_000,
+                    state: 'Z',
+                    args: 'defunct',
+                  },
+                ],
+                [
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 10_000,
+                    args: 'node unrelated.js',
+                  },
+                ],
+              ]),
+          },
+        });
+        expect(signal).not.toHaveBeenCalled();
+        expect(existsSync(workFile)).toBe(false);
+      },
+    );
+
     it('holds a leaderless group whose survivors are all younger than the record', async () => {
       // No live leader to date the group by and no survivor old enough to
       // be the record's: the shape cannot be told from work backgrounded
