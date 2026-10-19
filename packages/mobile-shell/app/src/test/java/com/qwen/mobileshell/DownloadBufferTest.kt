@@ -37,6 +37,22 @@ class DownloadBufferTest {
         assertThrows(IllegalArgumentException::class.java) { buffer.append(frame(0, byteArrayOf())) }
     }
 
+    @Test fun enforcesTheTransportLimitEvenWhenTheFileHasRoomForALargerChunk() {
+        val buffer = DownloadBuffer(id, DownloadBuffer.MAX_SIZE)
+        buffer.append(frame(0, ByteArray(DownloadBuffer.CHUNK_SIZE)))
+        assertEquals(DownloadBuffer.CHUNK_SIZE, buffer.offset)
+        assertThrows(IllegalArgumentException::class.java) {
+            buffer.append(frame(DownloadBuffer.CHUNK_SIZE, ByteArray(DownloadBuffer.CHUNK_SIZE + 1)))
+        }
+        assertEquals(DownloadBuffer.CHUNK_SIZE, buffer.offset)
+    }
+
+    @Test fun replacesEachReservedFileNameCharacter() {
+        for (character in ":*?\"<>|") {
+            assertEquals("a_b.txt", DownloadBuffer.fileName("a${character}b.txt"))
+        }
+    }
+
     @Test fun sanitizesDestinationNameWithoutAcceptingPaths() {
         assertEquals(".._.._report_.txt", DownloadBuffer.fileName("../..\\report\n.txt"))
         assertEquals("download", DownloadBuffer.fileName(" .. "))

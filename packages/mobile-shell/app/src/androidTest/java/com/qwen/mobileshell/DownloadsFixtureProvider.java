@@ -22,10 +22,12 @@ public class DownloadsFixtureProvider extends ContentProvider {
     public static final Uri URI = Uri.parse("content://com.qwen.mobileshell.test.downloads/file");
     private static final String TARGET = "com.qwen.mobileshell";
     private CountDownLatch resume = new CountDownLatch(1);
+    private CountDownLatch finished = new CountDownLatch(0);
     private final CRC32 checksum = new CRC32();
     private int count;
     private boolean opened;
     private boolean done;
+    private boolean failNextPipe;
     private String error;
 
     @Override public boolean onCreate() { return true; }
@@ -48,12 +50,26 @@ public class DownloadsFixtureProvider extends ContentProvider {
                 opened = false;
                 done = false;
                 error = null;
+                failNextPipe = "fail-pipe".equals(arg);
             }
             long identity = Binder.clearCallingIdentity();
             try { owner.grantUriPermission(TARGET, URI, Intent.FLAG_GRANT_WRITE_URI_PERMISSION); }
             finally { Binder.restoreCallingIdentity(identity); }
         } else if ("resume".equals(method)) {
             synchronized (this) { resume.countDown(); }
+        } else if ("reset".equals(method)) {
+            final CountDownLatch reader;
+            synchronized (this) { resume.countDown(); reader = finished; }
+            try {
+                if (!reader.await(15, TimeUnit.SECONDS)) throw new IllegalStateException("Fixture reader did not finish");
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(failure);
+            }
+            long identity = Binder.clearCallingIdentity();
+            try { owner.revokeUriPermission(TARGET, URI, Intent.FLAG_GRANT_WRITE_URI_PERMISSION); }
+            finally { Binder.restoreCallingIdentity(identity); }
+            synchronized (this) { opened = false; failNextPipe = false; }
         } else if (!"status".equals(method)) {
             throw new IllegalArgumentException("Unknown fixture operation");
         }
@@ -62,6 +78,7 @@ public class DownloadsFixtureProvider extends ContentProvider {
             result.putInt("count", count);
             result.putLong("crc", checksum.getValue());
             result.putBoolean("done", done);
+            result.putBoolean("opened", opened);
             result.putString("error", error);
             return result;
         }
@@ -70,12 +87,19 @@ public class DownloadsFixtureProvider extends ContentProvider {
     @Override public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
         if (!URI.equals(uri) || !"wt".equals(mode)) throw new FileNotFoundException("Invalid fixture destination");
         final CountDownLatch gate;
+        final CountDownLatch reader;
+        final boolean failPipe;
         synchronized (this) {
             if (opened) throw new FileNotFoundException("Fixture destination is already open");
             opened = true;
+            done = false;
             gate = resume;
+            reader = finished = new CountDownLatch(1);
+            failPipe = failNextPipe;
+            failNextPipe = false;
         }
         try {
+            if (failPipe) throw new IOException("Synthetic pipe creation failure");
             ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
             new Thread(() -> {
                 try (InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(pipe[0])) {
@@ -83,16 +107,19 @@ public class DownloadsFixtureProvider extends ContentProvider {
                     int size;
                     while ((size = input.read(bytes)) != -1) {
                         synchronized (this) { count += size; checksum.update(bytes, 0, size); }
-                        if (!gate.await(20, TimeUnit.SECONDS)) throw new IOException("Fixture was not resumed");
+                        if (!gate.await(10, TimeUnit.SECONDS)) throw new IOException("Fixture was not resumed");
                     }
                 } catch (Exception failure) {
                     synchronized (this) { error = failure.toString(); }
                 } finally {
                     synchronized (this) { done = true; }
+                    reader.countDown();
                 }
             }, "download-fixture-reader").start();
             return pipe[1];
         } catch (IOException failure) {
+            synchronized (this) { opened = false; done = true; }
+            reader.countDown();
             throw new FileNotFoundException(failure.toString());
         }
     }

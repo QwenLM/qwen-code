@@ -16,12 +16,10 @@ function installBridge(finish = true) {
   let listener: ((event: MessageEvent) => void) | undefined;
   let id = '';
   const frames: Uint8Array[] = [];
+  const emit = (data: unknown) =>
+    listener?.(new MessageEvent('message', { data }));
   const reply = (state: string, extra: Partial<Reply> = {}) =>
-    listener?.(
-      new MessageEvent('message', {
-        data: JSON.stringify({ v: 1, id, state, ...extra }),
-      }),
-    );
+    emit(JSON.stringify({ v: 1, id, state, ...extra }));
   const bridge = {
     postMessage: vi.fn((message: string | ArrayBuffer) => {
       if (typeof message === 'string') {
@@ -62,7 +60,7 @@ function installBridge(finish = true) {
     }),
   };
   Object.assign(window, { qwenAndroidDownloadV1: bridge });
-  return { bridge, frames, reply };
+  return { bridge, frames, reply, emit };
 }
 
 describe('saveBlob', () => {
@@ -191,6 +189,52 @@ describe('saveBlob', () => {
     expect(frames).toHaveLength(0);
   });
 
+  it('stops before reading another chunk when its source changes after an acknowledgement', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    const { bridge, frames } = installBridge();
+    const post = bridge.postMessage.getMockImplementation()!;
+    const reads = vi.spyOn(NodeBlob.prototype, 'arrayBuffer');
+    let cancelled = false;
+    bridge.postMessage.mockImplementation((message) => {
+      if (typeof message !== 'string') cancelled = true;
+      post(message);
+    });
+    await expect(
+      saveBlob(
+        new Blob([new Uint8Array(65_537)]),
+        'changing.bin',
+        () => cancelled,
+      ),
+    ).rejects.toThrow('no longer active');
+    expect(frames).toHaveLength(1);
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(bridge.postMessage.mock.calls.at(-1)?.[0]).toContain(
+      '"op":"cancel"',
+    );
+  });
+
+  it('does not send bytes if its source changes while reading a chunk', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    const { bridge, frames } = installBridge();
+    const read = NodeBlob.prototype.arrayBuffer;
+    let cancelled = false;
+    vi.spyOn(NodeBlob.prototype, 'arrayBuffer').mockImplementation(
+      async function (this: NodeBlob) {
+        const bytes = await read.call(this);
+        cancelled = true;
+        return bytes;
+      },
+    );
+    await expect(
+      saveBlob(new Blob(['x']), 'changing.bin', () => cancelled),
+    ).rejects.toThrow('no longer active');
+    expect(frames).toHaveLength(0);
+    expect(bridge.postMessage).toHaveBeenCalledTimes(2);
+    expect(bridge.postMessage.mock.calls.at(-1)?.[0]).toContain(
+      '"op":"cancel"',
+    );
+  });
+
   it('preserves whole Unicode code points when limiting download names', async () => {
     const { bridge } = installBridge();
     const prefix = 'a'.repeat(254);
@@ -201,6 +245,44 @@ describe('saveBlob', () => {
       op: 'begin',
       name: `${prefix}😀`,
     });
+  });
+
+  it('bounds encoded begin metadata before native can silently drop it', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    const { bridge } = installBridge();
+    await saveBlob(
+      new Blob([], { type: 'text/' + 'x'.repeat(5000) }),
+      '😀'.repeat(1000),
+    );
+    const metadata = bridge.postMessage.mock.calls[0][0] as string;
+    const begin = JSON.parse(metadata) as { name: string; mime: string };
+    expect(Array.from(begin.name)).toHaveLength(255);
+    expect(begin.mime).toHaveLength(127);
+    expect(new TextEncoder().encode(metadata).byteLength).toBeLessThanOrEqual(
+      2048,
+    );
+  });
+
+  it('ignores malformed and wrong-version replies before accepting a valid acknowledgement', async () => {
+    const { bridge, emit } = installBridge();
+    const post = bridge.postMessage.getMockImplementation()!;
+    bridge.postMessage.mockImplementation((message) => {
+      if (typeof message === 'string' && message.includes('"op":"begin"')) {
+        for (const data of [null, {}, 'not JSON', 'null', '1', '[]'])
+          emit(data);
+        emit(
+          JSON.stringify({
+            v: 2,
+            id: (JSON.parse(message) as Reply).id,
+            state: 'error',
+            error: 'Wrong protocol',
+          }),
+        );
+        post(message);
+      } else post(message);
+    });
+    await expect(saveBlob(new Blob([]), 'empty')).resolves.toBeUndefined();
+    expect(bridge.removeEventListener).toHaveBeenCalledOnce();
   });
 
   it('rejects oversize files before opening native saving', async () => {
@@ -394,20 +476,20 @@ describe('saveBlob', () => {
 
   it('uses original Blob bytes and reports missing data without a CSP-blocked fetch', async () => {
     vi.stubGlobal('Blob', NodeBlob);
-    const { frames } = installBridge();
+    const { bridge, frames } = installBridge();
     const anchor = document.createElement('a');
     anchor.href = 'blob:preview';
     anchor.download = 'image.png';
     const onError = vi.fn();
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
-    handleNativeDownload(
-      { currentTarget: anchor, preventDefault: vi.fn() },
-      onError,
-      undefined,
-      new Blob(['image']),
-    );
+    const event = { currentTarget: anchor, preventDefault: vi.fn() };
+    handleNativeDownload(event, onError, undefined, new Blob(['image']));
+    expect(event.preventDefault).toHaveBeenCalledExactlyOnceWith();
     await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(
+      JSON.parse(bridge.postMessage.mock.calls[0][0] as string),
+    ).toMatchObject({ name: 'image.png' });
     expect(new TextDecoder().decode(frames[0].slice(36))).toBe('image');
     expect(onError).not.toHaveBeenCalled();
     handleNativeDownload(
@@ -437,13 +519,18 @@ describe('saveBlob', () => {
     vi.stubGlobal('fetch', fetch);
     handleNativeDownload(event, onError);
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Open this remote download in a browser to save it.',
+      }),
+    );
     expect(event.preventDefault).toHaveBeenCalledOnce();
     expect(fetch).not.toHaveBeenCalled();
   });
 
   it('decodes image data locally without a CSP-blocked data URL fetch', async () => {
     vi.stubGlobal('Blob', NodeBlob);
-    const { frames } = installBridge();
+    const { bridge, frames } = installBridge();
     const anchor = document.createElement('a');
     anchor.href = 'data:image/png;base64,AP8B';
     anchor.download = 'image.png';
@@ -455,6 +542,9 @@ describe('saveBlob', () => {
       onError,
     );
     await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(
+      JSON.parse(bridge.postMessage.mock.calls[0][0] as string),
+    ).toMatchObject({ name: 'image.png' });
     expect(Array.from(frames[0].slice(36))).toEqual([0, 255, 1]);
     expect(onError).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
