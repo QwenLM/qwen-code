@@ -52,7 +52,8 @@ live-run reconcile 格（存活 turn 经 overlap-`skip` slot 驱动 `reconcile_r
   表达不了这个窗口：`settleOccurrence` 的 `HELD` 子查询会读同一行，外部锁把
   occurrence 的写入也堵住，崩溃点永远到不了。
 - **两个子进程。** `two-scanner-race` 起两个夹具 JVM，共用同一 MySQL 与 tenant，
-  各自内部端口与 `ready.json`，并指向同一个 Harness。
+  并指向同一个 Harness。只有第一个绑定内部 listener；第二个关闭该 listener，并使用
+  第一个子进程的 session-store URL——会话正是建在那个 store 上。
 
 ## 账本
 

@@ -531,8 +531,7 @@ class HostedAutomationSpringCrashIT {
                 .as("one accepted input across the crash")
                 .isEqualTo(1);
         // The kill also drops the Harness's Session connection, so the
-        // wake turn may be aborted before its model call; the turn count is
-        // the kill-before-answer cell's property, not this one's.
+        // wake turn may be aborted before its model call; no Turn is asserted.
         assertThat(occurrenceOutcome(definition)).isEqualTo("fired");
     }
 
@@ -597,8 +596,6 @@ class HostedAutomationSpringCrashIT {
             return "fired".equals(occurrenceOutcome(definition))
                     && chains != null && chains == 1 ? true : null;
         });
-        // `fired` lands with the fire answer, before the wake turn's model
-        // call starts, so wait for the turn and then pin it to exactly one.
         String runId = runIdOf(definition);
         assertThat(committedRuns(session))
                 .as("one committed automation_run for the re-driven slot")

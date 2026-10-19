@@ -59,8 +59,10 @@ This slice reuses that shape with an automation fixture main, and adds:
   settle's `HELD` proof reads the same row, so an outside lock blocks the
   occurrence write too and the crash point never arrives.
 - **Two children.** `two-scanner-race` starts two fixture JVMs against the
-  same MySQL and tenant, each with its own internal port and its own
-  `ready.json`, and points both at the same Harness.
+  same MySQL and tenant, both pointed at the same Harness. Only the first
+  binds an internal listener; the second runs with that listener off and
+  advertises the first child's session-store URL, which is the store the
+  session was created against.
 
 ## Ledger
 
