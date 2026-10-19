@@ -1,3 +1,5 @@
+import { useManagedFileReferences } from './use-managed-file-references';
+import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useEffect, useRef, useState } from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
@@ -412,6 +414,13 @@ export function WorkspaceBindingCreator({
 
   const currentOptions =
     sessionOptions?.agentId === agentId ? sessionOptions : undefined;
+  const fileReferences = useManagedFileReferences(
+    provider,
+    clientId,
+    currentOptions?.inputAttachments
+      ? { workspaceId: selected, cwdRelative }
+      : undefined,
+  );
   const approvalReady =
     !supportsApprovalModeSelection ||
     (!optionsLoading && Boolean(currentOptions));
@@ -456,6 +465,7 @@ export function WorkspaceBindingCreator({
     commit?: ComposerSubmitCommit,
     images?: PromptImage[],
     files?: PromptFile[],
+    metadata?: ComposerSubmitMetadata,
   ) {
     const abort = commandLifetime.current;
     if (
@@ -497,8 +507,19 @@ export function WorkspaceBindingCreator({
       encoding.current = true;
       setBusy(true);
       try {
-        if (text !== undefined)
-          input = await encodeManagedInput(text, images, files);
+        if (text !== undefined) {
+          const prepared = await fileReferences.prepareInput(
+            text,
+            files,
+            metadata,
+          );
+          input = await encodeManagedInput(
+            prepared.text,
+            images,
+            prepared.files,
+          );
+          fileReferences.assertCurrent();
+        }
       } catch (failure) {
         setError(message(failure));
         return;
@@ -602,7 +623,7 @@ export function WorkspaceBindingCreator({
       }
       if (attempt.input.length) {
         if (acceptedCommit.current) acceptedCommit.current();
-        else editor.current?.clearText();
+        else editor.current?.clear();
       }
       acceptedCommit.current = undefined;
       updatePending(undefined);
@@ -1084,6 +1105,7 @@ export function WorkspaceBindingCreator({
             />
           </div>
           <div className={shellStyles.footer}>
+            {fileReferences.error && <p role="alert">{fileReferences.error}</p>}
             <ChatEditor
               ref={editor}
               commands={[]}
@@ -1091,6 +1113,8 @@ export function WorkspaceBindingCreator({
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
+              fileReferenceActions={fileReferences.actions}
+              persistFileReferences
               existingFolderWorkspaceSupported={
                 registrationAvailable && Boolean(binding.registration)
               }
@@ -1103,6 +1127,7 @@ export function WorkspaceBindingCreator({
                 interactive
                   ? [
                       ...(currentOptions?.inputAttachments ||
+                      fileReferences.actions ||
                       currentOptions?.planModeSupported
                         ? ['addMenu' as const]
                         : []),
@@ -1226,10 +1251,12 @@ export function WorkspaceBindingCreator({
                 Boolean(directoryPicker) ||
                 registrationOpen
               }
-              isPreparing={busy || loading || optionsLoading}
+              isPreparing={
+                busy || fileReferences.busy || loading || optionsLoading
+              }
               placeholderText={t('managed.prompt')}
-              onSubmit={(text, images, files, commit) => {
-                void createOrRead(text, commit, images, files);
+              onSubmit={(text, images, files, commit, metadata) => {
+                void createOrRead(text, commit, images, files, metadata);
                 return false;
               }}
             />
