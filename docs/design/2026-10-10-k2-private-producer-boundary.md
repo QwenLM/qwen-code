@@ -38,7 +38,7 @@ The generic draft remains unimplemented because known ordinary ambient preflight
 
 ## Affected files
 
-The two production changes are confined to the common verifier in packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ToolPublicationStore.java and the legacy writer wrapper in the adjacent ManagedSessionStore.java. Collocated publication, data/admission, acknowledgement and native owner tests establish compatibility; exact additional test files depend on baseline reachability. No runtime-broker or TypeScript production changes are proposed.
+The two production changes are confined to the common verifier in packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationStore.java and the legacy writer wrapper in the adjacent ManagedSessionStore.java. Collocated publication, data/admission, acknowledgement and native owner tests establish compatibility; exact additional test files depend on baseline reachability. No runtime-broker or TypeScript production changes are proposed.
 
 ## Executed baseline
 

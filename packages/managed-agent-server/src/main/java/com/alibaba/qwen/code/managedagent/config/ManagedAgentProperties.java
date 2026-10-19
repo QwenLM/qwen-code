@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import jakarta.annotation.PostConstruct;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -190,7 +190,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 && !runtimeBroker.getResidentKubernetesApiUrl().isBlank()
                 && !runtimeBroker.getResidentKubernetesTokenFile().isBlank() && !runtimeBroker.getResidentKubernetesCaFile().isBlank();
         if (!runtimeBroker.getResidentWorkspaces().isEmpty()) {
-            new com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces(runtimeBroker.getResidentWorkspaces());
+            new com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces(runtimeBroker.getResidentWorkspaces());
             if (!residentFiles || !harness.isWorkspaceFilesEnabled()) {
                 throw new IllegalStateException("Resident Workspaces require exclusive CSI/files configuration");
             }
@@ -1181,10 +1181,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         }
 
         public record ResidentWorkspace(String workspaceId, long workspaceGeneration,
-                com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration registration,
-                com.alibaba.qwen.code.managedagent.service.WorkspaceCsiResourceGuard.ProtectionIdentity protection,
+                com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration registration,
+                com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiResourceGuard.ProtectionIdentity protection,
                 String image, List<String> command,
-                List<com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeProvisioner.WorkerArtifact> artifacts) {
+                List<com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeProvisioner.WorkerArtifact> artifacts) {
             public ResidentWorkspace {
                 if (registration == null || protection == null || workspaceId == null || workspaceId.isBlank()
                         || workspaceGeneration < 1 || image == null || !image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
@@ -1193,7 +1193,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
                                 || value.length() > 8192 || value.indexOf('\0') >= 0)
                         || artifacts == null || artifacts.size() > 48
                         || artifacts.stream().anyMatch(java.util.Objects::isNull)
-                        || artifacts.stream().map(com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeProvisioner.WorkerArtifact::configMapName)
+                        || artifacts.stream().map(com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeProvisioner.WorkerArtifact::configMapName)
                                 .distinct().count() != artifacts.size()) {
                     throw new IllegalArgumentException("Invalid resident Workspace configuration");
                 }

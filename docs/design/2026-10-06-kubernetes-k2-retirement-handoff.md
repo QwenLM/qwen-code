@@ -794,14 +794,14 @@ retain K1's existing LOST/tenant placement guard until independently qualified.
 
 Expected implementation areas; K2-A1 currently changes the snapshot store, private evidence entry, native verifiers and shared result conversion:
 
-- `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/`: extend
+- `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/`: extend
   `WorkspaceCsiReservationStore`, `WorkspaceCsiCheckpointSnapshotStore`,
   `WorkspaceCsiWorkerAckStore` and publication/resource authorities; add a small
   aggregate coordinator and additive migration/evidence representation.
 - `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/`: binding/Session/execution
   repository snapshot and same-connection transition boundaries,
   `WorkspaceExecutionProfile`, and exact original stop intent handling.
-- `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/`: CSI provisioner,
+- `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/`: CSI provisioner,
   identity, resource guard, Workspace resolver/transport and embedded Broker;
   Spring configuration and Hosted connector/store profile validation.
 - `packages/core/src/managed-runtime/`: native file-result/checkpoint proof and

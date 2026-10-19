@@ -114,14 +114,14 @@ seal or runtime release. This composition alone does not implement attachment.
 
 ## Files and consumers
 
-| Area                                                            | Change and consumer                                                                                                                         |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `managed-agent-server/.../store/WorkspaceCsiRuntimeMain.java`   | Private executable operator and existing Broker HTTP server composition.                                                                    |
-| `managed-agent-server/.../store/WorkspaceCsiRuntimeAccess.java` | Original Session resolver and context acquisition guard consumed by that operator.                                                          |
-| `managed-agent-server/pom.xml`                                  | Separate `csi-runtime` executable packaging; the ordinary Spring entry remains unchanged.                                                   |
-| `runtime-broker/.../JdbcCsiFilesRetirementGuard.java`           | Existing single-Session guard exposed for the private transport; original binding, session and tool repositories retain the same predicate. |
-| Collocated Java tests                                           | Original CREATE/JDBC admission, wrong identity, seal races and RPC refusal.                                                                 |
-| This bilingual design                                           | Production entry, trust boundaries and acceptance limits.                                                                                   |
+| Area                                                                  | Change and consumer                                                                                                                         |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `managed-agent-server/.../persistence/WorkspaceCsiRuntimeMain.java`   | Private executable operator and existing Broker HTTP server composition.                                                                    |
+| `managed-agent-server/.../persistence/WorkspaceCsiRuntimeAccess.java` | Original Session resolver and context acquisition guard consumed by that operator.                                                          |
+| `managed-agent-server/pom.xml`                                        | Separate `csi-runtime` executable packaging; the ordinary Spring entry remains unchanged.                                                   |
+| `runtime-broker/.../JdbcCsiFilesRetirementGuard.java`                 | Existing single-Session guard exposed for the private transport; original binding, session and tool repositories retain the same predicate. |
+| Collocated Java tests                                                 | Original CREATE/JDBC admission, wrong identity, seal races and RPC refusal.                                                                 |
+| This bilingual design                                                 | Production entry, trust boundaries and acceptance limits.                                                                                   |
 
 No public Spring provisioner selection, Hosted profile whitelist, wire schema,
 database migration or second placement authority is introduced.

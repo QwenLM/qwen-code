@@ -1,13 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-
-import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
-import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
-import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.number;
-
+import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiNativeReadbackProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -17,6 +15,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+
+import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
+import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
+import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.number;
 
 /** Joins an immutable native grant to the original execution, never to a new head. */
 public final class JdbcCsiExecutionAdmission {

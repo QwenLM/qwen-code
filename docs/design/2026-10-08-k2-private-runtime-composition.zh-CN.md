@@ -96,14 +96,14 @@ runtime release。本装配自身尚不实现 attachment。
 
 ## 文件与消费者
 
-| 区域                                                            | 变更及消费者                                                                                                       |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `managed-agent-server/.../store/WorkspaceCsiRuntimeMain.java`   | 私有可执行 operator 与既有 Broker HTTP server 装配。                                                               |
-| `managed-agent-server/.../store/WorkspaceCsiRuntimeAccess.java` | 原 Session resolver 与 context acquire guard，由该 operator 消费。                                                 |
-| `managed-agent-server/pom.xml`                                  | 独立 `csi-runtime` 可执行打包；普通 Spring 入口保持不变。                                                          |
-| `runtime-broker/.../JdbcCsiFilesRetirementGuard.java`           | 暴露既有 single-Session guard 供私有 transport 调用；原 binding、session 和 tool repositories 保持相同 predicate。 |
-| 同目录 Java 测试                                                | 原 CREATE/JDBC 准入、错误身份、seal 竞争和 RPC 拒绝。                                                              |
-| 本双语设计                                                      | 生产入口、信任边界及验收限制。                                                                                     |
+| 区域                                                                  | 变更及消费者                                                                                                       |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `managed-agent-server/.../persistence/WorkspaceCsiRuntimeMain.java`   | 私有可执行 operator 与既有 Broker HTTP server 装配。                                                               |
+| `managed-agent-server/.../persistence/WorkspaceCsiRuntimeAccess.java` | 原 Session resolver 与 context acquire guard，由该 operator 消费。                                                 |
+| `managed-agent-server/pom.xml`                                        | 独立 `csi-runtime` 可执行打包；普通 Spring 入口保持不变。                                                          |
+| `runtime-broker/.../JdbcCsiFilesRetirementGuard.java`                 | 暴露既有 single-Session guard 供私有 transport 调用；原 binding、session 和 tool repositories 保持相同 predicate。 |
+| 同目录 Java 测试                                                      | 原 CREATE/JDBC 准入、错误身份、seal 竞争和 RPC 拒绝。                                                              |
+| 本双语设计                                                            | 生产入口、信任边界及验收限制。                                                                                     |
 
 不增加公开 Spring provisioner 选择、Hosted profile 白名单、wire schema、数据库
 migration 或第二个 placement authority。

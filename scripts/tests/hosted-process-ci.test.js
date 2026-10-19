@@ -85,6 +85,54 @@ const failoverArms = [
     ['--continuation-failover', '--harness-only', '--g3-verify expiry'],
   ],
   [
+    'Run approval post-decision crash E2E',
+    'test:e2e:managed-harness-restart-approval-after-decision',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'after-decision',
+    ],
+  ],
+  [
+    'Run approval partial-prepare crash E2E',
+    'test:e2e:managed-harness-restart-approval-after-prepare',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'after-prepare',
+    ],
+  ],
+  [
+    'Run approval decision reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-decision-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'decision-reply-lost',
+    ],
+  ],
+  [
+    'Run Turn admission reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-admission-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'admission-reply-lost',
+    ],
+  ],
+  [
     'Run Harness-restart continuation closeout E2E',
     'test:e2e:managed-harness-restart-continuation-closeout',
     ['--continuation-failover', '--harness-only', '--g3-verify continuation'],
@@ -418,8 +466,8 @@ describe('Hosted real-process gates', () => {
     // Step ceilings today (151 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     ['hosted-harness-mysql', 231, 244],
-    // Fifteen failover arms at 10 each.
-    ['hosted-failover-e2e', 150, 165],
+    // Nineteen failover arms at 10 each.
+    ['hosted-failover-e2e', 190, 205],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {

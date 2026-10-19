@@ -4,23 +4,23 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
@@ -154,7 +154,7 @@ class ToolPublicationStoreTest {
     void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
         try (var pool = Executors.newSingleThreadExecutor()) {
             var publisher = new TransactionTemplate(manager).execute(status -> {
-                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
+                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
                 String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
                 jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
                         + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
@@ -496,7 +496,7 @@ class ToolPublicationStoreTest {
                         "pub-1", PUBLICATION_TOKEN);
                 default -> throw new AssertionError("Unexpected test operation");
             }
-        }).isInstanceOfSatisfying(ApiException.class, error -> {
+        }).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
             assertThat(error.getStatus()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
             assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable");
         });
@@ -515,7 +515,7 @@ class ToolPublicationStoreTest {
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant-1"));
         var before = producerTables();
         assertThatThrownBy(() -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN)).isInstanceOfSatisfying(ApiException.class,
+                "pub-1", PUBLICATION_TOKEN)).isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
         assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
     }
@@ -759,7 +759,7 @@ class ToolPublicationStoreTest {
                     } else {
                         replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
                     }
-                }).isInstanceOfSatisfying(ApiException.class, error ->
+                }).isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_publication_operation_expired"));
                 var recoveryStarted = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class);
                 var capacityBeforeRecovery = jdbc.queryForMap("SELECT capture_held_bytes,producer_held_bytes,admission_held_bytes,"
@@ -935,8 +935,8 @@ class ToolPublicationStoreTest {
                 release.countDown();
                 assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
                         .satisfies(error -> {
-                            assertThat(error.getCause()).isInstanceOf(ApiException.class);
-                            assertThat(((ApiException) error.getCause()).getCode()).isEqualTo(expired
+                            assertThat(error.getCause()).isInstanceOf(ManagedAgentException.class);
+                            assertThat(((ManagedAgentException) error.getCause()).getCode()).isEqualTo(expired
                                     ? "managed_tool_publication_operation_expired"
                                     : "managed_tool_publication_claim_expired");
                         });
@@ -1333,7 +1333,7 @@ class ToolPublicationStoreTest {
                 ToolPublicationContract.readJson(verification.toString().getBytes(StandardCharsets.UTF_8))))
                 .isEqualTo(committed);
         assertThatThrownBy(() -> admissions.verifyReceipt(key, "wrong-writer-token", verification))
-                .isInstanceOf(ApiException.class);
+                .isInstanceOf(ManagedAgentException.class);
         ObjectNode wrongSequence = verification.deepCopy().put("historyRevision", receiptSequence + 1);
         assertThatThrownBy(() -> admissions.verifyReceipt(key, WRITER_TOKEN, wrongSequence))
                 .hasMessageContaining("sequence conflicts");
@@ -1344,7 +1344,7 @@ class ToolPublicationStoreTest {
             return;
         }
         if ("intact".equals(damage) || large) {
-            com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryReaderAssertions.verifyOriginalPublication(
+            com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoveryReaderAssertions.verifyOriginalPublication(
                     jdbc, bucket, key, admission, manifestRef, receiptSequence, firstSegment.getBytes(StandardCharsets.UTF_8));
         }
         if (!"intact".equals(damage) && !large) {
@@ -1581,7 +1581,7 @@ class ToolPublicationStoreTest {
         byte[] abc = "abc".getBytes(StandardCharsets.UTF_8);
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "bad-digest", "stdout", 0, abc, digest("other")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
         data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0, abc, digest("abc"));
         data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-1", "stderr", 0, abc, digest("abc"));
@@ -1590,20 +1590,20 @@ class ToolPublicationStoreTest {
                 .hasMessageContaining("operation conflicts");
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "other-segment", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
         assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
                 "missing-segment", "stdout", 2, 3, digest("abc")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
         assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
                 "wrong-length", "stdout", 1, 4, digest("abc")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
         data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-correct", "stdout", 1, 3, digest("abc"));
         assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
                 "seal-conflict", "stdout", 1, 3, digest("abd")))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
     }
 
@@ -1734,7 +1734,7 @@ class ToolPublicationStoreTest {
         verificationTime[0] = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class)
                 .getTime() / 1000 * 1000;
         // Advance verification time with fixture reads, excluding JDBC latency.
-        JdbcTemplate verificationJdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+        JdbcTemplate verificationJdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override
             public <T> T queryForObject(String sql, Class<T> type) {
                 if (("SELECT " + ManagedSchemaTime.SQL_NOW).equals(sql) && type == java.sql.Timestamp.class) {
@@ -1777,7 +1777,7 @@ class ToolPublicationStoreTest {
         store.apply(request("reserve").put("captureBytes", captureBytes), WRITER_TOKEN, PUBLICATION_TOKEN);
         boolean[] slow = {false};
         int[] metadataQueries = {0};
-        JdbcTemplate metadataJdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+        JdbcTemplate metadataJdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
             @Override
             public <T> List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper,
                     Object... arguments) {
@@ -2246,7 +2246,7 @@ class ToolPublicationStoreTest {
         jdbc.update("DELETE FROM ma_session_journal_tx WHERE tenant_id = X'74656e616e742d31'"
                 + " AND session_id = X'73657373696f6e2d31' AND journal_revision = 3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())
                             .isEqualTo("managed_session_journal_corrupt");
                     assertThat(error.getStatus().is5xxServerError()).isTrue();
@@ -2270,7 +2270,7 @@ class ToolPublicationStoreTest {
                         + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
                         + " journal_revision = 3");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())
                             .isEqualTo("managed_session_journal_corrupt");
                     assertThat(error.getStatus().is5xxServerError()).isTrue();
@@ -2287,7 +2287,7 @@ class ToolPublicationStoreTest {
                         + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
                         + " journal_revision = 1");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())
                             .isEqualTo("managed_session_journal_corrupt");
                     assertThat(error.getStatus().is5xxServerError()).isTrue();
@@ -2752,12 +2752,12 @@ class ToolPublicationStoreTest {
     }
 
     private static void assertRefused(ThrowingCallable reservation, boolean retained, String limit) {
-        assertThatThrownBy(reservation).isInstanceOfSatisfying(ApiException.class,
+        assertThatThrownBy(reservation).isInstanceOfSatisfying(ManagedAgentException.class,
                 error -> assertRefusal(error, retained, limit));
     }
 
     // A refusal that used bytes alone cause is a 409; any other is a 429.
-    private static void assertRefusal(ApiException error, boolean retained, String limit) {
+    private static void assertRefusal(ManagedAgentException error, boolean retained, String limit) {
         assertThat(error.getStatus()).isEqualTo(retained ? HttpStatus.CONFLICT : HttpStatus.TOO_MANY_REQUESTS);
         assertThat(error.getCode()).isEqualTo(retained ? "managed_tool_publication_retention_exhausted"
                 : "managed_tool_publication_capacity_exhausted");
@@ -2800,7 +2800,7 @@ class ToolPublicationStoreTest {
         store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                 new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 2 * ALLOCATION - 1, 10 * ALLOCATION, 10));
         assertThatThrownBy(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertRefusal(error, true, "session_bytes");
                     assertThat(error.getDetails()).containsEntry("admits", 0L);
                 });
@@ -2811,7 +2811,7 @@ class ToolPublicationStoreTest {
         store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                 new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
         assertThatThrownBy(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertRefusal(error, true, "session_bytes");
                     assertThat(error.getDetails()).containsEntry("admits", 0L);
                 });
@@ -2863,7 +2863,7 @@ class ToolPublicationStoreTest {
             long admits) {
         store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings, capacity);
         assertThatThrownBy(() -> store.apply(request, WRITER_TOKEN, PUBLICATION_TOKEN)).isInstanceOfSatisfying(
-                ApiException.class, error -> {
+                ManagedAgentException.class, error -> {
                     assertRefusal(error, false, limit);
                     assertThat(error.getDetails()).containsEntry("admits", admits);
                 });
@@ -2956,8 +2956,8 @@ class ToolPublicationStoreTest {
             outcomes = List.of(one.get(), two.get());
         }
         assertThat(outcomes.stream().filter(JsonNode.class::isInstance).count()).isEqualTo(1);
-        assertThat(outcomes).filteredOn(ApiException.class::isInstance).singleElement()
-                .satisfies(error -> assertRefusal((ApiException) error, false, "tenant_bytes"));
+        assertThat(outcomes).filteredOn(ManagedAgentException.class::isInstance).singleElement()
+                .satisfies(error -> assertRefusal((ManagedAgentException) error, false, "tenant_bytes"));
         String winner = jdbc.queryForObject("SELECT publication_id FROM ma_output_capture", String.class);
         ObjectNode loser = "pub-1".equals(winner) ? secondRequest : firstRequest;
         ObjectNode fence = request("fence").put("publicationId", winner);
@@ -2976,7 +2976,7 @@ class ToolPublicationStoreTest {
         start.await();
         try {
             return store.apply(request, WRITER_TOKEN, PUBLICATION_TOKEN);
-        } catch (ApiException error) {
+        } catch (ManagedAgentException error) {
             return error;
         }
     }
@@ -3412,9 +3412,9 @@ class ToolPublicationStoreTest {
                                 + " FALSE WHERE tenant_id = X'74656e616e742d31' AND session_id ="
                                 + " X'73657373696f6e2d31'");
         fixture.jdbc().update("UPDATE ma_output_capture SET retention_state = 'RETIRING'");
-        var retention = new com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore(fixture.jdbc(), fixture.manager());
+        var retention = new com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore(fixture.jdbc(), fixture.manager());
         assertThat(retention.observe(Duration.ZERO)).singleElement()
-                .extracting(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("resource_referenced");
+                .extracting(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("resource_referenced");
     }
 
     @Test
@@ -3601,7 +3601,7 @@ class ToolPublicationStoreTest {
         fixture.jdbc().update(
                         "UPDATE ma_operation SET state='PENDING', available_at=0 WHERE"
                                 + " operation_kind = 'TOOL_RESULT_PROJECTION'");
-        JdbcTemplate projectionJdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(fixture.jdbc().getDataSource()) {
+        JdbcTemplate projectionJdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(fixture.jdbc().getDataSource()) {
             @Override
             public <T> T queryForObject(String sql, Class<T> type) {
                 if (("SELECT " + ManagedSchemaTime.SQL_NOW).equals(sql) && type == java.sql.Timestamp.class) {

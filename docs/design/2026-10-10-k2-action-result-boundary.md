@@ -159,7 +159,7 @@ Linux/cloud run, physical release or complete K2 acceptance.
 
 ## Files affected
 
-Production under `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/`:
+Production under `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/`:
 `ManagedAgentStore`, shared legacy guard, `ManagedSessionStore`,
 `ManagedToolResultStore`, `ManagedToolResultProjector` and `ManagedActionStore`.
 Focused tests cover these stores and ordinary publication/action integration.

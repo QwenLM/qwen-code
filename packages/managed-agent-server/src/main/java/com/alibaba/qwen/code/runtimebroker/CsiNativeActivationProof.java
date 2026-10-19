@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiNativeReadbackProtocol;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.fasterxml.jackson.core.StreamReadFeature;
@@ -8,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -1033,7 +1036,7 @@ public final class CsiNativeActivationProof {
                 false, null, previous.usedIds(), null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), 0);
     }
 
-    static byte[] utf8(String text) {
+    public static byte[] utf8(String text) {
         try {
             ByteBuffer encoded = StandardCharsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(text));
@@ -1861,26 +1864,26 @@ public final class CsiNativeActivationProof {
         }
     }
 
-    static void closed(JsonNode node, Set<String> fields) {
+    public static void closed(JsonNode node, Set<String> fields) {
         object(node);
         require(node.size() == fields.size());
         node.fieldNames().forEachRemaining(field -> require(fields.contains(field)));
     }
 
-    static String text(JsonNode node, String field) {
+    public static String text(JsonNode node, String field) {
         JsonNode value = node.get(field);
         require(value != null && value.isTextual() && !value.textValue().isEmpty()
                 && value.textValue().length() <= 4096);
         return value.textValue();
     }
 
-    static long number(JsonNode value) {
+    public static long number(JsonNode value) {
         require(value != null && value.isIntegralNumber() && value.canConvertToLong()
                 && value.longValue() >= 0 && value.longValue() <= MAX_SAFE);
         return value.longValue();
     }
 
-    static String id(JsonNode node, String field) {
+    public static String id(JsonNode node, String field) {
         String value = text(node, field);
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         require(utf8.length <= 512 && new String(utf8, StandardCharsets.UTF_8).equals(value)
@@ -1895,7 +1898,7 @@ public final class CsiNativeActivationProof {
         return value;
     }
 
-    static String canonical(JsonNode node) {
+    public static String canonical(JsonNode node) {
         require(node != null);
         if (node.isObject()) {
             List<String> fields = new ArrayList<>();

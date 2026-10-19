@@ -38,7 +38,7 @@ Build/typecheck/bundle、定向 producer/publication/ack/native 检查、Java st
 
 ## 受影响文件
 
-两处生产变更仅限 packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ToolPublicationStore.java 的共同 verifier，以及相邻 ManagedSessionStore.java 的旧 writer wrapper。同目录 publication、data/admission、acknowledgement 和 native owner 测试验证兼容；额外测试文件取决于基线可达性。不计划修改 runtime-broker 或 TypeScript 生产代码。
+两处生产变更仅限 packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationStore.java 的共同 verifier，以及相邻 ManagedSessionStore.java 的旧 writer wrapper。同目录 publication、data/admission、acknowledgement 和 native owner 测试验证兼容；额外测试文件取决于基线可达性。不计划修改 runtime-broker 或 TypeScript 生产代码。
 
 ## 已执行基线
 

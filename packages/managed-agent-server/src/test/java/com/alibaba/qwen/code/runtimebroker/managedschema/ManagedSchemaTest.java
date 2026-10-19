@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.managedschema;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -13,13 +12,14 @@ import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
+import javax.sql.DataSource;
+
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-import javax.sql.DataSource;
 
 class ManagedSchemaTest {
     @Test

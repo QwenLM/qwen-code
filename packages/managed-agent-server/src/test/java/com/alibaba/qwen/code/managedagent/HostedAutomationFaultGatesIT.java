@@ -418,7 +418,7 @@ class HostedAutomationFaultGatesIT {
         String session = createSession("claim-crash");
         String id = create(session, "FG11C_CLAIM", "0 0 1 1 *", "claim-crash-base");
         String key = "claim-crash-run";
-        String runId = com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.automationRunId(id,
+        String runId = com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.automationRunId(id,
                 "manual:" + key);
         Hold hold = storeHold("claim-crash", body -> (runId + ":2").equals(body.path("commandId").asText()));
         var answer = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
@@ -484,7 +484,7 @@ class HostedAutomationFaultGatesIT {
                 ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
         String id = create(session, "FG11C_SETTLED", "* * * * *", "settled-crash-base");
         String key = "settled-crash-run";
-        String runId = com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.automationRunId(id,
+        String runId = com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.automationRunId(id,
                 "manual:" + key);
         // Arm the hold before the POST: the Harness kicks the wake pump before answering
         // fire_run, so revision 3 can otherwise reach the store before the hold exists.
@@ -572,7 +572,7 @@ class HostedAutomationFaultGatesIT {
         String session = createSession("transport");
         String id = create(session, "FG11B_TRANSPORT", "0 0 1 1 *", "transport-base");
         String key = "transport-run";
-        String runId = com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.automationRunId(id,
+        String runId = com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.automationRunId(id,
                 "manual:" + key);
         storeDrop.set(runId + ":1");
         JsonNode run = request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202);
@@ -1235,7 +1235,7 @@ class HostedAutomationFaultGatesIT {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, ?, ?, 'OPERATOR')", tenant, "workspace-0", "actor".getBytes(StandardCharsets.UTF_8));
         if ("Linux".equals(System.getProperty("os.name"))) {
-            spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
+            spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }
     }

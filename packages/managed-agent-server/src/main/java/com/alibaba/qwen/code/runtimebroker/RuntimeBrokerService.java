@@ -1,11 +1,19 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import java.time.Clock;
-import java.time.Duration;
-import java.time.Instant;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -25,9 +33,9 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
@@ -2055,7 +2063,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
      * through to the worker (issue #13183 saw hundreds of status calls per
      * execution this way).
      */
-    CompletionStage<ExecutionReconciliation> observeExecution(
+    public CompletionStage<ExecutionReconciliation> observeExecution(
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
         requireOpen();

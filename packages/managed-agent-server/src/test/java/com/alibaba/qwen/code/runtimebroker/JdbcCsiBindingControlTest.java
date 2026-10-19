@@ -1,13 +1,13 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
+import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+
 import java.sql.Connection;
 import java.time.Duration;
 import java.time.Instant;
@@ -15,8 +15,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcCsiBindingControlTest {
     private static final String SESSION = "2815c6b8-468c-449a-869a-8794b0d52fca";

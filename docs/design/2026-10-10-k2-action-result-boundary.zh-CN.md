@@ -129,7 +129,7 @@ test-engineer 观察了专属 MySQL RC/RR 四次测试及打包 JDBC 十一组�
 
 ## 影响文件
 
-生产目录 `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/`：
+生产目录 `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/`：
 `ManagedAgentStore`、共享旧写入 guard、`ManagedSessionStore`、
 `ManagedToolResultStore`、`ManagedToolResultProjector` 和 `ManagedActionStore`。
 针对性测试覆盖这些 store 与普通 publication/action 集成。双语设计及 ignored
