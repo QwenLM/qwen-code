@@ -10,6 +10,37 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('reads the selected Session Skill catalog with authenticated cancellable requests', async () => {
+    const catalog = {
+      skills: [{ name: 'review', description: 'Published review.' }],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(catalog));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+    });
+    const abort = new AbortController();
+    expect(
+      await provider.skills!.list('session-a', {
+        clientId: 'client',
+        signal: abort.signal,
+      }),
+    ).toEqual(catalog);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/session-skills/query',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.signal).toBe(abort.signal);
+    expect(init?.credentials).toBe('include');
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({ sessionId: 'session-a' });
+  });
   it('preserves Workspace registration keys and validates directory and operation identities', async () => {
     const operation = {
       operationId: 'registration-a',
