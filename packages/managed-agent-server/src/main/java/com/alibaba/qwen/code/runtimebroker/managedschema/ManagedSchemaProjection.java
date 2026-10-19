@@ -41,7 +41,9 @@ public enum ManagedSchemaProjection {
                     + "recovery_deadline, execution_mode, verification_request_json, verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
-                    + "gmt_modified, completed_at"),
+                    + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
+                    + "settlement_deadline_ms, frozen_request_bytes, frozen_request_sha256, cut_bytes, "
+                    + "cut_sha256, finalize_receipt_bytes, finalize_receipt_sha256, csi_retirement_target_key"),
     OPERATION_WORK(
             "operation_key, work_kind, target_key, target_id, tenant_id, session_id, "
                     + "storage_key, physical_key, state, revision, payload_version, payload_json, "
