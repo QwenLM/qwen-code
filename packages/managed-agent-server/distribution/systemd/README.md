@@ -41,6 +41,13 @@ The Harness token and capability digest must match in `harness.env` and
 `server.env`. If the Harness reports a port other than 4170 because the
 requested one was in use, update `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` in
 `server.env` before starting the control plane.
+`QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` is separate: it names this Java
+control plane's own listener (`http://127.0.0.1:8080` in the template) and does
+not follow the Harness port.
+
+Alternatively, `../bin/qwen-managed-agent-bootstrap --directory
+/etc/qwen-managed-agent` generates all three files; adjust their ownership and
+mode for the service account afterwards.
 
 4. Install and start:
 
@@ -79,6 +86,12 @@ service is running.
 Broker restarts; the default `control-group` would terminate them with the
 server. `KillMode=mixed` on the Harness terminates its tool processes with it.
 Keep both settings unless an equivalent supervisor replaces them.
+
+The same `KillMode=process` means `systemctl stop qwen-managed-agent-server`
+signals only the main process: the unit reports inactive while Runtime workers
+keep the state directory and Workspace, and a following start races them. Reap
+them before restarting with
+`systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`.
 
 ## Paths
 

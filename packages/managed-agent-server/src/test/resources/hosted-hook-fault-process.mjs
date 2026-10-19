@@ -40,7 +40,7 @@ function record(event, fields = {}) {
   });
 }
 
-const solo = signalMode === 'hook-solo';
+const solo = signalMode === 'hook-solo' || signalMode === 'hook-deny';
 
 if (mode === 'child') {
   // FG13d: the graceful pass signals every member; this descendant has to
@@ -88,7 +88,8 @@ if (mode === 'child') {
     child.kill('SIGKILL');
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  record(lifecycle ? 'hook.done' : 'hook.allow', {
+  const deny = signalMode === 'hook-deny';
+  record(lifecycle ? 'hook.done' : deny ? 'hook.deny' : 'hook.allow', {
     eventName: value.hook_event_name,
   });
   if (lifecycle) process.exit(0);
@@ -96,8 +97,8 @@ if (mode === 'child') {
     JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
-        permissionDecisionReason: 'FG13_ALLOWED',
+        permissionDecision: deny ? 'deny' : 'allow',
+        permissionDecisionReason: deny ? 'FG13_DENIED' : 'FG13_ALLOWED',
       },
     }),
   );
