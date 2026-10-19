@@ -392,6 +392,7 @@ import {
   isWorkspaceTrusted,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
+import { createParentWorkflowAncestorTrustProvider } from './workflow-ancestor-trust.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -4003,6 +4004,7 @@ class QwenAgent implements Agent {
     ApprovalMode
   >();
   private managedShuttingDown = false;
+  private workflowAncestorTrustConnected = true;
   /**
    * A workspace change is being applied. New prompts wait for it, so no turn
    * is admitted under the revision the change replaces.
@@ -5304,6 +5306,15 @@ class QwenAgent implements Agent {
     private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
     private readonly managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'],
   ) {
+    if (expectedPrivateParentCapability !== undefined) {
+      const onClosed = () => {
+        this.workflowAncestorTrustConnected = false;
+      };
+      // ACP initializes the connection after its agent factory returns.
+      void Promise.resolve()
+        .then(() => connection.closed)
+        .then(onClosed, onClosed);
+    }
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
         'Tool execution sandbox does not support ACP sessions yet.',
@@ -15662,12 +15673,23 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
+    const workflowAncestorTrustSession: { sessionId: string | undefined } = {
+      sessionId: undefined,
+    };
     const workflowAncestorTrustProvider =
       this.expectedPrivateParentCapability === undefined
         ? createLocalWorkflowAncestorTrustProvider(
             getOperatorTrustSettings(settings),
           )
-        : undefined;
+        : this.hostExecutionEngine === 'legacy' && executionEngine !== 'managed'
+          ? createParentWorkflowAncestorTrustProvider(this.connection, {
+              isParentTrusted: () =>
+                this.isTrustedManagedParent() &&
+                this.workflowAncestorTrustConnected &&
+                !this.managedShuttingDown,
+              getSessionId: () => workflowAncestorTrustSession.sessionId,
+            })
+          : undefined;
     const config = await loadCliConfig(
       mergedSettings,
       argvForSession,
@@ -15743,6 +15765,7 @@ class QwenAgent implements Agent {
         : undefined,
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
     );
+    workflowAncestorTrustSession.sessionId = config.getSessionId();
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }

@@ -76,6 +76,10 @@
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
     },
+    "./workflowAncestorTrust": {
+      "types": "./dist/workflow-ancestor-trust.d.ts",
+      "import": "./dist/workflow-ancestor-trust.js"
+    },
     "./promptLedger": {
       "types": "./dist/prompt-ledger.d.ts",
       "import": "./dist/prompt-ledger.js"

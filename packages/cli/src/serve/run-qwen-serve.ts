@@ -185,6 +185,10 @@ import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
 } from '../config/daemon-trust-policy.js';
+import type {
+  WorkflowTrustAdmission,
+  WorkflowTrustPolicyPublication,
+} from './workflow-ancestor-trust.js';
 import {
   isManagedScratchChild,
   prepareManagedScratchRoot,
@@ -5211,20 +5215,36 @@ async function runQwenServeImpl(
     app: Application;
     bridge: AcpSessionBridge | undefined;
   }> => {
-    const [runtime, core, settingsRuntime, resolvedCliVersion, trustPolicy] =
-      await Promise.all([
-        loadServeRuntimeModules(),
-        loadCoreRuntime(),
-        loadSettingsRuntimeModules(),
-        cliVersionPromise,
-        import('../config/daemon-trust-policy.js'),
-      ]);
+    const [
+      runtime,
+      core,
+      settingsRuntime,
+      resolvedCliVersion,
+      trustPolicy,
+      workflowTrust,
+    ] = await Promise.all([
+      loadServeRuntimeModules(),
+      loadCoreRuntime(),
+      loadSettingsRuntimeModules(),
+      cliVersionPromise,
+      import('../config/daemon-trust-policy.js'),
+      import('./workflow-ancestor-trust.js'),
+    ]);
     getWorkspaceRuntimeCoordinatorIfSupported =
       runtime.getWorkspaceRuntimeCoordinatorIfSupported;
     cliVersion = resolvedCliVersion;
     settingsRuntime.environment.preResolveHomeEnvOverrides();
     const bootTrustSnapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
     let latestTrustPolicySnapshot = bootTrustSnapshot;
+    let publishedWorkflowTrustPolicy: WorkflowTrustPolicyPublication = {
+      publication: 0,
+      snapshot: bootTrustSnapshot,
+    };
+    const bootWorkflowTrustAdmission: WorkflowTrustAdmission = {
+      publication: 0,
+      snapshot: bootTrustSnapshot,
+    };
+    const workflowTrustIdeScopeCwd = process.cwd();
     const bootPrimaryTrustDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
       bootTrustSnapshot,
       boundWorkspace,
@@ -5740,6 +5760,33 @@ async function runQwenServeImpl(
     const workspaceRegistryForPersistence: {
       current: WorkspaceRegistry | undefined;
     } = { current: undefined };
+    const createRuntimeWorkflowAncestorTrustHandler = (
+      workspaceCwd: string,
+      getBridge: () => AcpSessionBridge | undefined,
+      generationGuard: WorkspaceGenerationGuard,
+      admissionPolicy: WorkflowTrustAdmission,
+    ) =>
+      workflowTrust.createWorkflowAncestorTrustHandler({
+        generationGuard,
+        admissionPolicy,
+        getPublished: () => publishedWorkflowTrustPolicy,
+        ideScopeCwd: workflowTrustIdeScopeCwd,
+        isCurrentOwner: (sessionId) => {
+          const registry = workspaceRegistryForPersistence.current;
+          if (!registry) return false;
+          const owner = registry.resolveLiveSessionOwner(sessionId);
+          const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
+          return (
+            owner.kind === 'found' &&
+            owner.runtime.trusted &&
+            owner.runtime.workspaceCwd === workspaceCwd &&
+            owner.runtime.bridge === getBridge() &&
+            entry?.state === 'active' &&
+            entry.current?.runtime === owner.runtime &&
+            entry.current.guard === generationGuard
+          );
+        },
+      });
     const isWorkspaceTrustedForPersistence = (workspace: string): boolean =>
       workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace)
         ?.trusted ??
@@ -6133,6 +6180,12 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
+          boundWorkspace,
+          () => bridgeRef,
+          primaryGenerationGuard,
+          bootWorkflowTrustAdmission,
+        ),
         artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
@@ -6763,6 +6816,12 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
+          workspaceInput.cwd,
+          () => secondaryBridgeRef,
+          secondaryGenerationGuard,
+          bootWorkflowTrustAdmission,
+        ),
         artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
@@ -7345,9 +7404,21 @@ async function runQwenServeImpl(
       if (provenance === 'live-conversation') {
         await liveConversationWorkspace.assertExactRoot(cwd);
       }
-      const snapshot =
-        buildOptions?.snapshot ??
-        (await trustPolicy.readDaemonTrustPolicySnapshot());
+      const workflowTrustAdmission: WorkflowTrustAdmission =
+        buildOptions?.snapshot
+          ? {
+              snapshot: buildOptions.snapshot,
+              publication:
+                publishedWorkflowTrustPolicy.snapshot?.revision ===
+                buildOptions.snapshot.revision
+                  ? publishedWorkflowTrustPolicy.publication
+                  : -1,
+            }
+          : await workflowTrust.readWorkflowTrustAdmission(
+              trustPolicy.readDaemonTrustPolicySnapshot,
+              () => publishedWorkflowTrustPolicy,
+            );
+      const snapshot = workflowTrustAdmission.snapshot;
       const decision =
         buildOptions?.decision ??
         trustPolicy.evaluateDaemonWorkspaceTrust(snapshot, cwd);
@@ -7483,6 +7554,12 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
+            cwd,
+            () => wsBridgeRef,
+            generationGuard,
+            workflowTrustAdmission,
+          ),
           artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
@@ -8780,11 +8857,18 @@ async function runQwenServeImpl(
       const trustMonitor = createDaemonTrustPolicyMonitor({
         onSnapshot: (snapshot) => {
           latestTrustPolicySnapshot = snapshot;
+          publishedWorkflowTrustPolicy = {
+            publication: publishedWorkflowTrustPolicy.publication + 1,
+            snapshot,
+          };
           return runWorkspaceTrustOperation(() =>
             trustReconciler.reconcile(snapshot),
           );
         },
         onError: (error) => {
+          publishedWorkflowTrustPolicy = {
+            publication: publishedWorkflowTrustPolicy.publication + 1,
+          };
           daemonLog.error(
             'workspace trust policy monitor failed',
             error instanceof Error ? error : null,

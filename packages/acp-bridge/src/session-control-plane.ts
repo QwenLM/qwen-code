@@ -4956,6 +4956,7 @@ export function createSessionControlPlane(
           })
           .catch(() => undefined);
       },
+      opts.onWorkflowAncestorTrust,
     );
     const connection = harness.createConnection(client, channel);
     // Add to `aliveChannels` + register the `channel.exited` handler

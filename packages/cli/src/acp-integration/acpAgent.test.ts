@@ -4562,12 +4562,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it.each([undefined, '', 'private-parent'])(
-    'H01/H04 injects ancestor trust only for direct ACP provenance %s',
+    'H01/H04 selects local or parent ancestor trust for provenance %s',
     async (capability) => {
       await setupSessionMocks('ancestor-session');
-      const { agent, agentPromise } = await bootAcpAgent({
-        privateParentCapability: capability,
-      });
+      const extMethod = vi.fn().mockResolvedValue({ v: 1, trusted: [true] });
+      const { agent, agentPromise } = await bootAcpAgent(
+        {
+          privateParentCapability: capability,
+        },
+        extMethod,
+      );
       try {
         if (capability !== undefined) {
           await expect(
@@ -4598,7 +4602,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             provider?.([process.cwd()], path.join(process.cwd(), 'project')),
           ).resolves.toEqual([true]);
         } else {
-          expect(provider).toBeUndefined();
+          expect(provider).toBeTypeOf('function');
+          await expect(
+            provider?.([process.cwd()], path.join(process.cwd(), 'project')),
+          ).resolves.toEqual([true]);
+          expect(extMethod).toHaveBeenCalledWith(
+            'qwen/control/workflow/ancestor-trust',
+            {
+              v: 1,
+              sessionId: 'ancestor-session',
+              canonicalTargetDir: path.join(process.cwd(), 'project'),
+              ancestorDirs: [process.cwd()],
+            },
+          );
         }
       } finally {
         mockConnectionState.resolve();
@@ -6091,7 +6107,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return innerConfig;
   }
 
-  async function bootAcpAgent(options?: Parameters<typeof runAcpAgent>[3]) {
+  async function bootAcpAgent(
+    options?: Parameters<typeof runAcpAgent>[3],
+    extMethod?: (
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>,
+  ) {
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
@@ -6099,11 +6121,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       options,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    let connectionReady = false;
     const agent = capturedAgentFactory!({
+      ...(extMethod ? { extMethod } : {}),
       get closed() {
+        if (!connectionReady) {
+          throw new Error(
+            'ACP connection is not initialized during agent construction',
+          );
+        }
         return mockConnectionState.promise;
       },
     }) as AgentLike;
+    connectionReady = true;
     return { agent, agentPromise };
   }
 
