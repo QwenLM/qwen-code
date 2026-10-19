@@ -5954,6 +5954,9 @@ describe('CoreToolScheduler', () => {
       `TOOL=printf; $TOOL '%s\\n' *.txt`,
       `TOOL=printf; $TOOL '%s\\n' '*.txt'`,
       `printf '%s\\n' *.txt`,
+      `printf '%s\\n' git; TOOL=printf; $TOOL '%s\\n' *.txt`,
+      `printf '%s\\n' git; printf '%s\\n' *.txt`,
+      `bash -c 'printf "%s\\n" git; TOOL=printf; $TOOL "%s\\n" *.txt'`,
       'unknown-wrapper git reset --soft; bash other.sh',
     ])(
       'lets harmless %s reach the classifier and run when it allows',
@@ -6004,6 +6007,10 @@ describe('CoreToolScheduler', () => {
       'gi{t..t} rese{t..t} --hard',
       'TOOL=git; $TOOL rese{t..t} --hard',
       'TOOL=$(which git); $TOOL rese{t..t} --hard',
+      'TOOL=$(printf git); $TOOL rese{t..t} --hard',
+      `printf 'git\\n' | { read TOOL; $TOOL rese{t..t} --hard; }`,
+      `CALL=eval; $CALL 'exec >tool-path <tool-path'; printf '%s\\n' git; read TOOL; $TOOL rese{t..t} --hard`,
+      `shopt -s expand_aliases; alias setup='exec >tool-path <tool-path'\nsetup\nprintf '%s\\n' git\nread TOOL\n$TOOL rese{t..t} --hard`,
       `printf 'git reset --hard\\n' > fix.sh && rg --pr{e..e} bash . fix.sh`,
     ];
 

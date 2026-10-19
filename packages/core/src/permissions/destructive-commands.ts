@@ -247,6 +247,10 @@ interface Script {
    * is weighed on its own.
    */
   checked: Array<[number, number]>;
+  /** Literal stdout data, excluded only when no output can feed code. */
+  printed: Array<[number, number]>;
+  /** An earlier opaque command could have changed the shell's descriptors. */
+  opaqueCommandSeen: boolean;
 }
 
 interface Scan {
@@ -262,6 +266,7 @@ interface Scan {
   patternArguments: boolean;
   /** A protected program named as an argument of an unverified wrapper. */
   unverifiedProgram: boolean;
+  outputMayFeedCode: boolean;
   /**
    * The command runs code the guard cannot read: a script file, a program a
    * shell reads from a pipe or file, interpreter code, a git setting, or a
@@ -295,12 +300,22 @@ export async function isDestructiveCommand(
   cwd?: string,
 ): Promise<DestructiveCommandResult | null> {
   const scan: Scan = {
-    scripts: [{ text: joinLines(command), cwd, depth: 0, checked: [] }],
+    scripts: [
+      {
+        text: joinLines(command),
+        cwd,
+        depth: 0,
+        checked: [],
+        printed: [],
+        opaqueCommandSeen: false,
+      },
+    ],
     amendTargets: [],
     movesRepository: false,
     unverifiable: false,
     patternArguments: false,
     unverifiedProgram: false,
+    outputMayFeedCode: false,
     hiddenCode: false,
   };
   for (let i = 0; i < scan.scripts.length && !scan.found; i++) {
@@ -309,13 +324,21 @@ export async function isDestructiveCommand(
   // Hidden code can come from anywhere in the command: text it prints,
   // writes to a file or keeps in a variable.
   if (scan.hiddenCode) {
-    for (const { text, checked } of scan.scripts) {
+    for (const { text, checked, printed } of scan.scripts) {
       let rest = text;
       for (const [start, end] of checked) {
         rest = rest.slice(0, start) + ' '.repeat(end - start) + rest.slice(end);
       }
-      if (mayRunProtected(rest, scan.patternArguments))
-        scan.unverifiable = true;
+      if (mayRunProtected(rest)) scan.unverifiable = true;
+      if (scan.patternArguments) {
+        if (!scan.outputMayFeedCode) {
+          for (const [start, end] of printed) {
+            rest =
+              rest.slice(0, start) + ' '.repeat(end - start) + rest.slice(end);
+          }
+        }
+        if (mayRunProtected(rest, true)) scan.unverifiable = true;
+      }
     }
   }
 
@@ -363,10 +386,24 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
     return;
   }
   try {
-    if (tree.rootNode.hasError) flagIfMayRunProtected(script.text, scan);
+    if (tree.rootNode.hasError) {
+      scan.outputMayFeedCode = true;
+      flagIfMayRunProtected(script.text, scan);
+    }
     const stack: SyntaxNode[] = [tree.rootNode];
     while (stack.length > 0) {
       const node = stack.pop()!;
+      // Keep data evidence across transfers, including persistent `exec`
+      // redirects and functions whose callers may capture their output.
+      if (
+        node.type.endsWith('_redirect') ||
+        node.type.endsWith('_substitution') ||
+        node.type === 'pipeline' ||
+        node.type === 'function_definition' ||
+        node.type === 'do_group'
+      ) {
+        scan.outputMayFeedCode = true;
+      }
       if (node.type === 'command') {
         visitCommand(node, script, scan);
       } else if (node.type === 'comment') {
@@ -406,6 +443,20 @@ function visitCommand(node: SyntaxNode, script: Script, scan: Scan): void {
   const name = node.childForFieldName('name');
   if (!name) return;
   const argv = [wordOf(name), ...argumentNodes(node).map(wordOf)];
+  const [program, ...args] = argv;
+  const format = args[0] === '--' ? (args[1] ?? '') : (args[0] ?? '');
+  if (
+    !script.opaqueCommandSeen &&
+    argv.every((word) => !isDynamic(word)) &&
+    !node.namedChildren.some((child) => child.type === 'variable_assignment') &&
+    (program === 'echo' ||
+      (program === 'printf' &&
+        !format.startsWith('-') &&
+        // Other printf conversions can assign variables, e.g. `%n`.
+        !/%(?![%s])/.test(format)))
+  ) {
+    script.printed.push([node.startIndex, node.endIndex]);
+  }
   runArgv(argv, { node, script, cwd: script.cwd }, scan);
 }
 
@@ -419,6 +470,7 @@ function visitAssignment(node: SyntaxNode, scan: Scan): void {
   } else if (STARTUP_FILE_VARIABLES.has(name)) {
     // A shell started later runs this file first.
     scan.hiddenCode = true;
+    scan.outputMayFeedCode = true;
   } else if (GIT_COMMAND_VARIABLE.test(name)) {
     // Git runs the value, or reads settings that can run anything.
     scan.hiddenCode = true;
@@ -552,6 +604,7 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   if (isDynamic(head)) {
     // e.g. `$GIT reset --hard`: the program is only known at run time.
     scan.hiddenCode = true;
+    ctx.script.opaqueCommandSeen = true;
     scan.patternArguments ||= args.some((arg) => arg.includes(PATTERN));
     if (
       args.some(
@@ -565,6 +618,12 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
     return;
   }
   const program = programName(head);
+  if (
+    SCRIPT_RUNNERS.has(program) ||
+    ['.', 'source', 'trap'].includes(program)
+  ) {
+    scan.outputMayFeedCode = true;
+  }
   if (program === 'git') return checkGit(head, args, ctx, scan);
   if (IAC_TOOLS.has(program)) return checkIac(head, program, args, ctx, scan);
   if (program === 'rg') {
@@ -641,6 +700,7 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   if (wrapper) return runWrapped(program, wrapper, args, ctx, scan);
   // An unknown program may still wrap a command the guard interprets, or
   // run code it is handed (`trap 'cmd' EXIT`, `lua -e …`).
+  ctx.script.opaqueCommandSeen = true;
   for (let i = 1; i < argv.length; i++) {
     if (isInterpreted(argv[i]!)) {
       const argumentProgram = programName(argv[i]!);
@@ -660,6 +720,8 @@ function runWrapped(
   ctx: CommandContext,
   scan: Scan,
 ): void {
+  // Wrappers can change startup state, e.g. `env BASH_ENV=... bash -c ...`.
+  ctx.script.opaqueCommandSeen = true;
   const withValue = words(wrapper.value ?? '');
   const scriptOptions = words(wrapper.script ?? '');
   const inner = { ...ctx, cwd: undefined };
@@ -1096,9 +1158,15 @@ function checkShell(args: string[], ctx: CommandContext, scan: Scan): void {
       break;
     }
     if (!/^[-+]./.test(arg)) break;
+    if (/^(?:--(?:login|interactive)|-[A-Za-z]*[il][A-Za-z]*)$/.test(arg)) {
+      scan.outputMayFeedCode = true;
+    }
     if (SHELL_OPTIONS_WITH_VALUE.has(arg)) {
       // A startup file is a script the shell runs first.
-      if (STARTUP_FILE_OPTIONS.has(arg)) scan.hiddenCode = true;
+      if (STARTUP_FILE_OPTIONS.has(arg)) {
+        scan.hiddenCode = true;
+        scan.outputMayFeedCode = true;
+      }
       i++;
       continue;
     }
@@ -1202,6 +1270,8 @@ function runScript(
     cwd: ctx.cwd,
     depth: ctx.script.depth + 1,
     checked: [],
+    printed: [],
+    opaqueCommandSeen: ctx.script.opaqueCommandSeen,
   });
 }
 
