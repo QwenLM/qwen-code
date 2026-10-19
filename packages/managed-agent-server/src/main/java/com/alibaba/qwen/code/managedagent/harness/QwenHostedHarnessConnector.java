@@ -386,22 +386,51 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         if (session.workspace() != null
                 && !approvalModeConfirmed(session, attached, minted)) {
-            attachments.remove(key);
+            attachments.remove(key, attached);
             throw new IllegalStateException(
                     "Hosted Harness did not confirm the Session approval mode");
         }
-        attachments.put(key, attached);
-        // A passive re-attach (rename / close / the adoptGeneration notices)
-        // carries the takeover recovery snapshot exactly like the
-        // recovery-load path that re-mints it: restore the pending marker
-        // or the next dispatch's cached branch answers "nothing parked"
-        // over the snapshot it still holds (R11-3). The marker is safe
-        // here: it was minted under the live boot, so a boot-identity
-        // eviction drops the attachment itself first.
-        if (attached.getRuntimeRecovery() != null) {
-            pendingRecovery.add(key);
-        } else {
-            pendingRecovery.remove(key);
+        HarnessSessionRef loaded = attached;
+        attachments.compute(key, (ignored, held) -> {
+            if (passiveManagedRuntimeRecovery && loadExisting) {
+                HostedHarnessClient current = client;
+                if (current == null) {
+                    throw new IllegalStateException("Hosted Harness generation moved during passive load");
+                }
+                String liveBootId = current.capabilities().getBootId();
+                if (!liveBootId.equals(loaded.getHarnessBootId())) {
+                    throw new IllegalStateException("Hosted Harness generation moved during passive load");
+                }
+            }
+            return loaded;
+        });
+        HarnessSessionRef published = attachments.computeIfPresent(key, (ignored, held) -> {
+            if (held != loaded) {
+                return held;
+            }
+            if (passiveManagedRuntimeRecovery && loadExisting) {
+                HostedHarnessClient current = client;
+                if (current == null || !current.capabilities().getBootId().equals(loaded.getHarnessBootId())) {
+                    pendingRecovery.remove(key);
+                    return null;
+                }
+            }
+            // A passive re-attach (rename / close / the adoptGeneration notices)
+            // carries the takeover recovery snapshot exactly like the
+            // recovery-load path that re-mints it: restore the pending marker
+            // or the next dispatch's cached branch answers "nothing parked"
+            // over the snapshot it still holds (R11-3). The ref must already
+            // be published for adoption's orphan-marker cleanup, and this
+            // slot prevents a late response changing a newer ref's marker.
+            if (loaded.getRuntimeRecovery() != null) {
+                pendingRecovery.add(key);
+            } else {
+                pendingRecovery.remove(key);
+            }
+            return loaded;
+        });
+        if (passiveManagedRuntimeRecovery && loadExisting && published != loaded) {
+            throw new IllegalStateException("Hosted Harness generation moved during passive load");
         }
         return new Attachment(attached.getHarnessBootId(),
                 attached.getRuntimeRecovery(),
@@ -876,6 +905,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return current.capabilities().getBootId();
         } catch (RuntimeException closed) {
             return null;
+        }
+    }
+
+    @Override
+    public void recoverForWake(String tenantId, String sessionId) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            // Passive load always makes a round trip, even with a cached ref, and never
+            // drives an unrelated foreground Turn. The loaded wake pump owns its inputs.
+            doCreateOrLoad(tenantId, sessionId, true, true, false);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
         }
     }
 
