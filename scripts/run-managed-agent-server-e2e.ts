@@ -1415,7 +1415,7 @@ try {
       [
         '-cp',
         springJar,
-        '-Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain',
+        '-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
         'org.springframework.boot.loader.launch.PropertiesLauncher',
         'register',
         tenant,

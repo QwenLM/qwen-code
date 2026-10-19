@@ -2,28 +2,28 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -222,12 +222,12 @@ class ManagedAgentServerIntegrationTest {
         assertThat(retry.replayed()).isTrue();
         assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-create", "qwen-code", "2", null, null, List.of()))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("idempotency_conflict"));
         assertThatThrownBy(() -> upgraded.createSession(tenant,
                 "revision-new", "qwen-code", "1", null, null, List.of()))
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("unsupported_feature"));
         CommandAdmission omitted = upgraded.createSession(tenant,
@@ -3483,7 +3483,7 @@ class ManagedAgentServerIntegrationTest {
         String operation = "operation-" + UUID.randomUUID();
         var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope(tenant, "workspace", "1", "/workspace", "capability", "session");
         var bindings = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository(jdbc.getDataSource(),
-                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("test", new byte[32]));
+                new com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector("test", new byte[32]));
         var sessions = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository(jdbc.getDataSource());
         var executions = new com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository(jdbc.getDataSource());
         var provisioner = org.mockito.Mockito.mock(com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class,

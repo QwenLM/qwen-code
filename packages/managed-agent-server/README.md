@@ -16,6 +16,21 @@ authentication and writer credentials" below.
 设计说明：[English](../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+## Java package layout
+
+Business components live in `managedagent.session`, `workspace`, `artifact`,
+`channel`, `automation`, `catalog` and `event`. Controllers and HTTP filters
+remain in `managedagent.api`; shared contracts and application errors live in
+`managedagent.model` and `exception`. The shared SQL aggregate remains in
+`managedagent.persistence` so its transaction and locking helpers stay
+package-private. Broker providers, HTTP adapters and credential protection live
+in `runtimebroker.provisioning`, `transport` and `security` respectively. The
+separate `maintenance` configuration remains outside the server's component scan.
+
+These are packages in one Maven module. See the package-boundary design:
+[English](../../docs/design/2026-10-19-managed-agent-package-boundaries.md) |
+[简体中文](../../docs/design/2026-10-19-managed-agent-package-boundaries.zh-CN.md).
+
 ## Integration status
 
 The Hosted path supports durable no-tool Sessions and private Workspace tool
@@ -1195,7 +1210,7 @@ crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 
 ```bash
 mvn -q -DskipTests compile exec:java \
-  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
 ```
 
@@ -1203,7 +1218,7 @@ The same entry is available from a shipped Spring Boot fat jar, without the sour
 
 ```bash
 java -cp /path/to/app.jar \
-  -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed
 ```
