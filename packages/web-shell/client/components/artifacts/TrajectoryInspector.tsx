@@ -7,6 +7,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import type { TrajectoryLifecycleEntry } from '../../trajectory/project-trajectory-lifecycle';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
@@ -87,7 +88,11 @@ export function TrajectoryInspector({
 
   useLayoutEffect(
     () => () => {
-      if (sectionRef.current?.contains(document.activeElement)) {
+      if (
+        sectionRef.current?.contains(
+          getShadowAwareActiveElement(sectionRef.current),
+        )
+      ) {
         onFocusedUnmount?.();
       }
     },

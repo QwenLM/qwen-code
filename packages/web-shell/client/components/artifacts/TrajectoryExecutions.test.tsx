@@ -6,7 +6,7 @@
  */
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import { TrajectoryExecutions } from './TrajectoryExecutions';
@@ -70,9 +70,11 @@ function running(key = 'a', start = 9_000): TrajectoryExecutionRow {
     },
   };
 }
-async function mount(rows: TrajectoryExecutionRow[]) {
+async function mount(rows: TrajectoryExecutionRow[], shadow = false) {
   const container = document.createElement('div');
-  document.body.append(container);
+  const host = shadow ? document.createElement('div') : container;
+  document.body.append(host);
+  if (shadow) host.attachShadow({ mode: 'open' }).append(container);
   const root = createRoot(container);
   const onSelect = vi.fn();
   let alive = true;
@@ -80,7 +82,7 @@ async function mount(rows: TrajectoryExecutionRow[]) {
     if (alive) {
       act(() => root.unmount());
       alive = false;
-      container.remove();
+      host.remove();
     }
   };
   cleanup.push(unmount);
@@ -218,28 +220,32 @@ it('opens in one click after manual collapse and a compact viewport resize', asy
   expect(vi.getTimerCount()).toBe(1);
 });
 
-for (const removal of ['compact', 'empty'] as const) {
-  it.each([false, true])(
-    `restores focus on ${removal} only when the removed grid owns it (outside=%s)`,
-    async (outside) => {
-      const { container, update } = await mount([running()]);
-      const grid = container.querySelector<HTMLElement>('[role="grid"]')!;
-      const toggle = container.querySelector<HTMLButtonElement>('button')!;
-      const other = document.createElement('button');
-      container.append(other);
-      (outside ? other : grid).focus();
-      if (removal === 'compact') {
-        act(() =>
-          resize(
-            [{ contentRect: { height: 400 } } as ResizeObserverEntry],
-            {} as ResizeObserver,
-          ),
-        );
-      } else {
-        await update([]);
-      }
-      expect(container.querySelector('[role="grid"]')).toBeNull();
-      expect(document.activeElement).toBe(outside ? other : toggle);
-    },
-  );
-}
+describe.each([false, true])('focus recovery (shadow=%s)', (shadow) => {
+  for (const removal of ['compact', 'empty'] as const) {
+    it.each([false, true])(
+      `restores focus on ${removal} only when the removed grid owns it (outside=%s)`,
+      async (outside) => {
+        const { container, update } = await mount([running()], shadow);
+        const grid = container.querySelector<HTMLElement>('[role="grid"]')!;
+        const toggle = container.querySelector<HTMLButtonElement>('button')!;
+        const other = document.createElement('button');
+        container.append(other);
+        (outside ? other : grid).focus();
+        if (removal === 'compact') {
+          act(() =>
+            resize(
+              [{ contentRect: { height: 400 } } as ResizeObserverEntry],
+              {} as ResizeObserver,
+            ),
+          );
+        } else {
+          await update([]);
+        }
+        expect(container.querySelector('[role="grid"]')).toBeNull();
+        expect(
+          (container.getRootNode() as Document | ShadowRoot).activeElement,
+        ).toBe(outside ? other : toggle);
+      },
+    );
+  }
+});

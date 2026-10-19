@@ -138,11 +138,14 @@ async function render(
   loadPage: TrajectoryPageLoader | undefined,
   liveStore: TrajectoryLiveStore | null = null,
   historyGapRevision = 0,
+  shadow = false,
 ): Promise<HTMLElement> {
   const container = document.createElement('div');
-  document.body.appendChild(container);
+  const host = shadow ? document.createElement('div') : container;
+  document.body.appendChild(host);
+  if (shadow) host.attachShadow({ mode: 'open' }).append(container);
   const root = createRoot(container);
-  mounted.push({ root, container });
+  mounted.push({ root, container: host });
   await act(async () => {
     root.render(
       <I18nProvider language="en">
@@ -421,9 +424,16 @@ describe('TrajectoryPanel', () => {
     expect(document.activeElement).toBe(refresh);
   });
 
-  it.each(['grid', 'collapsed', 'outside'] as const)(
-    'recovers focused details on execution eviction (%s)',
-    async (target) => {
+  it.each(
+    [false, true].flatMap((shadow) =>
+      (['grid', 'collapsed', 'outside'] as const).map((target) => ({
+        shadow,
+        target,
+      })),
+    ),
+  )(
+    'recovers focused details on execution eviction ($target, shadow=$shadow)',
+    async ({ shadow, target }) => {
       const store = createTrajectoryLiveStore();
       const owner = {};
       store.begin(owner, {
@@ -463,7 +473,7 @@ describe('TrajectoryPanel', () => {
         's',
         'scope',
       );
-      const container = await render(loader, store);
+      const container = await render(loader, store, 0, shadow);
       await act(async () =>
         container
           .querySelector<HTMLElement>(
@@ -491,7 +501,9 @@ describe('TrajectoryPanel', () => {
       expect(
         container.querySelector('[data-testid="trajectory-inspector"]'),
       ).toBeNull();
-      expect(document.activeElement).toBe(
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(
         target === 'outside'
           ? refresh
           : target === 'collapsed'

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import { useI18n } from '../../i18n';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import styles from './TrajectoryExecutions.module.css';
 
@@ -32,7 +33,12 @@ export function TrajectoryExecutions({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const setScrollElement = useCallback((node: HTMLDivElement | null) => {
-    if (!node && scrollRef.current?.contains(document.activeElement)) {
+    if (
+      !node &&
+      scrollRef.current?.contains(
+        getShadowAwareActiveElement(scrollRef.current),
+      )
+    ) {
       toggleRef.current?.focus({ preventScroll: true });
     }
     scrollRef.current = node;
