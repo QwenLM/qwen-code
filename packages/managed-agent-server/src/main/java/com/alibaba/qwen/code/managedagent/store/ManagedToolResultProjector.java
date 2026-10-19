@@ -65,12 +65,18 @@ public class ManagedToolResultProjector {
         } catch (RuntimeException error) {
             LOG.warn("Managed tool result backfill could not advance: {}", error.getClass().getSimpleName());
         }
-        for (int index = 0; index < 8; index++) {
-            var claim = store.claim();
-            if (claim.isEmpty()) {
-                return;
+        try {
+            for (int index = 0; index < 8; index++) {
+                var claim = store.claim();
+                if (claim.isEmpty()) {
+                    return;
+                }
+                project(claim.get());
             }
-            project(claim.get());
+        } catch (RuntimeException error) {
+            // Sibling collectors' shape: a held tenant guard refuses the claim (503) and the
+            // claim lapses back to due, so the next tick retries instead of an ERROR per pass.
+            LOG.warn("Managed tool result projection will retry: {}", error.getClass().getSimpleName());
         }
     }
 
@@ -272,13 +278,17 @@ public class ManagedToolResultProjector {
     }
 
     static String boundPreview(String text) {
+        return boundPreview(text, 8192, 200);
+    }
+
+    static String boundPreview(String text, int byteLimit, int lineLimit) {
         int bytes = 0;
         int lines = 1;
         int end = 0;
         while (end < text.length()) {
             int point = text.codePointAt(end);
             int count = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-            if (bytes + count > 8192 || point == '\n' && lines == 200) {
+            if (bytes + count > byteLimit || point == '\n' && lines == lineLimit) {
                 break;
             }
             bytes += count;

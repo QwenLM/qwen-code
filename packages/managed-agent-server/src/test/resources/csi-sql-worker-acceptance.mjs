@@ -190,13 +190,29 @@ try {
   await broker('/tool-sessions:acquire', { turnKind: 'bootstrap' });
   const writerId = randomUUID();
   const writerToken = randomBytes(32).toString('base64url');
+  let originalReceiptRequest;
+  let coldRefusalChecks = 0;
   stores = createHttpManagedSessionStores({
     baseUrl: input.adapter,
     sessionKey: key,
     writerId,
     writerToken,
-    leaseDurationMs: 300000,
+    leaseDurationMs: input.coldRecovery ? 10000 : 300000,
     requestTimeoutMs: 20000,
+    ...(input.coldRecovery
+      ? {
+          fetchFn: async (url, options) => {
+            const response = await fetch(url, options);
+            if (
+              response.ok &&
+              /\/transactions:commit(?:-v2)?$/u.test(new URL(url).pathname) &&
+              JSON.parse(options.body).operation === 'recordToolResult'
+            )
+              originalReceiptRequest = { url, options };
+            return response;
+          },
+        }
+      : {}),
   });
   const definitionRef = await stores.resourceStore.publish(
     'managed-definition',
@@ -220,13 +236,14 @@ try {
     cwd: '/workspace',
     version: 'hosted-harness/1',
     workerId: writerId,
-    activationLeaseDurationMs: 300000,
+    activationLeaseDurationMs: input.coldRecovery ? 10000 : 300000,
     journalStore: stores.journalStore,
     resourceStore: stores.resourceStore,
     requireNew: true,
     create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
   });
   const initialActivation = { ...session.activation };
+  let expectedActivation = initialActivation;
   const control = async (action, extra = {}) =>
     (
       await broker(`/tool-sessions/${key.sessionId}/control`, {
@@ -348,6 +365,320 @@ try {
         wakeReason: 'input',
       },
     );
+    if (input.hostedProducer) {
+      const { runHostedFileTurn } = await import('./csi-hosted-file-turns.mjs');
+      const actual = await runHostedFileTurn({
+        root,
+        output,
+        session,
+        promptId,
+        prompt,
+        index,
+        mutation,
+        recoveryCut: input.recoveryCut,
+        files: {
+          broker: { baseUrl: input.broker, token: input.operatorToken },
+          runtime: input.runtime,
+        },
+        ...(input.coldRecovery && index === 0
+          ? {
+              recover: async () => {
+                assert.ok(
+                  originalReceiptRequest,
+                  'Capture an actual old-writer receipt transaction',
+                );
+                const originalExecutions = (await fixture('/fixture:inspect'))
+                  .executions;
+                const working = await fs.readFile(
+                  path.join(workspace, 'marker.txt'),
+                );
+                await assert.rejects(
+                  session.close({ releaseActivation: false }),
+                  (error) =>
+                    [
+                      'csi_finalize_required',
+                      'csi_managed_mutation_unavailable',
+                    ].includes(error.remoteCode),
+                );
+                await stores.stopLocal();
+                session = undefined;
+                stores = undefined;
+                const storeHeaders = {
+                  ...headers,
+                  'X-Qwen-Managed-Writer-Token': writerToken,
+                  'X-Qwen-Tenant-Id': key.tenantId,
+                };
+                const prefix = `/internal/managed-session-store/v1/sessions/${key.sessionId}`;
+                const beforeLive = await fixture('/fixture:image');
+                await post(
+                  input.adapter,
+                  `${prefix}/writers:acquire`,
+                  {
+                    workspaceId: key.workspaceId,
+                    writerId: randomUUID(),
+                    leaseMillis: 1000,
+                  },
+                  storeHeaders,
+                  409,
+                  'Live original writer must refuse replacement',
+                );
+                assert.deepEqual(await fixture('/fixture:image'), beforeLive);
+                coldRefusalChecks++;
+                const waitForExpiry = async () => {
+                  const deadline = Date.now() + 30000;
+                  for (;;) {
+                    const lease = await fixture('/fixture:leases');
+                    if (
+                      lease.databaseNow >=
+                      Math.max(
+                        lease.writerLeaseUntil,
+                        lease.activationExpiresAt,
+                      )
+                    )
+                      break;
+                    assert.ok(
+                      Date.now() < deadline,
+                      'Original leases must expire naturally',
+                    );
+                    await new Promise((resolve) => setTimeout(resolve, 100));
+                  }
+                };
+                await waitForExpiry();
+                const refused = await fixture('/fixture:cold-refusals', {
+                  writerToken,
+                });
+                assert.equal(refused.refusals, 4);
+                coldRefusalChecks += refused.refusals;
+                const abandonedWriter = randomUUID();
+                const abandoned = await post(
+                  input.adapter,
+                  `${prefix}/writers:acquire`,
+                  {
+                    workspaceId: key.workspaceId,
+                    writerId: abandonedWriter,
+                    leaseMillis: 1000,
+                  },
+                  storeHeaders,
+                );
+                assert.equal(abandoned.writerGeneration, 2);
+                assert.equal(abandoned.activationEpoch, 1);
+                const beforeUninstalled = await fixture('/fixture:image');
+                await post(
+                  input.adapter,
+                  '/fixture:publication',
+                  {
+                    writerId: abandonedWriter,
+                    writerGeneration: 2,
+                    writerToken,
+                  },
+                  storeHeaders,
+                  409,
+                  'Uninstalled writer cannot publish',
+                );
+                assert.deepEqual(
+                  await fixture('/fixture:image'),
+                  beforeUninstalled,
+                );
+                coldRefusalChecks++;
+                await waitForExpiry();
+                let successorWriter = randomUUID();
+                if (input.isolation) {
+                  const writers = [successorWriter, randomUUID()];
+                  await fixture('/fixture:cold-arm', { writers });
+                  const pending = writers.map(async (candidate) => {
+                    const response = await fetch(
+                      `${input.adapter}${prefix}/writers:acquire`,
+                      {
+                        method: 'POST',
+                        headers: storeHeaders,
+                        signal: AbortSignal.timeout(20000),
+                        body: JSON.stringify({
+                          workspaceId: key.workspaceId,
+                          writerId: candidate,
+                          leaseMillis: 300000,
+                        }),
+                      },
+                    );
+                    return {
+                      writerId: candidate,
+                      status: response.status,
+                      body: await response.json(),
+                    };
+                  });
+                  const contention = await fixture('/fixture:cold-release');
+                  const responses = await Promise.all(pending);
+                  assert.deepEqual(
+                    responses.map((response) => response.status).sort(),
+                    [200, 409],
+                  );
+                  const winner = responses.find(
+                    (response) => response.status === 200,
+                  );
+                  successorWriter = winner.writerId;
+                  assert.equal(winner.body.writerGeneration, 3);
+                  assert.equal(winner.body.activationEpoch, 1);
+                  const warmed = Object.values(contention.warmed);
+                  assert.equal(warmed.length, 2);
+                  assert.ok(
+                    warmed.every(
+                      (entry) =>
+                        entry.isolation === input.isolation &&
+                        entry.autoCommit === false &&
+                        entry.writerGeneration === 2,
+                    ),
+                  );
+                  await fs.writeFile(
+                    path.join(output, 'cold-contention.json'),
+                    JSON.stringify({ contention, responses }, null, 2),
+                  );
+                }
+                stores = createHttpManagedSessionStores({
+                  baseUrl: input.adapter,
+                  sessionKey: key,
+                  writerId: successorWriter,
+                  writerToken,
+                  leaseDurationMs: 300000,
+                  requestTimeoutMs: 20000,
+                });
+                session = await openManagedSession({
+                  runtimeBaseDir: output,
+                  transcriptPath: '',
+                  sessionId: key.sessionId,
+                  sessionKey: key,
+                  cwd: '/workspace',
+                  version: 'hosted-harness/1',
+                  workerId: successorWriter,
+                  activationLeaseDurationMs: 300000,
+                  journalStore: stores.journalStore,
+                  resourceStore: stores.resourceStore,
+                });
+                assert.equal(
+                  (await stores.publication.owner()).writerGeneration,
+                  3,
+                );
+                assert.equal(session.activation.epoch, 2);
+                expectedActivation = { ...session.activation };
+                const beforeStale = await fixture('/fixture:image');
+                const replay = await fetch(originalReceiptRequest.url, {
+                  ...originalReceiptRequest.options,
+                  signal: AbortSignal.timeout(20000),
+                });
+                assert.equal(replay.status, 409);
+                await replay.arrayBuffer();
+                await post(
+                  input.adapter,
+                  `${prefix}/writers:renew`,
+                  {
+                    workspaceId: key.workspaceId,
+                    writerId,
+                    writerGeneration: 1,
+                    leaseMillis: 10000,
+                  },
+                  storeHeaders,
+                  409,
+                  'Original writer cannot renew after takeover',
+                );
+                await post(
+                  input.adapter,
+                  '/fixture:publication',
+                  {
+                    writerId,
+                    writerGeneration: 1,
+                    writerToken,
+                  },
+                  storeHeaders,
+                  409,
+                  'Original writer cannot publish after takeover',
+                );
+                assert.deepEqual(await fixture('/fixture:image'), beforeStale);
+                coldRefusalChecks += 3;
+                const { recoverHostedCsiReceipts } = await import(
+                  cli('hosted-csi-cold-recovery')
+                );
+                const recovered = await recoverHostedCsiReceipts(
+                  session,
+                  { baseUrl: input.broker, token: input.operatorToken },
+                  promptId,
+                  prompt,
+                  {
+                    ...input.runtime,
+                    ...(await stores.publication.owner()),
+                    activationId: session.activation.activationId,
+                    activationEpoch: session.activation.epoch,
+                  },
+                );
+                assert.deepEqual(
+                  (await fixture('/fixture:inspect')).executions,
+                  originalExecutions,
+                );
+                assert.deepEqual(
+                  await fs.readFile(path.join(workspace, 'marker.txt')),
+                  working,
+                );
+                return { session, ...recovered };
+              },
+            }
+          : {}),
+      });
+      invocations.push(...actual);
+      observation = await control('snapshot');
+      assert.deepEqual(session.activation, expectedActivation);
+      if (index === 0) firstPins = structuredClone(observation.retainedBackups);
+      else
+        for (const pin of firstPins)
+          assert.deepEqual(
+            observation.retainedBackups.find(
+              (current) => current.name === pin.name,
+            ),
+            pin,
+          );
+      const issued = await fixture('/fixture:inspect');
+      const grant = issued.executions
+        .filter((row) => row.native_authorization_json)
+        .map((row) => JSON.parse(row.native_authorization_json))
+        .at(-1);
+      assert.ok(grant, 'Hosted execution must mint a native SQL grant');
+      const request = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        action: 'execute',
+        subject: grant.executionCallId,
+        identity: grant.identity,
+        context: grant.context,
+        installedContext: grant.installedContext,
+      };
+      const workerHeaders = {
+        ...headers,
+        authorization: `Bearer ${boot.context.token}`,
+        'x-qwen-managed-lease-id': boot.context.leaseId,
+        'x-qwen-managed-lease-epoch': String(boot.context.epoch),
+      };
+      const workingBefore = await fs.readFile(
+        path.join(workspace, 'marker.txt'),
+      );
+      for (const [name, override, code] of [
+        ['Hosted wrong token', { authorization: 'Bearer foreign' }, 401],
+        ['Hosted wrong lease', { 'x-qwen-managed-lease-epoch': '99' }, 409],
+      ]) {
+        await post(
+          worker.ready.context.url,
+          '/internal/managed-runtime/csi/v2/execute',
+          request,
+          { ...workerHeaders, ...override },
+          code,
+          name,
+        );
+        assert.deepEqual(
+          await fs.readFile(path.join(workspace, 'marker.txt')),
+          workingBefore,
+          name,
+        );
+        assert.deepEqual(await fixture('/fixture:inspect'), issued, name);
+        checks.push(name);
+      }
+      completedTurns++;
+      continue;
+    }
     const harness = createManagedHarnessHandle(session);
     await new ManagedHookActivationController(session).runTurn(
       promptId,
@@ -824,7 +1155,7 @@ try {
           );
         }),
     );
-    assert.deepEqual(session.activation, initialActivation);
+    assert.deepEqual(session.activation, expectedActivation);
     if (index === 0) firstPins = structuredClone(observation.retainedBackups);
     else
       for (const pin of firstPins)
@@ -864,13 +1195,17 @@ try {
     JSON.stringify(
       {
         completedTurns,
+        hostedProducer: input.hostedProducer === true,
         nativeSqlGrant: true,
         workerClosed: true,
         finalBytes,
         retained,
         invocations,
         refusalChecks: checks.length,
-        writerGeneration: 1,
+        writerGeneration: (await stores.publication.owner()).writerGeneration,
+        coldRecovery: input.coldRecovery === true,
+        coldRefusalChecks,
+        recoveryCut: input.recoveryCut,
         originalActivation: initialActivation,
         platformFixture: `${actualPlatform.value} real inodes; explicit mount/proc-fd and placement mapping`,
         nativeCsiDeployment: false,

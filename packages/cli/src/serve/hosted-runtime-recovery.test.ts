@@ -36,6 +36,8 @@ import {
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerExecutionUnresolved,
+  HostedWorkspaceBrokerRejection,
   type HostedBrokerExecutionState,
 } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
@@ -748,6 +750,9 @@ describe('recoverHostedRuntimeTurn', () => {
       expect(recovered).toBeDefined();
       expect(execute).toHaveBeenCalledOnce();
       expect(execute.mock.calls[0]?.[0]).toBe(EXECUTION_ID);
+      // The continuation asks for one evidence read when the record is still
+      // UNKNOWN (the sixth argument is the reconcile-once flag).
+      expect(execute.mock.calls[0]?.[5]).toBe(true);
       expect(recovered!.report).toMatchObject({
         phase: 'results_ready',
         checkpointId: replacement.authority.latestCheckpoint?.checkpointId,
@@ -997,6 +1002,153 @@ describe('recoverHostedRuntimeTurn', () => {
         }),
       ]);
       expect(recovered.drivable).toBe(true);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('reconciles each parked execution once on a passive load', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const status = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValue({ state: 'settled', executionStatus: 'cancelled' });
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
+      // The dead owner left the record UNKNOWN: the read must ask the
+      // original Runtime for its evidence, not read the stale state back.
+      expect(status).toHaveBeenCalledWith(EXECUTION_ID, { reconcile: true });
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'settled' },
+        }),
+      ]);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([
+    new HostedWorkspaceBrokerRejection(
+      409,
+      'runtime_execution_evidence_unavailable',
+    ),
+    new HostedWorkspaceBrokerRejection(503, 'runtime_reconciliation_required'),
+  ])(
+    'reports an execution whose evidence cannot be read as unknown (%s)',
+    async (refusal) => {
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockRejectedValue(
+        refusal,
+      );
+      const replacement = await open('boot-2', false);
+      try {
+        const recovered = mustRecover(
+          await recoverHostedRuntimeTurn({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            passive: true,
+          }),
+        );
+        // The Broker proved neither commit nor non-commit: the takeover must
+        // report the outcome unknown rather than fail the load as a fault.
+        expect(recovered.report.executions).toEqual([
+          expect.objectContaining({
+            executionCallId: EXECUTION_ID,
+            outcome: 'unknown',
+          }),
+        ]);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('reports a parked execution reconciliation cannot settle as unknown', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockRejectedValue(
+      new HostedWorkspaceBrokerExecutionUnresolved(),
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'unknown',
+        }),
+      ]);
+      expect(recovered.drivable).toBe(false);
+      // Acceptance unknown is never a settled effect: nothing is journaled.
+      expect(
+        (await replacement.sink.project()).filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps an abandoned execution in a continuation report', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_broker_execution_unknown',
+        { terminal: true },
+      ),
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'abandoned' },
+        }),
+      ]);
+      expect(recovered.drivable).toBe(false);
     } finally {
       await replacement.close();
     }

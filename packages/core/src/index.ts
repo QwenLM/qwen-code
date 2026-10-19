@@ -246,7 +246,7 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './tools/write-file.js';
+} from './tools/artifact/workspace-auto-record.js';
 export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,

@@ -243,8 +243,9 @@ The B2d invariants hold. In addition:
 
 M1 to M4 are implemented and retained; M2, M4, M5a, M5b and M5c landed
 ahead of the priority review described in Status without registering the
-engine. M6 is implemented in #14483; the review fixes are in #14488, and the
-workspace-change tests and the end-to-end pass are still open. Reference
+engine. M6 is implemented in #14483; the review fixes are in #14488, the
+workspace-change tests in #14525 and #14554, and the end-to-end pass found
+and fixed the Managed restore refusal in #14688. Reference
 commits
 describe the original port; the linked host decision supersedes the old
 in-process M2 approach.
@@ -1285,8 +1286,9 @@ without registration.
 
 **Status: implemented in #14483.** The engine is registered at every paired
 runtime and the Managed host answers `qwen/control/workspace/change`. The
-review fixes are in #14488; the workspace-change tests and the end-to-end
-pass are still open.
+review fixes are in #14488; the workspace-change tests are in #14525 and
+#14554, and the end-to-end pass found and fixed the Managed restore refusal
+in #14688.
 
 #### M6a: registration and compatibility
 

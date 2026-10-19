@@ -946,6 +946,21 @@ const SETTINGS_SCHEMA = {
     description: 'User interface settings.',
     showInDialog: false,
     properties: {
+      allowedApprovalModes: {
+        type: 'array',
+        label: 'Web Shell Approval Modes',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        mergeStrategy: MergeStrategy.REPLACE,
+        description:
+          'Execution approval modes offered by Web Shell. Omit to show default, auto-edit, auto and yolo; an empty list offers none. Host allowedApprovalModes overrides this setting. Presentation only: does not change the current mode or enforce backend permissions. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored with a warning. Edit settings.json directly.',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          enum: ['default', 'auto-edit', 'auto', 'yolo'],
+        },
+      },
       theme: {
         type: 'string',
         label: 'Theme',

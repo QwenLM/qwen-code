@@ -123,6 +123,7 @@ const SUB_DIALOG_KEYS = new Set([
   'modelFallbacks',
 ]);
 const HIDDEN_SETTING_KEYS = new Set([
+  'ui.allowedApprovalModes',
   'ui.hideTips',
   'ui.enableUserFeedback',
   // Compact behavior is fixed on in the web shell; the daemon schema still
