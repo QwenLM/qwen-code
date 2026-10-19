@@ -254,9 +254,33 @@ public class ManagedSessionStore {
                         + " within the hot-path bound; retry.");
     }
 
-    static void lockBounded(Runnable lock) {
+    /**
+     * Runs one sweep candidate in its own transaction. A guard refusal skips that candidate
+     * instead of aborting the sweep; any other failure propagates unchanged.
+     */
+    static <T> T skipContended(
+            org.springframework.transaction.support.TransactionTemplate transactions,
+            org.springframework.transaction.support.TransactionCallback<T> body) {
         try {
+            return transactions.execute(body);
+        } catch (ApiException refusal) {
+            if (!"tenant_guard_contended".equals(refusal.getCode())) {
+                throw refusal;
+            }
+            return null;
+        }
+    }
+
+    static void lockBounded(Runnable lock) {
+        lockBoundedResult(() -> {
             lock.run();
+            return null;
+        });
+    }
+
+    static <T> T lockBoundedResult(Supplier<T> lock) {
+        try {
+            return lock.get();
         } catch (PessimisticLockingFailureException | QueryTimeoutException error) {
             throw guardContended();
         }
@@ -2843,42 +2867,12 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
-    private boolean insertSessionRoot(String tenantId, String sessionId) {
-        long now = epochMillis(databaseNow());
-        String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
-        String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        int inserted = jdbc.update(
-                "INSERT IGNORE INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
-                    + " session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?,"
-                    + " 'CONTROL', ?, ?, ?, ?, ?)",
-                tenantId,
-                sessionId,
-                tenantKey,
-                sessionKey,
-                sessionScopeKey(tenantId, sessionId),
-                now,
-                now);
-        return inserted == 1;
-    }
-
     private void ensureSessionRoot(String tenantId, String sessionId) {
         // Take the root row exclusively first: ordinary writers lock it
-        // without a tenant guard (#13800), and the shared lock INSERT IGNORE
-        // takes on an existing row would otherwise upgrade behind one of
-        // them and deadlock; lockSessionRoot materializes the row with its
-        // keys, so the INSERT IGNORE below never inserts.
+        // without a tenant guard (#13800); keep that order before
+        // initializing the session event stream.
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
-        insertSessionRoot(tenantId, sessionId);
-        materializeSessionRoot(tenantId, sessionId);
-    }
-
-    private void materializeSessionRoot(String tenantId, String sessionId) {
         long now = epochMillis(databaseNow());
-        String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
-        String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
-                        + " WHERE tenant_id = ? AND session_id = ? AND session_scope_key IS NULL",
-                tenantKey, sessionKey, sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
         jdbc.update(
                 "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                         + " gmt_modified) VALUES (?, ?, 'SESSION', X'', ?)",
