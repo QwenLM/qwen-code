@@ -23,11 +23,13 @@ install -m 0640 -o root -g qwen-managed-agent \
   harness.env.example /etc/qwen-managed-agent/harness.env
 install -m 0640 -o root -g qwen-managed-agent \
   server.env.example /etc/qwen-managed-agent/server.env
-install -m 0640 -o root -g qwen-managed-agent \
+install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
   ../config/application.example.yml /etc/qwen-managed-agent/application.yml
 ```
 
-`harness.env` 与 `server.env` 中的 Harness token 和 capability digest 必须一致。
+控制面以 `qwen-managed-agent` 身份读取 `application.yml`，因此该文件由服务账号拥有、权限 `0600`。预检会拒绝 group 或 others 可读的含 secret 文件；而 `root` 拥有的 `0600` 文件服务同样读不到。`systemd` 以 root 读取两个环境文件，因此它们保持 `0640 root:qwen-managed-agent` 即可。
+
+`harness.env` 与 `server.env` 中的 Harness token 和 capability digest 必须一致。若 `qwen serve` 因 4170 被占用而报告了其他端口，请在启动控制面前把 `server.env` 中的 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 改为实际端口。
 
 也可以运行 `../bin/qwen-managed-agent-bootstrap --directory /etc/qwen-managed-agent` 生成这三个文件，随后调整属主与权限。
 
@@ -40,7 +42,7 @@ systemctl daemon-reload
 systemctl enable --now qwen-hosted-harness qwen-managed-agent-server
 ```
 
-`qwen` 未安装在 `/usr/local/bin` 时，请调整 Harness unit 的 `ExecStart`。
+`qwen` 未安装在 `/usr/local/bin` 时，请调整 Harness unit 的 `ExecStart`。两个 unit 都设置了 `ProtectHome=true`，因此 `qwen` 解析到的可执行文件必须位于 `/home`、`/root`、`/run/user` 之外；若 `/usr/local/bin/qwen` 是指向 home 目录的软链接，unit 会以 `203/EXEC` 失败。可用 `readlink -f "$(command -v qwen)"` 检查。
 
 ## 验证
 

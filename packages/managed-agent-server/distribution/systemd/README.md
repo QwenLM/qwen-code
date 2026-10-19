@@ -27,12 +27,20 @@ install -m 0640 -o root -g qwen-managed-agent \
   harness.env.example /etc/qwen-managed-agent/harness.env
 install -m 0640 -o root -g qwen-managed-agent \
   server.env.example /etc/qwen-managed-agent/server.env
-install -m 0640 -o root -g qwen-managed-agent \
+install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
   ../config/application.example.yml /etc/qwen-managed-agent/application.yml
 ```
 
+The control plane reads `application.yml` as `qwen-managed-agent`, so that file
+is owned by the service account at `0600`. The preflight rejects a secret file
+that is group- or world-readable, and a `root`-owned `0600` file would be
+unreadable to the service. `systemd` reads the two environment files as root,
+so `0640 root:qwen-managed-agent` is enough for them.
+
 The Harness token and capability digest must match in `harness.env` and
-`server.env`.
+`server.env`. If the Harness reports a port other than 4170 because the
+requested one was in use, update `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` in
+`server.env` before starting the control plane.
 
 Alternatively, `../bin/qwen-managed-agent-bootstrap --directory
 /etc/qwen-managed-agent` generates all three files; adjust their ownership and
@@ -48,7 +56,10 @@ systemctl enable --now qwen-hosted-harness qwen-managed-agent-server
 ```
 
 Adjust `ExecStart` in the Harness unit when `qwen` is installed outside
-`/usr/local/bin`.
+`/usr/local/bin`. Both units set `ProtectHome=true`, so the executable that
+`qwen` resolves to must live outside `/home`, `/root` and `/run/user`; a
+`/usr/local/bin/qwen` symlink into a home directory fails with `203/EXEC`.
+Check with `readlink -f "$(command -v qwen)"`.
 
 ## Verify
 
