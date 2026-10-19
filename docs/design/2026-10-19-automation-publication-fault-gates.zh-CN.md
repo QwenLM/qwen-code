@@ -1,5 +1,7 @@
 # FG11f：automation wake turn 发布期的对象存储故障
 
+[English](2026-10-19-automation-publication-fault-gates.md) | [简体中文](2026-10-19-automation-publication-fault-gates.zh-CN.md)
+
 状态：提案。第 1 片（进程内故障臂）与第 2 片（发布者死亡）在此定界，均未实现。
 
 Issue：#14446，FG11 tracker。tracker 的 gate 表把 FG11f 列为本轮欠的两片之一。
@@ -53,17 +55,18 @@ bean。故障打在 `OSS` 客户端上，真实的 `AliyunToolPublicationObjectS
 适配器仍在路径上，因此门禁同时覆盖它的错误映射
 （`ToolPublicationStorageException`）；手写 store 会跳过这一段。
 
-| 故障臂                       | 在 `putObject` 注入                                                      | 预期                                                                                                                                                                                |
-| ---------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fail-before-write`          | 抛 `OSSException`（`InternalError`），不写对象                           | 操作留在 `UNKNOWN`；下一次尝试读对象对账，读不到，以 `409 tool_output_put_unresolved` 拒绝。工具结果如实失败或未知，Shell 不被重跑                                                  |
-| `drop-ack-after-write`       | 先写入对象，再抛 `ClientException`，让调用方分不清「已提交」与「已丢失」 | store 保留对象、`OBJECT_PUT` 停在 `UNKNOWN`，调用内不重试（`abandonScan` 只释放 claim）。是否有下一次尝试取决于调用方，因此断言只钉：对象按字节一致可读、工具结果如实、Shell 不重跑 |
-| `timeout`                    | 静默超过 `operation-timeout`，再抛 `SocketTimeout`，不写对象             | 与 `fail-before-write` 同样被拒绝；wake turn 的 Workspace lease 被释放；一次 run、一次 Turn、一次执行                                                                               |
-| `publisher-death`（第 2 片） | 在子 JVM 内扣住 put，随后 SIGKILL                                        | 重启后 run 从 journal 恰好结算一次；已提交的对象对账为 `RETURNED`，不存在的则被拒绝；Shell 不被重跑，lease 被释放                                                                   |
+| 故障臂                       | 在 `putObject` 注入                                                      | 预期                                                                                                                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fail-before-write`          | 抛 `OSSException`（`InternalError`），不写对象                           | 操作留在 `UNKNOWN`；下一次尝试读对象对账，读不到，以 `409 tool_output_put_unresolved` 拒绝。工具结果如实失败或未知，Shell 不被重跑                                                                                                  |
+| `drop-ack-after-write`       | 先写入对象，再抛 `ClientException`，让调用方分不清「已提交」与「已丢失」 | `OBJECT_PUT` 行短暂停在 `UNKNOWN`（`abandonScan` 只释放 claim）。打包夹具里的调用方会以同一 operation 与同一份字节重提，store 随后读对象对账并结算为 `RETURNED`；断言钉住该终态、恰好一次物理 PUT、对象按字节一致可读、Shell 不重跑 |
+| `timeout`                    | 静默超过 `operation-timeout`，再抛 `SocketTimeout`，不写对象             | 与 `fail-before-write` 同样被拒绝；wake turn 的 Workspace lease 被释放；一次 run、一次 Turn、一次执行                                                                                                                               |
+| `publisher-death`（第 2 片） | 在子 JVM 内扣住 put，随后 SIGKILL                                        | 重启后 run 从 journal 恰好结算一次；已提交的对象对账为 `RETURNED`，不存在的则被拒绝；Shell 不被重跑，lease 被释放                                                                                                                   |
 
 两种形态刻意不同：`fail-before-write` 钉住拒绝
 （`tool_output_put_unresolved`）与如实失败；`drop-ack-after-write` 钉住
-「丢失的 ack 绝不靠**重写对象**或重跑 Shell 恢复」——对象已在，后续尝试靠
-读取它完成对账。只注入一种形态会漏掉对账路径的另一半。
+「丢失的 ack 绝不靠**重写对象**或重跑 Shell 恢复」——对象已在，调用方的
+重提靠读取它完成对账，断言钉的是最终 `RETURNED`，而不是「对象可读」就算过。
+只注入一种形态会漏掉对账路径的另一半。
 
 `publisher-death` 需要进程在 capture 中途死亡，因此使用子 JVM 夹具
 （`HostedAutomationCrashFixtureMain`）而不是进程内类。第 1 片覆盖前三个臂。
@@ -73,8 +76,10 @@ bean。故障打在 `OSS` 客户端上，真实的 `AliyunToolPublicationObjectS
 每个臂断言同样的四条性质，只有故障可见的部分不同：
 
 1. **一次 run、一次 Turn。** `ma_session_record` 中该会话只有一条
-   `automation_run`，且模型桩对该 occurrence 只看到一次 prompt（按次数，
-   不按时序窗口）。
+   `automation_run`，且该 run 的持久 Turn 身份只有一个 Turn。模型桩的 prompt
+   列表承载不了这条性质：Shell-then-final 会在同一个 Turn 内发两次模型请求，
+   因此按 occurrence 的 `ma_turn` 行计数（或只计首次请求、排除 tool-result
+   续轮），而不是按 prompt 计数。
 2. **不靠重跑恢复。** `ma_tool_execution` 对这次 Shell 调用只有一行。丢失
    ack 绝不能换来第二次执行。
 3. **结果如实。** 对象存在时，按字节与期望一致、经 store 可读；否则工具

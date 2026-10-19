@@ -1,5 +1,7 @@
 # FG11f: publication faults during an automation wake turn
 
+[English](2026-10-19-automation-publication-fault-gates.md) | [简体中文](2026-10-19-automation-publication-fault-gates.zh-CN.md)
+
 Status: proposed. Slice 1 (in-process arms) and slice 2 (publisher death) are
 scoped here; neither is implemented yet.
 
@@ -60,19 +62,21 @@ real `AliyunToolPublicationObjectStore` adapter in the path, so the gate also
 exercises its error mapping (`ToolPublicationStorageException`), which a
 hand-written store would skip.
 
-| Arm                         | Injected at `putObject`                                                                                     | Expected                                                                                                                                                                                                                                                                                                                                                                   |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fail-before-write`         | Throw `OSSException` (`InternalError`) without storing the object                                           | The operation stays `UNKNOWN`; the next attempt reconciles by reading the object, finds none, and refuses with `409 tool_output_put_unresolved`. The tool result is honestly failed or unknown, and the Shell is not re-executed.                                                                                                                                          |
-| `drop-ack-after-write`      | Store the object, then throw `ClientException`, so the caller cannot tell a committed write from a lost one | The store keeps the object and leaves the `OBJECT_PUT` operation `UNKNOWN`; it never retries inside the call (`abandonScan` frees the claim). A later attempt reconciles by reading the object, but whether one arrives depends on the caller, so the gate asserts the object is byte-identical and readable, the tool result is honest, and the Shell is not re-executed. |
-| `timeout`                   | Stay silent past `operation-timeout`, then throw `SocketTimeout` without storing the object                 | Same refusal as `fail-before-write`, and the wake turn's Workspace lease is released; one run, one Turn, one execution.                                                                                                                                                                                                                                                    |
-| `publisher-death` (slice 2) | Park the put inside the child JVM, then SIGKILL it                                                          | On restart the run settles once from the journal; a committed object reconciles to `RETURNED`, an absent one refuses; the Shell is not re-executed and the lease is released.                                                                                                                                                                                              |
+| Arm                         | Injected at `putObject`                                                                                     | Expected                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fail-before-write`         | Throw `OSSException` (`InternalError`) without storing the object                                           | The operation stays `UNKNOWN`; the next attempt reconciles by reading the object, finds none, and refuses with `409 tool_output_put_unresolved`. The tool result is honestly failed or unknown, and the Shell is not re-executed.                                                                                                                        |
+| `drop-ack-after-write`      | Store the object, then throw `ClientException`, so the caller cannot tell a committed write from a lost one | The `OBJECT_PUT` row is transiently `UNKNOWN` (`abandonScan` frees the claim). The packaged caller resubmits the same operation and bytes, and the store then reconciles by reading the object and settling `RETURNED`; the gate asserts that final state, exactly one physical PUT, a byte-identical readable object, and no re-execution of the Shell. |
+| `timeout`                   | Stay silent past `operation-timeout`, then throw `SocketTimeout` without storing the object                 | Same refusal as `fail-before-write`, and the wake turn's Workspace lease is released; one run, one Turn, one execution.                                                                                                                                                                                                                                  |
+| `publisher-death` (slice 2) | Park the put inside the child JVM, then SIGKILL it                                                          | On restart the run settles once from the journal; a committed object reconciles to `RETURNED`, an absent one refuses; the Shell is not re-executed and the lease is released.                                                                                                                                                                            |
 
 The two shapes are deliberately different. `fail-before-write` pins the refusal
 (`tool_output_put_unresolved`) and the honest failure; `drop-ack-after-write`
 pins that a lost acknowledgement is never recovered by **writing the object
 again** or by running the Shell again — the object is already there, and a
-later attempt reconciles by reading it. A gate that only injected one shape
-would leave the other half of the reconcile path unpinned.
+caller's resubmission reconciles by reading it, and the gate pins the final
+`RETURNED` state rather than accepting a readable object as sufficient. A gate
+that only injected one shape would leave the other half of the reconcile path
+unpinned.
 
 `publisher-death` needs the process to die mid-capture, so it uses the
 child-JVM fixture (`HostedAutomationCrashFixtureMain`) rather than the
@@ -84,8 +88,11 @@ Each arm asserts the same four properties, and only the fault-visible ones
 differ:
 
 1. **One run, one Turn.** `ma_session_record` holds one `automation_run` for
-   the session, and the model stub saw one prompt for the occurrence
-   (prompt count, not a timing window).
+   the session, and the run's persisted Turn identity is a single Turn. The
+   model stub's prompt list cannot carry this property: the Shell-then-final
+   flow sends two model requests inside one Turn, so count the occurrence's
+   `ma_turn` rows (or count only the initial request and exclude tool-result
+   continuations) rather than prompts.
 2. **No recovery by re-execution.** `ma_tool_execution` has one row for the
    Shell call. A lost ack must never buy a second execution.
 3. **Honest result.** The published object, when it exists, is byte-identical
