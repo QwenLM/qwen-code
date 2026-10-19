@@ -39,7 +39,7 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 | 格子                 | 构造                                                       | 预期                                                                                                                              |
 | -------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `retire-at-intent`   | claim 以 `intent` 停在 Harness 时 retire（relay 扣住操作） | claim 结算为 `cancelled`/`not_started_proven`；occurrence 不是 `unknown`                                                          |
-| `disable-span`       | 跨两个到期 slot disable，再 enable                         | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
+| `disable-span`       | 以禁用状态创建定义，跨两个到期 slot 后再 enable            | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
 | `close-queued-input` | 有 automation input 排在 held turn 之后时关闭 Session      | 排队的 input 结算且不产生模型 Turn；关闭 Session 上的存活定义每个 slot 记 `skipped(session_not_active)`，这是今天的行为，在此钉住 |
 
 ## 第 2 片：取消矩阵
