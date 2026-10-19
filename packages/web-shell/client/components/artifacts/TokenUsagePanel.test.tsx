@@ -154,6 +154,54 @@ describe('TokenUsagePanel', () => {
     expect(container.textContent).toContain('Total output350K');
   });
 
+  it('shows average first token and output speed for timed models', async () => {
+    const stats = statsFixture();
+    stats.models['qwen-plus::hybrid'].generation = {
+      timedRequests: 4,
+      totalTtftMs: 4_800,
+      totalGenerationDurationMs: 2_000,
+      totalThroughputOutputTokens: 170,
+    };
+    stats.models['qwen-max::auto'].generation = {
+      timedRequests: 1,
+      totalTtftMs: 900,
+      totalGenerationDurationMs: 0,
+      totalThroughputOutputTokens: 0,
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats));
+    await act(async () => {});
+
+    expect(container.textContent).toContain(
+      'Avg first token 1.2s · Output speed 85.0 tok/s',
+    );
+    expect(container.textContent).toContain('Avg first token 900msInput');
+    expect(container.textContent?.match(/Output speed/g)).toHaveLength(1);
+  });
+
+  it('localizes the model timing line', async () => {
+    const stats = statsFixture();
+    stats.models['qwen-plus::hybrid'].generation = {
+      timedRequests: 2,
+      totalTtftMs: 1_000,
+      totalGenerationDurationMs: 4_000,
+      totalThroughputOutputTokens: 300,
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats), 'zh-CN');
+    await act(async () => {});
+
+    expect(container.textContent).toContain(
+      '平均首 token 500ms · 输出速度 75.0 tok/s',
+    );
+  });
+
+  it('omits the timing line for models without streamed timing', async () => {
+    const container = renderPanel(vi.fn().mockResolvedValue(statsFixture()));
+    await act(async () => {});
+
+    expect(container.textContent).toContain('qwen-plus::hybrid');
+    expect(container.textContent).not.toContain('first token');
+  });
+
   it('promotes compact values that round into the next unit', async () => {
     const stats = statsFixture();
     stats.models = {

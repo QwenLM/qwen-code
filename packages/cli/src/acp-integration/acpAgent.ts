@@ -9300,10 +9300,23 @@ class QwenAgent implements Agent {
     // repeated calls of the same agent type stay distinguishable. Output as a
     // structured array with readable type/name labels from sourceMeta.
     for (const [name, rawMetrics] of Object.entries(metrics.models)) {
-      const m = metrics.statsModels?.[name] ?? rawMetrics;
+      const statsModel = metrics.statsModels?.[name];
+      const m = statsModel ?? rawMetrics;
+      const generation = statsModel?.generation;
       models[name] = {
         api: { ...m.api },
         tokens: { ...m.tokens },
+        ...(generation
+          ? {
+              generation: {
+                timedRequests: generation.timedRequests,
+                totalTtftMs: generation.totalTtftMs,
+                totalGenerationDurationMs: generation.totalGenerationDurationMs,
+                totalThroughputOutputTokens:
+                  generation.totalThroughputOutputTokens,
+              },
+            }
+          : {}),
       };
     }
     const sources: ServeSessionStatsStatus['sources'] = [];

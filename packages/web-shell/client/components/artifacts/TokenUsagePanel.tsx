@@ -375,6 +375,16 @@ function ModelCard({ entry }: { entry: ModelEntry }) {
   const input = inputTokens(m.tokens);
   const avgLatency =
     m.api.totalRequests > 0 ? m.api.totalLatencyMs / m.api.totalRequests : 0;
+  const { generation } = m;
+  const avgTtft =
+    generation && generation.timedRequests > 0
+      ? generation.totalTtftMs / generation.timedRequests
+      : undefined;
+  const outputSpeed =
+    generation && generation.totalGenerationDurationMs > 0
+      ? generation.totalThroughputOutputTokens /
+        (generation.totalGenerationDurationMs / 1000)
+      : undefined;
   return (
     <div className={styles.modelCard}>
       <div className={styles.modelHeader}>
@@ -391,6 +401,19 @@ function ModelCard({ entry }: { entry: ModelEntry }) {
           )}
         </span>
       </div>
+      {avgTtft !== undefined && (
+        <div className={styles.modelTiming}>
+          {t('tokenUsage.avgFirstToken', {
+            duration: formatDuration(avgTtft),
+          })}
+          {outputSpeed !== undefined && (
+            <>
+              {' · '}
+              {t('tokenUsage.outputSpeed', { rate: outputSpeed.toFixed(1) })}
+            </>
+          )}
+        </div>
+      )}
       <div className={styles.modelBreakdown}>
         {segmentsOf(m).map((s) => (
           <LegendEntry

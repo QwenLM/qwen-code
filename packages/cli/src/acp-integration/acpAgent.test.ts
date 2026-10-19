@@ -14803,6 +14803,70 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('exposes per-model generation timing in session stats', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const api = { totalRequests: 2, totalErrors: 0, totalLatencyMs: 900 };
+    const tokens = {
+      prompt: 10,
+      candidates: 40,
+      total: 50,
+      cached: 0,
+      thoughts: 0,
+    };
+    vi.mocked(uiTelemetryService.getMetricsForSession).mockReturnValue({
+      models: {
+        'model-a': { api, tokens, bySource: {} },
+        'model-b': { api, tokens, bySource: {} },
+      },
+      statsModels: {
+        'model-a': {
+          api,
+          tokens,
+          generation: {
+            timedRequests: 2,
+            totalTtftMs: 500,
+            totalGenerationDurationMs: 400,
+            totalThroughputOutputTokens: 40,
+            last: {
+              model: 'model-a',
+              ttftMs: 200,
+              generationDurationMs: 0,
+              outputTokens: 0,
+            },
+          },
+        },
+        'model-b': { api, tokens },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+    } as never);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    try {
+      const stats = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionStats,
+        { sessionId },
+      )) as { models: Record<string, Record<string, unknown>> };
+      expect(stats.models['model-a']['generation']).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 500,
+        totalGenerationDurationMs: 400,
+        totalThroughputOutputTokens: 40,
+      });
+      expect(stats.models['model-b']).not.toHaveProperty('generation');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('status ext method returns disabled LSP status', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
