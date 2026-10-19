@@ -298,6 +298,53 @@ function touchedTopicsFromFilePaths(
   };
 }
 
+/**
+ * #13004: the parked skipped slice and the captured tail both come from the
+ * same live history, and the tail often still holds the slice's newest
+ * entries — the skip window (≤ half the tail) makes an un-shrunk tail the
+ * common case, not the exception. Concatenating both then forks those turns
+ * twice. Coverage cannot come from raw offsets (the tail is curated and
+ * payload-slimmed), so anchor on values: the tail's first entry is its
+ * oldest, and the LAST slice entry equal to it starts the overlap. Drop that
+ * entry and everything after it. The last match, never an earlier one:
+ * repeated content would otherwise cut turns the tail never held. When
+ * curation or slimming rewrote the anchor so nothing matches, the slice
+ * passes through whole — the pre-existing duplicate, never a loss.
+ */
+function uncoveredParkedPrefix(
+  skippedHistory: Content[],
+  capturedTail: Content[],
+): Content[] {
+  const anchor = capturedTail[0];
+  if (skippedHistory.length === 0 || anchor === undefined) {
+    return skippedHistory;
+  }
+  // Texts and call names survive the capture's shallow copy, curation and
+  // payload slimming unchanged; a part without either (media, code) has no
+  // stable key, so its entry never matches and fails safe toward a duplicate.
+  const partKey = (part: NonNullable<Content['parts']>[number]): string =>
+    typeof part.text === 'string'
+      ? `text:${part.text}`
+      : part.functionCall
+        ? `call:${part.functionCall.name ?? ''}`
+        : part.functionResponse
+          ? `response:${part.functionResponse.name ?? ''}`
+          : '';
+  const keysOf = (entry: Content): string[] => (entry.parts ?? []).map(partKey);
+  const anchorKeys = keysOf(anchor);
+  for (let i = skippedHistory.length - 1; i >= 0; i--) {
+    const skippedKeys = keysOf(skippedHistory[i]);
+    if (
+      skippedHistory[i].role === anchor.role &&
+      skippedKeys.length === anchorKeys.length &&
+      skippedKeys.every((key, j) => key !== '' && key === anchorKeys[j])
+    ) {
+      return skippedHistory.slice(0, i);
+    }
+  }
+  return skippedHistory;
+}
+
 export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
@@ -313,7 +360,7 @@ export async function runAutoMemoryExtractionByAgent(
     );
   }
   const extraHistory = buildAgentHistory([
-    ...skippedHistory,
+    ...uncoveredParkedPrefix(skippedHistory, cacheSafe.history),
     ...cacheSafe.history,
   ]);
 

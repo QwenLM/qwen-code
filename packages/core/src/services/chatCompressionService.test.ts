@@ -357,6 +357,28 @@ describe('ChatCompressionService', () => {
     expectNoNewHistory(await run(), CompressionStatus.NOOP);
   });
 
+  it('#13004: drops a parked memory-extraction snapshot when the shrink is decided', async () => {
+    const invalidatePendingExtract = vi.fn();
+    Object.assign(mockConfig, {
+      getMemoryManager: () => ({ invalidatePendingExtract }),
+      getSessionId: () => 'sess-compact',
+    });
+    arrangeAuto();
+    expectCompressed(await run());
+    expect(invalidatePendingExtract).toHaveBeenCalledWith('sess-compact');
+  });
+
+  it('#13004: keeps the parked memory-extraction snapshot when nothing shrinks', async () => {
+    const invalidatePendingExtract = vi.fn();
+    Object.assign(mockConfig, {
+      getMemoryManager: () => ({ invalidatePendingExtract }),
+      getSessionId: () => 'sess-compact',
+    });
+    arrange(turns('hi'), 600);
+    expectNoNewHistory(await run(), CompressionStatus.NOOP);
+    expect(invalidatePendingExtract).not.toHaveBeenCalled();
+  });
+
   describe('screenshot-overflow trigger', () => {
     const SCREENSHOT_ENV = [
       'QWEN_COMPACT_SCREENSHOT_TRIGGER',

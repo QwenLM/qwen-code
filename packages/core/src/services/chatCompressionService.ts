@@ -1465,6 +1465,15 @@ export class ChatCompressionService {
         config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
       }
 
+      // #13004: this shrink lands below whatever a parked cadence snapshot
+      // holds, and a turn that ends without reaching scheduleExtract (e.g.
+      // cancelled) lets no shrink guard observe it — the flush would replay
+      // the stale snapshot into a cursor no live history matches. Drop it
+      // here, at the point the shrink is decided.
+      config
+        .getMemoryManager?.()
+        ?.invalidatePendingExtract(config.getSessionId());
+
       return {
         newHistory: extraHistory,
         info: {

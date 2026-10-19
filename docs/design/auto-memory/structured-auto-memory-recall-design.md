@@ -226,8 +226,10 @@ lost the shared cache-safe slot to another session, and a close flush whose own
 budget expired while it waited for that slot (the run is abandoned rather than
 left to fork after the close tore its Config down) do not flush: up to N skipped
 turns are lost there, and a switch drops both sessions' skip state. If a later
-turn grows beyond the tail window, the next extraction prepends the bounded
-skipped slice to its captured tail. This preserves skipped turns without
+turn grows beyond the tail window, the next extraction prepends the part of
+the bounded skipped slice its captured tail no longer holds — coverage is
+checked against the captured tail itself, measured from the slice's own base,
+not a raw count from the cursor. This preserves skipped turns without
 changing the persisted cursor's raw-history index space. These losses are what the paired runs must
 measure before the default can change; #13004 stays open. Selector-only
 validation must not be cited as extraction, quality, or token-savings

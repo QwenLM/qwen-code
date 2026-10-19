@@ -511,6 +511,39 @@ describe('runAutoMemoryExtractionByAgent', () => {
     });
   });
 
+  it('forwards only the skipped entries the captured tail no longer holds', async () => {
+    // The parked slice and the captured tail are separate copies of the same
+    // live history, so their shared entries are equal by value, not identity.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 2' }] },
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+        { role: 'user', parts: [{ text: 'turn 3' }] },
+        { role: 'model', parts: [{ text: 'reply 3' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'turn 1' }] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toEqual([
+      'turn 1',
+      'reply 1',
+      'turn 2',
+      'reply 2',
+      'turn 3',
+      'reply 3',
+    ]);
+  });
+
   it('uses a scoped config that denies shell and outside writes', async () => {
     await extract([], { written: false });
 

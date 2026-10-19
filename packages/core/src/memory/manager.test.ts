@@ -2538,6 +2538,54 @@ describe('MemoryManager', () => {
       expect(flush.history).toHaveLength(6);
     });
 
+    it('does not carry a snapshot across roots when a run for the old root settles', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      await fs.mkdir(relocated, { recursive: true });
+      let liveRoot = tmp.projectRoot;
+      const config = {
+        getSessionId: () => 'sess',
+        getProjectRoot: () => liveRoot,
+      } as unknown as Config;
+      const turnAt = (root: string, length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(root, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      // Root A's run is in flight when the user `/cd`s away and back.
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        (params) =>
+          new Promise<ExtractResult>((resolve) => {
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
+          }),
+      );
+      const inFlight = turnAt(tmp.projectRoot, 2);
+
+      // In root B a run settles and arms, and a skip parks B's snapshot.
+      liveRoot = relocated;
+      await turnAt(relocated, 4);
+      expect((await turnAt(relocated, 6)).skippedReason).toBe('cadence');
+
+      // Back in A the in-flight run settles. Carrying B's snapshot would
+      // re-key the entry to A while keeping B's parked turns (and B's spent
+      // skip budget), and the supplement gate — comparing the entry's root
+      // alone — would splice them into A's extraction.
+      liveRoot = tmp.projectRoot;
+      release();
+      await inFlight;
+      await mgr.drain();
+
+      const supplemented = await turnAt(tmp.projectRoot, 43);
+      expect(supplemented.skippedReason).toBeUndefined();
+      const last = vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0];
+      expect(last.projectRoot).toBe(tmp.projectRoot);
+      expect(last.skippedHistory ?? []).toEqual([]);
+    });
+
     it('keeps a snapshot the relocated root parked behind a refused flush', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
       const mgr = new MemoryManager();
@@ -2731,11 +2779,50 @@ describe('MemoryManager', () => {
       releases[1]();
       await mgr.drain();
 
-      await mgr.flushPendingExtract('sess', 1_000);
+      // The carried settle moved the entry's base to 4 while the parked slice
+      // keeps the base it was cut at (2). At 43 the tail — measured from the
+      // slice's own base — no longer holds it, so this turn prepends it.
+      const supplemented = await turn(mgr, 43);
+      expect(supplemented.skippedReason).toBeUndefined();
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].skippedHistory,
+      ).toEqual(turns(6).slice(2));
+
+      // That run covered the parked turns, so the close flush forks nothing.
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it('runs when a carried settle let the parked span outgrow the skip window', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const releases: Array<() => void> = [];
+      const slowRun = (params: Parameters<typeof runAutoMemoryExtract>[0]) =>
+        new Promise<ExtractResult>((resolve) => {
+          releases.push(() =>
+            resolve(engagedNoop(params.sessionId, params.history.length)),
+          );
+        });
+      vi.mocked(runAutoMemoryExtract)
+        .mockImplementationOnce(slowRun)
+        .mockImplementationOnce(slowRun);
+
+      const first = turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      releases[0]();
+      await first;
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      releases[1]();
+      await mgr.drain();
+
+      // Base 4 after the carry, but the parked slice still starts at 2:
+      // measured from that base the unprocessed span is 22 — past the window
+      // half — so skipping again would strand entries the next tail evicts.
+      expect((await turn(mgr, 24)).skippedReason).toBeUndefined();
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
       expect(
-        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
-      ).toHaveLength(6);
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].skippedHistory,
+      ).toBeUndefined();
     });
 
     it('keeps a later skipped turn pending when an older direct run completes', async () => {
@@ -2910,6 +2997,28 @@ describe('MemoryManager', () => {
       await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
       expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+    });
+
+    it('drops a parked snapshot invalidated where compaction shrinks the history', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 13)).skippedReason).toBe('cadence');
+
+      // Compaction shrinks the live history and the turn ends cancelled, so
+      // no scheduleExtract observes the shrink: ChatCompressionService calls
+      // this where the shrink is decided. Without it the flush's
+      // bypassCadence replay forks the stale 13-entry snapshot above the live
+      // history and persists a cursor no live history can match.
+      mgr.invalidatePendingExtract('sess');
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(13);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
     it('refuses a parked flush whose snapshot a shrink dropped', async () => {

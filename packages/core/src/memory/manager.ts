@@ -67,6 +67,7 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
 import {
   EXTRACT_CADENCE_MAX_PENDING_ENTRIES,
+  EXTRACT_TAIL_ENTRIES,
   getExtractNoopSkipTurns,
 } from './extract-cadence.js';
 import {
@@ -173,6 +174,15 @@ export interface ScheduleExtractParams {
   now?: Date;
   config?: Config;
   skippedHistory?: Content[];
+  /**
+   * Internal, #13004 only: raw-history index where `skippedHistory` was cut
+   * from the live history (the cursor base at skip time). Carried separately
+   * because a later carried settle moves the cadence entry's
+   * `lastExtractedLength` forward while the parked slice keeps the base it
+   * was cut at, and eviction of the slice from the captured tail is measured
+   * from the slice's own base.
+   */
+  skippedFrom?: number;
   /**
    * Whether the turn's prompt stayed below the compaction warning threshold.
    * Cadence skips (#13004) need `true`; near compaction every turn extracts.
@@ -1278,9 +1288,17 @@ export class MemoryManager {
     if (
       cadenceNow?.pending &&
       cadenceNow.projectRoot === params.projectRoot &&
-      params.history.length - cadenceNow.lastExtractedLength > 40
+      params.history.length -
+        (cadenceNow.pending.skippedFrom ?? cadenceNow.lastExtractedLength) >
+        EXTRACT_TAIL_ENTRIES
     ) {
       // A long following turn can evict skipped turns from the captured tail.
+      // Measured from the snapshot's own base: a carried settle moves the
+      // entry's `lastExtractedLength` forward while the slice keeps the base
+      // it was cut at, so the entry's base both over-reports and
+      // under-reports what the tail still holds. Passing the whole slice is
+      // deliberate — the fork join drops the part the tail still holds, and
+      // only the captured tail itself can prove that coverage.
       params = {
         ...params,
         skippedHistory: cadenceNow.pending.skippedHistory,
@@ -1389,7 +1407,11 @@ export class MemoryManager {
     // nothing about the next one's, so it must not suppress a turn there.
     if (state.projectRoot !== params.projectRoot) return false;
     if (params.belowCompactionWarn !== true) return false;
-    const pendingEntries = params.history.length - state.lastExtractedLength;
+    // A second skip replaces the parked snapshot, so the span that must fit
+    // the next run's tail starts at the snapshot's own base when one is
+    // parked, not at the base a carried settle may have moved forward.
+    const pendingFrom = state.pending?.skippedFrom ?? state.lastExtractedLength;
+    const pendingEntries = params.history.length - pendingFrom;
     if (
       pendingEntries < 0 ||
       pendingEntries > EXTRACT_CADENCE_MAX_PENDING_ENTRIES
@@ -1400,6 +1422,7 @@ export class MemoryManager {
     state.pending = this.stampExtractSeq({
       ...params,
       skippedHistory: params.history.slice(state.lastExtractedLength),
+      skippedFrom: state.lastExtractedLength,
     });
     return true;
   }
@@ -1476,8 +1499,16 @@ export class MemoryManager {
     // consume it.
     const carried = this.extractCadence.get(params.sessionId);
     const previous = carried?.pending;
+    // Root agreement is part of the debt test, not implied by the ordering:
+    // this settle re-keys the entry to `params.projectRoot`, and a snapshot
+    // parked under another root (`/cd` away and back while this run was in
+    // flight) must not follow the re-key — the supplement gate compares the
+    // entry's root alone and would splice foreign turns into this root's
+    // extraction, skip budget included.
     const carry =
-      previous !== undefined && runSeq < this.seqOfExtractParams(previous);
+      previous !== undefined &&
+      previous.projectRoot === params.projectRoot &&
+      runSeq < this.seqOfExtractParams(previous);
     this.extractCadence.set(params.sessionId, {
       projectRoot: params.projectRoot,
       armed:
@@ -1561,6 +1592,20 @@ export class MemoryManager {
   discardExtractCadence(...sessionIds: string[]): void {
     this.cadenceDiscardEpoch += 1;
     for (const sessionId of sessionIds) this.extractCadence.delete(sessionId);
+  }
+
+  /**
+   * #13004: drops only the parked skipped-turn snapshot of one session, where
+   * a history shrink no `scheduleExtract` gets to observe (compaction, then a
+   * turn ending cancelled) would otherwise leave it parked above the live
+   * history — and the flush's `bypassCadence` exempts its replay from the
+   * shrink guard that deletes observed shrinks. Unlike
+   * {@link discardExtractCadence} this does not bump the discard epoch, so
+   * other sessions' in-flight cadence outcomes in this manager survive it.
+   */
+  invalidatePendingExtract(sessionId: string): void {
+    const state = this.extractCadence.get(sessionId);
+    if (state) delete state.pending;
   }
 
   /**

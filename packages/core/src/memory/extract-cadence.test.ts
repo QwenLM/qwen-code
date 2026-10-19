@@ -6,7 +6,9 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  EXTRACT_CADENCE_MAX_PENDING_ENTRIES,
   EXTRACT_NOOP_SKIP_TURNS_ENV,
+  EXTRACT_TAIL_ENTRIES,
   MAX_EXTRACT_NOOP_SKIP_TURNS,
   getExtractNoopSkipTurns,
 } from './extract-cadence.js';
@@ -28,6 +30,14 @@ describe('getExtractNoopSkipTurns', () => {
 
   it('keeps the documented 0-3 window', () => {
     expect(MAX_EXTRACT_NOOP_SKIP_TURNS).toBe(3);
+  });
+
+  it('keeps the skip window inside half the capture window', () => {
+    // The safety relationship, pinned so neither site moves alone: the
+    // capture reads EXTRACT_TAIL_ENTRIES curated entries and a skip stays
+    // safe only while every unprocessed entry fits half of it.
+    expect(EXTRACT_TAIL_ENTRIES).toBe(40);
+    expect(EXTRACT_CADENCE_MAX_PENDING_ENTRIES).toBe(EXTRACT_TAIL_ENTRIES / 2);
   });
 
   it('stays off unless the flag is a run of digits', () => {
