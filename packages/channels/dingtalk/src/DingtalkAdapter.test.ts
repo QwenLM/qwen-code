@@ -13975,11 +13975,12 @@ describe('DingtalkChannel proactive send', () => {
   );
 
   it.each([
-    ['Worker one', 14_939],
-    ['S'.repeat(3775), 11_142],
-  ])(
+    ['Worker one', 14_939, 'ts'],
+    ['S'.repeat(3775), 11_142, 'ts'],
+    ['Worker one', 30000, 'z'.repeat(3789)],
+  ] as const)(
     'rechecks serialized payload budgets after an unsent background header changes (%#)',
-    async (sourceLabel, length) => {
+    async (sourceLabel, length, info) => {
       const channel = proactive(createChannel({ interactiveCards: undefined }));
       const { sendCalls } = stubProactiveFetch(
         (index) => new Response('{}', { status: index === 0 ? 429 : 200 }),
@@ -13999,7 +14000,7 @@ describe('DingtalkChannel proactive send', () => {
       const packet: BackgroundOutputPacket = {
         kind: 'agent',
         status: 'running',
-        text: `\`\`\`ts\n${value}\n\`\`\``,
+        text: `\`\`\`${info}\n${value}\n\`\`\``,
         partial: false,
         turnComplete: false,
       };
@@ -14014,6 +14015,9 @@ describe('DingtalkChannel proactive send', () => {
       ).resolves.toBeDefined();
       const retried = sendCalls().slice(1).map(msgParamOf);
       expect(retried.length).toBeGreaterThan(1);
+      expect(retried.length).toBeLessThanOrEqual(
+        4 * Math.ceil(packet.text.length / 3800),
+      );
       for (const message of retried) {
         expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(
           15_000,
@@ -14029,7 +14033,8 @@ describe('DingtalkChannel proactive send', () => {
       ).toBe(value);
       expect(retried[0]!.text).toContain('✅ Background task completed');
       for (const message of retried.slice(1)) {
-        expect(message.text).toMatch(/\n\n```ts\nx+\n```$/u);
+        expect(message.text).toContain('\n\n```' + info + '\n');
+        expect(message.text).toMatch(/x+\n```$/u);
       }
     },
   );
@@ -14108,6 +14113,37 @@ describe('DingtalkChannel proactive send', () => {
       ).toBe(value);
       if (atUserId)
         expect(retried.join('').match(/@synthetic-user/g)).toHaveLength(1);
+    },
+  );
+
+  it.each([3789, 19985])(
+    'bounds the complete proactive batch for large code metadata (%s)',
+    async (length) => {
+      const channel = proactive(createChannel());
+      const { sendCalls } = stubProactiveFetch();
+      const text =
+        '```' + 'x'.repeat(length) + '\n' + 'y'.repeat(30000) + '\n```';
+      await channel.pushProactive(groupTarget, text);
+      const sends = sendCalls();
+      expect(sends.length).toBeLessThanOrEqual(
+        4 * Math.ceil(text.length / 3800),
+      );
+      const messages = sends.map(msgParamOf);
+      expect(
+        messages.reduce((sum, message) => sum + message.text.length, 0),
+      ).toBeLessThanOrEqual(4 * text.length + 20000);
+      expect(
+        messages
+          .map((message) => message.text)
+          .join('')
+          .match(/y/g),
+      ).toHaveLength(30000);
+      for (const message of messages) {
+        expect(message.text.length).toBeLessThanOrEqual(20000);
+        expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(
+          15000,
+        );
+      }
     },
   );
 

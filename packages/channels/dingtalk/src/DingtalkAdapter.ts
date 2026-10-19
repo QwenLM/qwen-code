@@ -933,12 +933,14 @@ type DingtalkChannelConfig = ChannelConfig & {
 };
 
 interface ProactiveTextDelivery {
+  sourceText: string;
   title: string;
   chunks: string[];
   nextChunk: number;
 }
 
 interface ReplyTextDelivery {
+  sourceText: string;
   title: string;
   chunks: string[];
   nextChunk: number;
@@ -1694,12 +1696,14 @@ export class DingtalkChannel extends ChannelBase {
       outgoingText,
       contentLimit,
       maxLength,
+      overhead,
     ).map(
       (chunk, index) =>
         `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
     );
     return {
       title: extractTitle(outgoingText),
+      sourceText: outgoingText,
       chunks,
       nextChunk: 0,
       ...(atUserId ? { atUserId } : {}),
@@ -1890,6 +1894,7 @@ export class DingtalkChannel extends ChannelBase {
     const title = extractTitle(outgoingText);
     return {
       title,
+      sourceText: outgoingText,
       chunks: this.createProactiveTextChunks(outgoingText, title, sourcePrefix),
       nextChunk: 0,
     };
@@ -1921,22 +1926,25 @@ export class DingtalkChannel extends ChannelBase {
         'DingTalk source label exceeds the proactive payload limit.',
       );
     }
-    return normalizeDingTalkMarkdown(text, targetLength, maxLength).flatMap(
-      (chunk) => {
-        let budget = maxLength;
-        let pieces = [chunk];
-        // OpenAPI limits the serialized msgParam, not UTF-16 text length.
-        while (!pieces.every(fits)) {
-          budget = Math.floor(budget / 2);
-          pieces = normalizeDingTalkMarkdown(
-            chunk,
-            Math.min(targetLength, budget),
-            budget,
-          );
-        }
-        return pieces.map((piece) => sourcePrefix + header + piece);
-      },
+    let budget = maxLength;
+    let pieces = normalizeDingTalkMarkdown(
+      text,
+      targetLength,
+      budget,
+      sourcePrefix.length + header.length,
     );
+    // Re-plan the whole batch from source before sending its first message.
+    // OpenAPI limits the serialized msgParam, not UTF-16 text length.
+    while (!pieces.every(fits)) {
+      budget = Math.floor(budget / 2);
+      pieces = normalizeDingTalkMarkdown(
+        text,
+        Math.min(targetLength, budget),
+        budget,
+        sourcePrefix.length + header.length,
+      );
+    }
+    return pieces.map((piece) => sourcePrefix + header + piece);
   }
 
   private async deliverProactiveText(
@@ -2933,66 +2941,37 @@ export class DingtalkChannel extends ChannelBase {
             (target.sourceLabel
               ? `${escapeDingTalkMarkdown(target.sourceLabel)}\n\n`
               : '');
-          plan.chunks[0] =
-            prefix + replaceHeader(plan.chunks[0]!.slice(prefix.length));
+          plan.sourceText = replaceHeader(plan.sourceText);
           const terminalHeader =
-            !output.text && plan.chunks[0]!.startsWith(prefix + header)
-              ? header
-              : '';
-          if (
-            replyPlan &&
-            replyPlan.chunks[0]!.length > DINGTALK_MAX_CHUNK_LENGTH
-          ) {
+            !output.text && plan.sourceText.startsWith(header) ? header : '';
+          const source = plan.sourceText.slice(terminalHeader.length);
+          if (replyPlan) {
             const mentionLength = replyPlan.atUserId
               ? `@${replyPlan.atUserId}\n\n`.length
               : 0;
-            replyPlan.chunks.splice(
-              0,
-              1,
-              ...normalizeDingTalkMarkdown(
-                replyPlan.chunks[0]!.slice(
-                  prefix.length + terminalHeader.length,
-                ),
-                Math.max(
-                  1,
-                  DINGTALK_CHUNK_LIMIT - prefix.length - terminalHeader.length,
-                ),
-                DINGTALK_MAX_CHUNK_LENGTH -
-                  prefix.length -
-                  terminalHeader.length,
-              ).map(
-                (chunk, index) =>
-                  (index === 0
-                    ? prefix + terminalHeader
-                    : prefix.slice(mentionLength)) + chunk,
-              ),
+            const reservedLength = prefix.length + terminalHeader.length;
+            replyPlan.chunks = normalizeDingTalkMarkdown(
+              source,
+              Math.max(1, DINGTALK_CHUNK_LIMIT - reservedLength),
+              DINGTALK_MAX_CHUNK_LENGTH - reservedLength,
+              reservedLength,
+            ).map(
+              (chunk, index) =>
+                (index === 0
+                  ? prefix + terminalHeader
+                  : prefix.slice(mentionLength)) + chunk,
             );
           }
           if (proactivePlan) {
-            proactivePlan.chunks = proactivePlan.chunks.flatMap(
-              (chunk, index) =>
-                Buffer.byteLength(
-                  JSON.stringify({
-                    title: `${plan.title} (cont.)`,
-                    text: chunk,
-                  }),
-                  'utf8',
-                ) <= 15_000
-                  ? [chunk]
-                  : this.createProactiveTextChunks(
-                      chunk.slice(
-                        prefix.length +
-                          (index === 0 ? terminalHeader.length : 0),
-                      ),
-                      plan.title,
-                      prefix,
-                      index === 0 ? terminalHeader : '',
-                    ).map((piece, pieceIndex) =>
-                      index === 0 && pieceIndex > 0
-                        ? prefix +
-                          piece.slice(prefix.length + terminalHeader.length)
-                        : piece,
-                    ),
+            proactivePlan.chunks = this.createProactiveTextChunks(
+              source,
+              plan.title,
+              prefix,
+              terminalHeader,
+            ).map((piece, index) =>
+              index > 0
+                ? prefix + piece.slice(prefix.length + terminalHeader.length)
+                : piece,
             );
           }
         }

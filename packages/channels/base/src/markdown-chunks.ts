@@ -7,6 +7,8 @@ export interface MarkdownChunkOptions {
   targetLength: number;
   maxLength: number;
   unit: 'utf16' | 'utf8';
+  /** Per-message prefix already subtracted from the content budgets. */
+  reservedLength?: number;
 }
 
 const blocks = unified().use(remarkParse);
@@ -18,22 +20,42 @@ export function splitMarkdown(
   text: string,
   options: MarkdownChunkOptions,
 ): string[] {
-  const { targetLength, maxLength, unit } = options;
+  const { targetLength, maxLength, unit, reservedLength = 0 } = options;
   if (
     !Number.isSafeInteger(targetLength) ||
     !Number.isSafeInteger(maxLength) ||
     targetLength <= 0 ||
-    maxLength < targetLength
+    maxLength < targetLength ||
+    !Number.isSafeInteger(reservedLength) ||
+    reservedLength < 0
   ) {
     throw new RangeError('Invalid Markdown chunk budget');
   }
-  return split(
+  const size = (value: string) =>
+    unit === 'utf8' ? Buffer.byteLength(value, 'utf8') : value.length;
+  const length = size(text) + reservedLength;
+  // Relative limits bound amplification, never truncate a delivery batch.
+  const fits = (parts: string[]) =>
+    parts.length <=
+      Math.max(1, 4 * Math.ceil(length / (targetLength + reservedLength))) &&
+    parts.reduce((total, part) => total + size(part) + reservedLength, 0) <=
+      4 * length + maxLength + reservedLength &&
+    parts.every((part) => size(part) <= maxLength);
+  const preferred = split(
     text,
-    targetLength,
+    reservedLength > targetLength ? maxLength : targetLength,
     maxLength,
-    (value) =>
-      unit === 'utf8' ? Buffer.byteLength(value, 'utf8') : value.length,
+    size,
     0,
+  );
+  if (fits(preferred)) return preferred;
+  const expanded = split(text, maxLength, maxLength, size, 0);
+  if (fits(expanded)) return expanded;
+  // Re-plan from the original source, without repeated container context.
+  const literal = split(text, maxLength, maxLength, size, 16);
+  if (fits(literal)) return literal;
+  throw new RangeError(
+    'Markdown budget cannot contain a bounded lossless batch',
   );
 }
 
@@ -81,9 +103,7 @@ function split(
       const budget = Math.max(
         size('😀'),
         size(String.fromCodePoint(value.codePointAt(0)!)),
-        Math.floor(
-          (Math.min(target, limit) - size(notice + '```text\n\n```')) / 3,
-        ),
+        Math.floor((limit - size(notice + '```text\n\n```')) / 3),
       );
       const end = cut(value, budget);
       const part = value.slice(0, end);
@@ -133,6 +153,8 @@ function split(
           : [];
         const table = raw.slice(offset);
         if (size(table) <= limit) return [...before, table];
+        if (size(header) >= limit / 2)
+          return [...before, ...plain(table, limit)];
         const result = [...before];
         const tableStart = result.length;
         let current = header;
@@ -271,11 +293,9 @@ function split(
         `${opening}\n${part}${part.endsWith('\n') ? '' : '\n'}${marker}`;
       if (size(wrap(node.value)) <= limit) return [wrap(node.value)];
       const overhead = size(wrap(''));
-      if (overhead + size('😀') >= limit) return plain(raw, limit);
+      if (overhead >= limit / 2) return plain(raw, limit);
       const budget =
-        preferred > overhead + size('😀')
-          ? preferred - overhead
-          : limit - overhead;
+        overhead < preferred / 2 ? preferred - overhead : limit - overhead;
       const result: string[] = [];
       let current = '';
       for (let line of node.value.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {

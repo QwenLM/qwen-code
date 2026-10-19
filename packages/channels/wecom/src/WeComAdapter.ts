@@ -1518,6 +1518,7 @@ function splitMarkdownChunks(text: string, prefix = ''): string[] {
   }
   return splitMarkdown(text, {
     targetLength: contentLimit,
+    reservedLength: overhead,
     maxLength,
     unit: 'utf8',
   }).map((chunk) => prefix + chunk);

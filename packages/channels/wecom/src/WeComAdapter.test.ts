@@ -4187,6 +4187,54 @@ describe('WeComChannel', () => {
     );
   });
 
+  it.each(['review', 'S'.repeat(1898), 'S'.repeat(1899), 'S'.repeat(3775)])(
+    'plans a bounded attributed batch before sending (%#)',
+    async (sourceLabel) => {
+      const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+      await channel.connect();
+      const client = lastClient();
+      const prefix = sourceLabel + '\n';
+      for (const text of [
+        '中😀'.repeat(10000),
+        '|' +
+          'h'.repeat(1800) +
+          '|\n|---|\n' +
+          Array(100)
+            .fill('|' + 'y'.repeat(600) + '|')
+            .join('\n'),
+        '```' +
+          'x'.repeat(3800 - prefix.length - 11) +
+          '\n' +
+          'y'.repeat(30000) +
+          '\n```',
+      ]) {
+        client.sendMessage.mockClear();
+        await channel.sendAttributed('chat-1', text, sourceLabel);
+        const chunks = client.sendMessage.mock.calls.map(
+          (call) =>
+            (call[1] as { markdown: { content: string } }).markdown.content,
+        );
+        expect(chunks.length).toBeLessThanOrEqual(
+          4 * Math.ceil(Buffer.byteLength(text) / 3800),
+        );
+        expect(
+          chunks.reduce((total, part) => total + Buffer.byteLength(part), 0),
+        ).toBeLessThanOrEqual(4 * Buffer.byteLength(text) + 20000);
+        for (const part of chunks) {
+          expect(part.startsWith(prefix)).toBe(true);
+          expect(Buffer.byteLength(part)).toBeLessThanOrEqual(20000);
+          expect(part.isWellFormed()).toBe(true);
+        }
+        const bodies = chunks.map((part) => part.slice(prefix.length));
+        if (text.startsWith('中')) expect(bodies.join('')).toBe(text);
+        else
+          expect(bodies.join('').match(/y/g)).toHaveLength(
+            text.startsWith('|') ? 60000 : 30000,
+          );
+      }
+    },
+  );
+
   it('extracts media first and repeats an escaped label within every byte-limited chunk', async () => {
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();

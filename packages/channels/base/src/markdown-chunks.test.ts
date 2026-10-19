@@ -204,6 +204,18 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
       definition;
     const parts = split(text);
     expect(parts.every((part) => measure(part) <= 20000)).toBe(true);
+    expect(parts.length).toBeLessThanOrEqual(
+      4 * Math.ceil(measure(text) / 3800),
+    );
+    expect(
+      parts.every((part) => part.includes('original text follows in parts')),
+    ).toBe(true);
+    expect(
+      parts
+        .flatMap(code)
+        .map((block) => block.value)
+        .join(''),
+    ).toBe(text);
   });
   it.each(['> ', '- '])(
     'splits long %s containers and retains their links',
@@ -305,6 +317,95 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     expect(blocks.every((block) => block.lang === language)).toBe(true);
     expect(blocks.map((block) => block.value).join('')).toBe(body);
   });
+  it.each([1891, 1892, 3788, 3789, 3790, 3797, 9983, 9984, 19985])(
+    'bounds fence repetition around budget boundaries (info length %s)',
+    (length) => {
+      const info = 'x'.repeat(length);
+      const body = '中😀y'.repeat(7500);
+      const text = '```' + info + '\n' + body + '\n```';
+      const parts = split(text);
+      expect(parts.length).toBeLessThanOrEqual(
+        4 * Math.ceil(measure(text) / options.targetLength),
+      );
+      expect(
+        parts.reduce((sum, part) => sum + measure(part), 0),
+      ).toBeLessThanOrEqual(4 * measure(text) + options.maxLength);
+      const blocks = parts.flatMap(code);
+      if (
+        parts.some((part) => part.includes('original text follows in parts'))
+      ) {
+        expect(blocks.map((block) => block.value).join('')).toBe(text);
+      } else {
+        expect(blocks.every((block) => block.lang === info)).toBe(true);
+        expect(blocks.map((block) => block.value).join('')).toBe(body);
+      }
+    },
+  );
+  it('does not turn the exact three-character fence budget into 10000 messages', () => {
+    const info = 'x'.repeat(3789);
+    const body = 'y'.repeat(30000);
+    const parts = split('```' + info + '\n' + body + '\n```');
+    expect(parts).toHaveLength(2);
+    expect(parts.flatMap(code).every((block) => block.lang === info)).toBe(
+      true,
+    );
+    expect(
+      parts
+        .flatMap(code)
+        .map((block) => block.value)
+        .join(''),
+    ).toBe(body);
+  });
+  it.each([3780, 9980, 19960])(
+    'bounds repeated table headers and preserves all source (%s)',
+    (length) => {
+      const header = '| ' + 'h'.repeat(length) + ' |\n|---|\n';
+      const data = Array(3000).fill('| 中😀 |').join('\n');
+      const text = header + data;
+      const parts = split(text);
+      expect(parts.length).toBeLessThanOrEqual(
+        4 * Math.ceil(measure(text) / 3800),
+      );
+      expect(
+        parts.reduce((sum, part) => sum + measure(part), 0),
+      ).toBeLessThanOrEqual(4 * measure(text) + 20000);
+      if (
+        parts.some((part) => part.includes('original text follows in parts'))
+      ) {
+        expect(
+          parts
+            .flatMap(code)
+            .map((block) => block.value)
+            .join(''),
+        ).toBe(text);
+      } else {
+        expect(parts.every((part) => part.startsWith(header))).toBe(true);
+        expect(parts.map((part) => part.slice(header.length)).join('')).toBe(
+          data,
+        );
+      }
+    },
+  );
+  it.each(['123456789. ', '123456789.   '])(
+    'bounds deep repeated list prefixes (%s)',
+    (marker) => {
+      const body = '中😀y'.repeat(7500);
+      const text = marker.repeat(16) + body;
+      const parts = split(text);
+      expect(parts.length).toBeLessThanOrEqual(
+        4 * Math.ceil(measure(text) / 3800),
+      );
+      expect(
+        parts.reduce((sum, part) => sum + measure(part), 0),
+      ).toBeLessThanOrEqual(4 * measure(text) + 20000);
+      const restored = parts
+        .flatMap(code)
+        .map((block) => block.value)
+        .join('');
+      expect(restored).toContain(body);
+      expect(restored.match(/中😀y/gu)).toHaveLength(7500);
+    },
+  );
   it('preserves nested code after a nearly exhausted prefix budget', () => {
     const body = 'x'.repeat(39500);
     const text = '\n'.repeat(19883) + '> - ```sh\n>   ' + body + '\n>   ```';

@@ -11,9 +11,11 @@ export function splitChunks(
   text: string,
   chunkLimit = DINGTALK_CHUNK_LIMIT,
   maxLength = DINGTALK_MAX_CHUNK_LENGTH,
+  reservedLength = 0,
 ): string[] {
   return splitMarkdown(text, {
     targetLength: chunkLimit,
+    reservedLength,
     maxLength,
     unit: 'utf16',
   });
@@ -31,6 +33,7 @@ export function normalizeDingTalkMarkdown(
   text: string,
   chunkLimit = DINGTALK_CHUNK_LIMIT,
   maxLength = DINGTALK_MAX_CHUNK_LENGTH,
+  reservedLength = 0,
 ): string[] {
-  return splitChunks(text, chunkLimit, maxLength);
+  return splitChunks(text, chunkLimit, maxLength, reservedLength);
 }
