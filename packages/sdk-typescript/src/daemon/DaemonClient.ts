@@ -220,6 +220,7 @@ import type {
   DaemonToolToggleResult,
   DaemonSkillBatchToggleResult,
   DaemonSkillToggleResult,
+  DaemonSkillRefreshResult,
   DaemonSkillInstallRequest,
   DaemonSkillMutationResult,
   DaemonSkillScope,
@@ -2002,11 +2003,15 @@ export class DaemonClient {
 
   async refreshExtensions(
     clientId?: string,
+    options?: { sessionIds?: string[] },
   ): Promise<ExtensionRefreshResponse> {
+    if (options?.sessionIds !== undefined) {
+      await this.requireCapability('workspace_session_refresh');
+    }
     return await this.jsonRequest<ExtensionRefreshResponse>(
       '/workspace/extensions/refresh',
       'POST /workspace/extensions/refresh',
-      { method: 'POST', body: {}, clientId, mode: 'rest' },
+      { method: 'POST', body: options ?? {}, clientId, mode: 'rest' },
     );
   }
 
@@ -5186,6 +5191,18 @@ export class DaemonClient {
     );
   }
 
+  async refreshWorkspaceSkills(
+    options?: { sessionIds?: string[] },
+    clientId?: string,
+  ): Promise<DaemonSkillRefreshResult> {
+    await this.requireCapability('workspace_session_refresh');
+    return this.jsonRequest<DaemonSkillRefreshResult>(
+      '/workspace/skills/refresh',
+      'POST /workspace/skills/refresh',
+      { method: 'POST', body: options ?? {}, clientId, mode: 'rest' },
+    );
+  }
+
   /**
    * Update workspace Skill settings by name without requiring a loaded Skill.
    * Active ACP sessions refresh their skill validation and command lists before
@@ -7990,6 +8007,19 @@ export class WorkspaceDaemonClient {
     return this.get('/skills', 'GET /workspaces/:workspace/skills');
   }
 
+  async refreshSkillRuntime(
+    options?: { sessionIds?: string[] },
+    clientId?: string,
+  ): Promise<DaemonSkillRefreshResult> {
+    await this.client.requireCapability('workspace_session_refresh');
+    return this.client.workspaceJsonRequest<DaemonSkillRefreshResult>(
+      this.workspaceSelector,
+      '/skills/refresh',
+      'POST /workspaces/:workspace/skills/refresh',
+      { method: 'POST', body: options ?? {}, clientId, mode: 'rest' },
+    );
+  }
+
   workspaceConfigSkills(): Promise<DaemonWorkspaceSkillsStatus> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -8844,14 +8874,18 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  refreshExtensionRuntime(
+  async refreshExtensionRuntime(
     clientId?: string,
+    options?: { sessionIds?: string[] },
   ): Promise<ExtensionMutationResponse> {
+    if (options?.sessionIds !== undefined) {
+      await this.client.requireCapability('workspace_session_refresh');
+    }
     return this.client.workspaceJsonRequest<ExtensionMutationResponse>(
       this.workspaceSelector,
       '/extensions/refresh',
       'POST /workspaces/:workspace/extensions/refresh',
-      { method: 'POST', body: {}, clientId, mode: 'rest' },
+      { method: 'POST', body: options ?? {}, clientId, mode: 'rest' },
     );
   }
 

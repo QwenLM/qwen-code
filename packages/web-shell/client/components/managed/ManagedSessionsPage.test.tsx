@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
+  clearEditor: vi.fn(),
   editorProps: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
@@ -98,6 +99,10 @@ vi.mock('../ChatEditor', async () => {
           ({
             setText: update,
             clearText: () => update(''),
+            clear: () => {
+              mocks.clearEditor();
+              update('');
+            },
             getText: () => input.current?.value ?? '',
             focus: () => input.current?.focus(),
           }) as EditorHandle,
@@ -284,6 +289,62 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('connects the Session Skill catalog to the composer without enabling other Workspace features', async () => {
+    const skills = [{ name: 'review', description: 'Pinned review.' }];
+    const list = vi.fn().mockResolvedValue({ skills });
+    provider = { ...provider, skills: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await act(async () => mocks.editorProps?.onSkillsOpenChange?.(true));
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+    expect(mocks.editorProps?.skills).toEqual(skills);
+    expect(mocks.editorProps?.skillsLoaded).toBe(true);
+  });
+
+  it('keeps Workspace file references available alongside the pinned Skill catalog', async () => {
+    const skills = [{ name: 'review', description: 'Pinned review.' }];
+    const list = vi.fn().mockResolvedValue({ skills });
+    const query = vi.fn().mockResolvedValue({
+      scopeRevision: 'registered',
+      directory: '.',
+      entries: [],
+      truncated: false,
+    });
+    provider = {
+      ...provider,
+      skills: { list },
+      workspaceFiles: { query, read: vi.fn() },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+        workspace: { workspaceId: 'ws', cwdRelative: '.' },
+      }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(mocks.editorProps?.persistFileReferences).toBe(true);
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    await act(async () => mocks.editorProps?.onSkillsOpenChange?.(true));
+    expect(mocks.editorProps?.skills).toEqual(skills);
+    expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(query).toHaveBeenCalledWith(
+      { workspaceId: 'ws', cwdRelative: '.', directory: '.', query: '' },
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
 
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',
@@ -2184,6 +2245,7 @@ describe('ManagedSessionsPage', () => {
       )?.disabled,
     ).toBe(true);
     expect(onSelect).toHaveBeenLastCalledWith('s1');
+    expect(mocks.clearEditor).toHaveBeenCalledOnce();
   });
 
   it('preserves the visible foreign draft when retrying a live retained commit', async () => {

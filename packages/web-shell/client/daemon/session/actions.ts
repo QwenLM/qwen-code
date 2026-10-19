@@ -155,37 +155,60 @@ class AttachmentUploadError extends Error {
 }
 
 const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
-const RESTORE_REQUEST_HEADROOM_MS = 10_000;
-const RESTORE_WATCHDOG_HEADROOM_MS = 15_000;
-// Covers one default capability preflight (30s generic request budget) plus a
-// create sized from the daemon's advertised session budget (70s under the
-// default budget), plus 15s headroom. Concurrent capability refreshes or an
-// advertised budget above the default can extend the chain beyond this limit.
-// Keep in sync with DEFAULT_FETCH_TIMEOUT_MS and the session-restore default in
-// sdk-typescript's DaemonClient.ts; actions.test.ts pins both SDK request
-// deadlines and this watchdog boundary.
-const CREATE_WATCHDOG_TIMEOUT_MS = 115_000;
+const REQUEST_HEADROOM_MS = 10_000;
+const WATCHDOG_HEADROOM_MS = 15_000;
+// The SDK charges a capability preflight to its generic request deadline rather
+// than to the session budget, so a cold create chain spans both. Keep in sync
+// with DEFAULT_FETCH_TIMEOUT_MS in sdk-typescript's DaemonClient.ts.
+const CAPABILITY_PREFLIGHT_BUDGET_MS = 30_000;
 const ATTACH_WATCHDOG_TIMEOUT_MS = 30_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function resolveAdvertisedServerTimeoutMs(
+  capabilities: DaemonCapabilities | undefined,
+): number {
+  const advertised = capabilities?.limits?.sessionRestoreTimeoutMs;
+  return typeof advertised === 'number' &&
+    Number.isInteger(advertised) &&
+    advertised > 0
+    ? advertised
+    : DEFAULT_RESTORE_SERVER_TIMEOUT_MS;
+}
 
 export function resolveSessionRestoreTimeouts(
   capabilities: DaemonCapabilities | undefined,
 ): { requestTimeoutMs: number; watchdogTimeoutMs: number | undefined } {
-  const advertised = capabilities?.limits?.sessionRestoreTimeoutMs;
-  const serverTimeoutMs =
-    typeof advertised === 'number' &&
-    Number.isInteger(advertised) &&
-    advertised > 0
-      ? advertised
-      : DEFAULT_RESTORE_SERVER_TIMEOUT_MS;
-  const requestTimeoutMs = serverTimeoutMs + RESTORE_REQUEST_HEADROOM_MS;
-  const watchdogTimeoutMs = serverTimeoutMs + RESTORE_WATCHDOG_HEADROOM_MS;
+  const serverTimeoutMs = resolveAdvertisedServerTimeoutMs(capabilities);
+  const requestTimeoutMs = serverTimeoutMs + REQUEST_HEADROOM_MS;
+  const watchdogTimeoutMs = serverTimeoutMs + WATCHDOG_HEADROOM_MS;
   return {
     requestTimeoutMs:
       requestTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : requestTimeoutMs,
     watchdogTimeoutMs:
       watchdogTimeoutMs > MAX_TIMER_DELAY_MS ? undefined : watchdogTimeoutMs,
   };
+}
+
+/**
+ * Limit for a workspace create, which waits for the capability preflight and
+ * then for the create request. The SDK sizes that request from the same
+ * advertised session budget as a restore, so an action limit below the sum of
+ * the two reports a timeout on a spawn the daemon is still finishing.
+ */
+export function resolveCreateWatchdogTimeoutMs(
+  capabilities: DaemonCapabilities | undefined,
+): number {
+  // The SDK floors a spawn deadline at its generic request budget, so a restore
+  // budget pinned below that must not shrink the create half of this chain.
+  const createRequestMs = Math.max(
+    resolveAdvertisedServerTimeoutMs(capabilities) + REQUEST_HEADROOM_MS,
+    CAPABILITY_PREFLIGHT_BUDGET_MS,
+  );
+  const watchdogTimeoutMs =
+    CAPABILITY_PREFLIGHT_BUDGET_MS + createRequestMs + WATCHDOG_HEADROOM_MS;
+  // setTimeout treats a delay above the 32-bit ceiling as 1ms and fires at once,
+  // which would report a timeout on a create that had barely started.
+  return Math.min(watchdogTimeoutMs, MAX_TIMER_DELAY_MS);
 }
 
 function clearPendingLoadTimeout(load: PendingSessionLoad): void {
@@ -2252,7 +2275,7 @@ export function createDaemonSessionActions({
                 ),
             ),
             'Create session timed out',
-            CREATE_WATCHDOG_TIMEOUT_MS,
+            resolveCreateWatchdogTimeoutMs(getConnection().capabilities),
           );
           persistStableClientId(nextSession.clientId, nextSession.sessionId);
           return nextSession;
@@ -2283,7 +2306,7 @@ export function createDaemonSessionActions({
             : await withActionTimeout(
                 trackedCreate,
                 'Create session timed out',
-                CREATE_WATCHDOG_TIMEOUT_MS,
+                resolveCreateWatchdogTimeoutMs(getConnection().capabilities),
               );
         const userMovedAway =
           (getConnection().sessionId !== connectionSessionIdAtStart ||
