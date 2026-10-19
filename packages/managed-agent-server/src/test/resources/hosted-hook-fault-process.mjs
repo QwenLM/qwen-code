@@ -52,9 +52,16 @@ if (mode === 'child') {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const value = JSON.parse(input);
-  record('hook.call', { input: value });
+  // FG13d: lifecycle events (SessionEnd/SessionDelete) must not answer with a
+  // PreToolUse decision, so the fixture only records their completion. Match
+  // the two names positively: an absent or renamed event must not take this
+  // path and silently exit without a decision.
+  const lifecycle = ['SessionEnd', 'SessionDelete'].includes(
+    value.hook_event_name,
+  );
+  record('hook.call', { eventName: value.hook_event_name, input: value });
   let child;
-  if (!solo) {
+  if (!solo && !lifecycle) {
     child = spawn(
       process.execPath,
       [
@@ -81,7 +88,10 @@ if (mode === 'child') {
     child.kill('SIGKILL');
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  record('hook.allow');
+  record(lifecycle ? 'hook.done' : 'hook.allow', {
+    eventName: value.hook_event_name,
+  });
+  if (lifecycle) process.exit(0);
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {
