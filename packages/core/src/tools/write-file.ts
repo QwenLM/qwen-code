@@ -740,7 +740,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 }
 
 export const WRITE_FILE_ARTIFACT_DESCRIPTION =
-  'Artifact-like files such as HTML, PDF, images, notebooks, office documents, CSV, Markdown, JSON, SQL, and Python files are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.';
+  'Artifact-like files such as HTML, PDF, images, notebooks, office documents, CSV, Markdown, JSON, SQL, and Python files are automatically registered as session artifacts. Set record_as_artifact=false for intermediates, such as HTML written only to print a PDF: that does not create an artifact, but one the session already has for the path is still refreshed. Files under .qwen/tmp/ are not registered. Delete intermediates when done.';
 
 /**
  * Implementation of the WriteFile tool logic
@@ -774,7 +774,7 @@ The user has the ability to modify \`content\`. If modified, this will be stated
           },
           record_as_artifact: {
             description:
-              'Set false for intermediate files that should not appear as session artifacts, such as HTML used only to print a PDF. Defaults to true for artifact-like extensions.',
+              'Set false to skip creating a session artifact. An artifact the session already has for this path is still refreshed. Defaults to true for artifact-like extensions.',
             type: 'boolean',
           },
         },

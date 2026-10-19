@@ -73,6 +73,12 @@ export interface NotebookEditToolParams {
   new_source?: string;
   cell_type?: EditableNotebookCellType;
   edit_mode?: NotebookEditMode;
+
+  /**
+   * When false, do not create a session artifact for this edit. An artifact
+   * the session already has for this path is still refreshed.
+   */
+  record_as_artifact?: boolean;
 }
 
 interface NotebookEditModifyMetadata {
@@ -712,7 +718,10 @@ class NotebookEditInvocation extends BaseToolInvocation<
       const artifact = buildWorkspaceArtifactCandidate(
         this.config,
         this.params.notebook_path,
-        { sizeBytes: postWriteSizeBytes },
+        {
+          recordAsArtifact: this.params.record_as_artifact,
+          sizeBytes: postWriteSizeBytes,
+        },
       );
       const reminder =
         artifact && !artifact.updateOnly
@@ -793,6 +802,11 @@ export class NotebookEditTool
             description: 'Notebook edit operation. Defaults to replace.',
             type: 'string',
             enum: ['replace', 'insert', 'delete'],
+          },
+          record_as_artifact: {
+            description:
+              'Set false to skip creating a session artifact for this edit. An artifact the session already has for the path is still refreshed. Defaults to true.',
+            type: 'boolean',
           },
         },
         required: ['notebook_path'],

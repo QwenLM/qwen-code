@@ -54,7 +54,7 @@
 - 合并：`mergeArtifact` 中 `status`、`sizeBytes` 取本次输入；`mergeMetadata` 在 `incoming.source !== existing.source`（或来源为 hook）时保留旧 metadata，**不采纳新指纹**。
 - 展示字段（`title`、`description`、`toolCallId`、`toolName`、`source`、`hookEventName`）只在 `shouldRefreshWorkspaceDisplay` 为真时刷新：`record_artifact`（非 hook）、无 `toolName` 的登记，或 `toolName` / `source` / `hookEventName` **三者都相同**。注释明确要求自动登记不得覆盖用户可见标题。
 - 删除：`shouldSuppressTombstonedUpsert` 只阻止 client 来源复活；被用户删除的 tool / hook 产物，下一次同路径登记会重新创建。
-- 驱逐：超过 200 条时依次淘汰最老的 missing 条目、超出来源配额的条目、最老的非 `clientRetained` 条目。
+- 驱逐：超过 200 条时依次淘汰最老的 missing 条目、超出来源配额的条目、最老的非 `clientRetained` 条目。如果剩下的全都是 `clientRetained`，最后一档会淘汰其中最老的一条。
 - "文件消失即遗忘"（`isVanishedAutoRecordedWorkspaceArtifact`）和存在性复查（`shouldRecheckWriteFilePresence`）都写死 `toolName === 'write_file'`。
 
 ### 2.4 Web Shell
@@ -127,7 +127,7 @@
 - 匹配内置扩展名：返回普通候选。
 - 不匹配，或 `record_as_artifact=false`：返回 `updateOnly: true` 的候选。
 
-内置扩展名集合在现有基础上追加 `.sql`、`.py`、`.md`、`.json`，kind 均为 `file`。它们是数据与分析场景最常见的交付物；不做成配置项，是为了不引入新的 settings 面。现有的跳过规则（点目录、`node_modules`、`dist` 等）与 `record_as_artifact=false` 继续生效。artifact 登记出错不得让一次成功的文件写入变成失败的工具调用：构造候选只做路径解析（realpath 失败时退回字面路径），store 在工具结果返回之后才登记。只有内置扩展名的候选在 `llmContent` 追加提示，`updateOnly` 候选不追加。
+内置扩展名集合在现有基础上追加 `.sql`、`.py`、`.md`、`.json`，kind 均为 `file`。它们是数据与分析场景最常见的交付物；不做成配置项，是为了不引入新的 settings 面。现有的跳过规则（点目录、`node_modules`、`dist` 等）继续生效。`write_file`、`edit`、`notebook_edit` 上的 `record_as_artifact=false` 不新建产物；该路径上会话里已经有的产物仍会刷新。artifact 登记出错不得让一次成功的文件写入变成失败的工具调用：构造候选只做路径解析（realpath 失败时退回字面路径），store 在工具结果返回之后才登记。只有内置扩展名的候选在 `llmContent` 追加提示，`updateOnly` 候选不追加。
 
 ### 4.3 入站字段：`updateOnly`
 
@@ -148,12 +148,12 @@ interface ToolArtifact {
 
 自动登记生产者集合为 tool 来源的 `{write_file, edit, notebook_edit}`。
 
-1. **`updateOnly` 先短路**：在串行队列内、`expandWorkspaceDirectoryInput` 之前，用与 `normalizeInput` 相同的路径规范化算出身份，并按 `upsertMany` 相同的查找方式（先 id，再 published workspace 目标）检查是否存在；不存在则直接丢弃——不建、不删、不驱逐、不发布、不 stat/hash。存在时走正常的 `normalizeInput`。
-2. **只同步内容（跨归属）**：来自生产者集合的输入跳过 `denyCrossClientMutation`，因此带 `clientId` 的 client 登记会接受 agent 的写入。合并只改内容字段：指纹基线、`status`、`sizeBytes`、`toolCallId`。`title`、`description`、`source`、`clientId`、retention、`clientRetained` 一律不变：`mergeArtifact` 保留已有的 `source` 与归属，展示刷新规则不接受该工具名，`mergeRetention` 不会覆盖显式 retention。其他工具输入（如 `record_artifact`）仍被拒绝。这放宽了权限边界，**需要维护者确认**。
+1. **`updateOnly` 先短路**：在串行队列内、`expandWorkspaceDirectoryInput` 之前，用与 `normalizeInput` 相同的路径规范化算出身份，并按 `upsertMany` 相同的查找方式（先 id，再 published workspace 目标）检查是否存在；不存在则直接丢弃——不建、不删、不驱逐、不发布、不 stat/hash，并写 `action=dropped reason="unmatched workspace update"`。存在时走正常的 `normalizeInput`。
+2. **只同步内容（跨归属）**：来自生产者集合的输入跳过 `denyCrossClientMutation`，因此带 `clientId` 的 client 登记会接受 agent 的写入。合并只改内容字段：指纹基线、`status`、`sizeBytes`、`toolCallId`。`title`、`description`、`source`、`clientId`、retention、`clientRetained` 一律不变：`mergeArtifact` 保留已有的 `source` 与归属，展示刷新规则不接受该工具名，`mergeRetention` 不会覆盖显式 retention。其他工具输入（如 `record_artifact`，或带着生产者 `toolName` 的 hook 输入）仍被拒绝。这是已经接受的权限边界。
 3. **跨 source 采纳指纹**：对生产者集合的输入，`mergeMetadata` 采纳 `isAdoptableContentFingerprintKey` 的键时不再要求 source 相同，且不新增其他键；其他输入、hook 来源输入、发布者信任规则不变。
 4. **按文件身份推进 turn 归属**：把"推进 `toolCallId`"与"刷新标题/描述"拆开。生产者集合的输入合并到 workspace 条目时，`toolCallId` 推进到本次调用；`title`、`description`、`toolName`、`source`、`hookEventName` 仍按现有 `shouldRefreshWorkspaceDisplay` 规则，自动登记不得覆盖用户可见标题。`toolName` 保留创建者，使遗忘规则仍按"谁创建"判定。
 5. **删除后不复活**：生产者集合的非 `updateOnly` 候选命中 tombstone 时，按 `updateOnly` 处理（因不存在而丢弃）。显式 `record_artifact`、hook 与客户端登记的复活规则不变。
-6. **泛化遗忘/复查谓词**：`toolName === 'write_file'` 改为 `toolName ∈ {write_file, edit, notebook_edit}`，与今天一样不判断 source；client 登记、`clientRetained`、`record_artifact` 显式登记的条目行为不变。
+6. **泛化遗忘/复查谓词**：`toolName === 'write_file'` 改为 `toolName ∈ {write_file, edit, notebook_edit}`，与今天一样不判断 source。因此 `toolName` 落在这个集合里的 hook 条目，文件消失时会被遗忘，和今天的 `write_file` hook 条目一样；这些条目在每次 list/get 时都会重新 stat，不受 5 秒存在性 TTL 保护。client 登记和显式 `record_artifact` 保留各自的 `toolName`，行为不变。
 
 不采用的替代做法：让 `edit` / `notebook_edit` 伪装成 `toolName: 'write_file'`（耦合到一个不真实的名称）；整体放宽 `shouldRefreshWorkspaceDisplay`（会让自动登记覆盖用户标题）。
 
@@ -173,26 +173,26 @@ interface ToolArtifact {
 
 **不需要数据迁移，不会扫盘补登记，不改已有 artifact 的 id。** artifact 持久化仍为 V2 journal/snapshot，不新增持久化字段。
 
-| 场景                                              | 升级后行为                                                        | 处理                                                  |
-| ------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------- |
-| 已有 artifact，升级后无人再改                     | 与今天一致                                                        | 无                                                    |
-| 工作区里从未登记过的文件                          | 不会被补登记                                                      | 只有 agent 再次写入（且匹配策略）或显式登记才可能新建 |
-| 已有会话中的 `.sql/.py/.md/.json` 文件            | 不补登记；升级后 agent 再次修改时才新建                           | 默认值放宽带来的预期行为变化                          |
-| 已有 artifact 被 agent 再次修改                   | 同一 id 发 `updated`，同步基线，`toolCallId` 推进                 | 这是修复                                              |
-| 已经是 `changed` 的旧条目（多为过去 edit 未同步） | 保持 `changed`（可下载），直到下次 agent 写入                     | **不批量重置**：无法区分旧缺陷与真实外部修改          |
-| 宿主（带 `clientId`）登记的产物                   | agent 修改时只同步内容；标题、retention、归属、tombstone 不变     | 依赖 4.4 第 2 步的维护者确认                          |
-| hook / `record_artifact` 登记的产物               | 身份、标题、retention 不变；agent 修改时采纳新指纹                | 无                                                    |
-| 用户删除过的 `write_file` 产物                    | **行为变化**：今天再次写入会复活，升级后不复活                    | 需要时用 `record_artifact` 显式重建                   |
-| published / managed / link / external_url         | 不走 workspace 自动登记路径                                       | 无                                                    |
-| 旧 transcript 的无快照回放                        | 旧记录不带新字段，回放行为与今天一致                              | 无                                                    |
-| core 与 acp-bridge 版本                           | daemon 用同一安装（`process.execPath`）拉起 agent，两者天然同版本 | 无                                                    |
-| 旧 web-shell + 新 daemon                          | 只是没有提示，turn 归属按旧规则                                   | 无                                                    |
+| 场景                                              | 升级后行为                                                                                                                               | 处理                                                  |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| 已有 artifact，升级后无人再改                     | 与今天一致                                                                                                                               | 无                                                    |
+| 工作区里从未登记过的文件                          | 不会被补登记                                                                                                                             | 只有 agent 再次写入（且匹配策略）或显式登记才可能新建 |
+| 已有会话中的 `.sql/.py/.md/.json` 文件            | 不补登记；升级后 agent 再次修改时才新建                                                                                                  | 默认值放宽带来的预期行为变化                          |
+| 已有 artifact 被 agent 再次修改                   | 同一 id 发 `updated`，同步基线，`toolCallId` 推进                                                                                        | 这是修复                                              |
+| 已经是 `changed` 的旧条目（多为过去 edit 未同步） | 保持 `changed`（可下载），直到下次 agent 写入                                                                                            | **不批量重置**：无法区分旧缺陷与真实外部修改          |
+| 宿主（带 `clientId`）登记的产物                   | agent 修改时只同步内容；标题、retention、归属、tombstone 不变                                                                            | 已在 4.4 第 2 步接受                                  |
+| hook / `record_artifact` 登记的产物               | 身份、标题、retention 不变；agent 修改时采纳新指纹                                                                                       | 无                                                    |
+| 用户删除过的 `write_file` 产物                    | **行为变化**：今天再次写入会复活，升级后不复活                                                                                           | 需要时用 `record_artifact` 显式重建                   |
+| published / managed / link / external_url         | 生产者写入不会更新 published 条目，其内容字段保持冻结                                                                                    | 无                                                    |
+| 旧 transcript 的无快照回放                        | id 不变。回放没有保存的指纹，会对当前文件重新求 hash 并写成基线，原先 `changed` 的条目会变成 `available`                                 | 这不是对已存快照的批量转换                            |
+| core 与 acp-bridge 版本                           | 只支持 daemon 与 agent 来自同一次安装。`QWEN_CLI_ENTRY` 可以指向另一份代码；拆开安装不受支持，旧 bridge 会丢掉 `updateOnly`              | 不要拆开安装                                          |
+| 旧 web-shell + 新 daemon                          | 没有「登记后已被修改」提示。daemon 仍会推进 `toolCallId`，旧壳的回退只把卡片放在最近一次写入的 turn，不会同时出现在登记 turn 和修改 turn | 无                                                    |
 
 实现与评审必须保持的约束：
 
 1. 身份键不变：`workspace:<canonicalPath>`（及 managed/url）。
 2. 不扫盘、不 backfill。
-3. 不批量把 `changed` 改成 `available`。
+3. 升级或快照恢复时，不批量把已存的 `changed` 改成 `available`。无快照回放没有保存的指纹，会把当前文件写成基线。
 4. `updateOnly` 永不删除或驱逐已有条目。
 5. 跨归属只同步内容字段，不改标题、retention、归属。
 6. 契约测试：用升级前写下的 V2 snapshot restore，断言条数与 id 不变；对其中一条 `edit`，断言同一 id、动作为 `updated`；另一条未触碰但已被外部修改的条目仍为 `changed`。
@@ -221,11 +221,11 @@ interface ToolArtifact {
 ## 7. 风险
 
 - **把每次写入都当成新产物**：由"内置策略之外一律 `updateOnly`"约束，并有测试覆盖。
-- **编码场景噪音与驱逐**：新增的 `.md`、`.json`、`.py` 在普通编码会话里很常见（README、`package.json`、源码），被 agent 修改后都会成为 artifact。200 条上限不是缓解而是风险本身：超限后最老的非 `clientRetained` 条目被淘汰，会话早期的重要报告可能被挤掉。缓解：跳过目录规则不变；`record_as_artifact=false` 可逐次关闭；删除后不复活。这是放宽默认值而非新增配置的代价，评审时需确认可接受。
+- **编码场景噪音与驱逐**：新增的 `.md`、`.json`、`.py` 在普通编码会话里很常见（README、`package.json`、源码），被 agent 修改后都会成为 artifact。200 条上限不是缓解而是风险本身：超限后最老的非 `clientRetained` 条目被淘汰；如果剩下的全都是 `clientRetained`，其中最老的一条也会被淘汰。缓解：跳过目录规则不变；`write_file`、`edit`、`notebook_edit` 上的 `record_as_artifact=false` 可以不新建；删除后不复活。这是放宽默认值而非新增配置的代价，评审时需确认可接受。
 - **含凭据的文件**：新增扩展名也会命中 `certs/service-account.json`、`config/credentials.json` 这类文件（包括被 gitignore 的），现有跳过规则都不排除它们。登记只在会话内列出路径、标题、大小和指纹；这条路径不复制也不上传内容，预览与下载走会话本来就能读取的工作区文件路由。不增加按文件名的跳过规则；`record_as_artifact=false` 可逐次关闭。
 - **权限边界**：跨归属内容同步绕过了 `denyCrossClientMutation`。范围限定为生产者集合的 tool 输入和内容字段，并有测试固定不改标题、retention、归属。
 - **写入到登记的窗口**：agent 写入与 store 读取之间的改动会被吸收为基线，与今天一致（见 4.3）。
-- **性能**：未登记文件的 `updateOnly` 候选在 stat 之前短路；已登记文件每次修改 stat + hash（超过 100MB 的文件保持今天按大小建立基线的行为）。无快照回放时，每条写入记录都会 hash 一次。
+- **性能**：未登记文件的 `updateOnly` 候选在 stat 之前短路；已登记文件每次修改 stat + hash（超过 100MB 的文件保持今天按大小建立基线的行为）。生产者集合创建的产物跳过 5 秒存在性 TTL，每次 list/get 都会 stat，所以文件被删后下一次 list 就会遗忘。无快照回放时，每条写入记录都会 hash 一次。
 - **transcript 与诊断**：任何文件的每次 `edit` 都会在 transcript 工具结果中多一条候选记录（路径、标题、kind），`toolResultBoundaryArtifact` 的诊断也会多报 `file` kind。
 - **journal 增长**：每次更新一条事件，沿用现有 snapshot 压缩节奏。
 
@@ -243,7 +243,7 @@ interface ToolArtifact {
 8. 未登记的 `src/foo.ts`（不在内置集合）被 `edit` → 不产生 artifact，store 不 stat。
 9. 用户删除一个自动登记的产物，agent 再次修改该文件 → 不复活；之后 `record_artifact` 该路径 → 重建。
 10. 外部修改或 agent 用 shell 修改文件 → `changed`，带提示，仍可下载。
-11. 删除 artifact 快照后 `session/load`（无快照回放）→ 结果与回放前一致。
+11. 删除 artifact 快照后 `session/load`（无快照回放）→ id 与回放前一致。状态按当前文件重新求 hash，原先 `changed` 的条目会变成 `available`。
 12. worktree / 多 workspace 下 write 与 edit 同一文件 → 同一 id。
 13. V2 兼容契约（4.7 第 6 条）。
 

@@ -142,6 +142,12 @@ export interface EditToolParams {
    * Initially proposed content.
    */
   ai_proposed_content?: string;
+
+  /**
+   * When false, do not create a session artifact for this edit. An artifact
+   * the session already has for this path is still refreshed.
+   */
+  record_as_artifact?: boolean;
 }
 
 interface CalculatedEdit {
@@ -818,7 +824,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       const artifact = buildWorkspaceArtifactCandidate(
         this.config,
         this.params.file_path,
-        { sizeBytes: postWriteSizeBytes },
+        {
+          recordAsArtifact: this.params.record_as_artifact,
+          sizeBytes: postWriteSizeBytes,
+        },
       );
       if (artifact && !artifact.updateOnly) {
         llmSuccessMessageParts.push(
@@ -919,6 +928,11 @@ Expectation for required parameters:
             type: 'boolean',
             description:
               'Replace all occurrences of old_string (default false).',
+          },
+          record_as_artifact: {
+            type: 'boolean',
+            description:
+              'Set false to skip creating a session artifact for this edit. An artifact the session already has for the path is still refreshed. Defaults to true for artifact-like extensions.',
           },
         },
         required: ['file_path', 'old_string', 'new_string'],

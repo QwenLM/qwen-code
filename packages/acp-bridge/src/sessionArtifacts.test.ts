@@ -9227,6 +9227,9 @@ describe('SessionArtifactStore workspace auto-record lifecycle', () => {
     const store = createStore('auto-record-update-only-unknown');
     await writeWorkspaceFile('src/index.ts', 'export {};\n');
     const lstat = vi.spyOn(fs, 'lstat');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
 
     const result = await store.upsertMany([
       fileWrite('src/index.ts', 'edit', 'call-1', { updateOnly: true }),
@@ -9236,6 +9239,9 @@ describe('SessionArtifactStore workspace auto-record lifecycle', () => {
       lstat.mock.calls.some(([entry]) => String(entry).endsWith('index.ts')),
     ).toBe(false);
     expect(result.changes).toEqual([]);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('reason="unmatched workspace update"'),
+    );
     await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
@@ -9368,7 +9374,7 @@ describe('SessionArtifactStore workspace auto-record lifecycle', () => {
       vi.setSystemTime(new Date(Date.now() + 6_000));
       const result = await store.upsertMany([
         fileWrite('data.json', 'edit', 'edit-1', {
-          metadata: { owner: 'agent' },
+          metadata: { owner: 'agent', note: 'from the edit' },
         }),
       ]);
 
@@ -9387,6 +9393,7 @@ describe('SessionArtifactStore workspace auto-record lifecycle', () => {
           'qwen.workspace.sha256': sha256('{"v":2}'),
         },
       });
+      expect(artifact?.metadata).not.toHaveProperty('note');
     },
   );
 
@@ -9438,6 +9445,28 @@ describe('SessionArtifactStore workspace auto-record lifecycle', () => {
     expect(recordedByTool.warnings).toEqual([
       `artifact ${artifactId} is owned by a different client`,
     ]);
+
+    await writeWorkspaceFile('upload/data.csv', 'a,b,c\n1,2,3\n');
+    const hooked = await store.upsertMany([
+      fileWrite('upload/data.csv', 'edit', 'hook-1', {
+        source: 'hook',
+        hookEventName: 'PostToolUse',
+      }),
+    ]);
+    expect(hooked.changes).toEqual([]);
+    expect(hooked.warnings).toEqual([
+      `artifact ${artifactId} is owned by a different client`,
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          title: 'Uploaded data',
+          metadata: expect.objectContaining({
+            'qwen.workspace.sha256': sha256('a,b\n1,2\n'),
+          }),
+        }),
+      ],
+    });
   });
 
   it('does not resurrect a deleted auto-recorded artifact on later writes', async () => {
@@ -9472,7 +9501,10 @@ describe('SessionArtifactStore workspace auto-record lifecycle', () => {
     async (toolName) => {
       const store = createStore(`auto-record-vanish-${toolName}`);
       await writeWorkspaceFile('analysis.ipynb', '{"cells":[]}');
-      await store.upsertMany([fileWrite('analysis.ipynb', toolName, 'call-1')]);
+      const created = await store.upsertMany([
+        fileWrite('analysis.ipynb', toolName, 'call-1'),
+      ]);
+      expect(created.changes[0]?.artifactId).toEqual(expect.any(String));
 
       await fs.rm(path.join(workspace, 'analysis.ipynb'));
 

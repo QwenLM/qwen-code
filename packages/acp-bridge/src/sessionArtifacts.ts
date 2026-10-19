@@ -380,6 +380,9 @@ export class SessionArtifactStore {
       for (const input of inputs) {
         try {
           if (await this.isUnmatchedWorkspaceUpdate(input)) {
+            writeStderrLine(
+              `[artifacts] session=${this.sessionId} action=dropped reason="unmatched workspace update" workspacePath=${JSON.stringify(input.workspacePath ?? '')}`,
+            );
             continue;
           }
           const expanded = await this.expandWorkspaceDirectoryInput(input);

@@ -781,7 +781,7 @@ describe('EditTool', () => {
         const csvPath = path.join(rootDir, 'orders.csv');
         seedFile(csvPath, 'id,old\n1,a\n');
 
-        const result = await run(edit(csvPath));
+        const result = await run(edit(csvPath, 'old', 'newer-col'));
 
         expect(result.llmContent).toContain(
           'automatically recorded as a workspace artifact with workspacePath "orders.csv"',
@@ -816,6 +816,23 @@ describe('EditTool', () => {
           }),
         ]);
         expect(result.artifacts?.[0]).not.toHaveProperty('updateOnly');
+      });
+
+      it('only refreshes an existing artifact when record_as_artifact is false', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(
+          edit(csvPath, 'old', 'new', { record_as_artifact: false }),
+        );
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'orders.csv',
+            updateOnly: true,
+          }),
+        ]);
       });
 
       it('only refreshes an existing artifact for other files', async () => {
