@@ -165,10 +165,11 @@ Design and client migration contract:
 ## Experimental reference distribution
 
 The independent Hosted Java reference distribution packages the runnable
-server, operator-recovery entry point, embedded Broker component, provenance
-manifest, checksums, and deployment/upgrade instructions. Pull requests and
-manual dry runs build and boot the same Linux archive; only a protected-main
-production dispatch publishes an immutable prerelease. See
+server, operator-recovery entry point, embedded Broker component, a
+configuration template, provenance manifest, checksums, and deployment/upgrade
+instructions. Pull requests and manual dry runs build and boot the same Linux
+archive; only a protected-main production dispatch publishes an immutable
+prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
 
@@ -852,8 +853,8 @@ qwen:
 
 New credentials use only the active key; reads select the active or previous
 key by the ID stored with the ciphertext, and an unavailable ID fails closed.
-The YAML-only ring, the retirement query and the single-key-pair maintenance
-entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
+The YAML-only ring, the retirement query, the operator-recovery ring and the
+single-key-pair CSI/migration entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
 with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
 Two optional knobs change how the Broker listens and how long it waits for a

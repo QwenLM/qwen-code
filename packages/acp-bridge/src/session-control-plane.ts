@@ -98,6 +98,7 @@ import {
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
+  type ServeWorkspaceSkillsRefreshResult,
 } from './status.js';
 import {
   BranchWhilePromptActiveError,
@@ -4071,7 +4072,7 @@ export function createSessionControlPlane(
           kind: 'permissions',
           tightening: true,
           persistedByControl: true,
-          payload: {},
+          payload: { scope: params?.['scope'] },
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceReload:
         return {
@@ -10293,6 +10294,7 @@ export function createSessionControlPlane(
   // so a paired Bridge can tell that the Managed engine cannot reproduce this
   // runtime's configuration.
   const runtimeMcpServerNames = new Set<string>();
+  let runtimeMcpServerChannelId: string | undefined;
   const bridgeApi: AcpSessionBridge = {
     // Derived once from the frozen overrides and the configured channel
     // factory; immutable for the bridge's lifetime.
@@ -13547,6 +13549,100 @@ export function createSessionControlPlane(
       params?: Record<string, unknown>,
       invokeOpts?: { timeoutMs?: number },
     ) {
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh &&
+        params?.['sessionIds'] !== undefined
+      ) {
+        const rawSessionIds = params['sessionIds'];
+        if (
+          !Array.isArray(rawSessionIds) ||
+          !rawSessionIds.every(
+            (id) => typeof id === 'string' && id.trim().length > 0,
+          )
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'sessionIds must be an array of non-empty strings',
+          );
+        }
+        const reason =
+          params['reason'] === undefined ? 'all' : params['reason'];
+        if (reason !== 'settings' && reason !== 'content' && reason !== 'all') {
+          throw RequestError.invalidParams(
+            undefined,
+            'reason must be settings, content, or all',
+          );
+        }
+        const sessions = [...new Set(rawSessionIds as string[])].map((id) => {
+          const entry = byId.get(id);
+          if (!entry) throw new SessionNotFoundError(id);
+          return entry;
+        });
+        assertRuntimeNotStopping();
+        const result = {
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+          configsRefreshed: 0,
+          configsFailed: 0,
+          reason,
+        };
+        const groups = new Map<ChannelInfo, string[]>();
+        for (const entry of sessions) {
+          const info = channelInfoForEntry(entry);
+          if (
+            isClosingOrAuthorizingClose(entry) ||
+            !info ||
+            info.harness.isDying
+          ) {
+            result.sessionsFailed += 1;
+            continue;
+          }
+          const ids = groups.get(info) ?? [];
+          ids.push(entry.sessionId);
+          groups.set(info, ids);
+        }
+        const targets = [...groups];
+        const results = await Promise.allSettled(
+          targets.map(async ([info, sessionIds]) =>
+            harness.withWorkspaceControl(info.harness, async () =>
+              withTimeout(
+                Promise.race([
+                  info.connection.extMethod(method, { ...params, sessionIds }),
+                  getChannelClosedReject(info),
+                ]),
+                invokeOpts?.timeoutMs ?? initTimeoutMs,
+                method,
+              ),
+            ),
+          ),
+        );
+        results.forEach((settled, index) => {
+          if (settled.status === 'rejected') {
+            result.sessionsFailed += targets[index]![1].length;
+            return;
+          }
+          const counts =
+            settled.value as unknown as ServeWorkspaceSkillsRefreshResult;
+          result.sessionsRefreshed += counts.sessionsRefreshed;
+          result.sessionsFailed += counts.sessionsFailed;
+          result.configsRefreshed += counts.configsRefreshed ?? 0;
+          result.configsFailed += counts.configsFailed ?? 0;
+        });
+        return result as T;
+      }
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh &&
+        liveChannelInfos().length === 0
+      ) {
+        assertRuntimeNotStopping();
+        return {
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+          configsRefreshed: 0,
+          configsFailed: 0,
+          reason: params?.['reason'] ?? 'all',
+        } as T;
+      }
       const startsWorkspaceChannel =
         method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart;
       const invoke = async (info: ChannelInfo) => {
@@ -14125,7 +14221,18 @@ export function createSessionControlPlane(
 
     async refreshExtensionsForAllSessions(data, options) {
       const skillsOnly = options?.skillsOnly === true;
-      const sessions = Array.from(byId.values());
+      const selectedIds =
+        options?.sessionIds === undefined
+          ? undefined
+          : [...new Set(options.sessionIds)];
+      const sessions =
+        selectedIds === undefined
+          ? Array.from(byId.values())
+          : selectedIds.flatMap((id) => {
+              const entry = byId.get(id);
+              return entry ? [entry] : [];
+            });
+      const missing = selectedIds ? selectedIds.length - sessions.length : 0;
       const bootstrapRefreshConnections = new Set<
         (typeof sessions)[number]['connection']
       >();
@@ -14243,7 +14350,10 @@ export function createSessionControlPlane(
         (sum, result) => sum + result.refreshed,
         0,
       );
-      const failed = results.reduce((sum, result) => sum + result.failed, 0);
+      const failed = results.reduce(
+        (sum, result) => sum + result.failed,
+        missing,
+      );
 
       if (refreshed > 0 || failed > 0 || data?.status !== undefined) {
         broadcastWorkspaceEvent({
@@ -16117,7 +16227,19 @@ export function createSessionControlPlane(
       return queue;
     },
 
-    hasRuntimeMcpServers: () => runtimeMcpServerNames.size > 0,
+    hasRuntimeMcpServers: () => {
+      // The servers live only in the child that recorded them. A replaced or
+      // retired channel no longer holds any, so a stale set must not keep
+      // every later session on Legacy.
+      if (
+        runtimeMcpServerNames.size > 0 &&
+        liveChannelInfo()?.id !== runtimeMcpServerChannelId
+      ) {
+        runtimeMcpServerNames.clear();
+        runtimeMcpServerChannelId = undefined;
+      }
+      return runtimeMcpServerNames.size > 0;
+    },
 
     async addRuntimeMcpServer(name, config, originatorClientId) {
       // Round-trip the runtime-add ext-method through the
@@ -16160,6 +16282,12 @@ export function createSessionControlPlane(
         const addSkipped = (response as { skipped?: boolean }).skipped === true;
         if (!addSkipped) {
           const ok = response as AddOk;
+          // Names recorded on a replaced child are gone with it; do not let
+          // a later add on the new child inherit them.
+          if (runtimeMcpServerChannelId !== info.id) {
+            runtimeMcpServerNames.clear();
+            runtimeMcpServerChannelId = info.id;
+          }
           runtimeMcpServerNames.add(ok.name);
           broadcastWorkspaceEvent({
             type: 'mcp_server_added',
@@ -16213,6 +16341,9 @@ export function createSessionControlPlane(
         if (!removeSkipped) {
           const ok = response as RemoveOk;
           runtimeMcpServerNames.delete(ok.name);
+          if (runtimeMcpServerNames.size === 0) {
+            runtimeMcpServerChannelId = undefined;
+          }
           broadcastWorkspaceEvent({
             type: 'mcp_server_removed',
             data: {

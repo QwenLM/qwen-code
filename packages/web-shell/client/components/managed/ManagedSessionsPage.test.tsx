@@ -285,6 +285,23 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('connects the Session Skill catalog to the composer without enabling other Workspace features', async () => {
+    const skills = [{ name: 'review', description: 'Pinned review.' }];
+    const list = vi.fn().mockResolvedValue({ skills });
+    provider = { ...provider, skills: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await act(async () => mocks.editorProps?.onSkillsOpenChange?.(true));
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+    expect(mocks.editorProps?.skills).toEqual(skills);
+    expect(mocks.editorProps?.skillsLoaded).toBe(true);
+  });
+
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',
     async (approvalMode) => {
