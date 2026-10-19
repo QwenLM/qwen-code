@@ -1808,11 +1808,14 @@ function truncateTurnText(text: string): {
   text: string;
   truncated: boolean;
 } {
-  const truncated = text.length > TURN_RESULT_TEXT_MAX_CHARS;
-  return {
-    text: truncated ? text.slice(0, TURN_RESULT_TEXT_MAX_CHARS) : text,
-    truncated,
-  };
+  if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
+    return { text, truncated: false };
+  }
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function rememberTerminalTurnStatus(
