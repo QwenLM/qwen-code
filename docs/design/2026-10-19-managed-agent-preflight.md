@@ -24,6 +24,8 @@ distribution needs no additional component.
 The command binds the same inputs Spring would load:
 
 - the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables;
+- the command line (`--server.address=...`, `--qwen.managed-agent.*`), which
+  keeps Spring's precedence;
 - the external YAML named by `--spring.config.additional-location` (which an
   operator can pass) or by `SPRING_CONFIG_ADDITIONAL_LOCATION` (which the
   launcher sets when `config/application.yml` exists);
