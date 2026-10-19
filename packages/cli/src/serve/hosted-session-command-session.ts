@@ -253,6 +253,7 @@ export class HostedSessionCommandSession {
       );
     }
     await this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const sent = this.command(params.commandId);
       if (sent !== undefined) {
         if (
@@ -360,6 +361,7 @@ export class HostedSessionCommandSession {
     }
     const replyDigest = createHash('sha256').update(replyBytes).digest('hex');
     await this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const existing = this.store.authority.extensionRecord(
         'session_command',
         commandId,
