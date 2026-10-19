@@ -331,7 +331,7 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
-    public synchronized List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+    public synchronized List<ToolHoldRow> findHoldRowsByHarnessSession(
             String harnessSessionId, String afterExecutionCallId, int limit) {
         if (harnessSessionId == null || limit < 1 || limit > 100) {
             throw new IllegalArgumentException(
@@ -339,7 +339,7 @@ public final class InMemoryToolExecutionRepository
         }
         String after = afterExecutionCallId == null ? ""
                 : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
-        TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
+        TreeMap<String, ToolHoldRow> batch = new TreeMap<>();
         for (ToolExecutionRecord record : recordsById.values()) {
             // A terminal hold row still counts: the run's exit leaves the
             // Runtime Session unreleased, and only that Session's recorded
@@ -348,7 +348,8 @@ public final class InMemoryToolExecutionRepository
                     && ManagedHoldFamily.of(record) != null) {
                 String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
                 if (key.compareTo(after) > 0) {
-                    batch.put(key, record);
+                    batch.put(key, new ToolHoldRow(record.getExecutionCallId(),
+                            record.getRuntimeSessionId()));
                     if (batch.size() > limit) {
                         batch.pollLastEntry();
                     }
