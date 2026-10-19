@@ -48,7 +48,7 @@ export class UpdateCheckTimeoutError extends Error {
   readonly distTag?: string;
   constructor(timeoutMs: number, distTag?: string) {
     const suffix = distTag ? ` for ${distTag}` : '';
-    super(`update check timed out after ${timeoutMs}ms${suffix}`);
+    super(`timed out after ${timeoutMs}ms${suffix}`);
     this.name = 'UpdateCheckTimeoutError';
     this.distTag = distTag;
   }
@@ -100,7 +100,7 @@ export function classifyUpdateCheckError(
 
 /**
  * Short human-readable reason for an update-check failure, for embedding in
- * status messages, e.g. "registry did not respond within 5s".
+ * status messages, e.g. "timed out after 5s".
  */
 export function describeUpdateCheckFailure(
   error: unknown,
@@ -108,7 +108,7 @@ export function describeUpdateCheckFailure(
 ): string {
   switch (classifyUpdateCheckError(error)) {
     case 'timeout':
-      return t('registry did not respond within {{seconds}}s', {
+      return t('timed out after {{seconds}}s', {
         seconds: String(Math.round(timeoutMs / 1000)),
       });
     case 'offline':

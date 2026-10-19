@@ -9,6 +9,7 @@ import {
   checkForUpdates,
   checkForUpdatesDetailed,
   classifyUpdateCheckError,
+  describeUpdateCheckFailure,
   fetchGlobalNpmUpdateInfo,
   FETCH_TIMEOUT_MS,
   runGlobalNpm,
@@ -598,5 +599,18 @@ describe('classifyUpdateCheckError', () => {
       'registry',
     );
     expect(classifyUpdateCheckError('not-an-error')).toBe('registry');
+  });
+});
+
+describe('describeUpdateCheckFailure', () => {
+  it('does not blame the registry for a timeout (#14686)', () => {
+    // The timeout budget also covers spawning node and booting the npm CLI,
+    // so a timeout cannot be attributed to the registry.
+    const message = describeUpdateCheckFailure(
+      new UpdateCheckTimeoutError(5000),
+      5000,
+    );
+    expect(message).not.toMatch(/registry/i);
+    expect(message).toBe('timed out after 5s');
   });
 });
