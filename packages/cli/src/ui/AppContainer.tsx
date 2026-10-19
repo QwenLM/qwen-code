@@ -3147,7 +3147,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // have no composer-side copy and still reach the model only. When
       // nothing was stripped the queued text is already the user's own text,
       // so the row keeps its composer-provenance-free fallback.
-      const strippedSubmittedValue = stripLeadingSystemReminders(submittedValue);
+      const strippedSubmittedValue =
+        stripLeadingSystemReminders(submittedValue);
       const submittedPrompt = submittedPromptProvenanceUnavailable
         ? undefined
         : !provenanceEnabled
