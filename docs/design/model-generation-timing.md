@@ -4,7 +4,7 @@
 
 ## Status and scope
 
-Implemented for #14722. Web Shell Token Usage and the daemon session stats route gain per-model average time to first token (TTFT) and output speed. The change also fixes two measurement errors in the generation timing that CLI `/stats` already shows. It builds on [Generation timing metrics in `/stats`](2026-07-24-generation-stats.md) and [LLM request timing decomposition](telemetry-llm-request-timing-design.md). It changes when TTFT fires and how the generation window is measured. It also extends the daemon/Web Shell stats schema, which the `/stats` design left unchanged.
+Implemented for #14722. Web Shell Token Usage and the daemon session stats route gain per-model first-token latency (TTFT), generation time and output speed. The change also fixes two measurement errors in the generation timing that CLI `/stats` already shows. It builds on [Generation timing metrics in `/stats`](2026-07-24-generation-stats.md) and [LLM request timing decomposition](telemetry-llm-request-timing-design.md). It changes when TTFT fires and how the generation window is measured. It also extends the daemon/Web Shell stats schema, which the `/stats` design left unchanged.
 
 ## Problem
 
@@ -31,13 +31,15 @@ Each `statsModels` entry gets an optional `generation` object with `timedRequest
 
 When a model has at least one timed request, `GET /session/:id/stats` adds `models[name].generation` with the four counters. `ServeSessionStatsModelMetrics` and `DaemonSessionStatsModelMetrics` declare the field as optional. Consumers that cast the JSON keep working.
 
-### D5 — One timing line per model card
+### D5 — One latency line per model card
 
-Each model card in Token Usage shows `Avg first token <duration> · Output speed <rate> tok/s` below its header:
+Each model card in Token Usage shows `First-token latency <duration> · Generation <duration> · Output speed <rate> tok/s` below its header:
 
-- **Average TTFT:** `totalTtftMs / timedRequests`.
-- **Output speed:** token-weighted, `totalThroughputOutputTokens / totalGenerationDurationMs`. It is omitted when no request had a generation window.
-- **Models without timing:** no timing line.
+- **First-token latency:** `totalTtftMs / timedRequests`.
+- **Generation:** `totalGenerationDurationMs / timedRequests`. It shares its denominator with first-token latency, so the two add up to the average latency of the timed requests up to their last visible chunk.
+- **Output speed:** token-weighted, `totalThroughputOutputTokens / totalGenerationDurationMs`.
+- **When parts are missing:** generation and output speed are omitted when no request had a generation window. A model without timing shows no line.
+- **Header unchanged:** the header's average latency still covers every request, including failed, internal and non-streamed ones. It can therefore differ from the sum of the line's first two values.
 
 ## Compatibility
 
@@ -50,7 +52,7 @@ Each model card in Token Usage shows `Avg first token <duration> · Output speed
 - Percentiles. Only sums and counts are kept.
 - Per-model timing in CLI `/stats` and in the Web Shell `/stats` card.
 - A separate first-chunk TTFT. `gen_ai.response.time_to_first_chunk` remains a span attribute.
-- Panel layout changes beyond the timing line. #14648 redesigns the panel.
+- Panel layout changes beyond the latency line. #14648 redesigns the panel.
 
 ## Validation
 
@@ -60,5 +62,5 @@ Each model card in Token Usage shows `Avg first token <duration> · Output speed
   - A single visible chunk records `generation_ms = 0`.
   - `UiTelemetryService` prefers `generation_ms` and falls back without it. It aggregates per model into `statsModels` only, and excludes internal prompts.
 - **CLI:** the stats extension method returns per-model generation without the `last` sample, and omits it for models without timed requests.
-- **Web Shell:** the timing line renders in English and Chinese. It omits output speed when there is no generation window and is absent for models without timing.
+- **Web Shell:** the latency line renders in English and Chinese. Generation uses the same denominator as first-token latency. The line omits generation and output speed when there is no generation window, and is absent for models without timing.
 - **E2E:** run a real daemon session on an OpenAI-compatible model with thinking disabled. Compare the TTFT recorded for tool-call-only turns before and after the change, and check the panel.

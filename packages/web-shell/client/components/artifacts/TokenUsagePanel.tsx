@@ -376,14 +376,21 @@ function ModelCard({ entry }: { entry: ModelEntry }) {
   const avgLatency =
     m.api.totalRequests > 0 ? m.api.totalLatencyMs / m.api.totalRequests : 0;
   const { generation } = m;
-  const avgTtft =
+  const timing =
     generation && generation.timedRequests > 0
-      ? generation.totalTtftMs / generation.timedRequests
-      : undefined;
-  const outputSpeed =
-    generation && generation.totalGenerationDurationMs > 0
-      ? generation.totalThroughputOutputTokens /
-        (generation.totalGenerationDurationMs / 1000)
+      ? {
+          ttft: generation.totalTtftMs / generation.timedRequests,
+          // Averaged over the same requests as TTFT so the two add up to
+          // their latency; Avg latency above also counts failed, internal
+          // and non-streamed requests.
+          generation:
+            generation.totalGenerationDurationMs / generation.timedRequests,
+          speed:
+            generation.totalGenerationDurationMs > 0
+              ? generation.totalThroughputOutputTokens /
+                (generation.totalGenerationDurationMs / 1000)
+              : undefined,
+        }
       : undefined;
   return (
     <div className={styles.modelCard}>
@@ -401,15 +408,19 @@ function ModelCard({ entry }: { entry: ModelEntry }) {
           )}
         </span>
       </div>
-      {avgTtft !== undefined && (
+      {timing && (
         <div className={styles.modelTiming}>
-          {t('tokenUsage.avgFirstToken', {
-            duration: formatDuration(avgTtft),
+          {t('tokenUsage.firstTokenLatency', {
+            duration: formatDuration(timing.ttft),
           })}
-          {outputSpeed !== undefined && (
+          {timing.speed !== undefined && (
             <>
               {' · '}
-              {t('tokenUsage.outputSpeed', { rate: outputSpeed.toFixed(1) })}
+              {t('tokenUsage.generationTime', {
+                duration: formatDuration(timing.generation),
+              })}
+              {' · '}
+              {t('tokenUsage.outputSpeed', { rate: timing.speed.toFixed(1) })}
             </>
           )}
         </div>

@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-已为 #14722 实现。Web Shell「Token 消耗」面板和 daemon 会话 stats 路由新增按模型统计的平均首 token 时间（TTFT）和输出速度。本改动同时修正 CLI `/stats` 现有生成计时里的两处测量错误。它基于 [`/stats` 生成计时指标](2026-07-24-generation-stats.md)和 [LLM 请求计时拆解](telemetry-llm-request-timing-design.md)两份设计，修改了 TTFT 的触发时机和生成窗口的测量方式。它还扩展了 daemon/Web Shell 的 stats 结构，而 `/stats` 设计当时没有改动这一结构。
+已为 #14722 实现。Web Shell「Token 消耗」面板和 daemon 会话 stats 路由新增按模型统计的首 token 延迟（TTFT）、生成时间和输出速度。本改动同时修正 CLI `/stats` 现有生成计时里的两处测量错误。它基于 [`/stats` 生成计时指标](2026-07-24-generation-stats.md)和 [LLM 请求计时拆解](telemetry-llm-request-timing-design.md)两份设计，修改了 TTFT 的触发时机和生成窗口的测量方式。它还扩展了 daemon/Web Shell 的 stats 结构，而 `/stats` 设计当时没有改动这一结构。
 
 ## 问题
 
@@ -31,13 +31,15 @@
 
 当某个模型至少有一次计时请求时，`GET /session/:id/stats` 会在 `models[name].generation` 中返回这四个计数器。`ServeSessionStatsModelMetrics` 和 `DaemonSessionStatsModelMetrics` 将该字段声明为可选。直接对 JSON 做类型断言的消费方不受影响。
 
-### D5 — 每张模型卡片一行计时
+### D5 — 每张模型卡片一行延迟
 
-「Token 消耗」中每张模型卡片的标题下方显示 `平均首 token <时长> · 输出速度 <速率> tok/s`：
+「Token 消耗」中每张模型卡片的标题下方显示 `首 token 延迟 <时长> · 生成 <时长> · 输出速度 <速率> tok/s`：
 
-- **平均 TTFT：** `totalTtftMs / timedRequests`。
-- **输出速度：** 按 token 加权，即 `totalThroughputOutputTokens / totalGenerationDurationMs`。没有任何请求产生生成窗口时不显示。
-- **没有计时数据的模型：** 不显示这一行。
+- **首 token 延迟：** `totalTtftMs / timedRequests`。
+- **生成：** `totalGenerationDurationMs / timedRequests`。它与首 token 延迟使用同一个分母，因此两者相加就是这些计时请求到最后一个可见块为止的平均延迟。
+- **输出速度：** 按 token 加权，即 `totalThroughputOutputTokens / totalGenerationDurationMs`。
+- **缺项时：** 没有任何请求产生生成窗口时，不显示生成和输出速度。没有计时数据的模型不显示这一行。
+- **标题不变：** 标题中的平均延迟仍统计所有请求，包括失败、内部和非流式请求，因此可能与这一行前两项之和不同。
 
 ## 兼容性
 
@@ -50,7 +52,7 @@
 - 分位数。目前只保留总和与次数。
 - CLI `/stats` 和 Web Shell `/stats` 卡片中的按模型计时。
 - 单独的首个 chunk TTFT。`gen_ai.response.time_to_first_chunk` 仍只作为 span 属性。
-- 计时行之外的面板布局调整。#14648 正在重新设计该面板。
+- 延迟行之外的面板布局调整。#14648 正在重新设计该面板。
 
 ## 验证
 
@@ -60,5 +62,5 @@
   - 只有一个可见块时记录 `generation_ms = 0`。
   - `UiTelemetryService` 优先使用 `generation_ms`，缺失时回退。按模型的汇总只写入 `statsModels`，并排除内部 prompt。
 - **CLI：** stats 扩展方法返回按模型的 generation，不包含 `last` 样本；没有计时请求的模型不返回该字段。
-- **Web Shell：** 计时行在中英文下都能正确显示。没有生成窗口时省略输出速度，没有计时数据的模型不显示计时行。
+- **Web Shell：** 延迟行在中英文下都能正确显示。生成时间与首 token 延迟使用同一个分母。没有生成窗口时省略生成和输出速度，没有计时数据的模型不显示这一行。
 - **E2E：** 在关闭思考的 OpenAI 兼容模型上运行真实的 daemon 会话。对比改动前后纯工具调用回合记录的 TTFT，并检查面板显示。

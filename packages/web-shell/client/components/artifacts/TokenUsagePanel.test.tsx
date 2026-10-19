@@ -154,7 +154,7 @@ describe('TokenUsagePanel', () => {
     expect(container.textContent).toContain('Total output350K');
   });
 
-  it('shows average first token and output speed for timed models', async () => {
+  it('splits timed model latency into first token and generation', async () => {
     const stats = statsFixture();
     stats.models['qwen-plus::hybrid'].generation = {
       timedRequests: 4,
@@ -172,9 +172,10 @@ describe('TokenUsagePanel', () => {
     await act(async () => {});
 
     expect(container.textContent).toContain(
-      'Avg first token 1.2s · Output speed 85.0 tok/s',
+      'First-token latency 1.2s · Generation 500ms · Output speed 85.0 tok/s',
     );
-    expect(container.textContent).toContain('Avg first token 900msInput');
+    expect(container.textContent).toContain('First-token latency 900msInput');
+    expect(container.textContent?.match(/Generation /g)).toHaveLength(1);
     expect(container.textContent?.match(/Output speed/g)).toHaveLength(1);
   });
 
@@ -190,7 +191,7 @@ describe('TokenUsagePanel', () => {
     await act(async () => {});
 
     expect(container.textContent).toContain(
-      '平均首 token 500ms · 输出速度 75.0 tok/s',
+      '首 token 延迟 500ms · 生成 2.0s · 输出速度 75.0 tok/s',
     );
   });
 
@@ -199,7 +200,7 @@ describe('TokenUsagePanel', () => {
     await act(async () => {});
 
     expect(container.textContent).toContain('qwen-plus::hybrid');
-    expect(container.textContent).not.toContain('first token');
+    expect(container.textContent).not.toContain('First-token latency');
   });
 
   it('promotes compact values that round into the next unit', async () => {
