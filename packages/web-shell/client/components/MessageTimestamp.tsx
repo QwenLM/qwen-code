@@ -36,6 +36,7 @@ interface MessageTimestampProps {
   onEdit?: () => void;
   editTitle?: string;
   onDelete?: () => void;
+  deleteDisabled?: boolean;
   deleteTitle?: string;
   /** When set, render an action that opens this turn's tool-call list. */
   onOpenTurnCalls?: () => void;
@@ -57,6 +58,7 @@ export function MessageTimestamp({
   onEdit,
   editTitle = 'Edit',
   onDelete,
+  deleteDisabled = false,
   deleteTitle = 'Delete messages',
   onOpenTurnCalls,
   turnCallsTitle = 'View tool calls',
@@ -186,7 +188,11 @@ export function MessageTimestamp({
             </DropdownMenuItem>
           )}
           {onDelete && (
-            <DropdownMenuItem variant="destructive" onSelect={onDelete}>
+            <DropdownMenuItem
+              variant="destructive"
+              disabled={deleteDisabled}
+              onSelect={onDelete}
+            >
               <Trash2Icon strokeWidth={1.6} aria-hidden="true" />
               {deleteTitle}
             </DropdownMenuItem>

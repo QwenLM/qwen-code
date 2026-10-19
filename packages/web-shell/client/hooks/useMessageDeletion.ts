@@ -147,25 +147,9 @@ export function useMessageDeletion(
         setError(t('messageDelete.unavailable'));
         return;
       }
-      const index = catalog.groups.findIndex((group) => group.id === groupId);
-      const visibleOrder = [...new Set(mapping.values())];
-      const preceding = visibleOrder.slice(
-        0,
-        visibleOrder.indexOf(groupId) + 1,
+      const allowed = new Set(
+        [...catalog.groups, ...localGroups].map((group) => group.id),
       );
-      const boundary =
-        index >= 0
-          ? index
-          : Math.max(
-              -1,
-              ...preceding.map((id) =>
-                catalog.groups.findIndex((group) => group.id === id),
-              ),
-            );
-      const allowed = new Set([
-        ...catalog.groups.slice(0, boundary + 1).map((group) => group.id),
-        ...preceding,
-      ]);
       setSelection({ key, ...catalog, selected: new Set([groupId]), allowed });
     } catch (cause) {
       if (currentKey.current === key && token === operation.current)
@@ -297,8 +281,7 @@ export function useMessageDeletion(
     confirming,
     selected: active ? selection.selected : new Set<string>(),
     allowed: active ? selection.allowed : new Set<string>(),
-    canDelete: (message) =>
-      !blocked && !busy && (supported || !!message.localCommandId),
+    canDelete: (message) => supported || !!message.localCommandId,
     start: (message) => {
       void start(message);
     },

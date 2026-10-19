@@ -5948,8 +5948,7 @@ export const MessageList = memo(
               }
               onDeleteMessage={
                 deletion &&
-                !deletion.active &&
-                !deletion.disabled &&
+                (deletion.active || !deletion.disabled) &&
                 deletion.canDelete(displayItem.message) &&
                 (displayItem.message.role === 'user' ||
                   displayItem.message.localCommandId) &&
@@ -5959,6 +5958,7 @@ export const MessageList = memo(
                   ? () => deletion.start(displayItem.message)
                   : undefined
               }
+              deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}

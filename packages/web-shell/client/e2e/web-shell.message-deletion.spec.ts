@@ -472,7 +472,7 @@ test('only group can be deleted at mobile width, leaving the session open @smoke
   await expect(page.locator('[data-web-shell-composer-editor]')).toBeVisible();
 });
 
-test('later groups are disabled, cancel preserves history, conflict allows fresh selection @smoke', async ({
+test('all groups remain selectable, cancel preserves history, conflict allows fresh selection @smoke', async ({
   page,
 }, info) => {
   const { deletions, setFail, setSnapshot } = await setup(
@@ -487,7 +487,7 @@ test('later groups are disabled, cancel preserves history, conflict allows fresh
   );
   await expect(
     page.getByRole('checkbox', { name: 'Select message group' }).nth(4),
-  ).toBeDisabled();
+  ).toBeEnabled();
   await page
     .locator('[data-web-shell-message-deletion]')
     .getByRole('button', { name: 'cancel', exact: true })
@@ -533,6 +533,64 @@ test('later groups are disabled, cancel preserves history, conflict allows fresh
   expect(deletions).toEqual([
     { snapshot: 'snapshot-1', groupIds: ['u1'] },
     { snapshot: 'snapshot-2', groupIds: ['u1'] },
+  ]);
+});
+
+test('middle entry allows both directions and keeps the deletion menu visible but disabled @smoke', async ({
+  page,
+}, info) => {
+  const { deletions } = await setup(page, String(info.project.use.baseURL));
+  const triggers = page.getByRole('button', {
+    name: 'More message actions',
+    exact: true,
+  });
+  await startDeletion(page, triggers.nth(1));
+  const checks = page.getByRole('checkbox', { name: 'Select message group' });
+  await expect(checks).toHaveCount(6);
+  for (let index = 0; index < 6; index++) {
+    await expect(checks.nth(index)).toBeEnabled();
+    if (index === 2 || index === 3)
+      await expect(checks.nth(index)).toBeChecked();
+    else await expect(checks.nth(index)).not.toBeChecked();
+  }
+  await checks.nth(5).click();
+  await expect(checks.nth(4)).toBeChecked();
+  await checks.nth(1).click();
+  await expect(checks.nth(0)).toBeChecked();
+  await checks.nth(1).click();
+  await expect(checks.nth(0)).not.toBeChecked();
+  await triggers.nth(1).hover();
+  const entry = page.getByRole('menuitem', {
+    name: 'Delete messages',
+    exact: true,
+  });
+  await expect(entry).toBeVisible();
+  await expect(entry).toBeDisabled();
+  await entry.dispatchEvent('click');
+  await expect(checks.nth(2)).toBeChecked();
+  await expect(checks.nth(4)).toBeChecked();
+  await expect(
+    page.locator('[data-web-shell-message-deletion] [role=status]'),
+  ).toHaveText('2 groups selected');
+  expect(deletions).toEqual([]);
+  await page.screenshot({
+    path: info.outputPath('all-groups-disabled-menu-mock-daemon.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await page.locator('[data-web-shell-composer-editor]').hover();
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await page
+    .getByRole('button', { name: 'Delete selected', exact: true })
+    .click();
+  await page
+    .getByRole('button', { name: 'Delete permanently', exact: true })
+    .click();
+  await expect(page.getByText('Question 1', { exact: true })).toBeVisible();
+  await expect(page.getByText('Question 2', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Question 3', { exact: true })).toHaveCount(0);
+  expect(deletions).toEqual([
+    { snapshot: 'snapshot-1', groupIds: ['u1', 'u2'] },
   ]);
 });
 

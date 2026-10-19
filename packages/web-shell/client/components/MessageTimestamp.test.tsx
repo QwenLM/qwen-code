@@ -214,6 +214,20 @@ describe('MessageTimestamp', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it('keeps a disabled deletion entry visible without dispatching it', () => {
+    const onDelete = vi.fn();
+    const container = render(
+      <MessageTimestamp onDelete={onDelete} deleteDisabled>
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+    openMenu(container);
+    const item = menuItem('Delete messages');
+    expect(item.getAttribute('aria-disabled')).toBe('true');
+    act(() => item.click());
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
   it('omits the edit action when no handler is given', () => {
     const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
     const container = render(
