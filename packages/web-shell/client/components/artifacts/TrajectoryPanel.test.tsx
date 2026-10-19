@@ -389,6 +389,85 @@ describe('execution following', () => {
     expect(followStatus(container)).toBe('Paused');
   });
 
+  it.each([
+    { input: 'upward wheel', deltaY: -180, top: 420 },
+    { input: 'downward wheel', deltaY: 180, top: 780 },
+    { input: 'scrollbar', deltaY: undefined, top: 420 },
+  ])('cancels a pending return on $input reading', async ({ deltaY, top }) => {
+    const { container, read, store, owner } = await setup();
+    await act(async () => {
+      for (let id = 2; id <= 40; id++)
+        store.ingest(owner, event(`execution-${id}`, id));
+    });
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"] [role="grid"]',
+    )!;
+    Object.defineProperty(grid, 'clientHeight', { value: 136 });
+    await act(async () => {
+      grid.scrollTop = 600;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(followStatus(container)).toBe('Paused');
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Refreshing history…');
+    await act(async () => store.ingest(owner, event('during-return', 41)));
+    expect(grid.scrollTop).toBe(634);
+    await act(async () => grid.dispatchEvent(new Event('scroll')));
+    expect(followStatus(container)).toContain('Refreshing history…');
+    await act(async () => {
+      if (deltaY !== undefined)
+        grid.dispatchEvent(new WheelEvent('wheel', { deltaY, bubbles: true }));
+      grid.scrollTop = top;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(followStatus(container)).toContain('Paused');
+    await act(async () => complete(page(REAL_EVENTS)));
+    expect(followStatus(container)).toBe('Paused');
+    expect(grid.scrollTop).toBe(top);
+  });
+
+  it.each(['wheel', 'pointerdown', 'PageUp', 'PageDown', ' '])(
+    'keeps layout scrolling separate from history reading with %j',
+    async (input) => {
+      const { container, read } = await setup();
+      const grid = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-rows"]',
+      )!;
+      let complete!: (result: TrajectoryPageResult) => void;
+      read.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      await act(async () => returnButton(container).click());
+      await act(async () => {
+        grid.scrollTop = 600;
+        grid.dispatchEvent(new Event('scroll'));
+      });
+      expect(followStatus(container)).toBe('Refreshing history…');
+      await act(async () =>
+        grid.dispatchEvent(
+          input === 'wheel'
+            ? new WheelEvent('wheel', { deltaY: -180, bubbles: true })
+            : input === 'pointerdown'
+              ? new MouseEvent('pointerdown', { bubbles: true })
+              : new KeyboardEvent('keydown', { key: input, bubbles: true }),
+        ),
+      );
+      expect(followStatus(container)).toBe('Paused');
+      await act(async () => complete(page(REAL_EVENTS)));
+      expect(followStatus(container)).toBe('Paused');
+    },
+  );
+
   it('pauses on connection loss and does not announce replay as newly arrived execution', async () => {
     const { container, store, owner } = await setup();
     await act(async () => store.reconnect(owner));

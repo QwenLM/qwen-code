@@ -133,7 +133,11 @@ export function TrajectoryExecutions({
   };
   useLayoutEffect(() => {
     followingRef.current = following;
-    if (following) setActiveKey(undefined);
+    if (following) {
+      setActiveKey(undefined);
+      // A successful return requests the top once, even without live delivery.
+      anchorRef.current = undefined;
+    }
   }, [following]);
   useEffect(() => {
     const update = () => setVisible(!document.hidden);
@@ -176,7 +180,7 @@ export function TrajectoryExecutions({
       if (!element || !open || !visible || element.clientHeight === 0) return;
       const keys = rows.map((row) => row.key);
       const target =
-        followingRef.current && liveStatus === 'live'
+        followingRef.current && (liveStatus === 'live' || !anchorRef.current)
           ? 0
           : anchorRef.current
             ? anchoredOffset(anchorRef.current, keys)
@@ -322,12 +326,15 @@ export function TrajectoryExecutions({
                   : undefined
               }
               onWheel={(event) => {
-                if (event.deltaY > 0) pause();
+                if (event.deltaY !== 0) pause();
               }}
               onScroll={(event) => {
                 if (event.currentTarget.clientHeight === 0) return;
-                if (followingRef.current && event.currentTarget.scrollTop > 1)
-                  pause();
+                const anchor = anchorRef.current;
+                const previousTop = anchor
+                  ? anchor.index * ROW_HEIGHT + anchor.offset
+                  : 0;
+                if (event.currentTarget.scrollTop !== previousTop) pause();
                 rememberScroll(event.currentTarget);
               }}
               onKeyDown={(event) => {

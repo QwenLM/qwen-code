@@ -942,6 +942,12 @@ export function TrajectoryPanel({
       } else if (event.key === 'End') {
         event.preventDefault();
         moveSelection(visualRows.length - 1);
+      } else if (
+        event.key === 'PageUp' ||
+        event.key === 'PageDown' ||
+        event.key === ' '
+      ) {
+        pauseFollowing();
       }
     },
     [
@@ -957,6 +963,7 @@ export function TrajectoryPanel({
       hiddenCounts,
       collapsed,
       toggleGroup,
+      pauseFollowing,
     ],
   );
 
@@ -1794,9 +1801,8 @@ export function TrajectoryPanel({
               }
               onKeyDown={handleKeyDown}
               onWheel={pauseFollowing}
+              onPointerDown={pauseFollowing}
               onScroll={(event) => {
-                if (event.currentTarget.scrollTop !== scrollTopRef.current)
-                  pauseFollowing();
                 scrollTopRef.current = event.currentTarget.scrollTop;
               }}
               data-testid="trajectory-rows"

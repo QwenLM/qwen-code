@@ -280,15 +280,18 @@ it('opens in one click after manual collapse and a compact viewport resize', asy
 
 it('anchors a paused reader across insertion, reordering, collapse and eviction', async () => {
   const rows = Array.from({ length: 40 }, (_, index) => running(String(index)));
-  const { container, update } = await mount(rows);
+  const { container, update, onPause } = await mount(rows);
   const grid = () => container.querySelector<HTMLElement>('[role="grid"]')!;
   act(() => {
     grid().scrollTop = 5 * 34 + 7;
     grid().dispatchEvent(new Event('scroll'));
   });
   expect(container.textContent).toContain('Paused');
+  onPause.mockClear();
   await update([running('new'), ...rows]);
   expect(grid().scrollTop).toBe(6 * 34 + 7);
+  act(() => grid().dispatchEvent(new Event('scroll')));
+  expect(onPause).not.toHaveBeenCalled();
   expect(container.textContent).toContain('Execution list updated');
   const reordered = [rows[20]!, ...rows.filter((row) => row !== rows[20])];
   await update(reordered);
@@ -311,6 +314,37 @@ it('anchors a paused reader across insertion, reordering, collapse and eviction'
   expect(document.activeElement).toBe(button);
   expect(container.textContent).not.toContain('Execution list updated');
 });
+
+it.each([false, true])(
+  'returns to the top once without live delivery (collapsed=%s)',
+  async (collapsed) => {
+    const rows = Array.from({ length: 40 }, (_, index) =>
+      running(String(index)),
+    );
+    const { container, update } = await mount(rows);
+    const grid = () => container.querySelector<HTMLElement>('[role="grid"]')!;
+    act(() => {
+      grid().scrollTop = 600;
+      grid().dispatchEvent(new Event('scroll'));
+    });
+    await update(rows, { liveStatus: 'unavailable' });
+    const toggle = container.querySelector<HTMLButtonElement>('button')!;
+    if (collapsed) act(() => toggle.click());
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-follow-return"]',
+    )!;
+    act(() => {
+      button.focus();
+      button.click();
+    });
+    expect(container.textContent).toContain('Waiting for live updates');
+    if (collapsed) act(() => toggle.click());
+    expect(grid().scrollTop).toBe(0);
+    expect(document.activeElement).toBe(button);
+    await update([running('replayed'), ...rows], { liveStatus: 'catching-up' });
+    expect(grid().scrollTop).toBe(34);
+  },
+);
 
 it('does not treat reconnect or history replacement as new live executions', async () => {
   const { container, update } = await mount([running('a')]);
