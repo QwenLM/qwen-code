@@ -64,7 +64,8 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   尚未开始」之间扣留，本夹具暂未暴露该注入点。
 - `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
   Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
-  `workspace_unavailable`——与 FG11f 记录的执行授权缺口相同。
+  `workspace_unavailable`，来自托管会话的 workspace 执行可用性检查，而非
+  FG11f 命中的 store 级授权。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
   接受。把 wake turn 扣在模型上时，该取消在 120 s 内没有让 run 结算，

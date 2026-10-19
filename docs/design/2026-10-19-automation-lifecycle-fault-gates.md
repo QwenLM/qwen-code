@@ -79,8 +79,9 @@ around it.
   turn, which this fixture does not expose yet.
 - `close-*` needs a workspace-backed Session: the automation API refuses a
   Session without one (`session_not_found`), while closing a workspace
-  Session in this fixture answers `workspace_unavailable` — the same
-  execution-authority gap FG11f records.
+  Session in this fixture answers `workspace_unavailable` from the managed
+  Session's workspace-execution check, not from the store-level authority
+  FG11f hits.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
   `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn parked
