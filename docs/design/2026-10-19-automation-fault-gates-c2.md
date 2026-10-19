@@ -93,9 +93,9 @@ and the job ceiling 227 to 236 minutes.
 "the Harness dies mid-turn and the run settles exactly once as
 `failed`/`outcome_unknown`", and the merged #14526 gates pin the per-run
 cancel path (a cancelled occurrence makes no model call, no duplicate
-execution). The remaining delta — a Runtime
-tool call is not replayed — would need a tool-call model stub and broker
-wiring whose cost outweighs the increment.
+execution). The remaining delta — a Runtime tool call is not replayed —
+would need a tool-call model stub and broker wiring whose cost outweighs
+the increment.
 
 ## Acceptance
 
