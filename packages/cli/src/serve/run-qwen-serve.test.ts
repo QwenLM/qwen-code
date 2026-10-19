@@ -84,6 +84,7 @@ import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import * as trustPolicyRuntime from '../config/daemon-trust-policy.js';
+import * as trustPolicyMonitorRuntime from '../config/daemon-trust-policy-monitor.js';
 import * as workspaceServiceRuntime from './workspace-service/index.js';
 import {
   ChannelWorkerStartupError,
@@ -8380,6 +8381,145 @@ describe('runQwenServe runtime startup failures', () => {
       await handle.close();
     }
   }
+
+  it('retains a fresh rebuild admission before the next monitor publication', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-admission-race-')),
+    );
+    const repo = path.join(tmpDir, 'repo');
+    const target = path.join(repo, 'packages', 'app');
+    fs.mkdirSync(target, { recursive: true });
+    fs.mkdirSync(path.join(repo, '.git'));
+    const initial = {
+      revision: 'initial-untrusted',
+      folderTrustEnabled: true,
+      ideTrust: undefined,
+      trustedFolders: {},
+    } as Awaited<
+      ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+    >;
+    const publishedGrant = {
+      ...initial,
+      revision: 'published-grant-A',
+      trustedFolders: { [repo]: trustedFoldersRuntime.TrustLevel.TRUST_FOLDER },
+    };
+    const freshRevoke = {
+      ...initial,
+      revision: 'fresh-revoke-B',
+      trustedFolders: {
+        [target]: trustedFoldersRuntime.TrustLevel.TRUST_FOLDER,
+      },
+    };
+    let currentSnapshot = publishedGrant;
+    const bootBridge = makeRuntimeBridge();
+    const staleCandidate = makeRuntimeBridge();
+    const freshCandidate = makeRuntimeBridge();
+    freshCandidate.getSessionSummary = vi.fn().mockReturnValue({
+      sessionId: 'rebuilt-session',
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(bootBridge)
+      .mockReturnValueOnce(staleCandidate)
+      .mockReturnValueOnce(freshCandidate);
+    let releaseValidation!: () => void;
+    const validationBlocked = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    let signalValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => {
+      signalValidation = resolve;
+    });
+    let paused = false;
+    vi.spyOn(trustPolicyRuntime, 'readDaemonTrustPolicySnapshot')
+      .mockResolvedValueOnce(initial)
+      .mockImplementation(async () => {
+        if (!paused && createBridge.mock.calls.length === 2) {
+          paused = true;
+          signalValidation();
+          await validationBlocked;
+        }
+        return currentSnapshot;
+      });
+    const publications: string[] = [];
+    const createMonitor =
+      trustPolicyMonitorRuntime.createDaemonTrustPolicyMonitor;
+    vi.spyOn(
+      trustPolicyMonitorRuntime,
+      'createDaemonTrustPolicyMonitor',
+    ).mockImplementation((options) =>
+      createMonitor({
+        ...options,
+        pollIntervalMs: 60_000,
+        onSnapshot: (snapshot, reasons) => {
+          publications.push(snapshot.revision);
+          return options.onSnapshot(snapshot, reasons);
+        },
+      }),
+    );
+    let registry: WorkspaceRegistry | undefined;
+    const createApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      registry = args[2]?.workspaceRegistry;
+      return createApp(...args);
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: target,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true, preheatBridge: false },
+    );
+    try {
+      await Promise.race([
+        validationStarted,
+        handle.runtimeReady.then(() => {
+          throw new Error(
+            'Runtime became ready without the validation barrier',
+          );
+        }),
+      ]);
+      currentSnapshot = freshRevoke;
+      releaseValidation();
+      await handle.runtimeReady;
+
+      expect(createBridge).toHaveBeenCalledTimes(3);
+      expect(staleCandidate.shutdown).toHaveBeenCalledOnce();
+      expect(registry?.primaryEntry.appliedRevision).toBe(freshRevoke.revision);
+      expect(registry?.primary.trusted).toBe(true);
+      expect(publications).toEqual([publishedGrant.revision]);
+      const selected = createBridge.mock.calls[2]?.[0];
+      expect(selected?.sessionLifecycle).toBeDefined();
+      selected!.sessionLifecycle!({
+        type: 'registered',
+        sessionId: 'rebuilt-session',
+        workspaceCwd: target,
+        reason: 'spawn',
+      });
+      expect(registry?.resolveLiveSessionOwner('rebuilt-session')).toEqual({
+        kind: 'found',
+        runtime: registry?.primary,
+      });
+      const handler = selected?.onWorkflowAncestorTrust;
+      expect(handler).toBeDefined();
+      const decision = await handler!({
+        sessionId: 'rebuilt-session',
+        workspaceCwd: target,
+        effectiveCwd: target,
+        canonicalTargetDir: target,
+        ancestorDirs: [path.dirname(target), repo],
+      });
+      expect(decision.trusted).toEqual([false, false]);
+      expect(decision.isCurrent()).toBe(false);
+    } finally {
+      releaseValidation();
+      await handle.close();
+    }
+  });
 
   it('keeps the primary bridge reference from the reconciled startup generation', async () => {
     tmpDir = fs.realpathSync(

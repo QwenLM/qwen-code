@@ -144,7 +144,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-bundle</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -152,7 +152,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-migration</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceMigrationMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceMigrationMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -160,7 +160,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-maintenance-recovery</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceMaintenanceRecoveryMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceMaintenanceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -168,7 +168,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>csi-session</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiSessionMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -176,7 +176,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>csi-runtime</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -184,7 +184,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>operator-recovery</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryCommand</mainClass>
                         </configuration>
                     </execution>
                 </executions>
@@ -479,8 +479,19 @@
                                  DELETE-drain cell (issue #14449) adds
                                  150 s: the healthy sum becomes 6985 s,
                                  so the fork moves to 7585 s and the
-                                 Verify step to 137 minutes. -->
-                            <forkedProcessTimeoutInSeconds>7585</forkedProcessTimeoutInSeconds>
+                                 Verify step to 137 minutes. The FG11c
+                                 Spring-crash class (five cases, 262.0 s
+                                 measured) is budgeted at 524 s: the healthy
+                                 sum becomes 7509 s, so the fork moves to
+                                 8109 s and the Verify step to 146 minutes.
+                                 The FG13a catalog lost-reply cell (issue
+                                 #14449) adds 150 s: the healthy sum becomes
+                                 7659 s, so the fork moves to 8259 s and the
+                                 Verify step to 148 minutes. The FG13a HTTP
+                                 lost-reply cell adds 150 s: the healthy sum
+                                 becomes 7809 s, so the fork moves to 8409 s
+                                 and the Verify step to 151 minutes. -->
+                            <forkedProcessTimeoutInSeconds>8409</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

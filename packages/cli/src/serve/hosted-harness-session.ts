@@ -16,6 +16,11 @@ import {
   readHostedInput,
 } from './hosted-input.js';
 import {
+  enqueueHostedWakeContinuation,
+  isHostedWakeContinuationId,
+  readHostedWakeContinuation,
+} from './hosted-wake-continuation.js';
+import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
   createHostedModelRequest,
@@ -119,6 +124,8 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   CHILD_NOTIFICATION_SOURCES,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionModeGateError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
@@ -383,10 +390,13 @@ function settledTurnOutcome(abort: AbortController): {
  * (writer conflicts, recovery blocks) keep their own names. A bounded
  * tenant-guard wait is not an outage either — the store answered it
  * promptly with a retryable contention refusal — so it stays unattributed
- * rather than naming the store unavailable.
+ * rather than naming the store unavailable. A stopped writer reads as
+ * unattributed here; `blockRecovery` keeps the name it already carries.
  */
 function namedStoreFailure(cause: unknown): string | undefined {
   if (
+    cause instanceof ManagedSessionAppendUnsettledError ||
+    cause instanceof ManagedSessionJournalFencedError ||
     cause instanceof ManagedSessionStoreTransportError ||
     (cause instanceof ManagedSessionStoreHttpError &&
       cause.status >= 500 &&
@@ -395,6 +405,38 @@ function namedStoreFailure(cause: unknown): string | undefined {
     return 'managed_session_store_unavailable';
   }
   return undefined;
+}
+
+/**
+ * Renders a store refusal with its stable status, remote code, refusing
+ * route and any writer-vs-store-head pairing captured at the refusal
+ * (review #14522): the store's public refusal text is shared across
+ * server predicates, so the printable error has to name which operation
+ * with which grant was refused (a grant never re-acquired vs one the
+ * store already judged superseded).
+ */
+function describeManagedError(cause: unknown): string {
+  let store: ManagedSessionStoreHttpError | undefined;
+  for (
+    let current: unknown = cause;
+    current instanceof Error;
+    current = (current as Error & { cause?: unknown }).cause
+  ) {
+    if (current instanceof ManagedSessionStoreHttpError) {
+      store = current;
+      break;
+    }
+  }
+  if (store === undefined) return String(cause);
+  const details = [
+    `status=${store.status}`,
+    `code=${store.remoteCode}`,
+    ...(store.route === undefined ? [] : [`route=${store.route}`]),
+    ...(store.writerRefusalContext === undefined
+      ? []
+      : [`[writer-context: ${store.writerRefusalContext}]`]),
+  ];
+  return `${String(cause)} (${details.join(' ')})`;
 }
 
 /**
@@ -411,13 +453,21 @@ function liftRecoveryBlock(session: HostedSession): void {
  * Blocks a Session on recovery under the name of the failure blocking it
  * now — `namedStoreFailure`'s, or none — so a block never carries the
  * reason an earlier block left behind (#13800 R2-14).
+ *
+ * A stopped writer is the exception: its latch is never reset, so the name
+ * recorded for that failure still describes the block when a later error
+ * arrives unclassified. Only `liftRecoveryBlock` clears it.
  */
 function blockRecovery(
   session: HostedSession,
   storeFailure: string | undefined,
 ): void {
   session.blocked = true;
-  session.recoveryReason = storeFailure;
+  session.recoveryReason =
+    storeFailure ??
+    (session.managed.authority.writesStopped
+      ? session.recoveryReason
+      : undefined);
 }
 
 interface HostedSession {
@@ -1260,6 +1310,10 @@ export async function settleCrashedWakeTurnAftermath(params: {
       messages: session.messages,
       commands: session.commands,
     });
+    const continuationId = await enqueueHostedWakeContinuation(
+      session.managed,
+      turnId,
+    );
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
     // same crash (the journal-filter rule in the history builders then
@@ -1295,6 +1349,9 @@ export async function settleCrashedWakeTurnAftermath(params: {
     // The settle journaled durably, so retries re-derive the outcomes from
     // the journal and the carry has no more work.
     session.recoveryUnobserved?.delete(turnId);
+    writeStderrLineSafe(
+      `qwen serve: Hosted wake turn ${turnId} crash aftermath settled${continuationId === undefined ? '.' : `; continuation ${continuationId} is durable.`}`,
+    );
     return 'settled';
   } catch (cause) {
     writeStderrLineSafe(
@@ -2923,7 +2980,6 @@ async function startHostedRecoveredTurn(
   void resumed.catch(rejectReady);
   void resumed
     .catch((cause: unknown) => {
-      session.blocked = true;
       // The automatic bare-load recovery drives the turn entirely inside
       // this helper — without routing through the prompt-route or
       // manual-continue fallbacks that already keep the named store
@@ -2936,12 +2992,16 @@ async function startHostedRecoveredTurn(
       const recordedStopReason = (
         turnResult?.systemPayload as { stopReason?: unknown } | undefined
       )?.['stopReason'];
-      if (storeFailure !== undefined) session.recoveryReason = storeFailure;
-      else if (recordedStopReason === 'managed_session_store_unavailable')
-        session.recoveryReason = 'managed_session_store_unavailable';
+      blockRecovery(
+        session,
+        storeFailure ??
+          (recordedStopReason === 'managed_session_store_unavailable'
+            ? 'managed_session_store_unavailable'
+            : undefined),
+      );
       writeStderrLineSafe(
         'qwen serve: Hosted Harness recovery remained blocked: ' +
-          String(cause),
+          describeManagedError(cause),
       );
     })
     .finally(() => {
@@ -3167,12 +3227,21 @@ async function executeHostedTurn(
         );
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
-          const user = record(session, sessionId, 'user', parentUuid, {
-            daemonPromptId: promptId,
-            message: { role: 'user', parts: promptInput.parts },
-          });
-          await session.managed.sink.write(user);
-          parentUuid = user.uuid;
+          const continuation = isHostedWakeContinuationId(promptId);
+          const inputRecord = record(
+            session,
+            sessionId,
+            continuation ? 'system' : 'user',
+            parentUuid,
+            {
+              daemonPromptId: promptId,
+              ...(continuation
+                ? { subtype: 'turn_attempt' }
+                : { message: { role: 'user', parts: promptInput.parts } }),
+            },
+          );
+          await session.managed.sink.write(inputRecord);
+          parentUuid = inputRecord.uuid;
         }
         const messageRecord = (
           type: 'assistant' | 'tool_result',
@@ -4128,7 +4197,7 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
         } catch (cause) {
-          resident.blocked = true;
+          blockRecovery(resident, namedStoreFailure(cause));
           writeStderrLineSafe(
             'qwen serve: Hosted recovery redrive failed: ' + String(cause),
           );
@@ -5009,6 +5078,16 @@ export function registerHostedHarnessSessionRoutes(
                 !stoppedMessage(input.source),
             );
             if (first === undefined) return undefined;
+            if (isHostedWakeContinuationId(first.turnId)) {
+              return {
+                turnId: first.turnId,
+                source: first.source,
+                ...(await readHostedWakeContinuation(
+                  session.managed,
+                  first.turnId,
+                )),
+              };
+            }
             if (first.source === CHANNEL_INPUT_SOURCE) {
               let text: string | undefined;
               try {
@@ -6854,7 +6933,6 @@ export function registerHostedHarnessSessionRoutes(
                 ),
             );
           } catch (settleCause) {
-            session.blocked = true;
             // The settlement write couldn't commit (#13800): keep the named
             // failure for the status surface instead of a bare boolean. The
             // name describes the block, not the turn's outcome, so the outer
@@ -6865,13 +6943,13 @@ export function registerHostedHarnessSessionRoutes(
             )?.['stopReason'];
             const blockStoreFailure =
               namedStoreFailure(cause) ?? namedStoreFailure(settleCause);
-            if (blockStoreFailure !== undefined) {
-              session.recoveryReason = blockStoreFailure;
-            } else if (
-              recordedStopReason === 'managed_session_store_unavailable'
-            ) {
-              session.recoveryReason = 'managed_session_store_unavailable';
-            }
+            blockRecovery(
+              session,
+              blockStoreFailure ??
+                (recordedStopReason === 'managed_session_store_unavailable'
+                  ? 'managed_session_store_unavailable'
+                  : undefined),
+            );
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
             );
@@ -7716,6 +7794,15 @@ export function registerHostedHarnessSessionRoutes(
         if (cause instanceof ChildMessagesPendingError) {
           return error(res, 409, 'child_messages_pending', undefined, message);
         }
+        if (
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        ) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} has an unknown store outcome: ${message}`,
+          );
+          return error(res, 503, 'child_operation_failed', undefined, message);
+        }
         if (cause instanceof ManagedSessionConflictError) {
           return error(
             res,
@@ -7937,7 +8024,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
-        cause instanceof ManagedSessionWritesStoppedError
+        cause instanceof ManagedSessionWritesStoppedError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -8006,7 +8095,17 @@ export function registerHostedHarnessSessionRoutes(
               parseSessionCommandReply(body?.['reply']),
             );
           } catch (cause) {
-            if (cause instanceof ManagedSessionRecordError) {
+            // A store-side append outcome is not the request's shape: let it
+            // reach the outer catch, which answers the retryable 503.
+            if (
+              cause instanceof ManagedSessionRecordError &&
+              !(cause instanceof ManagedSessionConflictError) &&
+              !(cause instanceof ManagedSessionStoreHttpError) &&
+              !(cause instanceof ManagedSessionStoreTransportError) &&
+              !(cause instanceof ManagedSessionWritesStoppedError) &&
+              !(cause instanceof ManagedSessionAppendUnsettledError) &&
+              !(cause instanceof ManagedSessionJournalFencedError)
+            ) {
               return error(res, 400, 'invalid_command_operation');
             }
             throw cause;
@@ -8109,7 +8208,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
-        cause instanceof ManagedSessionWritesStoppedError
+        cause instanceof ManagedSessionWritesStoppedError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted command operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -8331,7 +8432,11 @@ export function registerHostedHarnessSessionRoutes(
         cause instanceof ManagedSessionRecordError &&
         !(cause instanceof ManagedSessionConflictError) &&
         !(cause instanceof ManagedSessionStoreHttpError) &&
-        !(cause instanceof ManagedSessionStoreTransportError)
+        !(cause instanceof ManagedSessionStoreTransportError) &&
+        !(
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        )
       )
         return error(res, 400, 'invalid_channel_operation', undefined, message);
       if (
@@ -8897,7 +9002,7 @@ export function registerHostedHarnessSessionRoutes(
             const storeFailure = namedStoreFailure(cause);
             if (storeFailure !== undefined) failureReason = storeFailure;
             writeStderrLineSafe(
-              `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
+              `qwen serve: Hosted Harness turn ${promptId} failed: ${describeManagedError(cause)}`,
             );
           }
         }
@@ -10573,7 +10678,9 @@ export function registerHostedHarnessSessionRoutes(
       // would skip the occurrence while the fault is quite recoverable.
       if (
         cause instanceof ManagedSessionStoreHttpError ||
-        cause instanceof ManagedSessionStoreTransportError
+        cause instanceof ManagedSessionStoreTransportError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} lost its store: ${message}`,
