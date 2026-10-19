@@ -36,6 +36,7 @@ import {
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
   type HostedBrokerExecutionState,
 } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
@@ -748,6 +749,9 @@ describe('recoverHostedRuntimeTurn', () => {
       expect(recovered).toBeDefined();
       expect(execute).toHaveBeenCalledOnce();
       expect(execute.mock.calls[0]?.[0]).toBe(EXECUTION_ID);
+      expect(execute.mock.calls[0]?.[4]).toEqual({
+        reconcileUnknown: true,
+      });
       expect(recovered!.report).toMatchObject({
         phase: 'results_ready',
         checkpointId: replacement.authority.latestCheckpoint?.checkpointId,
@@ -929,9 +933,9 @@ describe('recoverHostedRuntimeTurn', () => {
       const release = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'release')
         .mockResolvedValue();
-      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue(
-        status,
-      );
+      const read = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'status')
+        .mockResolvedValue(status);
       const replacement = await open('boot-2', false);
       try {
         const recovered = mustRecover(
@@ -945,6 +949,7 @@ describe('recoverHostedRuntimeTurn', () => {
           }),
         );
         expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
+        expect(read).toHaveBeenCalledWith(EXECUTION_ID, { reconcile: true });
         expect(release).not.toHaveBeenCalled();
         expect(recovered!.report.executions).toEqual([
           expect.objectContaining({
@@ -965,6 +970,46 @@ describe('recoverHostedRuntimeTurn', () => {
       }
     },
   );
+
+  it('reports an execution the original Runtime cannot settle as unknown', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_broker_execution_unknown',
+      ),
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(recovered.drivable).toBe(false);
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'unknown',
+        }),
+      ]);
+      // The load reports the evidence gap; it never journals a false result.
+      expect(
+        (await replacement.sink.project()).filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await replacement.close();
+    }
+  });
 
   it('keeps the terminal fence of an abandoned execution in the report', async () => {
     await parkAtAwaitRuntime();

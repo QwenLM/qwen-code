@@ -12,7 +12,10 @@ import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-r
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
-import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import type {
+  ToolResultCapture,
+  ToolResultEnvelope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
   HarnessAgentWaitRun,
   HarnessCommandWaitRun,
@@ -106,6 +109,7 @@ import {
 } from './hosted-file-history.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 
@@ -2435,7 +2439,12 @@ export async function recoverHostedRuntimeTurn(input: {
   if (pending.length > 0) {
     if (passive) {
       for (const item of pending) {
-        const status = await broker.status(item.executionCallId);
+        // Ask the original Runtime before reading an UNKNOWN record, so a
+        // dead owner's v2 execution that actually settled reaches the report
+        // as known.
+        const status = await broker.status(item.executionCallId, {
+          reconcile: true,
+        });
         // Only a still-reconcilable unknown reports as failing to account
         // for the execution; a terminally fenced abandoned record keeps its
         // distinction so the coordinator can cancel over it.
@@ -2478,11 +2487,29 @@ export async function recoverHostedRuntimeTurn(input: {
           ) as { payloadJson?: unknown };
           if (typeof stored.payloadJson !== 'string')
             throw new RecoveryDeclined();
-          const result = await broker.execute(
-            item.executionCallId,
-            stored.payloadJson,
-            new AbortController().signal,
-          );
+          let result: ManagedToolResultPayload & {
+            capture?: ToolResultCapture | null;
+          };
+          try {
+            result = await broker.execute(
+              item.executionCallId,
+              stored.payloadJson,
+              new AbortController().signal,
+              undefined,
+              { reconcileUnknown: true },
+            );
+          } catch (cause) {
+            // The original Runtime could not settle the record either: the
+            // report keeps the execution unknown instead of failing the load
+            // as if the evidence read itself broke.
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 409 &&
+              cause.code === 'runtime_broker_execution_unknown'
+            )
+              continue;
+            throw cause;
+          }
           let parts = toolResultParts(item, result);
           let outcome = outcomeBytes(item, parts);
           let record: ChatRecord = {

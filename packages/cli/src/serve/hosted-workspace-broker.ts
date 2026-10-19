@@ -463,7 +463,12 @@ export class HostedWorkspaceBroker {
     payloadJson: string,
     signal: AbortSignal,
     observationMs = 120_000,
-    waitForUnknown = false,
+    options: {
+      /** Keep polling through a still-reconcilable unknown record. */
+      waitForUnknown?: boolean;
+      /** Ask the original Runtime once before reading an UNKNOWN record. */
+      reconcileUnknown?: boolean;
+    } = {},
   ): Promise<
     ManagedToolResultPayload & { capture?: ToolResultCapture | null }
   > {
@@ -493,7 +498,9 @@ export class HostedWorkspaceBroker {
           response = await this.request(`${path}:cancel`, {});
         }
         response ??= await this.request(
-          waitForUnknown ? `${path}?reconcile=true` : path,
+          options.waitForUnknown || options.reconcileUnknown
+            ? `${path}?reconcile=true`
+            : path,
         );
       } catch (cause) {
         const transportFailed =
@@ -501,7 +508,7 @@ export class HostedWorkspaceBroker {
           (cause instanceof DOMException && cause.name === 'TimeoutError');
         if (cancelling && transportFailed) cancellationSent = false;
         if (
-          !waitForUnknown ||
+          !options.waitForUnknown ||
           !(
             (cause instanceof HostedWorkspaceBrokerRejection &&
               cause.status === 409 &&
@@ -536,14 +543,14 @@ export class HostedWorkspaceBroker {
         } as unknown as ManagedToolResultPayload;
       }
       if (
-        !(waitForUnknown && status['state'] === 'unknown') &&
+        !(options.waitForUnknown && status['state'] === 'unknown') &&
         !['prepared', 'executing', 'cancel_requested'].includes(
           String(status['state']),
         )
       )
         throw new Error('Runtime execution outcome is unknown.');
       response = undefined;
-      await delay(waitForUnknown ? 250 : 50);
+      await delay(options.waitForUnknown ? 250 : 50);
     }
     throw new Error(
       'Runtime execution did not settle within its observation window.',
@@ -646,7 +653,10 @@ export class HostedWorkspaceBroker {
    * `abandoned` state rather than folding into that sentinel. A settled
    * record also names its result's execution status.
    */
-  async status(id: string): Promise<
+  async status(
+    id: string,
+    options: { reconcile?: boolean } = {},
+  ): Promise<
     | {
         state: HostedBrokerExecutionState;
         executionStatus?: string;
@@ -655,7 +665,11 @@ export class HostedWorkspaceBroker {
   > {
     let response: Record<string, unknown>;
     try {
-      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+      response = await this.request(
+        `/executions/${encodeURIComponent(id)}${
+          options.reconcile ? '?reconcile=true' : ''
+        }`,
+      );
     } catch (cause) {
       if (cause instanceof HostedWorkspaceBrokerRejection) {
         if (

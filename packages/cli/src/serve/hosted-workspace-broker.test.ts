@@ -551,7 +551,9 @@ it('observes a late original result after unknown cancellation without starting 
   const abort = new AbortController();
   abort.abort();
   await expect(
-    broker.execute('execution', '{}', abort.signal, 5000, true),
+    broker.execute('execution', '{}', abort.signal, 5000, {
+      waitForUnknown: true,
+    }),
   ).resolves.toMatchObject({ executionStatus: 'success' });
   expect(paths.filter((path) => path.endsWith(':cancel'))).toHaveLength(1);
   expect(paths.filter((path) => path.endsWith(':start'))).toHaveLength(0);
@@ -704,7 +706,9 @@ it('retries a cancellation whose transport reply was lost without restarting', a
   const abort = new AbortController();
   abort.abort();
   await expect(
-    broker.execute('execution', '{}', abort.signal, 3000, true),
+    broker.execute('execution', '{}', abort.signal, 3000, {
+      waitForUnknown: true,
+    }),
   ).resolves.toMatchObject({ executionStatus: 'cancelled' });
   expect(paths.filter((entry) => entry.endsWith(':cancel'))).toHaveLength(2);
   expect(paths.some((entry) => entry.endsWith(':start'))).toBe(false);
@@ -725,7 +729,9 @@ it('stops observation immediately when the original execution is terminally unkn
   const abort = new AbortController();
   abort.abort();
   await expect(
-    broker.execute('execution', '{}', abort.signal, 500, true),
+    broker.execute('execution', '{}', abort.signal, 500, {
+      waitForUnknown: true,
+    }),
   ).rejects.toMatchObject({
     code: 'runtime_broker_execution_unknown',
     details: { terminal: true, reason: 'runtime_lost' },
@@ -904,6 +910,76 @@ it('resolves a durable execution status for recovery reports', async () => {
   await expect(broker.status('execution')).resolves.toEqual({
     state: 'settled',
     executionStatus: 'success',
+  });
+});
+
+it('asks the original Runtime before reading an UNKNOWN record', async () => {
+  const queries: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, fields) => {
+    queries.push(fields);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'success', responseParts: [] },
+        },
+      },
+    };
+  });
+  await expect(
+    broker.status('execution', { reconcile: true }),
+  ).resolves.toEqual({ state: 'settled', executionStatus: 'success' });
+  expect(queries).toEqual([
+    expect.objectContaining({ reconcile: 'true', harnessSessionId: 'session' }),
+  ]);
+});
+
+it('reconciles the follow-up read of an unknown execution', async () => {
+  const paths: string[] = [];
+  const queries: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, fields) => {
+    paths.push(path);
+    if (path.endsWith(':start'))
+      return { code: 409, body: { code: 'runtime_execution_failed' } };
+    queries.push(fields);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'success', responseParts: [] },
+        },
+      },
+    };
+  });
+  await expect(
+    broker.execute('execution', '{}', new AbortController().signal, undefined, {
+      reconcileUnknown: true,
+    }),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+    '/internal/runtime-broker/v1/executions/execution',
+  ]);
+  expect(queries).toEqual([expect.objectContaining({ reconcile: 'true' })]);
+});
+
+it('keeps a still-unknown execution unknown when reconciling does not settle it', async () => {
+  const broker = await fixture((path) =>
+    path.endsWith(':start')
+      ? { code: 409, body: { code: 'runtime_execution_failed' } }
+      : { code: 409, body: { code: 'runtime_broker_execution_unknown' } },
+  );
+  await expect(
+    broker.execute('execution', '{}', new AbortController().signal, undefined, {
+      reconcileUnknown: true,
+    }),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'runtime_broker_execution_unknown',
   });
 });
 

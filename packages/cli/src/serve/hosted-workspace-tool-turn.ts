@@ -4659,7 +4659,7 @@ export class HostedWorkspaceToolTurn {
             : this.mcp
               ? 630_000
               : undefined,
-          this.mcp !== undefined,
+          { waitForUnknown: this.mcp !== undefined },
         );
         const shellResult = request.isShell
           ? parseToolResultEnvelope(result)
