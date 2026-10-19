@@ -14,6 +14,8 @@ vi.mock('../ui/utils/textUtils.js', () => ({
 import {
   daemonCommand,
   formatDaemonAge,
+  processStartMatchesRecord,
+  processStartTime,
   selectDaemonEntries,
   tailLines,
 } from './daemon.js';
@@ -76,6 +78,30 @@ describe('qwen daemon command', () => {
     expect(formatDaemonAge(3_600_000)).toBe('1h');
     expect(formatDaemonAge(86_400_000)).toBe('1d');
   });
+
+  it('treats a process that started after the record as a reused pid', () => {
+    const recorded = '2026-10-19T00:00:00.000Z';
+    const at = Date.parse(recorded);
+    // A slow start may predate the record by any amount.
+    expect(processStartMatchesRecord(recorded, at - 60_000)).toBe(true);
+    // Clock precision inside the tolerance is still the recorded daemon.
+    expect(processStartMatchesRecord(recorded, at + 1_000)).toBe(true);
+    // A later start cannot be the daemon that wrote the record.
+    expect(processStartMatchesRecord(recorded, at + 60_000)).toBe(false);
+    expect(processStartMatchesRecord(recorded, undefined)).toBe(true);
+    expect(processStartMatchesRecord('not-a-date', at)).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reads a live process start time that matches a record written now',
+    () => {
+      const started = processStartTime(process.pid);
+      expect(started).toBeTypeOf('number');
+      expect(processStartMatchesRecord(new Date().toISOString(), started)).toBe(
+        true,
+      );
+    },
+  );
 
   it('returns the trailing lines of a log', () => {
     expect(tailLines('a\nb\nc\n', 2)).toEqual(['b', 'c']);

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
@@ -27,6 +28,7 @@ const HEALTH_TIMEOUT_MS = 1_000;
 const STOP_TIMEOUT_MS = 10_000;
 const STOP_POLL_MS = 100;
 const FOLLOW_POLL_MS = 250;
+const PROCESS_START_TOLERANCE_MS = 5_000;
 
 type DaemonHealth = 'running' | 'unreachable' | 'stale';
 
@@ -55,6 +57,40 @@ interface StopArgs {
 function age(iso: string, now = Date.now()): number {
   const started = Date.parse(iso);
   return Number.isFinite(started) ? Math.max(0, now - started) : 0;
+}
+
+/**
+ * The recorded daemon's process start time, from ps's lstart. POSIX only:
+ * Windows has no portable equivalent, and callers there fall back to the
+ * health probe alone.
+ */
+export function processStartTime(pid: number): number | undefined {
+  if (process.platform === 'win32') return undefined;
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+  });
+  if (result.status !== 0 || typeof result.stdout !== 'string') {
+    return undefined;
+  }
+  const parsed = Date.parse(result.stdout.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * A reused PID belongs to a process that started after the daemon wrote its
+ * record. The daemon's own process starts before that write, so the check is
+ * one-sided on purpose: a slow startup may start well before the record, while
+ * a later start cannot be the recorded daemon.
+ */
+export function processStartMatchesRecord(
+  recordStartedAt: string,
+  processStartedAt: number | undefined,
+): boolean {
+  if (processStartedAt === undefined) return true;
+  const recorded = Date.parse(recordStartedAt);
+  if (!Number.isFinite(recorded)) return true;
+  return processStartedAt <= recorded + PROCESS_START_TOLERANCE_MS;
 }
 
 export function formatDaemonAge(ms: number): string {
@@ -341,6 +377,23 @@ async function handleStop(argv: StopArgs): Promise<void> {
       writeStderrLine('qwen daemon: refusing to stop the current process.');
       failed = true;
       continue;
+    }
+    if (process.platform !== 'win32') {
+      const processStarted = processStartTime(record.pid);
+      if (processStarted === undefined) {
+        writeStderrLine(
+          `qwen daemon: refusing to signal pid ${record.pid}: its process start time could not be read.`,
+        );
+        failed = true;
+        continue;
+      }
+      if (!processStartMatchesRecord(record.startedAt, processStarted)) {
+        writeStderrLine(
+          `qwen daemon: refusing to signal pid ${record.pid}: it started after the daemon recorded at ${record.startedAt}, so the pid was reused.`,
+        );
+        failed = true;
+        continue;
+      }
     }
     try {
       process.kill(record.pid, 'SIGTERM');

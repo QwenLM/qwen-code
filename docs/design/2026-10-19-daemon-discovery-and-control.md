@@ -85,8 +85,10 @@ qwen daemon stop [--port <port>] [--all] [--force]
 - `logs` prints the trailing lines and, with `--follow`, polls the recorded
   file until interrupted. It survives truncation by resetting its offset.
 - `stop` sends `SIGTERM` to the recorded PID only after the listener answers
-  or the PID is still alive. `--force` sends `SIGKILL` after the graceful
-  timeout. A stale record is removed without signalling anything.
+  or the PID is still alive, and only when the process start time matches the
+  record (POSIX). A PID that started after the record is a reused id and is
+  never signalled. `--force` sends `SIGKILL` after the graceful timeout. A
+  stale record is removed without signalling anything.
 - When exactly one daemon is registered, `logs` and `stop` select it
   implicitly. Multiple registrations require `--port` or, for `stop`, `--all`.
 
@@ -103,14 +105,16 @@ qwen daemon stop [--port <port>] [--all] [--force]
 - Files are private to the user (`0700` directory, `0600` record).
 - No bearer token, prompt, transcript, or credential is written to the record.
 - `stop` refuses to signal the current process and never signals a PID whose
-  record is already stale.
+  record is already stale. It also refuses a PID whose process started after
+  the record was written, and, on POSIX, refuses when the start time cannot
+  be read.
 - `--force` is opt-in and only applies after the graceful timeout.
 
 ## Validation
 
 - Unit tests cover record round-trip, POSIX permissions, malformed records,
   expected-PID removal, runtime-directory resolution, wildcard URL rewriting,
-  entry selection, age formatting, and log tailing.
+  process-start identity, entry selection, age formatting, and log tailing.
 - Typecheck passes for the whole workspace.
 - Manual validation: start `qwen serve`, run `qwen daemon status`, follow the
   log, then `qwen daemon stop`, and confirm the record is removed.
