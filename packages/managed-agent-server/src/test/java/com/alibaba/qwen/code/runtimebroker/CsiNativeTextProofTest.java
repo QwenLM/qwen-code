@@ -61,6 +61,31 @@ class CsiNativeTextProofTest {
     }
 
     @Test
+    void acceptsAtomicFinalOutputWithoutInventingRuntimeWork() {
+        var terminal = transaction(6).events().getFirst();
+        var message = transaction(7).events().getFirst().deepCopy();
+        ((ObjectNode) message.path("payload")).put("modelAttemptId", terminal.path("payload").path("attemptId").textValue());
+        var payload = terminal.path("payload");
+        var digest = JSON.createArrayNode().add("managed-final-output/1").add(payload.path("attemptId"));
+        for (JsonNode ref : List.of(payload.path("routeRef"), payload.path("inputCheckpointRef"),
+                payload.path("usageRef"), message.path("payload").path("contentRef"))) {
+            digest.add(JSON.createArrayNode().add(ref.path("resourceId")).add(ref.path("kind"))
+                    .add(ref.path("schemaVersion")).add(ref.path("byteLength")).add(ref.path("digest")));
+        }
+        ObjectNode metadata = request(6).deepCopy();
+        metadata.put("contentDigest", CsiNativeActivationProof.sha256(CsiNativeActivationProof.utf8(digest.toString())));
+        // Derived atomic framing, retaining the original route, usage and assistant body bytes.
+        var after = CsiNativeActivationProof.advance(new CsiNativeActivationProof.Transaction(List.of(terminal, message),
+                transaction(7).lastRecordUuid()), metadata, original, writer, genesis, activation,
+                metadata.path("expectedJournalRevision").longValue(), metadata.path("expectedCommittedSequence").longValue(),
+                prefix(6), reader);
+        assertTrue(after.assistantCommitted());
+        assertTrue(after.checkpoint().state().path("tools").isNull());
+        assertEquals(message.path("payload").path("contentRef"), after.attempt().finalMessageRef());
+        assertEquals(0, after.receipts().size());
+    }
+
+    @Test
     void refusesMessageBeforeCheckpointAssistantBeforeTerminalAndDuplicateStart() {
         rejected(() -> advance(4, prefix(3), reader));
         rejected(() -> advance(7, prefix(6), reader));

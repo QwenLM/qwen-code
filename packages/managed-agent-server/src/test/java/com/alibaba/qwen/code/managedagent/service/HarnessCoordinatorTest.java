@@ -39,6 +39,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -125,6 +126,97 @@ class HarnessCoordinatorTest {
                 mock(HarnessConnector.class), new HarnessEventProjector(),
                 mock(RuntimeWarmer.class), directExecutor(),
                 Clock.systemUTC(), properties).close();
+    }
+
+    @Test
+    void sessionCreateWarmWarmsTheSessionWithoutAPublicEvent() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(runtimeWarmer.isEnabled()).thenReturn(true);
+        when(runtimeWarmer.warm("session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        ExecutorService executor = directExecutor();
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store,
+                harness, runtimeWarmer, executor, true);
+        try {
+            coordinator.warmSession("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+        verify(executor).execute(any(Runnable.class));
+        verify(runtimeWarmer).warm("session");
+        verifyNoInteractions(store);
+    }
+
+    @ParameterizedTest(name = "setting = {0}, warmer = {1}, files = {2}")
+    @CsvSource({"false, true, true", "true, false, true", "true, true, false"})
+    void sessionCreateWarmIsSkippedUnlessEveryGateIsOpen(boolean setting,
+            boolean warmerEnabled, boolean filesAvailable) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(filesAvailable);
+        when(runtimeWarmer.isEnabled()).thenReturn(warmerEnabled);
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store,
+                harness, runtimeWarmer, directExecutor(), setting);
+        try {
+            coordinator.warmSession("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+        verify(runtimeWarmer, never()).warm(anyString());
+        verifyNoInteractions(store);
+    }
+
+    @ParameterizedTest(name = "thrown = {0}")
+    @ValueSource(booleans = {true, false})
+    void aFailedSessionCreateWarmIsLoggedWithoutAPublicEvent(boolean thrown) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(runtimeWarmer.isEnabled()).thenReturn(true);
+        IllegalStateException failure = new IllegalStateException("down");
+        if (thrown) {
+            when(runtimeWarmer.warm("session")).thenThrow(failure);
+        } else {
+            when(runtimeWarmer.warm("session"))
+                    .thenReturn(CompletableFuture.failedFuture(failure));
+        }
+        ch.qos.logback.classic.Logger coordinatorLog =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(HarnessCoordinator.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        coordinatorLog.addAppender(logged);
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store,
+                harness, runtimeWarmer, directExecutor(), true);
+        try {
+            coordinator.warmSession("tenant", "session");
+        } finally {
+            coordinator.close();
+            coordinatorLog.detachAppender(logged);
+            logged.stop();
+        }
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("create warm failed")
+                    .contains("session=session");
+        });
+        verifyNoInteractions(store);
+    }
+
+    private static HarnessCoordinator sessionCreateWarmCoordinator(
+            AgentStateStore store, HarnessConnector harness,
+            RuntimeWarmer runtimeWarmer, ExecutorService executor,
+            boolean sessionCreateWarm) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setSessionCreateWarm(sessionCreateWarm);
+        return new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), properties);
     }
 
     @Test
