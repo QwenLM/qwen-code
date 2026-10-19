@@ -5157,6 +5157,31 @@ describe('SessionService', () => {
       await expectUnlabelled();
     });
 
+    it('ignores a nested Goal marker in a record carrying a Goal payload', async () => {
+      // The scan prefilters on the raw `"subtype":"goal_state"` substring, so a
+      // line whose nested content contains that marker is a candidate even when
+      // the record itself is not a Goal record. The case above cannot tell
+      // whether the reader's own type/subtype check rejected it, because its
+      // record has no top-level `systemPayload` to read an objective from; this
+      // one does, so only that check keeps the decoy's objective off the label.
+      write([
+        ...fillerLines(9 * 400).slice(0, 9),
+        msgLine(sessionId, 'payload-bearing-marker', null, 'assistant', 5, '', {
+          message: content(
+            'model',
+            fnCall('persist', {
+              type: 'system',
+              subtype: 'goal_state',
+              objective: 'injected',
+            }),
+          ),
+          systemPayload: goalPayload('Decoy objective'),
+        }),
+      ]);
+
+      await expectUnlabelled();
+    });
+
     it.each([
       ['first array element', false],
       ['comma-positioned array element', true],
