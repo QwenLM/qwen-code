@@ -317,6 +317,14 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getSessionSkills(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionSkills']>(
+      '/session-skills/query',
+      { sessionId },
+      signal,
+    );
+  }
+
   changeModel(
     request: Schemas['WebShellChangeModelRequest'],
     signal?: AbortSignal,

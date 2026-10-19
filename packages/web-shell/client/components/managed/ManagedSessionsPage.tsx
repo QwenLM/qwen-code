@@ -38,6 +38,7 @@ import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
+import { useManagedSkills } from './use-managed-skills';
 import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
@@ -169,6 +170,7 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const skills = useManagedSkills(provider, clientId, sessionId);
   const pageRef = useRef<HTMLDivElement>(null);
   const taskTriggerRef = useRef<HTMLButtonElement>(null);
   const [wideTasks, setWideTasks] = useState(false);
@@ -1186,6 +1188,13 @@ function ManagedSessionsContent({
                   return false;
                 }}
                 commands={[]}
+                skills={skills.skills}
+                onSkillsOpenChange={
+                  skills.supported ? skills.onOpenChange : undefined
+                }
+                skillsLoading={skills.loading}
+                skillsLoadError={skills.error}
+                skillsLoaded={skills.loaded}
                 workspaceFeaturesEnabled={false}
                 attachmentsEnabled={
                   summary?.capabilities.inputAttachments === true
@@ -1194,7 +1203,8 @@ function ManagedSessionsContent({
                   interactive
                     ? [
                         ...(summary?.capabilities.inputAttachments ||
-                        summary?.planModeSupported
+                        summary?.planModeSupported ||
+                        skills.supported
                           ? ['addMenu' as const]
                           : []),
                         ...(summary?.planModeSupported || summary?.planMode

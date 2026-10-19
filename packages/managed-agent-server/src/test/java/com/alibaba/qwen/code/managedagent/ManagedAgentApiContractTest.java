@@ -264,6 +264,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
+                    entry(ApiModels.WebShellSkill.class, List.of("WebShellSkill")),
+                    entry(ApiModels.WebShellSessionSkills.class, List.of("WebShellSessionSkills")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
                     entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
@@ -1285,6 +1287,12 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 200,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 401,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
         exchange(drift, "queryWebShellSessionModels", 401,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant),

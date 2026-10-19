@@ -279,6 +279,10 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record WebShellSkill(String name, String description) { }
+
+    public record WebShellSessionSkills(List<WebShellSkill> skills) { }
+
     public record WebShellTranscriptRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {
     }
