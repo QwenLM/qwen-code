@@ -138,6 +138,7 @@ class SessionRowLockOrderTest {
             "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
             "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
+            "WakeRecoveryStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
@@ -160,6 +161,9 @@ class SessionRowLockOrderTest {
     // only. Main's private CSI work (#13996) adds the same shapes:
     // data-source probes, the publication-placement lock delegator and the
     // runtime-access record's accessors, none of which reaches either side.
+    // SSH storage adds same-name verify/1 and storageKey/2 references;
+    // their SQL touches only storage ownership and migration history.
+    // Its physicalKey/1 delegates to the pure local identity hash.
     // The child Workspace row's snapshot/0 (#13753 I3) is a record accessor
     // over its mode: it reaches no JDBC call and takes no lock.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
@@ -208,6 +212,12 @@ class SessionRowLockOrderTest {
                             Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("SessionResourceCollectionCollector.java",
                             Set.of("SessionResourceCollectionCollector.runOnce/0")),
+                    // D7-2's parked registration asks its record whether it
+                    // reserved, through a record accessor the parse cannot
+                    // resolve.
+                    Map.entry("SshWorkspaceStore.java",
+                            Set.of("Parked.reserved/0",
+                                    "SshWorkspaceStore.physicalKey/1")),
                     Map.entry("ToolPublicationAdmissionStore.java",
                             Set.of("AcknowledgementBundle.captureIdentity/0",
                                     "AcknowledgementBundle.finished/0",
@@ -239,14 +249,21 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCreationStore.java",
                             Set.of("WorkspaceCreationStore.enabled/0")),
                     Map.entry("WorkspaceExecutionStore.java",
-                            Set.of("WorkspaceExecutionStore.createdStorageRoot/2")),
+                            Set.of("WorkspaceExecutionStore.createdStorageRoot/2",
+                                    "WorkspaceExecutionStore.storageKey/2")),
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",
                                     "WorkspaceCsiCheckpointSnapshotStore.scope/1")),
+                    // Text dispatch and environment delegation share local
+                    // method names without adding session/turn SQL.
+                    Map.entry("WorkspaceCsiHostedMain.java",
+                            Set.of("WorkspaceCsiHostedMain.required/1")),
                     Map.entry("WorkspaceCsiRuntimeAccess.java",
                             Set.of("WorkspaceCsiRuntimeAccess.attest/3",
                                     "WorkspaceCsiRuntimeAccess.request/0",
                                     "WorkspaceCsiRuntimeAccess.unavailable/0")),
+                    Map.entry("WorkspaceCsiRuntimeMain.java",
+                            Set.of("WorkspaceCsiRuntimeMain.run/1")),
                     Map.entry("WorkspaceCsiWorkerAckStore.java",
                             Set.of("WorkspaceCsiWorkerAckStore.decode/1",
                                     "WorkspaceCsiWorkerAckStore.hash/1")),
@@ -267,7 +284,8 @@ class SessionRowLockOrderTest {
                                     "WorkspaceRecoveryStore.hash/1",
                                     "WorkspaceRecoveryStore.parse/1")),
                     Map.entry("WorkspaceStorageGuard.java",
-                            Set.of("IdentityReader.read/1")));
+                            Set.of("IdentityReader.read/1",
+                                    "WorkspaceStorageGuard.verify/1")));
 
     // Held bodies whose invocation the parse cannot see but whose
     // transaction it can: ManagedSnapshotStore.afterCommit registers a
@@ -340,12 +358,16 @@ class SessionRowLockOrderTest {
                 "bindRecoveredHarness", "recordAdmission",
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
-                "cancelBeforeAdmission", "failTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
+                "failRecoveryBlockedTurn",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
                 // Main's rename-delivery family (#13682): each takes the
                 // session-row FOR UPDATE before its delivery-row work.
                 "beginSessionRename", "completeSessionRename",
                 "abandonSessionRename", "claimRename",
+                // D7-2's parked-title settle locks the session row before
+                // its delivery row, as the late reply it races does.
+                "settleParkedRename",
                 // Main's internal child close (#14069) locks the child's
                 // session row before its operation-row work.
                 "beginChildClose",
@@ -366,6 +388,7 @@ class SessionRowLockOrderTest {
                         "completeSessionMutation", "unarchiveWorkspaceSession",
                         "beginSessionRename", "completeSessionRename",
                         "abandonSessionRename", "claimRename",
+                        "settleParkedRename",
                         "replayChildSessionCommand", "requireCsiRequest");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
@@ -379,24 +402,37 @@ class SessionRowLockOrderTest {
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "findActiveTurns",
+                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn",
+                        "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
                         "findTurnSummary", "hasActiveTurn",
+                        // #14387's lifecycle gate counts live Turns under
+                        // its caller's session-row lock. Its recovery-blocked
+                        // verdict can take the session-row lock through the
+                        // cross-file legacy guard before the Turn update, a
+                        // lock this same-file parse cannot see; both pin here
+                        // as Turn-row accessors, not lockers.
+                        "hasLiveTurn",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
+                        "markTurnRecoveryBlocked",
                         "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
                         "requireTurnForUpdate", "requireIdlePolicyChange", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
+                        "settleTurnCommands",
+                        // D7-2's journal evidence for a parked input reads
+                        // its Turn and takes no lock.
+                        "turnInputAcceptance",
                         "updateHarnessCursor", "validateOperationStart",
-                        "withdrawSubmissionAttempted");
+                        "withdrawSubmissionAttempted", "cancelUnadmittedTurn");
         // The references the parse cannot resolve to one member —
         // ItemRow.toRecord behind the lambda parameter at the item read,
         // and main's this::renameDelivery RowMapper references (#13682),
@@ -422,8 +458,8 @@ class SessionRowLockOrderTest {
     // assertion still green. Pin the boundary on the R2 entry points.
     @Test
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
-        for (String name : List.of("recordAdmission", "failTurn",
-                "cancelBeforeAdmission")) {
+        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission")) {
             List<Method> entries = Arrays.stream(ManagedAgentStore.class
                     .getDeclaredMethods())
                     .filter(method -> method.getName().equals(name))

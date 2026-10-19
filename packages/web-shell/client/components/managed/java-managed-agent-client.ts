@@ -142,11 +142,70 @@ export class JavaManagedAgentClient {
     );
   }
 
+  listRuntimeNodes(signal?: AbortSignal) {
+    return this.post<Schemas['WebShellRuntimeNodePage']>(
+      '/runtime-nodes/query',
+      {},
+      signal,
+    );
+  }
+
+  checkWorkspaceDirectory(
+    request: Schemas['WebShellWorkspaceDirectoryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceDirectory']>(
+      '/workspaces/check-directory',
+      request,
+      signal,
+    );
+  }
+
+  registerWorkspace(
+    request: Schemas['WebShellWorkspaceRegisterRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/register',
+      request,
+      signal,
+    );
+  }
+
+  getWorkspaceOperation(operationId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
+      '/workspaces/operations/get',
+      { operationId },
+      signal,
+    );
+  }
+
   createWorkspace(
     request: Schemas['WebShellWorkspaceCreateRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentWorkspace> {
     return this.post('/workspaces/create', request, signal);
+  }
+
+  queryWorkspaceFiles(
+    request: Schemas['WebShellWorkspaceFileQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFilePage']> {
+    return this.post('/workspaces/files/query', request, signal);
+  }
+
+  readWorkspaceFile(
+    request: Schemas['WebShellWorkspaceFileReadRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
+    return this.post('/workspaces/files/read', request, signal);
+  }
+
+  workspaceDirectories(
+    request: Schemas['WebShellWorkspaceDirectoryQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceDirectoryPage']> {
+    return this.post('/workspaces/directories/query', request, signal);
   }
 
   getSessionApproval(
@@ -267,6 +326,14 @@ export class JavaManagedAgentClient {
   getSessionModels(sessionId: string, signal?: AbortSignal) {
     return this.post<Schemas['WebShellSessionModels']>(
       '/session-models/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  getSessionSkills(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['WebShellSessionSkills']>(
+      '/session-skills/query',
       { sessionId },
       signal,
     );

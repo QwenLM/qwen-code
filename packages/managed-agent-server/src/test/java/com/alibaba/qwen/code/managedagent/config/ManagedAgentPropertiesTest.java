@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
+import com.alibaba.qwen.code.managedagent.service.WakeRecovery;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -405,6 +406,17 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void theWakeRecoveryScanUsesItsDedicatedSchedulerAndMillisecondCadence() {
+        assertThat(schedulesOn(WakeRecovery.class, "wake-recovery.scan-delay"))
+                .hasSize(1).allSatisfy(scheduled -> {
+                    assertThat(scheduled.fixedDelayString()).isEqualTo(
+                            "${qwen.managed-agent.wake-recovery.scan-delay:2s}");
+                    assertThat(scheduled.scheduler()).isEqualTo("wakeRecoveryScheduler");
+                    assertThat(scheduled.timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
+                });
+    }
+
+    @Test
     void theThreeScanDelaySchedulesShareOneFallback() throws java.io.IOException {
         // The Dispatch comment claims the three sites read the identical
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
@@ -480,7 +492,8 @@ class ManagedAgentPropertiesTest {
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
-                "runtime-broker.retention.scan-delay");
+                "runtime-broker.retention.scan-delay",
+                "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {
             if (!hasTypedField(key)) {
@@ -714,6 +727,53 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void sshCatalogBindsAndRetainsExistingRuntimeConfigurationWhenNewAdmissionIsDisabled() {
+        var remote = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues("qwen.managed-agent.harness.enabled=true",
+                        "qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "qwen.managed-agent.session-store.enabled=true",
+                        "qwen.managed-agent.runtime-broker.enabled=true",
+                        "qwen.managed-agent.runtime-broker.ssh.enabled=true",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].node-id=mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].display-name=Build Mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].ssh-host=build-mac",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].node-executable=/node",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].qwen-entry=/cli.js",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].state-directory=/state",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].allowed-roots[0]=/work",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].publication-port=41270",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].qwen-version=0.25.1",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].access[0].tenant-id=tenant",
+                        "qwen.managed-agent.runtime-broker.ssh.nodes[0].access[0].actor-id=actor");
+        remote.run(started -> {
+            assertThat(started).hasNotFailed();
+            var ssh = started.getBean(ManagedAgentProperties.class).getRuntimeBroker().getSsh();
+            assertThat(ssh.isEnabled()).isTrue();
+            assertThat(ssh.getNodes().getFirst().admits("tenant", "actor")).isTrue();
+            assertThat(ssh.getNodes().getFirst().admits("tenant", "other")).isFalse();
+        });
+        remote.withPropertyValues("qwen.managed-agent.runtime-broker.ssh.enabled=false")
+                .run(started -> assertThat(started).hasNotFailed());
+        if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
+                && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
+            var mixed = remote.withPropertyValues("qwen.managed-agent.runtime-broker.child-workspaces-enabled=true",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=local-storage",
+                    "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
+            mixed.run(started -> {
+                assertThat(started).hasNotFailed();
+                var broker = started.getBean(ManagedAgentProperties.class).getRuntimeBroker();
+                assertThat(broker.getSsh().isEnabled()).isTrue();
+                assertThat(broker.isChildWorkspacesEnabled()).isTrue();
+            });
+            mixed.withPropertyValues(DURABLE_KEY + "=false").run(started -> assertThat(started).hasFailed());
+        }
+        for (String invalid : List.of("runtime-broker.child-workspaces-enabled=true", "harness.workspace-files-enabled=false")) {
+            remote.withPropertyValues("qwen.managed-agent." + invalid).run(started -> assertThat(started).hasFailed());
+        }
+    }
+
+    @Test
     void validatesWorkspaceFilesWhenSpringInitializesTheProperties() {
         ApplicationContextRunner context = new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class);
@@ -784,6 +844,17 @@ class ManagedAgentPropertiesTest {
                 .run(started -> assertThat(started).hasFailed());
         context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
                 .run(started -> assertThat(started).hasFailed());
+        context.withPropertyValues(prefix + "ssh.nodes[0].node-id=remote",
+                        prefix + "ssh.nodes[0].display-name=Remote",
+                        prefix + "ssh.nodes[0].ssh-host=remote",
+                        prefix + "ssh.nodes[0].node-executable=/node",
+                        prefix + "ssh.nodes[0].qwen-entry=/cli.js",
+                        prefix + "ssh.nodes[0].state-directory=/state",
+                        prefix + "ssh.nodes[0].allowed-roots[0]=/work",
+                        prefix + "ssh.nodes[0].publication-port=41270",
+                        prefix + "ssh.nodes[0].qwen-version=0.25.1")
+                .run(started -> assertThat(started).hasFailed().getFailure()
+                        .hasRootCauseMessage("Resident Workspaces require exclusive CSI/files configuration"));
     }
 
     @Test
@@ -823,6 +894,64 @@ class ManagedAgentPropertiesTest {
         missing.getHarness().setWorkspaceFilesEnabled(true);
         missing.getHarness().setApprovalMode(null);
         assertThatThrownBy(missing::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void boundSessionIsolationDefaultsToSessionAndWorkspaceRequiresADurableLocalBrokerWithoutChildren() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().getBoundSessionIsolationClass()).isEqualTo("session");
+        plain.validateWorkspaceFiles();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties unknown = new ManagedAgentProperties();
+        unknown.getRuntimeBroker().setBoundSessionIsolationClass("tenant");
+        assertThatThrownBy(unknown::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("session or workspace");
+
+        ManagedAgentProperties notDurable = new ManagedAgentProperties();
+        notDurable.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        notDurable.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThatThrownBy(notDurable::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durable");
+
+        ManagedAgentProperties withChildren = new ManagedAgentProperties();
+        withChildren.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        withChildren.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        assertThatThrownBy(withChildren::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("child Workspaces");
+
+        ManagedAgentProperties nonLocal = new ManagedAgentProperties();
+        nonLocal.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        nonLocal.getRuntimeBroker().setProvisioner("static");
+        assertThatThrownBy(nonLocal::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("local-process");
+    }
+
+    @Test
+    void sessionCreateWarmDefaultsOffAndRequiresWorkspaceIsolationWithoutSshNodes() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().isSessionCreateWarm()).isFalse();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.getRuntimeBroker().setSessionCreateWarm(true);
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties session = new ManagedAgentProperties();
+        session.getRuntimeBroker().setSessionCreateWarm(true);
+        assertThatThrownBy(session::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
+
+        ManagedAgentProperties ssh = new ManagedAgentProperties();
+        ssh.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        ssh.getRuntimeBroker().setSessionCreateWarm(true);
+        ssh.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node("mac", "Mac", "test-host",
+                "/node", "/cli.js", "/state", List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThatThrownBy(ssh::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
     }
 
     @Configuration(proxyBeanMethods = false)

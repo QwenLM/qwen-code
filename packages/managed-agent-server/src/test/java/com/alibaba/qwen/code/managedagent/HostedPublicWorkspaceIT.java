@@ -80,6 +80,7 @@ class HostedPublicWorkspaceIT {
     private String node;
     private boolean approvals;
     private boolean shell;
+    private boolean definitionApproval;
     private String shellDecision = "allow";
     private boolean durableClose;
     private boolean resident;
@@ -116,6 +117,122 @@ class HostedPublicWorkspaceIT {
         // approval answered by the non-owner OPERATOR — pin the handoff,
         // or the responder ternary can collapse to the owner unnoticed.
         assertThat(operatorAnswered).hasSize(2);
+    }
+
+    @Test
+    @Timeout(240)
+    void storedDefinitionApprovalSelectionRoundTripsThroughRealWorkspaceToolsOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("Definition approval acceptance requires real MySQL")
+                .startsWith("jdbc:mysql:");
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        Path root = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        JsonNode definition = request("POST", "/v1/agents", Map.of("model", Map.of(),
+                "instructions", "Execute only the deterministic fixture tools requested by the user.",
+                "tools", List.of(Map.of("type", "hosted_profile", "profile", "hosted-workspace-shell/1")),
+                "permission_policy", Map.of("approval_mode", "default")), "definition", "actor", 202);
+        String agent = definition.path("id").asText();
+        String session = request("POST", "/api/agent/web-shell/v1/sessions/create",
+                Map.of("agentId", agent, "idempotencyKey", "definition-session", "input", List.of(),
+                        "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "definition-session", "actor", 202).path("sessionId").asText();
+        String identitySql = "SELECT CAST(agent_id AS CHAR) AS agent_id, agent_revision, agent_definition_digest,"
+                + " approval_mode, CAST(workspace_id AS CHAR) AS workspace_id, workspace_generation,"
+                + " CAST(workspace_storage_id AS CHAR) AS workspace_storage_id, cwd_relative, tool_profile,"
+                + " CAST(model_id AS CHAR) AS model_id, model_revision FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?";
+        Map<String, Object> identity = jdbc.queryForMap(identitySql, tenant, session);
+        assertThat(identity).containsEntry("agent_id", agent)
+                .containsEntry("agent_revision", definition.path("revision").asText())
+                .containsEntry("agent_definition_digest", definition.path("digest").asText().replace("sha256:", ""))
+                .containsEntry("approval_mode", "default").containsEntry("workspace_id", "workspace-0")
+                .containsEntry("cwd_relative", "child").containsEntry("tool_profile", "hosted-workspace-shell/1");
+        String definitionSql = "SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
+                + " AND kind = 'managed-definition'";
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session)).isEqualTo("ACTIVE"));
+        String initialDefinition = null;
+        List<String> modes = List.of("default", "yolo", "auto-edit", "default");
+        List<Integer> approvalCounts = List.of(2, 0, 1, 2);
+        for (int index = 0; index < modes.size(); index++) {
+            String mode = modes.get(index);
+            if (index > 0) {
+                JsonNode changed = request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                        Map.of("sessionId", session, "idempotencyKey", "approval-" + index,
+                                "approvalMode", mode, "expectedRevision", index - 1), null, "actor", 200);
+                assertThat(changed.path("approvalMode").asText()).isEqualTo(mode);
+                assertThat(changed.path("approvalRevision").asLong()).isEqualTo(index);
+            }
+            JsonNode selection = request("POST", "/api/agent/web-shell/v1/session-approval/query",
+                    Map.of("sessionId", session), null, "actor", 200);
+            assertThat(selection.path("supported").asBoolean()).isTrue();
+            assertThat(selection.path("approvalMode").asText()).isEqualTo(mode);
+            assertThat(selection.path("approvalRevision").asLong()).isEqualTo(index);
+            JsonNode options = request("POST", "/api/agent/web-shell/v1/session-options/query",
+                    Map.of("agentId", agent), null, "actor", 200);
+            assertThat(options.path("availableApprovalModes")).isEqualTo(json.valueToTree(List.of("default")));
+            String marker = "G0_DEFINITION_APPROVAL_" + index;
+            Map<String, Object> submit = Map.of("sessionId", session, "idempotencyKey", marker,
+                    "input", List.of(Map.of("type", "input_text", "text", marker)));
+            String turn = request("POST", "/api/agent/web-shell/v1/turns/submit", submit,
+                    marker, "actor", 202).path("turnId").asText();
+            int answeredBefore = answered.size();
+            await().atMost(Duration.ofSeconds(40)).failFast(() -> {
+                if (modelFailure.get() != null) {
+                    throw new AssertionError("Model fixture failed", modelFailure.get());
+                }
+                String status = jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ?", String.class, tenant, session, turn);
+                if (List.of("FAILED", "CANCELLED").contains(status)) {
+                    throw new AssertionError("Definition Turn failed: " + jdbc.queryForList(
+                            "SELECT status, error_code FROM ma_turn WHERE session_id = ? AND turn_id = ?", session, turn)
+                            + "; Harness: " + Files.readString(temporary.resolve("harness.log")));
+                }
+            }).untilAsserted(() -> {
+                answerActions(session, true);
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ?", String.class, tenant, session, turn))
+                        .isEqualTo("COMPLETED");
+            });
+            assertThat(answered.size() - answeredBefore).as(mode).isEqualTo(approvalCounts.get(index));
+            assertThat(jdbc.queryForMap("SELECT approval_mode, approval_revision FROM ma_turn"
+                    + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?", tenant, session, turn))
+                    .containsEntry("approval_mode", mode).containsEntry("approval_revision", (long) index);
+            assertThat(Files.readString(root.resolve(marker + ".write"))).isEqualTo("BYTES_" + marker + "\n");
+            assertThat(Files.readString(root.resolve(marker + ".shell"))).isEqualTo("once\n");
+            assertThat(decoy.resolve(marker + ".write")).doesNotExist();
+            assertThat(decoy.resolve(marker + ".shell")).doesNotExist();
+            assertThat(jdbc.queryForMap(identitySql, tenant, session)).isEqualTo(identity);
+            if (index == 0) {
+                initialDefinition = jdbc.queryForObject(definitionSql,
+                        (row, unused) -> new String(row.getBytes(1), StandardCharsets.UTF_8), tenant, session);
+            }
+            assertThat(jdbc.<String>queryForObject(definitionSql,
+                    (row, unused) -> new String(row.getBytes(1), StandardCharsets.UTF_8), tenant, session))
+                    .isEqualTo(initialDefinition);
+            int requestsBeforeReplay = modelRequests.size();
+            JsonNode replay = request("POST", "/api/agent/web-shell/v1/turns/submit", submit,
+                    marker, "actor", 202);
+            assertThat(replay.path("turnId").asText()).isEqualTo(turn);
+            assertThat(replay.path("replayed").asBoolean()).isTrue();
+            assertThat(modelRequests).hasSize(requestsBeforeReplay);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                    Integer.class, tenant, session)).isEqualTo(index + 1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?"
+                    + " AND execution_state = 'SETTLED'", Integer.class, session)).isEqualTo(2 * (index + 1));
+            assertThat(Files.readString(root.resolve(marker + ".shell"))).isEqualTo("once\n");
+        }
+        assertThat(jdbc.queryForList("SELECT approval_mode FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                + " ORDER BY approval_revision", String.class, tenant, session)).containsExactlyElementsOf(modes);
+        assertThat(jdbc.queryForList("SELECT approval_revision FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                + " ORDER BY approval_revision", Long.class, tenant, session)).containsExactly(0L, 1L, 2L, 3L);
+        assertThat(answered).hasSize(5);
+        assertThat(modelRequests).hasSize(12).allSatisfy(request ->
+                assertThat(request.path("model").asText()).isEqualTo("g0-fixture"));
+        assertThat(modelFailure.get()).isNull();
     }
 
     @Test
@@ -906,7 +1023,7 @@ class HostedPublicWorkspaceIT {
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
-        if (durableClose) {
+        if (durableClose || definitionApproval) {
             Files.createDirectory(temporary.resolve("broker"), PosixFilePermissions.asFileAttribute(
                     PosixFilePermissions.fromString("rwx------")));
         } else {
@@ -1306,27 +1423,16 @@ class HostedPublicWorkspaceIT {
         if (shell) {
             arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
         }
-        if (shellLifecycleV2) {
-            arguments.add("--qwen.managed-agent.tool-publication.enabled=true");
-            arguments.add("--qwen.managed-agent.tool-publication.oss-endpoint=https://oss-cn-hangzhou.aliyuncs.com");
-            arguments.add("--qwen.managed-agent.tool-publication.oss-region=cn-hangzhou");
-            arguments.add("--qwen.managed-agent.tool-publication.oss-bucket=private-test-bucket");
-            arguments.add("--qwen.managed-agent.tool-publication.service-base-url=http://127.0.0.1:" + port);
-            arguments.add("--qwen.managed-agent.tool-publication.execution-bytes=1048576");
-            arguments.add("--qwen.managed-agent.tool-publication.session-bytes=1073741824");
-            arguments.add("--qwen.managed-agent.tool-publication.tenant-bytes=1073741824");
-            arguments.add("--qwen.managed-agent.tool-publication.active-captures=4");
-            arguments.add("--qwen.managed-agent.tool-publication.entry-concurrency=4");
-            arguments.add("--qwen.managed-agent.tool-publication.operation-timeout=10s");
-            arguments.add("--qwen.managed-agent.tool-publication.claim-timeout=5s");
-            arguments.add("--qwen.managed-agent.tool-publication.verification-bytes-per-second=1048576");
-            arguments.add("--qwen.managed-agent.tool-publication.max-verification-timeout=20m");
-            arguments.add("--qwen.managed-agent.tool-publication.gc-enabled=true");
-            arguments.add("--qwen.managed-agent.tool-publication.deletion-grace=0s");
+        if (definitionApproval) {
+            arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
         }
-        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
+        if (shellLifecycleV2) {
+            arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
+                    "private-test-bucket", 1048576));
+        }
+        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                + "Linux".equals(System.getProperty("os.name")));
+                + (definitionApproval || "Linux".equals(System.getProperty("os.name"))));
         if (resident) {
             com.alibaba.qwen.code.managedagent.service.ResidentHostedRuntimeFixture.arguments(arguments, tenant, roots.getFirst());
         }
@@ -1346,44 +1452,13 @@ class HostedPublicWorkspaceIT {
                     }
                     if (shellLifecycleV2) {
                         publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
-                        var acl = new com.aliyun.oss.model.AccessControlList();
-                        acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
-                        var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class, invocation -> switch (invocation.getMethod().getName()) {
-                            case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
-                            case "getBucketAcl" -> acl;
-                            case "putObject" -> {
-                                var put = (com.aliyun.oss.model.PutObjectRequest) invocation.getArgument(0);
-                                byte[] bytes = put.getInputStream().readAllBytes();
-                                if (publicationObjects.putIfAbsent(put.getKey(), bytes) != null) {
-                                    throw new com.aliyun.oss.OSSException("Object already exists", "FileAlreadyExists",
-                                            "request", "host", put.getBucketName(), put.getKey(), "resource");
-                                }
-                                yield new com.aliyun.oss.model.PutObjectResult();
-                            }
-                            case "getObject" -> {
-                                byte[] bytes = publicationObjects.get(invocation.<String>getArgument(1));
-                                if (bytes == null) {
-                                    throw new com.aliyun.oss.OSSException("Object not found", "NoSuchKey",
-                                            "request", "host", invocation.getArgument(0), invocation.getArgument(1), "resource");
-                                }
-                                var object = new com.aliyun.oss.model.OSSObject();
-                                object.setObjectContent(new java.io.ByteArrayInputStream(bytes));
-                                yield object;
-                            }
-                            case "deleteObject" -> {
-                                publicationObjects.remove(invocation.<String>getArgument(1));
-                                yield null;
-                            }
-                            case "shutdown" -> null;
-                            case "toString" -> "publication-oss-fixture";
-                            default -> throw new AssertionError("Unexpected OSS access in publication fixture: " + invocation.getMethod().getName());
-                        });
-                        context.addBeanFactoryPostProcessor(beanFactory -> beanFactory.registerSingleton("toolPublicationOss", oss));
+                        HostedGateTestSupport.stubPublicationOss(context,
+                                publicationObjects, "publication-oss-fixture");
                     }
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
-        if ("Linux".equals(System.getProperty("os.name"))) {
+        if (definitionApproval || "Linux".equals(System.getProperty("os.name"))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
@@ -1561,6 +1636,7 @@ class HostedPublicWorkspaceIT {
                 return;
             }
             int step = results.size();
+            boolean definitionTurn = prompt.get().contains("G0_DEFINITION_APPROVAL_");
             boolean runShell = shell && prompt.get().contains("G0_SHELL");
             boolean foregroundOnly = runShell && shellLifecycleV2;
             if (!runShell && step == 3) {
@@ -1583,7 +1659,7 @@ class HostedPublicWorkspaceIT {
                     .put("created", 0).put("model", "g0-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
             var delta = choice.putObject("delta").put("role", "assistant");
-            boolean toolCall = step < (shellFault != null || foregroundOnly ? 1 : 3);
+            boolean toolCall = step < (definitionTurn ? 2 : shellFault != null || foregroundOnly ? 1 : 3);
             if (toolCall) {
                 String name = runShell ? (!foregroundOnly && shellFault == null && step == 0 ? "monitor" : "run_shell_command")
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
@@ -1601,6 +1677,13 @@ class HostedPublicWorkspaceIT {
                     args = step == 1
                             ? Map.of("file_path", "proof.txt", "old_string", "after-first-" + tenant, "new_string", "after-second-" + tenant)
                             : Map.of("file_path", "proof.txt");
+                }
+                if (definitionTurn) {
+                    String marker = prompt.get().split("[^A-Z0-9_]", 2)[0];
+                    name = step == 0 ? "write_file" : "run_shell_command";
+                    args = step == 0 ? Map.of("file_path", marker + ".write", "content", "BYTES_" + marker + "\n")
+                            : Map.of("command", "printf 'once\\n' >> " + marker + ".shell",
+                                    "description", "Append the definition approval proof");
                 }
                 if (shellFault != null) {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
@@ -1736,7 +1819,7 @@ class HostedPublicWorkspaceIT {
                 () -> { if (relayExecutor != null) {
                     relayExecutor.close();
                 } },
-                () -> { if (durableClose) {
+                () -> { if (durableClose || definitionApproval) {
                     HostedDurableWorkers.stop(temporary.resolve("broker"), json);
                 } },
                 () -> { if (model != null) {

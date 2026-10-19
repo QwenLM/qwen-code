@@ -38,6 +38,34 @@ class ManagedToolResultProjectorTest {
     }
 
     @Test
+    void contendedTenantGuardSkipsThePassInsteadOfEscapingTheScheduler() {
+        var store = org.mockito.Mockito.mock(ManagedToolResultStore.class);
+        var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
+        properties.getArtifacts().setEnabled(true);
+        var factory = new org.springframework.beans.factory.support.StaticListableBeanFactory();
+        var projector =
+                new ManagedToolResultProjector(
+                        store,
+                        org.mockito.Mockito.mock(
+                                org.springframework.jdbc.core.JdbcTemplate.class),
+                        factory.getBeanProvider(ToolPublicationDataStore.class),
+                        org.mockito.Mockito.mock(ManagedArtifactReader.class),
+                        org.mockito.Mockito.mock(
+                                com.alibaba.qwen.code.managedagent.service
+                                        .ManagedArtifactPolicy.class),
+                        properties);
+        org.mockito.Mockito.when(store.claim())
+                .thenThrow(new com.alibaba.qwen.code.managedagent.api.ApiException(
+                        org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                        "tenant_guard_contended",
+                        "Tenant guard is held"));
+        org.assertj.core.api.Assertions.assertThatCode(projector::tick)
+                .doesNotThrowAnyException();
+        org.mockito.Mockito.verify(store).backfillOnePage();
+        org.mockito.Mockito.verify(store).claim();
+    }
+
+    @Test
     void limitsDecodedInvalidUtf8ByEncodedBytesWithoutSplittingCharacters() {
         byte[] raw = new byte[4096];
         Arrays.fill(raw, (byte) 0xff);

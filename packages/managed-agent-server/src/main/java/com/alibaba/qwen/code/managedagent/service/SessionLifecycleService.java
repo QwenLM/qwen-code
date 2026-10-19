@@ -213,8 +213,8 @@ public class SessionLifecycleService {
         if (session.workspace() != null) {
             boolean activeLifecycle = usesLifecycleProtocol(session, kind);
             admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
-                    idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle(session.toolProfile())
-                            : kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose(),
+                    idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle(session)
+                            : kind == OperationKind.CLOSE && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace()),
                     activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0);
         } else {
             sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);

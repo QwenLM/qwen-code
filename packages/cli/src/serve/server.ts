@@ -202,6 +202,7 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -1501,8 +1502,10 @@ export function createServeApp(
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       preheatAcpChild: () => bridge.preheat(),
-      refreshExtensionsForAllSessions: () =>
-        bridge.refreshExtensionsForAllSessions(),
+      refreshExtensionsForAllSessions: (sessionIds) =>
+        sessionIds === undefined
+          ? bridge.refreshExtensionsForAllSessions()
+          : bridge.refreshExtensionsForAllSessions(undefined, { sessionIds }),
       ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
       ...(deps.persistSettings
         ? { persistSettings: deps.persistSettings }
@@ -2500,17 +2503,31 @@ export function createServeApp(
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
+  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   if (hostedHarness) {
-    registerHostedHarnessSessionRoutes(
-      app,
-      hostedHarness,
-      primaryBoundWorkspace,
+    const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
         ? {
             baseUrl: opts.managedRuntimeBrokerUrl,
             token: opts.managedRuntimeBrokerToken,
           }
-        : undefined,
+        : undefined;
+    if (opts.hostedCsiSessionStoreUrl && broker) {
+      const privateSessions = registerHostedCsiSessionRoutes(
+        app,
+        hostedHarness,
+        opts.hostedCsiSessionStoreUrl,
+        broker,
+        (id) => ordinary.owns(id),
+      );
+      stopHostedCsiSessions = privateSessions.stopLocal;
+      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
+    }
+    const ordinary = registerHostedHarnessSessionRoutes(
+      app,
+      hostedHarness,
+      primaryBoundWorkspace,
+      broker,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
@@ -4183,6 +4200,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (
@@ -4207,12 +4225,14 @@ export function createServeApp(
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
         stopSessionAgentOrchestrators?: () => void;
+        stopHostedMountHandbacks?: () => void;
       };
       stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
+      stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

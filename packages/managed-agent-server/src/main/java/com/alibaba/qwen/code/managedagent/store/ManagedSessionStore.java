@@ -254,9 +254,33 @@ public class ManagedSessionStore {
                         + " within the hot-path bound; retry.");
     }
 
-    static void lockBounded(Runnable lock) {
+    /**
+     * Runs one sweep candidate in its own transaction. A guard refusal skips that candidate
+     * instead of aborting the sweep; any other failure propagates unchanged.
+     */
+    static <T> T skipContended(
+            org.springframework.transaction.support.TransactionTemplate transactions,
+            org.springframework.transaction.support.TransactionCallback<T> body) {
         try {
+            return transactions.execute(body);
+        } catch (ApiException refusal) {
+            if (!"tenant_guard_contended".equals(refusal.getCode())) {
+                throw refusal;
+            }
+            return null;
+        }
+    }
+
+    static void lockBounded(Runnable lock) {
+        lockBoundedResult(() -> {
             lock.run();
+            return null;
+        });
+    }
+
+    static <T> T lockBoundedResult(Supplier<T> lock) {
+        try {
+            return lock.get();
         } catch (PessimisticLockingFailureException | QueryTimeoutException error) {
             throw guardContended();
         }
@@ -529,7 +553,7 @@ public class ManagedSessionStore {
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query(
                         "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ? AND"
-                                + " workspace_id IS NOT NULL FOR UPDATE",
+                                + " (workspace_id IS NOT NULL OR session_kind = 'PUBLIC') FOR UPDATE",
                 (row, index) -> row.getString("status"), tenantId, sessionId);
         if (authority == null && !closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
             throw conflict("managed_session_not_writable", "The Session is closing or closed.");
@@ -550,7 +574,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -565,7 +589,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -943,11 +967,13 @@ public class ManagedSessionStore {
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
+        boolean wakeInput = false;
         for (String line :
                 new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = ManagedExtensionRecordStore.parse(line);
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
+                wakeInput |= WakeRecoveryStore.isWakeInput(event);
                 ManagedHostedRecoveryRecords.validateEvent(
                         event.path("kind").asText(),
                         event.path("payload"),
@@ -1092,6 +1118,8 @@ public class ManagedSessionStore {
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
+                        + " wake_pending = wake_pending OR ?,"
+                        + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
                         + " latest_checkpoint_resource_id),"
@@ -1101,7 +1129,9 @@ public class ManagedSessionStore {
                         + " activation_head_revision = ?, storage_version = ?, gmt_modified = ?"
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ?",
-                revision, request.lastSequence(), request.commitDigest(),
+                revision, request.lastSequence(),
+                wakeInput,
+                head.journalRevision(), revision, request.commitDigest(),
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()
@@ -2843,42 +2873,12 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
-    private boolean insertSessionRoot(String tenantId, String sessionId) {
-        long now = epochMillis(databaseNow());
-        String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
-        String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        int inserted = jdbc.update(
-                "INSERT IGNORE INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
-                    + " session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?,"
-                    + " 'CONTROL', ?, ?, ?, ?, ?)",
-                tenantId,
-                sessionId,
-                tenantKey,
-                sessionKey,
-                sessionScopeKey(tenantId, sessionId),
-                now,
-                now);
-        return inserted == 1;
-    }
-
     private void ensureSessionRoot(String tenantId, String sessionId) {
         // Take the root row exclusively first: ordinary writers lock it
-        // without a tenant guard (#13800), and the shared lock INSERT IGNORE
-        // takes on an existing row would otherwise upgrade behind one of
-        // them and deadlock; lockSessionRoot materializes the row with its
-        // keys, so the INSERT IGNORE below never inserts.
+        // without a tenant guard (#13800); keep that order before
+        // initializing the session event stream.
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
-        insertSessionRoot(tenantId, sessionId);
-        materializeSessionRoot(tenantId, sessionId);
-    }
-
-    private void materializeSessionRoot(String tenantId, String sessionId) {
         long now = epochMillis(databaseNow());
-        String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
-        String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
-                        + " WHERE tenant_id = ? AND session_id = ? AND session_scope_key IS NULL",
-                tenantKey, sessionKey, sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
         jdbc.update(
                 "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                         + " gmt_modified) VALUES (?, ?, 'SESSION', X'', ?)",
@@ -2895,7 +2895,7 @@ public class ManagedSessionStore {
         return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scopeKey, resourceId);
     }
 
-    private static String commandKeyHash(String operation,
+    static String commandKeyHash(String operation,
             String commandId) {
         return sha256((operation + "\u0000" + commandId)
                 .getBytes(StandardCharsets.UTF_8));

@@ -1,8 +1,12 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ResidentWorkspaces;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -10,6 +14,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,6 +47,9 @@ class ResidentWorkspaceProvisionerTest {
     private MockedConstruction<WorkspaceCsiRuntimeProvisioner> delegates;
     private ResidentWorkspaceProvisioner wrapper;
     private RuntimeProvisionRequest request;
+    private ManagedAgentProperties properties;
+    private JdbcTemplate jdbc;
+    private JdbcRuntimeBindingRepository bindings;
     private final RuntimeProvisionSeed seed = new RuntimeProvisionSeed("request", "runtime", "incarnation",
             "lease", 1, "inert-test-token");
 
@@ -55,7 +64,7 @@ class ResidentWorkspaceProvisionerTest {
                 new WorkspaceCsiResourceGuard.ProtectionIdentity("namespace", "policy", "policy-uid", 1,
                         "binding", "binding-uid", 1), "worker@sha256:" + "a".repeat(64),
                 List.of("node", "/worker/cli.js"), List.of());
-        var properties = new ManagedAgentProperties();
+        properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(false);
         var config = properties.getRuntimeBroker();
@@ -67,12 +76,12 @@ class ResidentWorkspaceProvisionerTest {
         config.setResidentKubernetesApiUrl("https://no-network.invalid");
         config.setResidentKubernetesTokenFile("/inert/token");
         config.setResidentKubernetesCaFile("/inert/ca");
-        var jdbc = mock(JdbcTemplate.class);
+        jdbc = mock(JdbcTemplate.class);
         var source = mock(DataSource.class);
         when(jdbc.getDataSource()).thenReturn(source);
         when(jdbc.queryForList(anyString(), eq(String.class), any(), any(), any(), any(), any()))
                 .thenReturn(List.of(new ObjectMapper().writeValueAsString(registration)));
-        var bindings = mock(JdbcRuntimeBindingRepository.class);
+        bindings = mock(JdbcRuntimeBindingRepository.class);
         when(bindings.usesDataSource(source)).thenReturn(true);
         wrapper = new ResidentWorkspaceProvisioner(properties, jdbc, mock(PlatformTransactionManager.class), bindings);
         request = new RuntimeProvisionRequest(ResidentWorkspaces.scope(mapping), null, "kubernetes-workspace", "storage");
@@ -82,6 +91,29 @@ class ResidentWorkspaceProvisionerTest {
     void tearDown() {
         delegates.close();
         clients.close();
+    }
+
+    @Test
+    void logicalCloseIsAvailableOnlyForTheConfiguredResidentBinding() {
+        var config = properties.getRuntimeBroker();
+        config.setPort(0);
+        config.setProvisioner("kubernetes-workspace");
+        config.setToken("inert-broker-token");
+        config.setWorkspaceId("workspace");
+        config.setWorkspaceCwd("/workspace");
+        properties.getHarness().setCapabilityDigest("test-capability");
+        var binding = new ContextBinding("tenant", "workspace", 1, "storage", ".",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var foreign = new ContextBinding("tenant", "other-workspace", 1, "storage", ".",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        try (var broker = new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties,
+                bindings, new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
+                mock(WorkspaceExecutionStore.class), null, null, jdbc,
+                mock(PlatformTransactionManager.class), wrapper)) {
+            assertThat(broker.supportsWorkspaceClose()).isTrue();
+            assertThat(RuntimeWarmer.supportsClose(broker, binding)).isTrue();
+            assertThat(RuntimeWarmer.supportsClose(broker, foreign)).isFalse();
+        }
     }
 
     @Test
