@@ -798,6 +798,7 @@ fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
 
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
     is_bootstrap_url(url)
+        // Web Shell srcdoc previews rely on sandboxing and CSP for isolation.
         || url.as_str() == "about:srcdoc"
         || lock(origin)
             .as_ref()
