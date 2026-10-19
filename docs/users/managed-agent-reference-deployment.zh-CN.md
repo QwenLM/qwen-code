@@ -92,7 +92,7 @@ bin/qwen-managed-agent-bootstrap
 bin/qwen-managed-agent-server --check
 ```
 
-检查范围包括 JDK、配置文件及其权限、凭据密钥环、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验原生 Workspace storage 注册。
+检查范围包括 JDK、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验原生 Workspace storage 注册。
 
 ## systemd
 
