@@ -164,6 +164,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.ArtifactAccess.class, List.of("ArtifactAccess")),
                     entry(ApiModels.ArtifactResponse.class, List.of("ArtifactResponse")),
                     entry(ApiModels.ToolResultResponse.class, List.of("ToolResultResponse")),
+                    entry(ApiModels.WebShellToolDetails.class, List.of("WebShellToolDetails")),
+                    entry(ApiModels.WebShellShellResult.class, List.of("WebShellShellResult")),
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
@@ -619,6 +621,9 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getArtifactContent", 401,
                 get("/v1/agents/sessions/%s/artifacts/artifact_missing/content".formatted(sessionId))
                         .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellToolDetails", 401,
+                post("/api/agent/web-shell/v1/tool-details/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
         exchange(drift, "getWebShellToolResult", 401,
                 post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));

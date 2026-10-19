@@ -1247,9 +1247,11 @@ public class ManagedAgentStore implements AgentStateStore {
         boolean commandEffect = ACTIVE_TURN_STATES.contains(turn.status())
                 && !"CANCELLING".equals(turn.status());
         if (commandEffect) {
+            // D7-2: a user cancel is due at once, never behind the Runtime
+            // recovery park's recheck window.
             int updated = jdbc.update("UPDATE ma_turn SET status ="
-                            + " 'CANCELLING', gmt_modified = ?, version ="
-                            + " version + 1 WHERE tenant_id = ? AND"
+                            + " 'CANCELLING', retry_after = NULL, gmt_modified = ?,"
+                            + " version = version + 1 WHERE tenant_id = ? AND"
                             + " session_id = ? AND turn_id = ? AND status IN"
                             + " ('ACCEPTED', 'RUNNING')",
                     now, tenantId, sessionId, turnId);
@@ -4666,13 +4668,28 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
-        // #14387: a Turn marked recovery-blocked (its workflow's Harness
-        // generation was lost) is parked, never re-dispatched — without
-        // the carve-out the sweep would claim → refuse → release it once
-        // per tick forever. A cancel still scans it: settling the Turn
+        // #14387 / D7-2: a Turn marked recovery-blocked (its workflow's
+        // generation was lost, or its parked Runtime execution's acceptance
+        // is still unknown) is parked, never re-dispatched — without the
+        // carve-out the sweep would claim → refuse → release it once per
+        // tick forever. A cancel still scans it: settling the Turn
         // cancelled is the cancel's own act, not a re-dispatch.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code <> '" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "') AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                (result, row) -> new DispatchTarget(
+                        result.getString("tenant_id"),
+                        result.getString("session_id"),
+                        result.getString("turn_id")), now, now, limit);
+    }
+
+    public List<DispatchTarget> findRuntimeRecoveryParked(long now, int limit) {
+        // D7-2: a Turn whose parked Runtime execution still cannot be proved
+        // either way waits for its recheck, never for a dispatch. A cancel
+        // is not scanned here: the normal sweep owns that lane.
+        return jdbc.query(
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING') AND error_code = '"
+                        + AgentStateStore.RUNTIME_RECOVERY_BLOCKED
+                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -4740,6 +4757,26 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " 'CANCELLING')",
                 errorCode, errorMessage, now, tenantId, sessionId, turnId,
                 owner, now) == 1;
+    }
+
+    @Override
+    @Transactional
+    public boolean parkTurnForRuntimeRecovery(String tenantId,
+            String sessionId, String turnId, String owner, String message,
+            long retryAfter) {
+        requireLegacyMutation(tenantId, sessionId);
+        long now = clock.millis();
+        // D7-2: the park keeps the Turn active so its input stays unsettled.
+        // Only a proven cancel may settle it; the recheck drives that cancel.
+        return jdbc.update("UPDATE ma_turn SET error_code = ?,"
+                        + " error_message = ?, retry_after = ?,"
+                        + " dispatch_owner = NULL, dispatch_lease_until = NULL,"
+                        + " gmt_modified = ?, version = version + 1 WHERE"
+                        + " tenant_id = ? AND session_id = ? AND turn_id = ? AND"
+                        + " dispatch_owner = ? AND dispatch_lease_until >= ? AND"
+                        + " status IN ('ACCEPTED', 'RUNNING')",
+                AgentStateStore.RUNTIME_RECOVERY_BLOCKED, message, retryAfter,
+                now, tenantId, sessionId, turnId, owner, now) == 1;
     }
 
     @Override
