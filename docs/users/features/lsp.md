@@ -346,10 +346,10 @@ You can override trust requirements for specific servers in their configuration:
 
 ### Server Not Starting
 
-1. **Verify `--experimental-lsp` flag**: Make sure you're using the flag when starting Qwen Code
+1. **Verify LSP is enabled**: Use the `tools.lspEnabled` setting (user, system or system-defaults scope) or the `--experimental-lsp` flag; `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override both (disable wins)
 2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
 3. **Check the command**: The server binary must be in your system `PATH`, or specified as an absolute path (e.g. `/opt/llvm/bin/clangd`). Relative paths that escape the workspace are blocked
-4. **Check workspace trust**: The workspace must be trusted for LSP (use `/trust`)
+4. **Check workspace trust**: With `security.folderTrust.enabled` on, the workspace must be trusted for LSP (use `/trust`); with it off — the default — an untrusted folder's servers are still admitted
 5. **Check logs**: Start Qwen Code with `--debug`, then search for LSP-related entries in the debug log (see Debugging section below)
 6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 
@@ -459,7 +459,7 @@ Extensions can provide LSP server configurations through the `lspServers` field 
 
 ### Q: How do I enable LSP?
 
-Use the `--experimental-lsp` flag when starting Qwen Code:
+Use the `tools.lspEnabled` setting (user, system or system-defaults scope) or the `--experimental-lsp` flag. `QWEN_CODE_ENABLE_LSP=1` and `QWEN_CODE_DISABLE_LSP=1` override both (disable wins); workspace-scoped values are ignored.
 
 ```bash
 qwen --experimental-lsp
