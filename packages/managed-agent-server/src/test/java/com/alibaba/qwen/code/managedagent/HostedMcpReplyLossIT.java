@@ -69,6 +69,9 @@ class HostedMcpReplyLossIT {
     private volatile boolean dropOwnerRelease;
     private final java.util.concurrent.atomic.AtomicBoolean ownerDropArmed =
             new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile boolean dropExecutionPrepare;
+    private final java.util.concurrent.atomic.AtomicBoolean prepareDropArmed =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final List<Map<String, Object>> wire = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
@@ -210,6 +213,28 @@ class HostedMcpReplyLossIT {
                 .asBoolean()).isTrue();
         assertThat(effects("resource_read"))
                 .containsExactly("ext://proof", "ext://hold");
+
+        // FG12a: a lost tool-start reply. The model calls the MCP tool; the
+        // execution reservation loses its reply, and the retry reuses the
+        // same idempotency key, so the tool effect happens once.
+        String toolPromptId = uuid();
+        List<Map<String, Object>> toolPrompt = List.of(Map.of("type", "text",
+                "text", "FG12_TOOL"));
+        String toolPayload = json.writeValueAsString(toolPrompt);
+        dropExecutionPrepare = true;
+        prepareDropArmed.set(true);
+        harnessRequest("POST", "/session/" + session.id() + "/prompt",
+                Map.of("promptId", toolPromptId, "prompt", toolPrompt,
+                        "payloadDigest",
+                        "sha256:" + DigestUtils.sha256Hex(toolPayload)),
+                session.clientId(), 202);
+        waitFor(() -> assertThat(harnessRequest("GET", "/session/"
+                + session.id() + "/status", null, session.clientId(), 200)
+                        .path("hasActivePrompt").asBoolean()).isFalse());
+        assertThat(prepareCalls()).hasSize(2);
+        assertThat(prepareCalls().getFirst().dropped()).isTrue();
+        assertThat(prepareCalls().getLast().dropped()).isFalse();
+        assertThat(effects("tool_call")).containsExactly("FG12_TOOL");
 
         // FG12a: a lost mcp-release reply. The close resolves the release
         // through a status lookup; a same-id release is re-sent only when
@@ -390,6 +415,13 @@ class HostedMcpReplyLossIT {
 
     private List<ProxyCall> controls(String kind) {
         return proxyCalls.stream().filter(call -> kind.equals(call.kind()))
+                .toList();
+    }
+
+    private List<ProxyCall> prepareCalls() {
+        return proxyCalls.stream()
+                .filter(call -> "POST".equals(call.method())
+                        && call.path().endsWith("/executions:prepare"))
                 .toList();
     }
 
@@ -604,18 +636,42 @@ class HostedMcpReplyLossIT {
 
     private void modelReply(HttpExchange exchange) throws IOException {
         try {
-            json.readTree(exchange.getRequestBody());
+            JsonNode request = json.readTree(exchange.getRequestBody());
+            boolean toolResult = false;
+            boolean toolPrompt = false;
+            for (JsonNode message : request.path("messages")) {
+                if ("tool".equals(message.path("role").asText()))
+                    toolResult = true;
+                if ("user".equals(message.path("role").asText())
+                        && message.path("content").toString()
+                                .contains("FG12_TOOL"))
+                    toolPrompt = true;
+            }
+            String mcpName = null;
+            for (JsonNode tool : request.path("tools")) {
+                String name = tool.at("/function/name").asText();
+                if (name.startsWith("mcp_")) mcpName = name;
+            }
+            boolean call = toolPrompt && !toolResult && mcpName != null;
             var chunk = json.createObjectNode().put("id", "fg12a")
                     .put("object", "chat.completion.chunk").put("created", 0)
                     .put("model", "loss-fixture");
             var choice = chunk.putArray("choices").addObject()
                     .put("index", 0);
-            choice.putObject("delta").put("role", "assistant")
-                    .put("content", "FG12_DONE");
+            var delta = choice.putObject("delta").put("role", "assistant");
+            if (call) {
+                delta.putArray("tool_calls").addObject().put("index", 0)
+                        .put("id", "call_fg12_tool").put("type", "function")
+                        .putObject("function").put("name", mcpName)
+                        .put("arguments", json.writeValueAsString(
+                                Map.of("value", "FG12_TOOL")));
+            } else {
+                delta.put("content", "FG12_DONE");
+            }
             choice.putNull("finish_reason");
             String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
             choice.putObject("delta");
-            choice.put("finish_reason", "stop");
+            choice.put("finish_reason", call ? "tool_calls" : "stop");
             byte[] response = (first + "data: "
                     + json.writeValueAsString(chunk)
                     + "\n\ndata: [DONE]\n\n")
@@ -681,6 +737,10 @@ class HostedMcpReplyLossIT {
                 && "POST".equals(exchange.getRequestMethod())
                 && path.endsWith(":release")
                 && ownerDropArmed.compareAndSet(true, false));
+        drop = drop || (dropExecutionPrepare
+                && "POST".equals(exchange.getRequestMethod())
+                && path.endsWith("/executions:prepare")
+                && prepareDropArmed.compareAndSet(true, false));
         URI upstream = URI.create("http://127.0.0.1:" + brokerPort + path
                 + (query == null ? "" : "?" + query));
         HttpRequest.Builder builder = HttpRequest.newBuilder(upstream)
