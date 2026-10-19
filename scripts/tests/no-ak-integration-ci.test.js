@@ -194,43 +194,55 @@ describe('no-AK integration CI wiring', () => {
     expect(packageJson.scripts.typecheck).toContain(
       `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`,
     );
+    const expectedFiles = [
+      './fake-openai-server.test.ts',
+      './test-helper.test.ts',
+      './chat-transcript-contract.test.ts',
+      './skill-hooks-invocation-parity.test.ts',
+      './skill-hooks-resume.test.ts',
+      './qwen-live-m4-acp-call.test.ts',
+      './qwen-live-m4-acp-permission.test.ts',
+      './qwen-live-m4-acp-steering.test.ts',
+      './qwen-live-m4-acp-multibackend.test.ts',
+      './qwen-live-m1-call.test.ts',
+      './qwen-live-m2-inject.test.ts',
+      './qwen-live-m2-permission.test.ts',
+      './qwen-live-m2-steering.test.ts',
+      './cli/_prompt-latency-policy.test.ts',
+      './cli/hosted-harness-process.test.ts',
+      './cli/daemon-invocation-context.test.ts',
+      './cli/headless-workflow-skill.test.ts',
+      './cli/workflow-ancestor-discovery.test.ts',
+      './cli/daemon-workflow-ancestor-trust.test.ts',
+      './cli/list_directory.test.ts',
+      './cli/tool-hook-context.test.ts',
+      './cli/tool-hook-updated-input.test.ts',
+      './cli/qwen-serve-routes.test.ts',
+      './cli/qwen-serve-streaming.test.ts',
+      './cli/qwen-serve-standalone-concurrency.test.ts',
+      './interactive/workflow-completion.test.ts',
+      './sdk-typescript/abort-and-lifecycle.test.ts',
+      './sdk-typescript/permission-control.test.ts',
+      './sdk-typescript/sdk-mcp-server.test.ts',
+      './sdk-typescript/subagents.test.ts',
+      './sdk-typescript/system-control.test.ts',
+      './sdk-typescript/tool-control.test.ts',
+    ];
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
         'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
-        './fake-openai-server.test.ts',
-        './test-helper.test.ts',
-        './chat-transcript-contract.test.ts',
-        './skill-hooks-invocation-parity.test.ts',
-        './skill-hooks-resume.test.ts',
-        './qwen-live-m4-acp-call.test.ts',
-        './qwen-live-m4-acp-permission.test.ts',
-        './qwen-live-m4-acp-steering.test.ts',
-        './qwen-live-m4-acp-multibackend.test.ts',
-        './qwen-live-m1-call.test.ts',
-        './qwen-live-m2-inject.test.ts',
-        './qwen-live-m2-permission.test.ts',
-        './qwen-live-m2-steering.test.ts',
-        './cli/_prompt-latency-policy.test.ts',
-        './cli/hosted-harness-process.test.ts',
-        './cli/daemon-invocation-context.test.ts',
-        './cli/headless-workflow-skill.test.ts',
-        './cli/workflow-ancestor-discovery.test.ts',
-        './cli/daemon-workflow-ancestor-trust.test.ts',
-        './cli/list_directory.test.ts',
-        './cli/tool-hook-context.test.ts',
-        './cli/tool-hook-updated-input.test.ts',
-        './cli/qwen-serve-routes.test.ts',
-        './cli/qwen-serve-streaming.test.ts',
-        './cli/qwen-serve-standalone-concurrency.test.ts',
-        './interactive/workflow-completion.test.ts',
-        './sdk-typescript/abort-and-lifecycle.test.ts',
-        './sdk-typescript/permission-control.test.ts',
-        './sdk-typescript/sdk-mcp-server.test.ts',
-        './sdk-typescript/subagents.test.ts',
-        './sdk-typescript/system-control.test.ts',
-        './sdk-typescript/tool-control.test.ts',
+        ...expectedFiles,
       ].join(' '),
     );
+    // Vitest positional args are filename filters, not paths: a renamed entry
+    // matches nothing while the other filters keep vitest exiting 0, so the
+    // gate would report pass with that file's coverage silently gone.
+    for (const entry of expectedFiles) {
+      expect(
+        existsSync(path.join(ROOT, 'integration-tests', entry)),
+        entry,
+      ).toBe(true);
+    }
   });
 
   it('runs the no-AK integration script as its own check on PRs and the merge queue', () => {
