@@ -523,17 +523,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
-    // Teammate activity notices add attributed tool and inter-agent message
-    // bubbles to this entry on top of that copy. Merged with main 52ae53b0
-    // the two sides together measure 1,338,274 UTF-16 units, past both the
-    // 1,338,000 ceiling main carries and the 1,338,500 this branch carried,
-    // so the bound moves to 1,340,000 and retains 1,726 units of margin.
+    // Attachment recovery copy (#14628) measures 1,338,049 at 9c3555b334:
+    // 251 units of shared copy above its base, while Managed interactive code
+    // stays excluded. Teammate activity notices add attributed tool and
+    // inter-agent message bubbles to this entry on top of that shared table;
+    // with both landed the merged entry measures 1,340,232 UTF-16 units, so
+    // the bound moves to 1,342,000 and retains 1,768 units of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_340_000);
+    expect(js.length).toBeLessThan(1_342_000);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
