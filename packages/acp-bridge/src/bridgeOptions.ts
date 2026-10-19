@@ -28,6 +28,7 @@ import type {
   BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
 } from './bridgeTypes.js';
+import type { WorkflowAncestorTrustHandler } from './workflow-ancestor-trust.js';
 
 export type BridgeExecutionEngine = SessionExecutionEngine;
 // The ACP host writes this receipt and the Bridge checks it: one definition.
@@ -706,6 +707,8 @@ export interface BridgeOptions {
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
+  /** Resolves ancestor workflow trust from the owning daemon runtime. */
+  onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler;
 }
 
 /**
