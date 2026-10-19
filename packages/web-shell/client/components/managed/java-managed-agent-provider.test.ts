@@ -10,6 +10,47 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('reads tool details through the authenticated WebShell route and preserves empty output', async () => {
+    const details = {
+      input: { command: 'true' },
+      output: '',
+      truncated: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(details));
+    const abort = new AbortController();
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      getHeaders: () => ({
+        'X-Qwen-Tenant-Id': 'tenant',
+        'X-Qwen-Actor-Id': 'actor',
+      }),
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.toolDetails!.get('session-1', 'item-1', {
+        clientId: 'client',
+        signal: abort.signal,
+      }),
+    ).toEqual(details);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/tool-details/get',
+    );
+    expect(JSON.parse(String(request?.body))).toEqual({
+      sessionId: 'session-1',
+      itemId: 'item-1',
+    });
+    expect(request?.signal).toBe(abort.signal);
+    expect(new Headers(request?.headers).get('X-Qwen-Tenant-Id')).toBe(
+      'tenant',
+    );
+    expect(new Headers(request?.headers).get('X-Qwen-Actor-Id')).toBe('actor');
+  });
+
   it('reads the selected Session Skill catalog with authenticated cancellable requests', async () => {
     const catalog = {
       skills: [{ name: 'review', description: 'Published review.' }],

@@ -350,6 +350,18 @@ class WorkspaceCsiSessionGuardTest {
     }
 
     @Test
+    void slotOnlyCsiMarkerWithoutAnyBindingStillTakesTheLockedFence() {
+        ready();
+        jdbc.update(
+                "UPDATE ma_session SET tool_profile = 'hosted-workspace-files/1',"
+                        + " runtime_request_key = NULL");
+        jdbc.update("UPDATE ma_runtime_slot SET active_binding_id = NULL");
+        jdbc.update("DELETE FROM ma_runtime_binding");
+        assertThat(jdbc.queryForObject("SELECT csi_guard FROM ma_session", Boolean.class)).isFalse();
+        assertBrokerCode(() -> transaction.execute(status -> acquire()), "csi_original_binding_unavailable");
+    }
+
+    @Test
     void ordinarySlotReferencesCannotHideForeignCsiAfterTheFirstTwoCandidates() {
         ready();
         String legacyId = UUID.randomUUID().toString();

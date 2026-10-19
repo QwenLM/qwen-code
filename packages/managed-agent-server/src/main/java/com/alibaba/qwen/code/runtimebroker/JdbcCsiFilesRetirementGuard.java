@@ -91,8 +91,9 @@ public final class JdbcCsiFilesRetirementGuard {
         if (!retained) {
             initializeRetentionRoot(connection, tenant);
         }
-        List<Slot> slots = lockSlots(connection, tenant, session);
-        List<Binding> bindings = lockBindings(connection, tenant, session, slots);
+        List<Slot> slots = new ArrayList<>();
+        List<Binding> bindings = new ArrayList<>();
+        readRuntimeRows(connection, tenant, session, true, slots, bindings);
         requirePin(readPin(connection, tenant, session), request);
         if (!retained && (!slots.isEmpty() || !bindings.isEmpty())) {
             throw unavailable();
@@ -196,8 +197,9 @@ public final class JdbcCsiFilesRetirementGuard {
             throws SQLException {
         requireTransaction(connection);
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenantId, 10);
-        List<Slot> slots = lockSlots(connection, tenantId, sessionId);
-        List<Binding> bindings = lockBindings(connection, tenantId, sessionId, slots);
+        List<Slot> slots = new ArrayList<>();
+        List<Binding> bindings = new ArrayList<>();
+        readRuntimeRows(connection, tenantId, sessionId, true, slots, bindings);
         Pin pin = readPin(connection, tenantId, sessionId);
         if (pin == null || !CsiFilesRetirementProfile.PROFILE.equals(pin.profile())) {
             if (pin != null && pin.requestKey() != null
@@ -246,80 +248,50 @@ public final class JdbcCsiFilesRetirementGuard {
      */
     public static boolean hasCsiRuntimeMarker(Connection connection, String tenantId, String sessionId)
             throws SQLException {
-        List<String> references = new ArrayList<>();
+        return readRuntimeRows(connection, tenantId, sessionId, false,
+                new ArrayList<>(), new ArrayList<>());
+    }
+
+    private static boolean readRuntimeRows(Connection connection, String tenantId, String sessionId,
+            boolean locking, List<Slot> slots, List<Binding> bindings) throws SQLException {
+        List<Object> references = new ArrayList<>();
         StringBuilder sql = new StringBuilder(
-                "SELECT * FROM ma_runtime_binding WHERE (tenant_id = ? AND isolation_key = ?)");
-        // Plain reads still wait on metadata locks, so both statements carry
-        // the class's query timeout.
-        try (PreparedStatement statement = statement(connection,
-                "SELECT * FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?")) {
+                "SELECT " + ManagedSchemaProjection.RUNTIME_BINDING.columns()
+                        + " FROM ma_runtime_binding WHERE (tenant_id = ? AND isolation_key = ?)");
+        String slotSql = "SELECT " + ManagedSchemaProjection.RUNTIME_SLOT.columns()
+                + " FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?";
+        if (locking) {
+            slotSql += " ORDER BY request_key FOR UPDATE";
+        }
+        try (PreparedStatement statement = statement(connection, slotSql)) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    if (isProfile(request(rows).getScope())) {
+                    RuntimeProvisionRequest slotRequest = request(rows);
+                    boolean profile = isProfile(slotRequest.getScope());
+                    if (!locking && profile) {
                         return true;
+                    }
+                    String key = rows.getString("request_key");
+                    String activeBinding = com.alibaba.qwen.code.runtimebroker.managedschema
+                            .ManagedSchemaRows.identity(rows, "active_binding_id");
+                    if (locking) {
+                        slots.add(new Slot(slotRequest, key, activeBinding,
+                                rows.getLong("last_generation")));
                     }
                     sql.append(" OR request_key = ?");
-                    references.add(rows.getString("request_key"));
-                    String active = com.alibaba.qwen.code.runtimebroker.managedschema
-                            .ManagedSchemaRows.identity(rows, "active_binding_id");
-                    if (active != null) {
+                    references.add(key);
+                    if (activeBinding != null) {
                         sql.append(" OR binding_id = ?");
-                        references.add(active);
+                        references.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(activeBinding));
                     }
                 }
             }
         }
-        try (PreparedStatement statement = statement(connection, sql.toString())) {
-            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
-            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
-            for (int index = 0; index < references.size(); index++) {
-                JdbcRepositorySupport.setStringParameter(statement, index + 3, references.get(index));
-            }
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    if (isProfile(request(rows).getScope())) {
-                        return true;
-                    }
-                }
-            }
+        if (locking) {
+            sql.append(" ORDER BY request_key, binding_id FOR UPDATE");
         }
-        return false;
-    }
-
-    private static List<Slot> lockSlots(Connection connection, String tenantId, String sessionId) throws SQLException {
-        List<Slot> slots = new ArrayList<>();
-        try (PreparedStatement statement = statement(connection,
-                "SELECT " + ManagedSchemaProjection.RUNTIME_SLOT.columns() + " FROM ma_runtime_slot WHERE tenant_id = ? AND isolation_key = ?"
-                        + " ORDER BY request_key FOR UPDATE")) {
-            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
-            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    slots.add(new Slot(request(rows), rows.getString("request_key"),
-                            rows.getString("active_binding_id"), rows.getLong("last_generation")));
-                }
-            }
-        }
-        return slots;
-    }
-
-    private static List<Binding> lockBindings(Connection connection, String tenantId, String sessionId,
-            List<Slot> slots) throws SQLException {
-        List<Binding> bindings = new ArrayList<>();
-        StringBuilder sql = new StringBuilder("SELECT " + ManagedSchemaProjection.RUNTIME_BINDING.columns() + " FROM ma_runtime_binding"
-                + " WHERE (tenant_id = ? AND isolation_key = ?)");
-        List<Object> references = new ArrayList<>();
-        for (Slot slot : slots) {
-            sql.append(" OR request_key = ?");
-            references.add(slot.key());
-            if (slot.activeBinding() != null) {
-                sql.append(" OR binding_id = ?");
-                references.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(slot.activeBinding()));
-            }
-        }
-        sql.append(" ORDER BY request_key, binding_id FOR UPDATE");
         try (PreparedStatement statement = statement(connection, sql.toString())) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
@@ -333,19 +305,30 @@ public final class JdbcCsiFilesRetirementGuard {
             }
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    Original original = new Original(request(rows), rows.getString("binding_id"),
-                            rows.getLong("runtime_generation"),
-                            RuntimeBindingRecord.State.valueOf(rows.getString("binding_state")),
-                            rows.getBoolean("drain_requested"), rows.getLong("record_version"),
-                            rows.getObject("first_activation_journal_revision", Long.class));
-                    if (bindings.size() < 2 || isProfile(original.request().getScope())
-                            && bindings.stream().noneMatch(binding -> isProfile(binding.original().request().getScope()))) {
-                        bindings.add(new Binding(original, rows.getString("request_key"), rows.getString("scope_key")));
+                    RuntimeProvisionRequest bindingRequest = request(rows);
+                    boolean profile = isProfile(bindingRequest.getScope());
+                    if (!locking && profile) {
+                        return true;
+                    }
+                    if (locking) {
+                        Original original = new Original(bindingRequest,
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
+                                        .identity(rows, "binding_id"),
+                                rows.getLong("runtime_generation"),
+                                RuntimeBindingRecord.State.valueOf(rows.getString("binding_state")),
+                                rows.getBoolean("drain_requested"), rows.getLong("record_version"),
+                                rows.getObject("first_activation_journal_revision", Long.class));
+                        if (bindings.size() < 2 || isProfile(original.request().getScope())
+                                && bindings.stream().noneMatch(binding ->
+                                        isProfile(binding.original().request().getScope()))) {
+                            bindings.add(new Binding(original, rows.getString("request_key"),
+                                    rows.getString("scope_key")));
+                        }
                     }
                 }
             }
         }
-        return bindings;
+        return false;
     }
 
     static Original lockRuntimeSession(Connection connection, RuntimeSessionRecord session)

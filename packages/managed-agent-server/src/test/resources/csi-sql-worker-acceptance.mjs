@@ -11,6 +11,7 @@ import process from 'node:process';
 
 const root = process.cwd();
 const input = JSON.parse(await fs.readFile(process.argv[2], 'utf8'));
+const coldFixture = Boolean(input.cold || input.legacyAcceptedOnly);
 const output = process.argv[3];
 process.env.QWEN_HOME = path.join(output, 'home');
 process.env.QWEN_RUNTIME_DIR = path.join(output, 'runtime');
@@ -61,7 +62,7 @@ const checks = [];
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const wires = [];
 async function observedFetch(url, options = {}) {
-  if (!input.cold || new URL(url).pathname.startsWith('/fixture:'))
+  if (!coldFixture || new URL(url).pathname.startsWith('/fixture:'))
     return fetch(url, options);
   const wire = {
     url: String(url),
@@ -266,6 +267,14 @@ function installedImage(
   const receipt = wireJson(wire);
   const expected = structuredClone(before.image);
   const revision = request.expectedJournalRevision + 1;
+  assert.equal(
+    Number(cell(before.image.ma_session_head[0], 'journal_revision')),
+    request.expectedJournalRevision,
+  );
+  assert.equal(
+    Number(cell(before.image.ma_session_head[0], 'wake_head_revision')),
+    request.expectedJournalRevision,
+  );
   assert.equal(request.operation, 'installActivation');
   assert.equal(request.writerGeneration, 2);
   assert.equal(request.activationEpoch, 2);
@@ -292,6 +301,7 @@ function installedImage(
   expected.ma_session_head = [
     changedRow(before.image.ma_session_head[0], {
       journal_revision: revision,
+      wake_head_revision: revision,
       committed_sequence: request.lastSequence,
       last_commit_digest: request.commitDigest,
       activation_epoch: 2,
@@ -719,6 +729,7 @@ let worker,
   retirementJoined = false;
 const coldStores = [];
 let stopActivation = async () => {};
+let recoveredLegacySession;
 try {
   await fs.writeFile(path.join(workspace, 'marker.txt'), 'alpha\n', {
     mode: 0o640,
@@ -777,7 +788,7 @@ try {
   await broker('/tool-sessions:acquire', { turnKind: 'bootstrap' });
   const writerId = randomUUID();
   const writerToken = randomBytes(32).toString('base64url');
-  const leaseDurationMs = input.cold
+  const leaseDurationMs = coldFixture
     ? 15000
     : input.coldRecovery
       ? 10000
@@ -831,7 +842,7 @@ try {
     requireNew: true,
     create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
   };
-  if (input.cold) {
+  if (coldFixture) {
     const journal = await stores.journalStore.open({ sessionKey: key });
     const authority = await LocalManagedSessionAuthority.open({
       journal,
@@ -984,6 +995,191 @@ try {
     reachCut = resolve;
   });
   let producerState;
+  async function legacyTakeover(cut, originalWriterId, token) {
+    const acceptedIds = input.legacyMissingValid
+      ? ['legacy-read-0']
+      : ['legacy-read-0', 'legacy-read-2'];
+    assert.deepEqual(
+      cut.members.map((member) => member.fc.id),
+      acceptedIds,
+    );
+    assert.deepEqual(
+      cut.members.map((member) => member.reference.ordinal),
+      input.legacyMissingValid ? [0] : [0, 2],
+    );
+    const projected = await session.sink.project();
+    const assistant = projected.find((entry) => entry.uuid === cut.batchId);
+    assert.deepEqual(
+      assistant.message.parts.flatMap((part) =>
+        part.functionCall ? [part.functionCall.id] : [],
+      ),
+      ['legacy-read-0', 'legacy-invalid-1', 'legacy-read-2'],
+    );
+    assert.ok(
+      !projected.some(
+        (entry) =>
+          entry.type === 'tool_result' &&
+          entry.message.parts.some(
+            (part) => part.functionResponse?.id === 'legacy-invalid-1',
+          ),
+      ),
+    );
+    const events = session.authority.eventsInSequenceRange(
+      1,
+      session.authority.committedSequence,
+    );
+    assert.equal(
+      events.filter((event) => event.kind === 'tool.intent').length,
+      acceptedIds.length,
+    );
+    assert.equal(
+      events.filter((event) => event.kind === 'tool.receipt').length,
+      acceptedIds.length,
+    );
+    const oldExecutions = (await fixture('/fixture:inspect')).executions;
+    assert.equal(oldExecutions.length, acceptedIds.length);
+    assert.ok(
+      oldExecutions.every((row) => row.native_authorization_json !== null),
+    );
+    const originalOwner = await stores.publication.owner();
+    await stopActivation();
+    await stores.assertWritable();
+    await stores.stopLocal();
+    const quiet = await coldImage('legacy-joined');
+    const prefix = `/internal/managed-session-store/v1/sessions/${key.sessionId}`;
+    const storeHeaders = {
+      ...headers,
+      'X-Qwen-Managed-Writer-Token': token,
+      'X-Qwen-Tenant-Id': key.tenantId,
+    };
+    await post(
+      input.adapter,
+      `${prefix}/writers:acquire`,
+      {
+        workspaceId: key.workspaceId,
+        writerId: randomUUID(),
+        leaseMillis: 300000,
+      },
+      storeHeaders,
+      409,
+    );
+    const liveRefused = await coldImage('legacy-live-refused');
+    unchanged(quiet, liveRefused);
+    const clock = [];
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      const lease = await fixture('/fixture:leases');
+      clock.push(lease);
+      if (
+        lease.databaseNow >
+        Math.max(lease.writerLeaseUntil, lease.activationExpiresAt)
+      )
+        break;
+      assert.ok(
+        Date.now() < deadline,
+        'Original writer/activation must expire in real DB time',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await fs.writeFile(
+      path.join(output, 'legacy-clock.json'),
+      JSON.stringify(clock, null, 2),
+    );
+    const expired = await coldImage('legacy-expired');
+    unchanged(quiet, expired);
+    let evidenceRefusals = 0;
+    if (!input.legacyMissingValid) {
+      const checked = await fixture('/fixture:cold-refusals', {
+        writerToken: token,
+      });
+      assert.equal(checked.refusals, 4);
+      evidenceRefusals = checked.refusals;
+      unchanged(expired, await coldImage('legacy-negative-controls-restored'));
+    }
+    const successorWriter = randomUUID();
+    const grant = await post(
+      input.adapter,
+      `${prefix}/writers:acquire`,
+      {
+        workspaceId: key.workspaceId,
+        writerId: successorWriter,
+        leaseMillis: 300000,
+      },
+      storeHeaders,
+      input.legacyMissingValid ? 409 : 200,
+      'legacy accepted-only cold acquisition',
+    );
+    if (input.legacyMissingValid) {
+      unchanged(expired, await coldImage('legacy-missing-valid-refused'));
+      return {
+        legacyAcceptedOnly: true,
+        missingValid: true,
+        acquireStatus: 409,
+        writerGeneration: originalOwner.writerGeneration,
+        activationEpoch: initialActivation.epoch,
+        originalCallCount: 3,
+        acceptedCount: acceptedIds.length,
+        recoveredCount: 0,
+      };
+    }
+    assert.equal(grant.writerGeneration, 2);
+    const successor = createHttpManagedSessionStores({
+      baseUrl: input.adapter,
+      sessionKey: key,
+      writerId: successorWriter,
+      writerToken: token,
+      leaseDurationMs: 300000,
+      requestTimeoutMs: 20000,
+      fetchFn: observedFetch,
+    });
+    coldStores.push(successor);
+    const recoveredSession = await openManagedSession({
+      runtimeBaseDir: output,
+      transcriptPath: '',
+      sessionId: key.sessionId,
+      sessionKey: key,
+      cwd: '/workspace',
+      version: 'hosted-harness/1',
+      workerId: successorWriter,
+      activationLeaseDurationMs: 300000,
+      journalStore: successor.journalStore,
+      resourceStore: successor.resourceStore,
+    });
+    recoveredLegacySession = recoveredSession;
+    const { recoverHostedCsiReceipts } = await import(
+      cli('hosted-csi-cold-recovery')
+    );
+    const recovered = await recoverHostedCsiReceipts(
+      recoveredSession,
+      { baseUrl: input.broker, token: input.operatorToken },
+      cut.promptId,
+      cut.prompt,
+    );
+    assert.deepEqual(
+      recovered.parts.map((part) => part.functionResponse.id),
+      acceptedIds,
+    );
+    assert.equal(recovered.finalOutput, undefined);
+    assert.deepEqual(
+      (await fixture('/fixture:inspect')).executions,
+      oldExecutions,
+    );
+    assert.equal(
+      await fs.readFile(path.join(workspace, 'marker.txt'), 'utf8'),
+      'alpha\n',
+    );
+    return {
+      legacyAcceptedOnly: true,
+      missingValid: false,
+      acquireStatus: 200,
+      writerGeneration: (await successor.publication.owner()).writerGeneration,
+      activationEpoch: recoveredSession.activation.epoch,
+      originalCallCount: 3,
+      acceptedCount: acceptedIds.length,
+      recoveredCount: recovered.parts.length,
+      evidenceRefusals,
+    };
+  }
   for (const [index, mutation] of [
     {
       name: 'write_file',
@@ -1295,14 +1491,32 @@ try {
           await scope.bindBudget(new TurnBudget(), prompt);
           const complete = await scope.beginMainAttempt('owned-model');
           await complete(true, usage);
-          const functions = [
-            {
-              id: `owned-read-${index}`,
-              name: 'read_file',
-              args: { file_path: 'marker.txt' },
-            },
-            { id: `owned-mutate-${index}`, ...mutation },
-          ];
+          const functions = input.legacyAcceptedOnly
+            ? [
+                {
+                  id: 'legacy-read-0',
+                  name: 'read_file',
+                  args: { file_path: 'marker.txt' },
+                },
+                {
+                  id: 'legacy-invalid-1',
+                  name: 'read_file',
+                  args: { file_path: '../outside' },
+                },
+                {
+                  id: 'legacy-read-2',
+                  name: 'read_file',
+                  args: { file_path: 'marker.txt' },
+                },
+              ]
+            : [
+                {
+                  id: `owned-read-${index}`,
+                  name: 'read_file',
+                  args: { file_path: 'marker.txt' },
+                },
+                { id: `owned-mutate-${index}`, ...mutation },
+              ];
           const assistant = record('assistant', {
             daemonPromptId: promptId,
             model: 'owned-model',
@@ -1319,6 +1533,11 @@ try {
           const batchId = assistant.uuid;
           const members = [];
           for (const [ordinal, fc] of functions.entries()) {
+            if (
+              input.legacyAcceptedOnly &&
+              (ordinal === 1 || (input.legacyMissingValid && ordinal === 2))
+            )
+              continue;
             const payloadJson = JSON.stringify({
               toolName: fc.name,
               input: fc.args,
@@ -1392,19 +1611,25 @@ try {
             })),
             paths: ['marker.txt'],
           };
-          const intent = await history(
-            `csi-file-history:intent:${batchId}`,
-            preparation,
-            observation,
-          );
-          observation = await control('prepare', {
-            preparationRef: intent.recordRef,
-          });
-          await history(
-            `csi-file-history:prepared:${batchId}`,
-            { ...preparation, stage: 'prepared', intentRef: intent.recordRef },
-            observation,
-          );
+          if (!input.legacyAcceptedOnly) {
+            const intent = await history(
+              `csi-file-history:intent:${batchId}`,
+              preparation,
+              observation,
+            );
+            observation = await control('prepare', {
+              preparationRef: intent.recordRef,
+            });
+            await history(
+              `csi-file-history:prepared:${batchId}`,
+              {
+                ...preparation,
+                stage: 'prepared',
+                intentRef: intent.recordRef,
+              },
+              observation,
+            );
+          }
           for (const member of members) {
             const { executionCallId, reference } = member;
             await session.authority.appendExecutionEvent(
@@ -1537,7 +1762,7 @@ try {
               await fs.readFile(path.join(workspace, 'marker.txt')),
               workingBefore,
             );
-            if (!input.retirement && !input.cold) {
+            if (!input.retirement && !coldFixture) {
               const bindRequest = { ...request, action: 'bind', subject: null };
               const nativeRoute = '/internal/runtime-broker/csi/v1/native:read';
               await post(input.broker, nativeRoute, bindRequest, workerHeaders);
@@ -1717,14 +1942,18 @@ try {
               }),
               { class: 'trusted_entry' },
             );
-            if (input.cold && member === members.at(-1)) {
+            if (coldFixture && member === members.at(-1)) {
               invocations.push({
                 tool: fc.name,
                 executionCallId,
                 grantDigest: hash(JSON.stringify(grant)),
                 responseParts: status.result.responseParts,
               });
-              reachCut(firstSettled);
+              reachCut(
+                input.legacyAcceptedOnly
+                  ? { promptId, prompt, batchId, functions, members }
+                  : firstSettled,
+              );
               await new Promise(() => {});
             }
             await session.sink.write(tool);
@@ -1771,7 +2000,7 @@ try {
           );
         }),
     );
-    if (input.cold) {
+    if (coldFixture) {
       producerState = 'pending';
       void producer.then(
         () => {
@@ -1785,7 +2014,9 @@ try {
         cutReached,
         producer.then(() => assert.fail('Producer completed before cold cut')),
       ]);
-      coldResult = await coldTakeover(cut, writerId, writerToken);
+      coldResult = input.legacyAcceptedOnly
+        ? await legacyTakeover(cut, writerId, writerToken)
+        : await coldTakeover(cut, writerId, writerToken);
       assert.equal(producerState, 'pending');
       break;
     }
@@ -1802,94 +2033,125 @@ try {
         );
     completedTurns++;
   }
-  const retained = [];
-  for (const pin of observation.retainedBackups) {
-    const bytes = await fs.readFile(
-      path.join(workspace, '.qwen-csi-file-history', key.sessionId, pin.name),
+  if (input.legacyAcceptedOnly) {
+    assert.equal(
+      await fs.readFile(path.join(workspace, 'marker.txt'), 'utf8'),
+      'alpha\n',
     );
-    assert.equal(hash(bytes), pin.digest);
-    assert.equal(pin.mode, 0o640);
-    retained.push(bytes.toString());
-  }
-  assert.deepEqual(
-    retained.sort(),
-    input.cold ? ['alpha\n'] : ['alpha\n', 'beta\n'],
-  );
-  const finalBytes = await fs.readFile(
-    path.join(workspace, 'marker.txt'),
-    'utf8',
-  );
-  assert.equal(finalBytes, input.cold ? 'beta\n' : 'gamma\n');
-  assert.equal(observation.state.snapshots.length, input.cold ? 1 : 2);
-  const writerGeneration =
-    coldResult?.writerGeneration ??
-    (await stores.publication.owner()).writerGeneration;
-  let retirementResult = {};
-  if (input.retirement) {
-    retirementJoined = true;
-    await stores.csiRetirement.joinWriter();
-    const terminalRecords = await session.authority.prepareOriginalCsiRelease();
-    await stores.csiRetirement.prepare(terminalRecords);
-    const retirement = await fixture('/fixture:retire');
-    const drained = await stores.csiRetirement.complete(
-      retirement.retirementId,
+    const workerUrl = worker.ready.context.url;
+    await worker.close();
+    await assert.rejects(
+      fetch(workerUrl, { signal: AbortSignal.timeout(2000) }),
+      TypeError,
     );
-    assert.equal(drained.stage, 'DRAINED');
-    assert.equal(drained.progressVersion, 4);
-    const retainedBeforeClose = await fixture('/fixture:retained', {
-      token: writerToken,
-      label: 'worker-open',
-    });
-    retirementResult = { retirement: drained, retainedBeforeClose };
-    await stores.stopLocal();
-  }
-  const workerUrl = worker.ready.context.url;
-  await worker.close();
-  worker = undefined;
-  if (input.retirement) {
-    retirementResult.retainedAfterClose = await fixture('/fixture:retained', {
-      token: writerToken,
-      label: 'worker-closed',
-    });
-    retirementResult.retainedMatrix = await fixture(
-      '/fixture:retained-matrix',
-      {
+    await fs.writeFile(
+      path.join(output, 'result.json'),
+      JSON.stringify(
+        {
+          ...coldResult,
+          finalBytes: 'alpha\n',
+          workerClosed: true,
+          nativeSqlGrant: true,
+          nativeGrantInsertedByFixture: false,
+          workerRepliesStubbed: false,
+          nativeCsiDeployment: false,
+          fixture: 'H2/HTTP with actual worker and explicit mount facade',
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    const retained = [];
+    for (const pin of observation.retainedBackups) {
+      const bytes = await fs.readFile(
+        path.join(workspace, '.qwen-csi-file-history', key.sessionId, pin.name),
+      );
+      assert.equal(hash(bytes), pin.digest);
+      assert.equal(pin.mode, 0o640);
+      retained.push(bytes.toString());
+    }
+    assert.deepEqual(
+      retained.sort(),
+      input.cold ? ['alpha\n'] : ['alpha\n', 'beta\n'],
+    );
+    const finalBytes = await fs.readFile(
+      path.join(workspace, 'marker.txt'),
+      'utf8',
+    );
+    assert.equal(finalBytes, input.cold ? 'beta\n' : 'gamma\n');
+    assert.equal(observation.state.snapshots.length, input.cold ? 1 : 2);
+    const writerGeneration =
+      coldResult?.writerGeneration ??
+      (await stores.publication.owner()).writerGeneration;
+    let retirementResult = {};
+    if (input.retirement) {
+      retirementJoined = true;
+      await stores.csiRetirement.joinWriter();
+      const terminalRecords =
+        await session.authority.prepareOriginalCsiRelease();
+      await stores.csiRetirement.prepare(terminalRecords);
+      const retirement = await fixture('/fixture:retire');
+      const drained = await stores.csiRetirement.complete(
+        retirement.retirementId,
+      );
+      assert.equal(drained.stage, 'DRAINED');
+      assert.equal(drained.progressVersion, 4);
+      const retainedBeforeClose = await fixture('/fixture:retained', {
         token: writerToken,
-      },
+        label: 'worker-open',
+      });
+      retirementResult = { retirement: drained, retainedBeforeClose };
+      await stores.stopLocal();
+    }
+    const workerUrl = worker.ready.context.url;
+    await worker.close();
+    worker = undefined;
+    if (input.retirement) {
+      retirementResult.retainedAfterClose = await fixture('/fixture:retained', {
+        token: writerToken,
+        label: 'worker-closed',
+      });
+      retirementResult.retainedMatrix = await fixture(
+        '/fixture:retained-matrix',
+        {
+          token: writerToken,
+        },
+      );
+      assert.equal(retirementResult.retainedMatrix.length, 12);
+    }
+    await assert.rejects(
+      fetch(workerUrl, { signal: AbortSignal.timeout(2000) }),
+      TypeError,
     );
-    assert.equal(retirementResult.retainedMatrix.length, 12);
+    await fs.writeFile(
+      path.join(output, 'result.json'),
+      JSON.stringify(
+        {
+          ...retirementResult,
+          ...coldResult,
+          completedTurns,
+          hostedProducer: input.hostedProducer === true,
+          nativeSqlGrant: true,
+          workerClosed: true,
+          finalBytes,
+          retained,
+          invocations,
+          refusalChecks: checks.length,
+          writerGeneration,
+          coldRecovery: input.coldRecovery === true,
+          coldRefusalChecks,
+          originalActivation: initialActivation,
+          platformFixture: `${actualPlatform.value} real inodes; explicit mount/proc-fd and placement mapping`,
+          nativeCsiDeployment: false,
+          nativeGrantInsertedByFixture: false,
+          workerRepliesStubbed: false,
+        },
+        null,
+        2,
+      ),
+    );
   }
-  await assert.rejects(
-    fetch(workerUrl, { signal: AbortSignal.timeout(2000) }),
-    TypeError,
-  );
-  await fs.writeFile(
-    path.join(output, 'result.json'),
-    JSON.stringify(
-      {
-        ...retirementResult,
-        ...coldResult,
-        completedTurns,
-        hostedProducer: input.hostedProducer === true,
-        nativeSqlGrant: true,
-        workerClosed: true,
-        finalBytes,
-        retained,
-        invocations,
-        refusalChecks: checks.length,
-        writerGeneration,
-        coldRecovery: input.coldRecovery === true,
-        coldRefusalChecks,
-        originalActivation: initialActivation,
-        platformFixture: `${actualPlatform.value} real inodes; explicit mount/proc-fd and placement mapping`,
-        nativeCsiDeployment: false,
-        nativeGrantInsertedByFixture: false,
-        workerRepliesStubbed: false,
-      },
-      null,
-      2,
-    ),
-  );
 } catch (error) {
   console.error(error);
   throw error;
@@ -1897,13 +2159,14 @@ try {
   const cleanupErrors = [];
   for (const close of [
     () => stopActivation(),
+    () => recoveredLegacySession?.close({ releaseActivation: false }),
     ...coldStores.map((candidate) => () => candidate.stopLocal()),
     () =>
-      input.cold || retirementJoined
+      coldFixture || retirementJoined
         ? stores?.stopLocal()
         : session?.close({ releaseActivation: false }),
     () =>
-      input.cold || retirementJoined ? stores?.stopLocal() : stores?.close(),
+      coldFixture || retirementJoined ? stores?.stopLocal() : stores?.close(),
   ]) {
     try {
       await close();
@@ -1927,7 +2190,7 @@ try {
   Object.assign(fs, native);
   for (const handle of opened) await handle.close();
   await rootHandle.close();
-  if (input.cold)
+  if (coldFixture)
     await fs.writeFile(
       path.join(output, 'cold-wires.json'),
       JSON.stringify(wires, null, 2),

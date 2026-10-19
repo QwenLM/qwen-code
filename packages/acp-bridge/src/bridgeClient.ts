@@ -415,6 +415,7 @@ function artifactPayloadFields(
     sizeBytes: artifact['sizeBytes'] as number | undefined,
     metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
     retention: artifact['retention'] as SessionArtifactInput['retention'],
+    updateOnly: artifact['updateOnly'] as boolean | undefined,
   };
 }
 

@@ -124,14 +124,24 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         run(source, directory, false, 0, hostedProducer, coldRecovery);
     }
 
+    static void legacyAcceptance(DataSource source, Path directory, boolean missingValid) throws Exception {
+        run(source, directory, false, 0, false, false, missingValid ? "missing-valid" : "complete");
+    }
+
     private static void run(DataSource source, Path directory, boolean retire, int isolation,
             boolean hostedProducer, boolean coldRecovery) throws Exception {
+        run(source, directory, retire, isolation, hostedProducer, coldRecovery, null);
+    }
+
+    private static void run(DataSource source, Path directory, boolean retire, int isolation,
+            boolean hostedProducer, boolean coldRecovery, String legacyMode) throws Exception {
         boolean coldRun = isolation != 0;
         Path scenario = directory;
         String evidence = System.getProperty("csi.acceptance.evidence");
-        if (coldRun && evidence != null) {
+        if ((coldRun || legacyMode != null) && evidence != null) {
             Files.createDirectories(Path.of(evidence));
-            scenario = Files.createTempDirectory(Path.of(evidence), "cold-" + isolation + "-");
+            scenario = Files.createTempDirectory(Path.of(evidence), legacyMode == null
+                    ? "cold-" + isolation + "-" : "legacy-" + legacyMode + "-");
         }
         Path root = Path.of("../..").toRealPath();
         assertThat(Files.isRegularFile(root.resolve("packages/cli/dist/src/serve/managed-csi-file-worker.js")))
@@ -192,7 +202,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var retirement = new AtomicReference<WorkspaceCsiReservationStore.Retirement>();
         var nativeReads = new AtomicInteger();
         String operatorToken = UUID.randomUUID().toString();
-        var lifetime = coldRun ? Duration.ofMinutes(5) : Duration.ofSeconds(30);
+        var lifetime = coldRun || legacyMode != null ? Duration.ofMinutes(5) : Duration.ofSeconds(30);
         try (provisioner; var service = new RuntimeBrokerService(access, provisioner, access, bindings, sessions, executions,
                 "owned-broker", lifetime, lifetime);
                 var broker = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", brokerPort), operatorToken,
@@ -357,6 +367,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         respond(exchange, 200, response);
                     }
                 } catch (RuntimeBrokerException refusal) {
+                    if (legacyMode != null) {
+                        refusal.printStackTrace();
+                    }
                     try {
                         respond(exchange, refusal.getStatusCode(), Map.of("error", Map.of("code", refusal.getCode(),
                                 "message", refusal.getMessage())));
@@ -364,6 +377,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         exchange.close();
                     }
                 } catch (ApiException refusal) {
+                    if (legacyMode != null) {
+                        refusal.printStackTrace();
+                    }
                     try {
                         respond(exchange, refusal.getStatus().value(), Map.of("error", Map.of("code", refusal.getCode(),
                                 "message", refusal.getMessage())));
@@ -397,6 +413,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         Map.entry("cold", isolation),
                         Map.entry("hostedProducer", hostedProducer),
                         Map.entry("coldRecovery", coldRecovery),
+                        Map.entry("legacyAcceptedOnly", legacyMode != null),
+                        Map.entry("legacyMissingValid", "missing-valid".equals(legacyMode)),
                         Map.entry("runtime", Map.of("bindingId", initial.getBindingId(), "generation", Long.toString(initial.getGeneration()))),
                         Map.entry("sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", sessionId))));
                 Path producer = scenario.resolve("producer.mjs");
@@ -418,6 +436,24 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 assertThat(child.waitFor(180, TimeUnit.SECONDS)).as("Owned Node chain timed out").isTrue();
                 assertThat(child.exitValue()).as(Files.readString(scenario.resolve("node.log"))).isZero();
                 var result = JSON.readTree(scenario.resolve("result.json").toFile());
+                if (legacyMode != null) {
+                    boolean missingValid = "missing-valid".equals(legacyMode);
+                    assertThat(result.path("legacyAcceptedOnly").asBoolean()).isTrue();
+                    assertThat(result.path("missingValid").asBoolean()).isEqualTo(missingValid);
+                    assertThat(result.path("acquireStatus").asInt()).isEqualTo(missingValid ? 409 : 200);
+                    assertThat(result.path("writerGeneration").asLong()).isEqualTo(missingValid ? 1 : 2);
+                    assertThat(result.path("activationEpoch").asLong()).isEqualTo(missingValid ? 1 : 2);
+                    assertThat(result.path("originalCallCount").asInt()).isEqualTo(3);
+                    assertThat(result.path("acceptedCount").asInt()).isEqualTo(missingValid ? 1 : 2);
+                    assertThat(result.path("recoveredCount").asInt()).isEqualTo(missingValid ? 0 : 2);
+                    assertThat(result.path("workerClosed").asBoolean()).isTrue();
+                    assertThat(result.path("finalBytes").asText()).isEqualTo("alpha\n");
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
+                            + " WHERE execution_state = 'SETTLED'", Integer.class)).isEqualTo(missingValid ? 1 : 2);
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
+                            + " WHERE native_authorization_json IS NOT NULL", Integer.class)).isEqualTo(missingValid ? 1 : 2);
+                    return;
+                }
                 if (coldRun) {
                     assertThat(result.path("writerGeneration").asLong()).isEqualTo(2);
                     assertThat(result.path("activationEpoch").asLong()).isEqualTo(2);
@@ -864,11 +900,17 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             connection.setAutoCommit(false);
             var tables = new ArrayList<String>();
+            String schema = connection.getSchema();
+            if (schema == null) {
+                schema = connection.getCatalog();
+            }
             try (var statement = connection.prepareStatement("SELECT table_name FROM information_schema.tables"
-                    + " WHERE table_schema=DATABASE() AND table_type='BASE TABLE' ORDER BY table_name");
-                    var rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    tables.add(rows.getString(1));
+                    + " WHERE table_schema=? AND table_type='BASE TABLE' ORDER BY table_name")) {
+                statement.setString(1, schema);
+                try (var rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        tables.add(rows.getString(1));
+                    }
                 }
             }
             for (String table : tables) {

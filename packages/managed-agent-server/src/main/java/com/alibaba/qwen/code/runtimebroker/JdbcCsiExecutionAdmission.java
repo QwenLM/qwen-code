@@ -116,6 +116,7 @@ public final class JdbcCsiExecutionAdmission {
         if (batch != null) {
             require(members.stream().map(member -> member.getReference().get("functionCallId"))
                     .collect(java.util.stream.Collectors.toSet()).equals(batch.calls().stream()
+                            .filter(call -> CsiNativeToolReservation.refusalReason(original.request(), call) == null)
                             .map(CsiNativeActivationProof.FunctionCall::id)
                             .filter(id -> !batch.refusedFunctionIds().contains(id))
                             .collect(java.util.stream.Collectors.toSet())));

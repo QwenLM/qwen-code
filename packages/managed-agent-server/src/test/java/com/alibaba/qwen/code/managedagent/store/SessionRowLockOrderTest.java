@@ -144,8 +144,8 @@ class SessionRowLockOrderTest {
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
-            "ManagedActionStore.java", "ManagedToolResultProjector.java",
-            "WorkspaceCsiApplicationInventory.java",
+            "ManagedActionStore.java", "ManagedToolDetailsStore.java",
+            "ManagedToolResultProjector.java", "WorkspaceCsiApplicationInventory.java",
             "WorkspaceExecutionStore.java", "WorkspaceMigrationStore.java",
             "WorkspaceRecoveryStore.java");
 
@@ -484,6 +484,12 @@ class SessionRowLockOrderTest {
                         // lock this same-file parse cannot see; both pin here
                         // as Turn-row accessors, not lockers.
                         "hasLiveTurn",
+                        // D7-2's Tool-recovery park: the park write and its
+                        // due scan reach the Turn row, and the cross-file
+                        // legacy guard may take the session lock before it.
+                        // Both pin here as Turn-row accessors, not lockers.
+                        "findRuntimeRecoveryParked",
+                        "parkTurnForRuntimeRecovery",
                         "insertCancelCommand", "insertChildSession",
                         "insertChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
