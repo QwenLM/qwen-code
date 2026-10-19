@@ -13,8 +13,10 @@ import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Base64;
 import java.util.List;
@@ -90,6 +92,32 @@ class ManagedInputAttachmentTest {
                         .isEqualTo(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input()));
     }
 
+    @ParameterizedTest
+    @MethodSource("additionalImageFormats")
+    void preservesAdditionalImageFormatsThroughAdmissionReplayAndProjection(String mime, String data) {
+        String canonicalMime = mime.equals("image/jpg") ? "image/jpeg" : mime;
+        var blocks = List.of(new InputBlock("input_image", null, mime, data, null));
+        var admission = service.createSession("tenant", "image-format", "qwen-code", null, null, null, blocks);
+        var expected = List.of(Map.of("type", "image", "data", data, "mimeType", canonicalMime));
+        assertThat(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input())
+                .isEqualTo(expected);
+        var replay = service.createSession("tenant", "image-format", "qwen-code", null, null, null,
+                List.of(new InputBlock("input_image", null, canonicalMime, data, null)));
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.turnId()).isEqualTo(admission.turnId());
+        store.materializeNextBatch("tenant", admission.sessionId(), 100);
+        assertThat(service.listPublicItems("tenant", null, admission.sessionId(), 0, 100).data())
+                .singleElement().satisfies(item -> assertThat(item.attributes().get("inputAttachments"))
+                        .isEqualTo(expected));
+    }
+
+    static Stream<Arguments> additionalImageFormats() {
+        return Stream.of(
+                Arguments.of("image/jpg", Base64.getEncoder().encodeToString(new byte[] {(byte) 255, (byte) 216, (byte) 255})),
+                Arguments.of("image/gif", "R0lGODdhAQABAIAAAAAAAP///ywAAAAAAQABAAACAkQBADs="),
+                Arguments.of("image/gif", "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"));
+    }
+
     @Test
     void acceptsFileOnlyInputAndEnforcesTheWholeEncodedBudget() {
         var admitted = service.createSession("tenant", "file-only", "qwen-code", null, null, null,
@@ -121,6 +149,15 @@ class ManagedInputAttachmentTest {
                 new InputBlock("input_file", "x", "text/plain", "extra", "a.txt"),
                 new InputBlock("input_image", null, "image/png", PNG + "\n", null),
                 new InputBlock("input_image", null, "image/jpeg", PNG, null),
+                new InputBlock("input_image", null, "image/jpg", PNG, null),
+                new InputBlock("input_image", null, "image/gif", PNG, null),
+                new InputBlock("input_image", null, "image/gif",
+                        Base64.getEncoder().encodeToString("GIF88a".getBytes(StandardCharsets.US_ASCII)), null),
+                new InputBlock("input_image", null, "image/gif",
+                        Base64.getEncoder().encodeToString("GIF89".getBytes(StandardCharsets.US_ASCII)), null),
+                new InputBlock("input_image", null, "image/gif", "R0lGODlh\n", null),
+                new InputBlock("input_image", null, "image/bmp", PNG, null),
+                new InputBlock("input_image", null, "image/heic", PNG, null),
                 new InputBlock("input_image", "extra", "image/png", PNG, null),
                 new InputBlock("input_image", null, "image/svg+xml", PNG, null));
     }

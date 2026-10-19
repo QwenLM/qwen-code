@@ -11492,7 +11492,13 @@
           },
           "mime_type": {
             "type": "string",
-            "enum": ["image/png", "image/jpeg", "image/webp"]
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/jpg",
+              "image/gif",
+              "image/webp"
+            ]
           },
           "data": {
             "type": "string",
@@ -11500,7 +11506,7 @@
             "maxLength": 8388608
           }
         },
-        "description": "Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 8 MiB."
+        "description": "Canonical base64 PNG, JPEG, GIF or WebP image with a matching signature. The image/jpg alias is normalized to image/jpeg. The complete canonical input containing attachments is limited to 8 MiB."
       },
       "WebShellSkill": {
         "type": "object",

@@ -44,7 +44,7 @@ final class ManagedInputAttachments {
         }
         if ("input_image".equals(block.type()) && block.text() == null && block.name() == null) {
             String data = block.data();
-            String mime = block.mimeType();
+            String mime = "image/jpg".equals(block.mimeType()) ? "image/jpeg" : block.mimeType();
             if (data == null || data.isEmpty() || data.length() > MAX_INPUT_BYTES || mime == null) {
                 throw invalid();
             }
@@ -68,6 +68,9 @@ final class ManagedInputAttachments {
                     new byte[] {(byte) 137, 80, 78, 71, 13, 10, 26, 10});
             case "image/jpeg" -> bytes.length >= 3 && bytes[0] == (byte) 255
                     && bytes[1] == (byte) 216 && bytes[2] == (byte) 255;
+            case "image/gif" -> bytes.length >= 6
+                    && (new String(bytes, 0, 6, StandardCharsets.US_ASCII).equals("GIF87a")
+                    || new String(bytes, 0, 6, StandardCharsets.US_ASCII).equals("GIF89a"));
             case "image/webp" -> bytes.length >= 12 && new String(bytes, 0, 4, StandardCharsets.US_ASCII).equals("RIFF")
                     && new String(bytes, 8, 4, StandardCharsets.US_ASCII).equals("WEBP");
             default -> false;
@@ -76,6 +79,6 @@ final class ManagedInputAttachments {
 
     private static ApiException invalid() {
         return new ApiException(HttpStatus.BAD_REQUEST, "unsupported_input",
-                "Attachments require a UTF-8 text file or a valid PNG, JPEG or WebP image; URLs and host paths are unsupported.");
+                "Attachments require a UTF-8 text file or a valid PNG, JPEG, GIF or WebP image; URLs and host paths are unsupported.");
     }
 }
