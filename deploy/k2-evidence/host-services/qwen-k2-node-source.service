@@ -1,0 +1,45 @@
+[Unit]
+Description=K2 original cgroup custody and CSI frontend
+After=qwen-k2-runtime-gateway.service kubelet.service
+Requires=qwen-k2-runtime-gateway.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+AppArmorProfile=qwen-k2-source-v1
+UMask=0077
+ExecStart=/opt/qwen-k2/bin/k2-node-evidence source /etc/qwen-k2/source.json
+Restart=no
+TimeoutStopSec=15
+RuntimeDirectory=qwen-k2/source
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=
+PrivateUsers=no
+PrivateMounts=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=default
+ProcSubset=all
+ReadOnlyPaths=/proc /var/lib/kubelet /run/qwen-k2/backend
+ReadWritePaths=/var/lib/qwen-k2/journal /run/qwen-k2/source
+RestrictNamespaces=yes
+# systemd's SUID/SGID filter disables the required openat2 resolver.
+RestrictSUIDSGID=no
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=~@mount @module @reboot @swap @raw-io @obsolete ptrace process_vm_readv process_vm_writev pidfd_getfd pidfd_send_signal process_madvise process_mrelease

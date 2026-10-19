@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - 'packages/k2-node-evidence/**'
+      - 'deploy/k2-evidence/**'
       - 'packages/managed-agent-server/src/test/resources/contracts/k2-*.json'
       - '.github/workflows/k2-node-evidence.yml'
   push:
     branches: ['main']
     paths:
       - 'packages/k2-node-evidence/**'
+      - 'deploy/k2-evidence/**'
       - 'packages/managed-agent-server/src/test/resources/contracts/k2-*.json'
       - '.github/workflows/k2-node-evidence.yml'
 
@@ -17,6 +19,17 @@ permissions:
   contents: 'read'
 
 jobs:
+  offline-artifacts:
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-python@v5'
+        with:
+          python-version: '3.12'
+      - name: 'Test offline artifact producers and packaging'
+        run: |
+          python3 -m unittest discover -s deploy/k2-evidence -p 'test_*.py' -v
   software:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
