@@ -601,6 +601,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-skills/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read only names and descriptions from the Session's pinned static Skill catalog. Requires a trusted actor and Workspace read access. Never resolves the latest AgentDefinition or discovers host Skills. */
+        post: operations["queryWebShellSessionSkills"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/files/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read-only Workspace file query
+         * @description Browse directories or search file names within the persisted Workspace working directory. Requires a trusted actor with current OPERATOR or OWNER access to an ACTIVE Workspace, the deployment Workspace-files opt-in, and verified LOCAL or SSH_LOCAL storage. Authorization and binding are rechecked after I/O. Paths are relative to the working directory; host paths and Runtime credentials are never returned. Unsupported storage never falls back to the local daemon, and no Session, worker or model request is created.
+         */
+        post: operations["webShellWorkspaceFilesQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/files/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read-only Workspace file read
+         * @description Read one selection-time snapshot of a nonempty, NUL-free UTF-8 file, at most 24 KiB, using the scope revision returned by query. Requires a trusted actor with current OPERATOR or OWNER access to an ACTIVE Workspace, the deployment Workspace-files opt-in, and verified LOCAL or SSH_LOCAL storage. Authorization and binding are rechecked after I/O. Paths are relative to the working directory; host paths and Runtime credentials are never returned. Unsupported storage never falls back to the local daemon, and no Session, worker or model request is created.
+         */
+        post: operations["webShellWorkspaceFilesRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -661,7 +718,7 @@ export interface components {
             environmentId?: string | null;
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
-            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
@@ -679,7 +736,7 @@ export interface components {
             idempotencyKey: string;
             /** Format: uuid */
             sessionId: string;
-            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             /**
@@ -1170,7 +1227,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent, 1.46 for workflow and 1.54 for background_shell and monitor, tasks of those kinds in pending, running, waiting or degraded, and since 1.57 for channel_delivery, a delivery still pending because no adapter has claimed it, each in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent, 1.46 for workflow and 1.54 for background_shell and monitor, tasks of those kinds in pending, running, waiting or degraded, and since 1.57 for channel_delivery, a delivery still pending because no adapter has claimed it, each in an active Session, and since 1.65 for automation_run in pending, running, waiting or degraded in an active Session; only that occurrence is cancelled and its schedule is preserved); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -1510,7 +1567,7 @@ export interface components {
             type: "input_text" | "text";
             text: string;
         };
-        /** @description Inline UTF-8 text file. No host paths, URLs, binary or NUL. Conservative text MIME/extension validation; the complete canonical input containing attachments is limited to 48 KiB. */
+        /** @description Inline UTF-8 text file. No host paths, URLs, binary or NUL. Conservative text MIME/extension validation; the complete canonical input containing attachments is limited to 8 MiB. */
         InputFileBlock: {
             /** @enum {string} */
             type: "input_file";
@@ -1518,13 +1575,55 @@ export interface components {
             mime_type: string;
             text: string;
         };
-        /** @description Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 48 KiB. */
+        /** @description Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 8 MiB. */
         InputImageBlock: {
             /** @enum {string} */
             type: "input_image";
             /** @enum {string} */
             mime_type: "image/png" | "image/jpeg" | "image/webp";
             data: string;
+        };
+        WebShellSkill: {
+            name: string;
+            description: string;
+        };
+        WebShellSessionSkills: {
+            skills: components["schemas"]["WebShellSkill"][];
+        };
+        WebShellWorkspaceFileQueryRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            directory: string;
+            query?: string;
+            expectedScopeRevision?: string;
+        };
+        WebShellWorkspaceFileReadRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            path: string;
+            expectedScopeRevision: string;
+        };
+        WebShellWorkspaceFileEntry: {
+            path: string;
+            name: string;
+            /** @enum {string} */
+            kind: "file" | "directory";
+        };
+        WebShellWorkspaceFilePage: {
+            scopeRevision: string;
+            directory: string;
+            entries: components["schemas"]["WebShellWorkspaceFileEntry"][];
+            truncated: boolean;
+        };
+        WebShellWorkspaceFileSnapshot: {
+            scopeRevision: string;
+            path: string;
+            name: string;
+            /** @enum {string} */
+            mimeType: "text/plain";
+            text: string;
+            byteLength: number;
+            sha256: string;
         };
     };
     responses: {
@@ -2801,6 +2900,96 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    queryWebShellSessionSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session static Skill metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionSkills"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellWorkspaceFilesQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized Workspace file result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFilePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellWorkspaceFilesRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileReadRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized Workspace file result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFileSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

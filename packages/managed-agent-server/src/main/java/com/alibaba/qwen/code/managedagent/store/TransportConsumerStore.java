@@ -23,9 +23,8 @@ import java.util.Set;
  * wake_covered_sequence, the highest journal
  * sequence a wake activation was attempted for. It only dedups — a
  * redelivered or reordered wake at or below it is a no-op — and is never
- * recovery evidence: a wake whose attempt failed after the claim recovers
- * exactly as a missed notice does — through the ledger of the source that
- * committed its input (see TransportWakeActivator).
+ * recovery evidence: the independent SQL wake recovery scan finds committed
+ * unconsumed inputs after writer loss even when a notice was already claimed.
  */
 public class TransportConsumerStore {
     private static final int HELD_CHUNK = 200;

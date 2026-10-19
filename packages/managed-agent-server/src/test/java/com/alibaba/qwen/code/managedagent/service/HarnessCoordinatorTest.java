@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
+import com.alibaba.qwen.code.daemon.HostedHarnessStreamIdleException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
@@ -38,6 +39,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -124,6 +126,97 @@ class HarnessCoordinatorTest {
                 mock(HarnessConnector.class), new HarnessEventProjector(),
                 mock(RuntimeWarmer.class), directExecutor(),
                 Clock.systemUTC(), properties).close();
+    }
+
+    @Test
+    void sessionCreateWarmWarmsTheSessionWithoutAPublicEvent() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(runtimeWarmer.isEnabled()).thenReturn(true);
+        when(runtimeWarmer.warm("session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        ExecutorService executor = directExecutor();
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store,
+                harness, runtimeWarmer, executor, true);
+        try {
+            coordinator.warmSession("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+        verify(executor).execute(any(Runnable.class));
+        verify(runtimeWarmer).warm("session");
+        verifyNoInteractions(store);
+    }
+
+    @ParameterizedTest(name = "setting = {0}, warmer = {1}, files = {2}")
+    @CsvSource({"false, true, true", "true, false, true", "true, true, false"})
+    void sessionCreateWarmIsSkippedUnlessEveryGateIsOpen(boolean setting,
+            boolean warmerEnabled, boolean filesAvailable) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(filesAvailable);
+        when(runtimeWarmer.isEnabled()).thenReturn(warmerEnabled);
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store,
+                harness, runtimeWarmer, directExecutor(), setting);
+        try {
+            coordinator.warmSession("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+        verify(runtimeWarmer, never()).warm(anyString());
+        verifyNoInteractions(store);
+    }
+
+    @ParameterizedTest(name = "thrown = {0}")
+    @ValueSource(booleans = {true, false})
+    void aFailedSessionCreateWarmIsLoggedWithoutAPublicEvent(boolean thrown) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(runtimeWarmer.isEnabled()).thenReturn(true);
+        IllegalStateException failure = new IllegalStateException("down");
+        if (thrown) {
+            when(runtimeWarmer.warm("session")).thenThrow(failure);
+        } else {
+            when(runtimeWarmer.warm("session"))
+                    .thenReturn(CompletableFuture.failedFuture(failure));
+        }
+        ch.qos.logback.classic.Logger coordinatorLog =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(HarnessCoordinator.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        coordinatorLog.addAppender(logged);
+        HarnessCoordinator coordinator = sessionCreateWarmCoordinator(store,
+                harness, runtimeWarmer, directExecutor(), true);
+        try {
+            coordinator.warmSession("tenant", "session");
+        } finally {
+            coordinator.close();
+            coordinatorLog.detachAppender(logged);
+            logged.stop();
+        }
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("create warm failed")
+                    .contains("session=session");
+        });
+        verifyNoInteractions(store);
+    }
+
+    private static HarnessCoordinator sessionCreateWarmCoordinator(
+            AgentStateStore store, HarnessConnector harness,
+            RuntimeWarmer runtimeWarmer, ExecutorService executor,
+            boolean sessionCreateWarm) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setSessionCreateWarm(sessionCreateWarm);
+        return new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer, executor,
+                Clock.systemUTC(), properties);
     }
 
     @Test
@@ -3019,6 +3112,63 @@ class HarnessCoordinatorTest {
                 new HarnessEventProjector(), mock(RuntimeWarmer.class),
                 directExecutor(), Clock.systemUTC(),
                 new ManagedAgentProperties());
+    }
+
+    // #14135: a half-open stream ends with the typed idle outcome. That is a
+    // transient stream failure: the admitted Turn waits for a retry that
+    // re-attaches, and the silence alone never settles or cancels it.
+    @Test
+    void anIdleStreamRetriesTheAdmittedTurnWithoutSettlingIt() {
+        AgentStateStore store = boundCancellingStore();
+        TurnRecord running = turn("tenant", "session", "turn", "prompt",
+                "epoch", 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(running));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(running));
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot"));
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch");
+        when(stream.next()).thenThrow(
+                mock(HostedHarnessStreamIdleException.class));
+        when(harness.stream("tenant", "session", 1, "epoch"))
+                .thenReturn(stream);
+        ch.qos.logback.classic.Logger coordinatorLog =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(
+                        HarnessCoordinator.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        coordinatorLog.addAppender(logged);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+            coordinatorLog.detachAppender(logged);
+        }
+        verify(stream).close();
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong(), eq(false));
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).cancel(anyString(), anyString());
+        // Operators tell the liveness timeout from a reset socket or a
+        // server that ended the stream by the failure the retry names.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("will retry")
+                    .contains("failure=HostedHarnessStreamIdleException");
+        });
     }
 
     private static AgentStateStore boundCancellingStore() {
