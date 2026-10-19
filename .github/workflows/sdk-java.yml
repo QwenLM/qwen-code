@@ -683,13 +683,17 @@ jobs:
     # liveness gates to 6083 s, which moves Verify to 115 minutes, the
     # FG13d dropped-reply cancel cell to 6233 s, still inside those 115
     # minutes, and the FG12b store-failure class to 6353 s; the FG12f
-    # stream-gap class adds 242 s, so the fork moves to 6585 s and Verify to
-    # 120 minutes, which wraps its fork + 600 s plus margin; the Broker
-    # fault gates keep 10, and admission plus O4 keep per-fork ceilings) plus
-    # ~13 minutes for the uncapped setup steps (Checkout.. cgroup
-    # delegation, the report checks): 200 + 13. The failover arms run in
+    # stream-gap class adds 242 s, so the fork moves to 6585 s; the FG13a
+    # execute lost-reply cell adds 150 s and the FG13a status lost-reply
+    # cell another 150 s, moving the fork to 6885 s and Verify to 125
+    # minutes; the FG11c Harness-crash method (144.8 s measured) is budgeted
+    # at 550 s, so the fork moves to 7435 s and Verify to 134 minutes, which
+    # wraps its fork + 600 s plus margin; the Broker fault gates
+    # keep 10, and admission plus O4 keep per-fork ceilings) plus ~13
+    # minutes for the uncapped setup steps (Checkout.. cgroup delegation,
+    # the report checks): 214 + 13. The failover arms run in
     # hosted-failover-e2e.
-    timeout-minutes: 213
+    timeout-minutes: 227
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -778,8 +782,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 6585 s, so the step wraps to fork + 600 s plus margin.
-        timeout-minutes: 120
+        # 7435 s, so the step wraps to fork + 600 s plus margin.
+        timeout-minutes: 134
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
