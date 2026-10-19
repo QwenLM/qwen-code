@@ -351,4 +351,46 @@ setInterval(() => {}, 1000);`,
       worker.kill('SIGKILL');
     }
   });
+
+  it('reaps when it starts already reparented to PID 1', async () => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      ['--eval', 'setTimeout(() => process.exit(0), 1000)'],
+      {},
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const spec = JSON.parse(process.env.SPEC);
+spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+process.exit(0);`,
+      ],
+      {
+        env: { PATH: process.env['PATH'] ?? '', SPEC: JSON.stringify(launch) },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    try {
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+    } finally {
+      worker.kill('SIGKILL');
+    }
+  });
 });

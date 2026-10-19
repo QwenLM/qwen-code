@@ -10,13 +10,13 @@ Issue [#14502](https://github.com/QwenLM/qwen-code/issues/14502)（由 FG13 轮�
 
 ## 决策
 
-- `HookCommandCgroup.launch(..., { reapOnParentExit: true })` 设置 launcher 环境标记。launcher 每 100 ms 检查一次 `process.ppid`；一旦变化就写 `cgroup.kill` 并退出。内核会杀掉 launcher 与整个单元，因此「从不写 stdout 的前台命令」与已脱离的后代都会消失。
+- `HookCommandCgroup.launch(..., { reapOnParentExit: true })` 设置 launcher 环境标记。launcher 每 100 ms 检查一次 `process.ppid`；若启动时已被 PID 1 收养则立即回收，之后父进程变化时写 `cgroup.kill` 并退出。内核会杀掉 launcher 与整个单元，因此「从不写 stdout 的前台命令」与已脱离的后代都会消失。
 - Hook runner 只在 `waitForProcessTree` 命令路径上启用。后台 Shell 不启用：H3 有意让它们跨 worker 重启存活并按名字重挂。`survivesParentExit` 的 Hook（`MessageDisplay`、`StopFailure`、`SessionDelete`）使用独立 supervisor，不会创建这个单元。
 - 相比 issue 里的两种设计：launcher 已在单元内，因此不需要可持久化的单元名或产品状态，Java 控制面也不需要新增 cgroup 代码；回收发生在唯一活过 worker 的进程里。空目录与未知结果仍在；清扫与 abandonment 路由属于后续。
 
 ## 行为与验收
 
-- launcher 测试由一个 worker 持有 launcher，杀掉 worker，断言 launcher 写出了 `cgroup.kill`；默认 launch 不带标记，后台 Shell 的生命周期不变。
+- launcher 测试由一个 worker 持有 launcher，杀掉 worker，断言 launcher 写出了 `cgroup.kill`；第二个用例让 launcher 在其 worker 已退出（ppid 1）后才启动，断言立即回收。默认 launch 不带标记，后台 Shell 的生命周期不变。
 - Hook runner 套件与既有进程树取消用例保持全绿。
 - 在带真实委派 cgroup root 的 Linux Hosted 车道上，原 `HookRunner` 复现（worker SIGKILL、堆 OOM、原生崩溃）应显示单元被清空；可观察量是 `populated 0`。
 - `packages/core` 的类型检查与 lint 通过。
@@ -26,4 +26,5 @@ Issue [#14502](https://github.com/QwenLM/qwen-code/issues/14502)（由 FG13 轮�
 - `cgroup.kill` 之后空单元目录仍保留；worker 启动时清扫 `populated 0` 的 `qwen-hook-*` 单元属于后续。
 - 记录仍是 `recovery_blocked`/`outcome_unknown`：杀掉进程只能限制影响，无法结算没有幸存者观察到的结果。
 - 只覆盖 local-process 的 Linux cgroup 路径；非 Linux 的 Hook 命令本来就已被 cgroup 守卫拒绝。
+- 如果自定义 subreaper 在 launcher 启动前收养了它，启动时的 reparent 可能观察不到；正常的 worker/Harness 拓扑会 reparent 到 PID 1，且间隔检查仍覆盖运行中的死亡。
 - 本切片不改 Broker/Java，也不引入可持久化的单元名。

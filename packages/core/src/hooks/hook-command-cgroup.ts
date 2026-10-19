@@ -62,6 +62,16 @@ try {
 // background Shell does not, because H3 keeps it across worker restarts.
 if (process.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT === '1') {
   const parentPid = process.ppid;
+  if (parentPid === 1) {
+    // The worker died before this launcher started; there is no parent
+    // transition left to observe.
+    try {
+      writeFileSync(group + '/cgroup.kill', '1');
+    } catch {
+      // The unit is gone or the kernel refused the write.
+    }
+    process.exit(0);
+  }
   setInterval(() => {
     if (process.ppid === parentPid) return;
     try {
