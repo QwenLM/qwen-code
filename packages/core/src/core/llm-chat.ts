@@ -4519,9 +4519,7 @@ export class LlmChat {
                           hookContextPart,
                         ];
                       } else {
-                        self.history.push(
-                          createUserContent([hookContextPart]),
-                        );
+                        self.history.push(createUserContent([hookContextPart]));
                       }
                     }
                     requestContents = self.getRequestHistoryForRoute(
