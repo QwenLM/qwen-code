@@ -1276,10 +1276,10 @@ export class ContentGenerationPipeline {
 
     // Apply provider-specific enhancements
     let baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-      model: context.model,
       messages,
-      ...this.buildGenerateContentConfig(request),
+      ...this.buildGenerateContentConfig({ ...request, model: context.model }),
       ...this.buildResponseFormat(request),
+      model: context.model,
     };
 
     if (isStreaming) {
@@ -2006,7 +2006,14 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     isStreaming: boolean,
   ): RequestContext {
-    const effectiveModel = request.model || this.contentGeneratorConfig.model;
+    const staticModel = {
+      ...this.contentGeneratorConfig.samplingParams,
+      ...this.contentGeneratorConfig.extra_body,
+    }['model'];
+    const effectiveModel =
+      typeof staticModel === 'string'
+        ? staticModel
+        : request.model || this.contentGeneratorConfig.model;
     const providerOverrides =
       this.config.provider.getRequestContextOverrides?.() ?? {};
     const toolCallParser = isStreaming

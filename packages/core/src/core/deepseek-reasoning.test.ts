@@ -166,6 +166,39 @@ describe('built-in DeepSeek reasoning', () => {
 describe('DeepSeek effective reasoning state', () => {
   it.each<{
     settings: Partial<ContentGeneratorConfig>;
+    expected: { enabled: boolean; effort?: string };
+  }>([
+    { settings: {}, expected: { enabled: true, effort: undefined } },
+    {
+      settings: { reasoning: { effort: 'low' } },
+      expected: { enabled: true, effort: 'low' },
+    },
+    {
+      settings: { extra_body: { reasoning: { effort: 'max' } } },
+      expected: { enabled: true, effort: 'max' },
+    },
+    {
+      settings: { reasoning: false },
+      expected: { enabled: false, effort: undefined },
+    },
+  ])(
+    'does not synthesize a legacy default for $settings',
+    ({ settings, expected }) => {
+      expect(
+        getDeepSeekReasoningState(
+          { ...config, ...settings },
+          {
+            thinking: true,
+            efforts: ['low', 'max'],
+            disableField: 'thinking',
+          },
+        ),
+      ).toEqual(expected);
+    },
+  );
+
+  it.each<{
+    settings: Partial<ContentGeneratorConfig>;
     expected: { enabled: boolean; effort: string };
   }>([
     { settings: {}, expected: { enabled: true, effort: 'high' } },

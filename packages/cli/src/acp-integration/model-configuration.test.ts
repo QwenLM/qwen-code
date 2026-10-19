@@ -207,6 +207,39 @@ describe('model configuration manifest', () => {
     });
   });
 
+  it('shows provider default for a legacy DeepSeek declaration without a default tier', () => {
+    const generation = {
+      model: 'deepseek-flash',
+      authType: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+      reasoningSnapshot: [
+        {
+          id: 'deepseek-flash',
+          authType: 'openai',
+          baseUrl: 'https://api.deepseek.com/v1',
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'max'],
+            disableField: 'thinking',
+          },
+        },
+      ],
+    } as ContentGeneratorConfig;
+    const config = {} as Config;
+    const reasoning = resolveReasoningForModel(config, generation);
+    expect(
+      buildModelReasoningRoutePreview(
+        generation,
+        reasoning,
+        undefined,
+        true,
+      )?.[0]?.currentValue,
+    ).toBe('default');
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: undefined,
+    });
+  });
+
   it('clears DeepSeek request overrides without dropping nested siblings', () => {
     const generation = {
       model: 'deepseek-flash',

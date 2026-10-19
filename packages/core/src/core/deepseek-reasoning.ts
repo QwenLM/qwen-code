@@ -133,7 +133,7 @@ export function applyDeepSeekReasoningEffort<T extends object>(
 export function getDeepSeekReasoningState(
   config: Partial<ContentGeneratorConfig>,
   resolved: ResolvedReasoning | undefined,
-): { enabled: boolean; effort: ReasoningEffort } | undefined {
+): { enabled: boolean; effort?: ReasoningEffort } | undefined {
   if (
     !getBuiltinDeepSeekReasoning(config) ||
     !resolved ||
@@ -142,17 +142,19 @@ export function getDeepSeekReasoningState(
     resolved.toggleOnly
   )
     return undefined;
-  const defaultEffort =
-    resolved.defaultEffort ?? clampReasoningEffort('high', resolved.efforts);
+  const defaultEffort = resolved.defaultEffort;
   const configured = (config.reasoning || undefined)?.effort;
   const effort = configured ?? defaultEffort;
-  const normalized = resolved.efforts.includes(effort)
-    ? effort
-    : normalizeDeepSeekReasoningEffort(effort, config.model, config.baseUrl);
+  const normalized =
+    effort === undefined || resolved.efforts.includes(effort)
+      ? effort
+      : normalizeDeepSeekReasoningEffort(effort, config.model, config.baseUrl);
   const body: Record<string, unknown> = applyDeepSeekReasoningEffort(
     { model: config.model, ...config.samplingParams, ...config.extra_body },
     config.baseUrl,
-    clampReasoningEffort(normalized as ReasoningEffort, resolved.efforts),
+    normalized === undefined
+      ? undefined
+      : clampReasoningEffort(normalized as ReasoningEffort, resolved.efforts),
   );
   const disabled =
     resolved.canDisable !== false &&
@@ -166,13 +168,15 @@ export function getDeepSeekReasoningState(
     config.reasoning !== false && typeof body['reasoning_effort'] === 'string'
       ? body['reasoning_effort']
       : defaultEffort;
-  const effective = resolved.efforts.includes(wireEffort as ReasoningEffort)
-    ? wireEffort
-    : normalizeDeepSeekReasoningEffort(
-        wireEffort,
-        config.model,
-        config.baseUrl,
-      );
+  const effective =
+    wireEffort === undefined ||
+    resolved.efforts.includes(wireEffort as ReasoningEffort)
+      ? wireEffort
+      : normalizeDeepSeekReasoningEffort(
+          wireEffort,
+          config.model,
+          config.baseUrl,
+        );
   return {
     enabled: !disabled,
     effort: resolved.efforts.includes(effective as ReasoningEffort)

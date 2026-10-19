@@ -1569,6 +1569,90 @@ describe('ContentGenerationPipeline', () => {
       expect(other.reasoning).toEqual({ effort: 'xhigh' });
     });
 
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'resolves inferred reasoning after the %s model override',
+      async (source) => {
+        const otherModel = 'qwen2.5-coder-32b-instruct';
+        const other = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: otherModel },
+        });
+        expect(other.model).toBe(otherModel);
+        expect(other.reasoning_effort).toBeUndefined();
+        expect(other.enable_thinking).toBeUndefined();
+        expect(other.thinking).toBeUndefined();
+        expect(other.reasoning).toBeUndefined();
+
+        const deepSeek = await deepSeekWire({
+          model: otherModel,
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: 'deepseek-v4.1-flash-1017' },
+        });
+        expect(deepSeek.model).toBe('deepseek-v4.1-flash-1017');
+        expect(deepSeek.reasoning_effort).toBe('high');
+        expect(deepSeek.enable_thinking).toBe(true);
+        expect(deepSeek.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['deepseek-v4.1-flash-1017', 'qwen2.5-coder-32b-instruct', 'high'],
+      ['qwen2.5-coder-32b-instruct', 'deepseek-v4.1-flash-1017', undefined],
+    ])(
+      'uses extra_body model %s after sampling model %s for reasoning',
+      async (finalModel, samplingModel, effort) => {
+        const wire = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          samplingParams: { model: samplingModel },
+          extra_body: { model: finalModel },
+        });
+        expect(wire.model).toBe(finalModel);
+        expect(wire.reasoning_effort).toBe(effort);
+        expect(wire.enable_thinking).toBe(effort ? true : undefined);
+        expect(wire.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'respects the final model profile after a %s override',
+      async (source) => {
+        const wire = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: 'company-alias' },
+          reasoningSnapshot: [
+            {
+              id: 'company-alias',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: DASHSCOPE_URL,
+              reasoning: {
+                profile: 'openai-reasoning',
+                efforts: ['low', 'medium', 'high'],
+                defaultEffort: 'medium',
+              },
+            },
+          ],
+        });
+        expect(wire.model).toBe('company-alias');
+        expect(wire.reasoning).toEqual({ effort: 'medium' });
+        expect(wire.reasoning_effort).toBeUndefined();
+        expect(wire.enable_thinking).toBeUndefined();
+        expect(wire.thinking).toBeUndefined();
+      },
+    );
+
+    it('keeps an unspecified legacy DeepSeek default off the wire', async () => {
+      const wire = await deepSeekWire(
+        {},
+        {
+          thinking: true,
+          efforts: ['low', 'max'],
+          disableField: 'thinking',
+        },
+      );
+      expect(wire.reasoning_effort).toBeUndefined();
+      expect(wire.reasoning).toBeUndefined();
+    });
+
     it('keeps explicit other profiles ahead of the built-in DeepSeek serializer', async () => {
       const wire = await deepSeekWire(
         {
