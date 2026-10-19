@@ -260,6 +260,177 @@ describe('selected-workspace memory import HTTP', () => {
     await request(h.app).get('/workspaces/secondary/memory/import/batches');
     expect(recover).toHaveBeenCalledTimes(2);
   });
+  it('reports a closed generation as retryable runtime unavailability', async () => {
+    const h = await setup();
+    h.secondary.generationGuard!.close();
+    const response = await request(h.app).get(
+      '/workspaces/secondary/memory/import/batches',
+    );
+    expect(response.status).toBe(503);
+    expect(response.headers['retry-after']).toBe('1');
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.secondary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+  it.each(['EIO', 'ENOENT'])(
+    'reports collection storage %s as server failure',
+    async (code) => {
+      const h = await setup();
+      vi.spyOn(MemoryImportService.prototype, 'list').mockRejectedValue(
+        Object.assign(new Error('Private storage details'), { code }),
+      );
+      const response = await request(h.app).get(
+        '/workspaces/secondary/memory/import/batches',
+      );
+      expect(response.status).toBe(500);
+      expect(response.body.code).toBe('memory_import_failed');
+      expect(JSON.stringify(response.body)).not.toContain(
+        'Private storage details',
+      );
+    },
+  );
+  it('keeps client validation separate from an explicitly missing batch', async () => {
+    const h = await setup();
+    const base = '/workspaces/secondary/memory/import';
+    for (const body of [
+      { source: {}, selection: selection(), idempotencyKey: 'invalid-source' },
+      { source, selection: [], idempotencyKey: 'invalid-selection' },
+    ]) {
+      const response = await request(h.app)
+        .post(`${base}/batches`)
+        .set('x-confirm', 'yes')
+        .send(body);
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('memory_import_rejected');
+    }
+    const missing = await request(h.app).get(
+      `${base}/batches/${'a'.repeat(64)}`,
+    );
+    expect(missing.status).toBe(404);
+    expect(missing.body.code).toBe('memory_import_not_found');
+    expect((await request(h.app).get(`${base}/batches/invalid`)).status).toBe(
+      400,
+    );
+    expect(h.secondary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+  it.each(['submit', 'retry'] as const)(
+    'returns the durable %s receipt if the runtime drains after admission',
+    async (method) => {
+      const h = await setup();
+      const base = '/workspaces/secondary/memory/import';
+      const original = MemoryImportService.prototype[method];
+      const owner = createHash('sha256')
+        .update(path.resolve(h.secondary.workspaceCwd))
+        .digest('hex');
+      const batchRoot = path.join(
+        h.secondary.sessionRuntimeBaseDir,
+        'memory-import',
+        'batches',
+        owner,
+      );
+      let id: string | undefined;
+      if (method === 'retry') {
+        vi.mocked(
+          h.secondary.bridge.invokeWorkspaceCommand,
+        ).mockRejectedValueOnce(new Error('Synthetic model failure'));
+        const seed = await request(h.app)
+          .post(`${base}/batches`)
+          .set('x-confirm', 'yes')
+          .send({
+            source,
+            selection: selection(),
+            idempotencyKey: 'durable-receipt',
+          });
+        id = seed.body.id;
+        expect((await terminal(h.app, base, id!))['status']).toBe('partial');
+      }
+      let admitted!: Awaited<ReturnType<MemoryImportService['submit']>>;
+      let settle!: () => Promise<unknown>;
+      vi.spyOn(MemoryImportService.prototype, method).mockImplementation(
+        async function (
+          this: MemoryImportService,
+          ...args:
+            | Parameters<MemoryImportService['submit']>
+            | Parameters<MemoryImportService['retry']>
+        ) {
+          const task =
+            method === 'submit'
+              ? await (original as MemoryImportService['submit']).apply(
+                  this,
+                  args as Parameters<MemoryImportService['submit']>,
+                )
+              : await (original as MemoryImportService['retry']).apply(
+                  this,
+                  args as Parameters<MemoryImportService['retry']>,
+                );
+          admitted = task;
+          settle = this.idle.bind(this, task.id);
+          h.registry.beginDrain(h.secondary);
+          return task;
+        },
+      );
+      const response = await request(h.app)
+        .post(id ? `${base}/batches/${id}/retry` : `${base}/batches`)
+        .set('x-confirm', 'yes')
+        .send(
+          id
+            ? {}
+            : {
+                source,
+                selection: selection(),
+                idempotencyKey: 'durable-receipt',
+              },
+        );
+      expect(response.status).toBe(202);
+      expect(response.body.id).toBe(admitted.id);
+      await expect(settle()).rejects.toThrow(
+        'Workspace memory import is unavailable.',
+      );
+      const saved = JSON.parse(
+        await fs.readFile(
+          path.join(batchRoot, admitted.id, 'task.json'),
+          'utf8',
+        ),
+      );
+      expect(saved.id).toBe(admitted.id);
+      expect(
+        saved.items.some((item: { status: string }) => item.status === 'added'),
+      ).toBe(false);
+      expect(h.primary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['close', 'untrust'] as const)(
+    'does not return retained source after runtime %s',
+    async (change) => {
+      const h = await setup();
+      const base = '/workspaces/secondary/memory/import';
+      const submitted = await request(h.app)
+        .post(`${base}/batches`)
+        .set('x-confirm', 'yes')
+        .send({
+          source,
+          selection: selection(),
+          idempotencyKey: 'protected-source',
+        });
+      await terminal(h.app, base, submitted.body.id);
+      const original = MemoryImportService.prototype.source;
+      vi.spyOn(MemoryImportService.prototype, 'source').mockImplementation(
+        async function (this: MemoryImportService, ...args) {
+          const retained = await original.apply(this, args);
+          if (change === 'close') h.secondary.generationGuard!.close();
+          else Object.assign(h.secondary, { trusted: false });
+          return retained;
+        },
+      );
+      const response = await request(h.app).get(
+        `${base}/batches/${submitted.body.id}/sources/${selection()[0].id}`,
+      );
+      expect(response.status).toBe(503);
+      expect(response.body).not.toHaveProperty('content');
+      expect(JSON.stringify(response.body)).not.toContain(
+        'Validate rollback paths',
+      );
+    },
+  );
   it('uses secondary model/storage and exposes only selected retained sources', async () => {
     const h = await setup();
     const base = '/workspaces/secondary/memory/import';

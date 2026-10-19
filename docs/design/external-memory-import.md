@@ -47,6 +47,8 @@ not allocate task directories. Each lock signals loss only to dependent work; on
 detected, that holder cannot replace journals or publish staged documents. Other
 tasks continue, while explicit user cancellation can still persist cancelled state.
 
+HTTP distinguishes invalid requests (400), missing batches (404), unavailable runtime generations (503 with `Retry-After: 1`), and unexpected service/storage failures (500). A successful durable submit/retry returns its 202 receipt even if the runtime closes immediately afterward; publication remains guarded and reads recheck access before returning content. Clients retain the idempotency key and batch ID to reconcile uncertain outcomes without creating another import.
+
 Imported project documents use a separate private root keyed by the real Git
 common directory. Main checkouts and linked worktrees share it; clones/forks do
 not share merely because their remotes match. Ordinary project memory remains

@@ -12,6 +12,8 @@ import { constants } from 'node:fs';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 
+export class MemoryImportRequestError extends Error {}
+
 export const IMPORT_LIMITS = {
   files: 256,
   fileBytes: 512 * 1024,
@@ -88,7 +90,7 @@ export function validateSource(value: unknown): ImportSource {
     value['files'].length === 0 ||
     value['files'].length > IMPORT_LIMITS.files
   )
-    throw new Error('Invalid version 1 Codex source set.');
+    throw new MemoryImportRequestError('Invalid version 1 Codex source set.');
   let bytes = 0;
   const seen = new Set<string>();
   const files = value['files'].map((file: unknown): ImportSourceFile => {
@@ -99,7 +101,7 @@ export function validateSource(value: unknown): ImportSource {
       typeof file['content'] !== 'string' ||
       file['content'].includes('\0')
     )
-      throw new Error(
+      throw new MemoryImportRequestError(
         'Invalid Codex Markdown resource. Only memory Markdown and rollout_summaries/*.md are accepted.',
       );
     const size = Buffer.byteLength(file['content']);
@@ -109,7 +111,9 @@ export function validateSource(value: unknown): ImportSource {
       bytes > IMPORT_LIMITS.totalBytes ||
       seen.has(file['path'].toLowerCase())
     )
-      throw new Error('Source exceeds limits or contains duplicate paths.');
+      throw new MemoryImportRequestError(
+        'Source exceeds limits or contains duplicate paths.',
+      );
     seen.add(file['path'].toLowerCase());
     return { path: file['path'], content: file['content'] };
   });
@@ -118,7 +122,7 @@ export function validateSource(value: unknown): ImportSource {
       (file) => file.path === 'MEMORY.md' || file.path === 'memory_summary.md',
     )
   )
-    throw new Error(
+    throw new MemoryImportRequestError(
       'Select the Codex memories folder containing MEMORY.md or memory_summary.md.',
     );
   return {
@@ -200,7 +204,9 @@ export function previewSource(input: unknown): ImportPreview {
     const atxCandidates =
       file.content.match(/^ {0,3}#{1,6}(?:[\t ]|$)/gm)?.length ?? 0;
     if (headingCount + atxCandidates > 4 * IMPORT_LIMITS.headings)
-      throw new Error('Source exceeds the supported heading limit.');
+      throw new MemoryImportRequestError(
+        'Source exceeds the supported heading limit.',
+      );
     // Bound parser work independently of heading syntax, including setext and
     // pathological inline delimiters. These conservative limits include code.
     for (let i = 0; i < file.content.length; i++) {
@@ -212,7 +218,7 @@ export function previewSource(input: unknown): ImportPreview {
         lineCount > IMPORT_LIMITS.markdownLines ||
         markerCount > IMPORT_LIMITS.inlineMarkers
       )
-        throw new Error(
+        throw new MemoryImportRequestError(
           'Source exceeds the Markdown complexity limit; split it into smaller source sets before importing.',
         );
     }
@@ -236,7 +242,9 @@ export function previewSource(input: unknown): ImportPreview {
       }));
     headingCount += headings.length;
     if (headingCount > IMPORT_LIMITS.headings)
-      throw new Error('Source exceeds the supported heading limit.');
+      throw new MemoryImportRequestError(
+        'Source exceeds the supported heading limit.',
+      );
     const scopedDepths = headings
       .filter(
         (heading) =>
@@ -285,7 +293,7 @@ export function previewSource(input: unknown): ImportPreview {
         parts.reduce((bytes, part) => bytes + Buffer.byteLength(part), 0) +
         2 * (parts.length - 1);
       if (expandedBytes > IMPORT_LIMITS.totalBytes)
-        throw new Error(
+        throw new MemoryImportRequestError(
           'Source expanded context exceeds 8 MiB; split shared context and project groups before importing.',
         );
       const content = parts.join('\n\n');

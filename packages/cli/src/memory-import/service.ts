@@ -32,7 +32,16 @@ import {
   packMemoryImportSections,
 } from '@qwen-code/qwen-code-core/memory/import-budget.js';
 import { resolveTrustedMemoryFile } from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
-import { digest, previewSource, type ImportSection } from './source.js';
+import {
+  digest,
+  previewSource,
+  MemoryImportRequestError,
+  type ImportSection,
+} from './source.js';
+
+export class MemoryImportNotFoundError extends Error {
+  readonly code = 'ENOENT';
+}
 
 type Scope = 'project' | 'user';
 export interface ImportSelection {
@@ -275,7 +284,8 @@ export class MemoryImportService {
     return readJson<T>(file);
   }
   private taskDir(id: string): string {
-    if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid import batch ID.');
+    if (!/^[a-f0-9]{64}$/.test(id))
+      throw new MemoryImportRequestError('Invalid import batch ID.');
     return path.join(this.state, 'batches', this.owner, id);
   }
   // Private sources must never be written into a Git checkout, even when a
@@ -371,14 +381,14 @@ export class MemoryImportService {
       !selections.length ||
       selections.length > 2048
     )
-      throw new Error(
+      throw new MemoryImportRequestError(
         'Provide an idempotency key and explicit non-empty selection.',
       );
     const seen = new Set<string>();
     const selected = selections
       .map((value: unknown) => {
         if (!value || typeof value !== 'object')
-          throw new Error('Invalid selection.');
+          throw new MemoryImportRequestError('Invalid selection.');
         const selection = value as ImportSelection;
         const section = preview.sections.find(
           (item) => item.id === selection.id && item.selectable,
@@ -388,7 +398,7 @@ export class MemoryImportService {
           seen.has(selection.id) ||
           !['project', 'user'].includes(selection.scope)
         )
-          throw new Error(
+          throw new MemoryImportRequestError(
             'Invalid, duplicate or unavailable section selection.',
           );
         seen.add(selection.id);
@@ -397,7 +407,7 @@ export class MemoryImportService {
       .sort((a, b) => a.id.localeCompare(b.id));
     const retained = JSON.stringify({ sections: selected });
     if (Buffer.byteLength(retained) > 16 * 1024 * 1024)
-      throw new Error(
+      throw new MemoryImportRequestError(
         'Selected contextual source exceeds the retained snapshot limit.',
       );
     const requestDigest = digest(JSON.stringify(selected));
@@ -413,7 +423,7 @@ export class MemoryImportService {
             path.join(dir, 'task.json'),
           );
           if (task.requestDigest !== requestDigest)
-            throw new Error(
+            throw new MemoryImportRequestError(
               'Idempotency key was already used with a different selection.',
             );
           this.kick(id);
@@ -500,7 +510,13 @@ export class MemoryImportService {
     this.options.assertActive();
     const task = await this.readState<StoredTask>(
       path.join(this.taskDir(id), 'task.json'),
-    );
+    ).catch((cause: unknown) => {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT')
+        throw new MemoryImportNotFoundError('Import batch not found.', {
+          cause,
+        });
+      throw cause;
+    });
     if (
       task.status !== 'completed' &&
       (await exists(path.join(this.taskDir(id), 'cancel.json')))
@@ -515,7 +531,10 @@ export class MemoryImportService {
       path.join(this.taskDir(id), 'source.json'),
     );
     const section = source.sections.find((item) => item.id === sectionId);
-    if (!section) throw new Error('Source section not found in this batch.');
+    if (!section)
+      throw new MemoryImportRequestError(
+        'Source section not found in this batch.',
+      );
     return section;
   }
   async cancel(id: string): Promise<ImportTask> {

@@ -8,10 +8,20 @@ import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import type { MemoryImportBatchProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { runWithMemoryProjectScope } from '@qwen-code/qwen-code-core/memory/paths.js';
-import { previewSource } from '../memory-import/source.js';
-import { MemoryImportService } from '../memory-import/service.js';
+import {
+  previewSource,
+  MemoryImportRequestError,
+} from '../memory-import/source.js';
+import {
+  MemoryImportService,
+  MemoryImportNotFoundError,
+} from '../memory-import/service.js';
 import { runWithWorkspaceRuntimeStorage } from './workspace-runtime-storage.js';
-import { resolveTrustedRuntime } from './workspace-route-runtime.js';
+import {
+  resolveTrustedRuntime,
+  sendGenerationClosedError,
+} from './workspace-route-runtime.js';
+import { WorkspaceGenerationClosedError } from './workspace-registry.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -41,13 +51,15 @@ export function mountMemoryImportRoutes(
       !runtime.trusted ||
       runtime.routeFileSystemFactory.sshWorkspace
     )
-      throw new Error('Workspace memory import is unavailable.');
+      throw new WorkspaceGenerationClosedError(
+        'Workspace memory import is unavailable.',
+      );
     entry.current.guard.assertOpen();
     // These legacy process-global overrides cannot safely describe a selected
     // runtime with different memory settings. Refuse rather than use primary.
     for (const key of ['QWEN_CODE_MEMORY_BASE_DIR', 'QWEN_CODE_MEMORY_LOCAL']) {
       if ((runtime.env.effectiveEnv?.[key] ?? process.env[key]) !== undefined)
-        throw new Error(
+        throw new MemoryImportRequestError(
           'Memory import does not support legacy memory path overrides.',
         );
     }
@@ -122,7 +134,9 @@ export function mountMemoryImportRoutes(
       try {
         active(runtime);
         const result = await withRuntime(runtime, () => action(req, runtime));
-        active(runtime);
+        // Admission already persisted a 202 receipt; closing afterward must not
+        // hide its task ID. Reads still recheck access before returning content.
+        if (status !== 202) active(runtime);
         res.status(status).json(result);
       } catch (error) {
         sendError(res, error);
@@ -200,16 +214,25 @@ function sendError(res: Response, error: unknown): void {
     });
     return;
   }
-  if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+  if (sendGenerationClosedError(res, error)) return;
+  if (error instanceof MemoryImportNotFoundError) {
     res.status(404).json({
       code: 'memory_import_not_found',
       error: 'Import batch not found.',
     });
     return;
   }
-  res.status(400).json({
-    code: 'memory_import_rejected',
+  if (error instanceof MemoryImportRequestError) {
+    res.status(400).json({
+      code: 'memory_import_rejected',
+      error: error.message,
+    });
+    return;
+  }
+  debugLogger.warn('Workspace memory import request failed.', error);
+  res.status(500).json({
+    code: 'memory_import_failed',
     error:
-      'Invalid source, selection, batch, or unavailable workspace storage. No existing memory was overwritten.',
+      'Import request failed. Check daemon logs and retry using the same idempotency key or batch ID.',
   });
 }
