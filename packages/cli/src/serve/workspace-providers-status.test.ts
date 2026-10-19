@@ -206,6 +206,104 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     );
   });
 
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'projects DeepSeek controls for the final %s.model in cold workspace status',
+    async (source) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'deepseek-v4.1-flash-1017', reasoningEffort: 'low' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-v4.1-flash-1017',
+              baseUrl,
+              generationConfig: { [source]: { model: 'deepseek-v4-pro' } },
+            },
+          ],
+        },
+      });
+      const result = await provider(workspace, false);
+      expect(result.initialized).toBe(true);
+      expect(
+        result.providers
+          .flatMap((entry) => entry.models)
+          .find((model) => model.baseModelId === 'deepseek-v4.1-flash-1017'),
+      ).toMatchObject({
+        baseModelId: 'deepseek-v4.1-flash-1017',
+        configOptions: [
+          {
+            currentValue: 'high',
+            options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+          },
+        ],
+      });
+    },
+  );
+
+  it('uses the final DeepSeek route declaration in cold workspace status', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'deepseek-v4.1-flash-1017' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'deepseek-v4.1-flash-1017',
+            baseUrl,
+            generationConfig: { extra_body: { model: 'deepseek-v4-pro' } },
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['low'],
+                defaultEffort: 'low',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            fastOnly: true,
+            baseUrl,
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['max'],
+                defaultEffort: 'max',
+              },
+            },
+          },
+          {
+            id: 'deepseek-v4-pro',
+            baseUrl: 'https://api.deepseek.com/v1',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                disableField: 'enable_thinking',
+                efforts: ['low'],
+                defaultEffort: 'low',
+              },
+            },
+          },
+        ],
+      },
+    });
+    const result = await provider(workspace, false);
+    expect(
+      result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.baseModelId === 'deepseek-v4.1-flash-1017'),
+    ).toMatchObject({
+      baseModelId: 'deepseek-v4.1-flash-1017',
+      configOptions: [
+        { currentValue: 'max', options: [{ value: 'none' }, { value: 'max' }] },
+      ],
+    });
+  });
+
   it('projects endpoint-specific DeepSeek controls for duplicate model routes', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

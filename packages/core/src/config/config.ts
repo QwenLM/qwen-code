@@ -21,6 +21,7 @@ import {
   type ReasoningSnapshot,
 } from '../core/reasoning-overrides.js';
 import { getBuiltinDeepSeekReasoning } from '../core/deepseek-reasoning.js';
+import { getRequestModel } from '../core/request-model.js';
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
@@ -5927,9 +5928,16 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
+    const requestModel = getRequestModel(newContentGeneratorConfig);
     const deepSeekRoute =
-      getBuiltinDeepSeekReasoning(priorGeneration) ||
-      getBuiltinDeepSeekReasoning(newContentGeneratorConfig);
+      getBuiltinDeepSeekReasoning({
+        ...priorGeneration,
+        model: getRequestModel(priorGeneration),
+      }) ||
+      getBuiltinDeepSeekReasoning({
+        ...newContentGeneratorConfig,
+        model: requestModel,
+      });
     const explicitOff =
       (priorReasoningSource?.kind === 'settings' &&
         priorReasoningSource.settingsPath === 'model.reasoningEffort') ||
@@ -5937,7 +5945,8 @@ export class Config {
         priorReasoningSource.detail === 'reasoning selection');
     const preserveReasoningOff =
       priorReasoning === false &&
-      newContentGeneratorConfig.thinkingMandatory !== true &&
+      (requestModel !== newContentGeneratorConfig.model ||
+        newContentGeneratorConfig.thinkingMandatory !== true) &&
       (!deepSeekRoute ||
         (explicitOff &&
           priorGeneration.authType === newContentGeneratorConfig.authType &&
@@ -7210,12 +7219,13 @@ export class Config {
     }
 
     const configuredReasoning = resolveReasoningForModel(this, cfg);
-    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    const model = getRequestModel(cfg);
+    const tieredModel = isTieredEffortWireModel(model, configuredReasoning);
     if (!tieredModel) return undefined;
 
     const currentEffort = this.getReasoningEffort();
     const selected = selectDashScopeThinkingKnob(
-      cfg.model,
+      model,
       cfg.extra_body,
       cfg.samplingParams,
       currentEffort,
@@ -7237,7 +7247,7 @@ export class Config {
         return undefined;
       }
       const below = selectDashScopeThinkingKnob(
-        cfg.model,
+        model,
         undefined,
         cfg.samplingParams,
         currentEffort,

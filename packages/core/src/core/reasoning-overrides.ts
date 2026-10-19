@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import type { ContentGeneratorConfig } from './contentGenerator.js';
+import { getRequestModel } from './request-model.js';
 import type {
   AvailableModel,
   ModelReasoningCapabilities,
@@ -323,6 +324,7 @@ export function resolveReasoningForModel(
   model = generation.model,
   strict = false,
 ): ResolvedReasoning | undefined {
+  model = getRequestModel(generation, model);
   let declaration: unknown;
   if (generation.reasoningSnapshot) {
     const rows = generation.reasoningSnapshot.filter(
@@ -367,7 +369,12 @@ export function resolveReasoningForModel(
 
 export function getEffectiveReasoning(
   generation: Pick<ContentGeneratorConfig, 'reasoning'> &
-    Partial<Pick<ContentGeneratorConfig, 'model' | 'baseUrl' | 'authType'>>,
+    Partial<
+      Pick<
+        ContentGeneratorConfig,
+        'model' | 'baseUrl' | 'authType' | 'samplingParams' | 'extra_body'
+      >
+    >,
   resolved?: ResolvedReasoning,
 ): ContentGeneratorConfig['reasoning'] {
   if (!resolved) return generation.reasoning;
@@ -382,15 +389,16 @@ export function getEffectiveReasoning(
     return false;
   if (resolved.toggleOnly)
     return selected ?? (resolved.profile ? {} : undefined);
+  const model = getRequestModel(generation);
   const knownDeepSeek =
     (resolved.profile === undefined ||
       resolved.profile === 'deepseek-openai') &&
-    getBuiltinDeepSeekReasoning(generation);
+    getBuiltinDeepSeekReasoning({ ...generation, model });
   let effort = selected?.effort ?? resolved.defaultEffort;
   if (effort && knownDeepSeek && !resolved.efforts.includes(effort))
     effort = normalizeDeepSeekReasoningEffort(
       effort,
-      generation.model,
+      model,
       generation.baseUrl,
     ) as ReasoningEffort;
   return effort

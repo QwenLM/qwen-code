@@ -74,6 +74,98 @@ function snapshotConfig(
 }
 
 describe('reasoning declarations', () => {
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'resolves DeepSeek capabilities and aliases against %s.model',
+    (source) => {
+      const generation: ContentGeneratorConfig = {
+        model: 'deepseek-v4.1-flash-1017',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        thinkingMandatory: true,
+        reasoning: { effort: 'xhigh' },
+        [source]: { model: 'deepseek-v4-pro' },
+      };
+      const resolved = resolveReasoningForModel(undefined, generation);
+      expect(resolved).toMatchObject({ efforts: ['high', 'max'] });
+      expect(resolved?.canDisable).toBeUndefined();
+      expect(getEffectiveReasoning(generation, resolved)).toEqual({
+        effort: 'max',
+      });
+    },
+  );
+
+  it('uses the final static model declaration without inheriting the configured route marker', () => {
+    const { generation } = snapshotConfig(
+      [
+        model('alias', 'low'),
+        {
+          ...model('target', 'low'),
+          registryBaseUrl: 'https://original.example/v1',
+        },
+        model('target', 'high'),
+      ],
+      'https://original.example/v1',
+    );
+    Object.assign(generation, {
+      samplingParams: { model: 'alias' },
+      extra_body: { model: 'target' },
+      thinkingMandatory: true,
+    });
+    const resolved = resolveReasoningForModel(
+      undefined,
+      generation,
+      generation.model,
+      true,
+    );
+    expect(resolved).toMatchObject({ defaultEffort: 'high' });
+    expect(resolved?.canDisable).toBeUndefined();
+  });
+
+  it.each([
+    AuthType.USE_OPENAI_RESPONSES,
+    AuthType.USE_ANTHROPIC,
+    AuthType.USE_GEMINI,
+  ])('does not apply Chat Completions model overrides to %s', (authType) => {
+    const getResolvedModelConfig = vi.fn();
+    resolveReasoningForModel(
+      { getResolvedModelConfig },
+      {
+        model: 'configured',
+        authType,
+        baseUrl: route.baseUrl,
+        samplingParams: { model: 'sampling' },
+        extra_body: { model: 'extra' },
+      },
+    );
+    expect(getResolvedModelConfig).toHaveBeenCalledWith(
+      authType,
+      'configured',
+      route.baseUrl,
+    );
+  });
+
+  it.each([AuthType.USE_OPENAI, AuthType.QWEN_OAUTH])(
+    'resolves the final Chat Completions model for %s',
+    (authType) => {
+      const getResolvedModelConfig = vi.fn();
+      resolveReasoningForModel(
+        { getResolvedModelConfig },
+        {
+          model: 'configured',
+          authType,
+          samplingParams: { model: 'sampling' },
+          extra_body: { model: 'extra' },
+        },
+        'per-call',
+      );
+      expect(getResolvedModelConfig).toHaveBeenCalledWith(
+        authType,
+        'extra',
+        undefined,
+      );
+    },
+  );
+
   it('infers known DeepSeek routes only when no capability is declared', () => {
     const target = {
       ...route,

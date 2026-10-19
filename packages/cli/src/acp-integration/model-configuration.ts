@@ -26,6 +26,7 @@ import {
   getBuiltinDeepSeekReasoning,
   getDeepSeekReasoningState,
 } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -150,7 +151,8 @@ export function getGptReasoningOverrideState(
       blocksTierChange: true;
     }
   | undefined {
-  const capabilities = getGptReasoningCapabilities(generation.model);
+  const model = getRequestModel(generation);
+  const capabilities = getGptReasoningCapabilities(model);
   const profile = configuredReasoning?.profile;
   if ((!capabilities && !profile) || generation.reasoning === false) {
     return undefined;
@@ -163,7 +165,7 @@ export function getGptReasoningOverrideState(
     return undefined;
   }
   const reasoning = getModelConfiguration(
-    generation.model,
+    model,
     configuredReasoning,
   )?.reasoning;
   const defaultEnabled =
@@ -182,7 +184,7 @@ export function getGptReasoningOverrideState(
   const openRouter =
     profile === 'openai-reasoning' || isOpenRouterHostname(generation);
   const removedFlatNone =
-    (generation.thinkingMandatory === true ||
+    ((model === generation.model && generation.thinkingMandatory === true) ||
       reasoning?.canDisable === false ||
       capabilities?.thinkingMandatory) &&
     flat === REASONING_EFFORT_NONE;
@@ -340,9 +342,12 @@ export function getConfiguredModelReasoning(
       active?.baseUrl ?? config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
   };
   const reasoning = resolveReasoningForModel(config, generation, modelId);
+  const requestModel = getRequestModel(generation, modelId);
   return (
     reasoning ??
-    (fallbackToManifest ? getModelConfiguration(modelId)?.reasoning : undefined)
+    (fallbackToManifest
+      ? getModelConfiguration(requestModel)?.reasoning
+      : undefined)
   );
 }
 
@@ -399,7 +404,7 @@ export function clearReasoningRequestOverrides(
     resolveReasoningForModel(undefined, generation),
   );
   if (
-    getGptReasoningCapabilities(generation.model) ||
+    getGptReasoningCapabilities(getRequestModel(generation)) ||
     getGptReasoningOverrideState(
       generation,
       resolveReasoningForModel(undefined, generation),
@@ -473,7 +478,10 @@ export function applyReasoningSelection(
   const modelsConfig = config.getModelsConfig?.();
   const rebuildable = modelsConfig?.getGenerationConfig?.();
   if (rebuildable !== live) apply(rebuildable);
-  if (live && getBuiltinDeepSeekReasoning(live)) {
+  if (
+    live &&
+    getBuiltinDeepSeekReasoning({ ...live, model: getRequestModel(live) })
+  ) {
     for (const sources of [
       config.getContentGeneratorConfigSources?.(),
       modelsConfig?.getGenerationConfigSources?.(),
@@ -655,6 +663,9 @@ export function buildModelReasoningRoutePreview(
   selection: unknown,
   opaqueRoute = false,
 ): SessionConfigOption[] | undefined {
+  const model = getRequestModel(generation);
+  const thinkingMandatory =
+    model === generation.model && generation.thinkingMandatory === true;
   if (
     opaqueRoute &&
     !reasoning?.profile &&
@@ -666,9 +677,9 @@ export function buildModelReasoningRoutePreview(
     !parsedSelection ||
     parsedSelection === REASONING_EFFORT_DEFAULT ||
     !isReasoningSelectionSupported(
-      generation.model,
+      model,
       parsedSelection,
-      generation.thinkingMandatory === true,
+      thinkingMandatory,
       reasoning,
     );
   const deepSeekState = usesConfiguredState
@@ -688,14 +699,14 @@ export function buildModelReasoningRoutePreview(
       )
     : undefined;
   return buildModelReasoningConfigPreview(
-    generation.model,
+    model,
     {
       enabled: generation.reasoning === false ? false : undefined,
       effort: generation.reasoning ? generation.reasoning.effort : undefined,
       ...resolvePersistedReasoningConfigState(
-        generation.model,
+        model,
         selection,
-        generation.thinkingMandatory === true,
+        thinkingMandatory,
         reasoning,
       ),
       ...deepSeekState,

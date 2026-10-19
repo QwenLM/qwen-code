@@ -25,6 +25,7 @@ import {
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
+import { getRequestModel } from '../request-model.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -2006,14 +2007,10 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     isStreaming: boolean,
   ): RequestContext {
-    const staticModel = {
-      ...this.contentGeneratorConfig.samplingParams,
-      ...this.contentGeneratorConfig.extra_body,
-    }['model'];
-    const effectiveModel =
-      typeof staticModel === 'string'
-        ? staticModel
-        : request.model || this.contentGeneratorConfig.model;
+    const effectiveModel = getRequestModel(
+      this.contentGeneratorConfig,
+      request.model || this.contentGeneratorConfig.model,
+    );
     const providerOverrides =
       this.config.provider.getRequestContextOverrides?.() ?? {};
     const toolCallParser = isStreaming

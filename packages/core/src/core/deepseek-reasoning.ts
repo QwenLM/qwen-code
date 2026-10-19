@@ -10,6 +10,7 @@ import {
   type ReasoningEffort,
 } from './reasoning-effort.js';
 import type { ResolvedReasoning } from './reasoning-overrides.js';
+import { getRequestModel } from './request-model.js';
 import { AuthType } from '../utils/auth-type.js';
 
 const FLASH_MODELS = new Set([
@@ -134,8 +135,9 @@ export function getDeepSeekReasoningState(
   config: Partial<ContentGeneratorConfig>,
   resolved: ResolvedReasoning | undefined,
 ): { enabled: boolean; effort?: ReasoningEffort } | undefined {
+  const model = getRequestModel(config);
   if (
-    !getBuiltinDeepSeekReasoning(config) ||
+    !getBuiltinDeepSeekReasoning({ ...config, model }) ||
     !resolved ||
     (resolved.profile !== undefined &&
       resolved.profile !== 'deepseek-openai') ||
@@ -148,7 +150,7 @@ export function getDeepSeekReasoningState(
   const normalized =
     effort === undefined || resolved.efforts.includes(effort)
       ? effort
-      : normalizeDeepSeekReasoningEffort(effort, config.model, config.baseUrl);
+      : normalizeDeepSeekReasoningEffort(effort, model, config.baseUrl);
   const body: Record<string, unknown> = applyDeepSeekReasoningEffort(
     { model: config.model, ...config.samplingParams, ...config.extra_body },
     config.baseUrl,
@@ -172,11 +174,7 @@ export function getDeepSeekReasoningState(
     wireEffort === undefined ||
     resolved.efforts.includes(wireEffort as ReasoningEffort)
       ? wireEffort
-      : normalizeDeepSeekReasoningEffort(
-          wireEffort,
-          config.model,
-          config.baseUrl,
-        );
+      : normalizeDeepSeekReasoningEffort(wireEffort, model, config.baseUrl);
   return {
     enabled: !disabled,
     effort: resolved.efforts.includes(effective as ReasoningEffort)

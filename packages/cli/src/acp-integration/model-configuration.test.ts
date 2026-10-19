@@ -77,6 +77,135 @@ describe('default reasoning configuration', () => {
 
 describe('model configuration manifest', () => {
   it.each([
+    [{ samplingParams: { model: 'deepseek-v4-pro' } }, ['high', 'max'], 'high'],
+    [{ extra_body: { model: 'deepseek-v4-pro' } }, ['high', 'max'], 'high'],
+    [
+      {
+        samplingParams: { model: 'deepseek-v4-pro' },
+        extra_body: { model: 'deepseek-v4.1-flash-1017' },
+      },
+      ['low', 'high', 'max'],
+      'low',
+    ],
+    [
+      {
+        samplingParams: { model: 'deepseek-v4.1-flash-1017' },
+        extra_body: { model: 'deepseek-v4-pro' },
+      },
+      ['high', 'max'],
+      'high',
+    ],
+  ] as const)(
+    'matches DeepSeek options, validation and display to final model in %j',
+    (overrides, efforts, currentValue) => {
+      const generation = {
+        model: 'deepseek-v4.1-flash-1017',
+        authType: 'openai',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: { effort: 'low' },
+        ...overrides,
+      } as ContentGeneratorConfig;
+      const config = {
+        getModel: () => generation.model,
+        getContentGeneratorConfig: () => generation,
+      } as unknown as Config;
+      const reasoning = resolveReasoningForModel(config, generation);
+      expect(getConfiguredModelReasoning(config)).toEqual(reasoning);
+      expect(reasoning).toMatchObject({ efforts });
+      expect(
+        isReasoningSelectionSupported(
+          generation.model,
+          'low',
+          false,
+          reasoning,
+        ),
+      ).toBe(currentValue === 'low');
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, 'low')?.[0],
+      ).toMatchObject({
+        currentValue,
+        options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+      });
+      expect(getReasoningForDisplay(config, generation)).toEqual({
+        effort: currentValue,
+      });
+    },
+  );
+
+  it('keeps the final model declaration ahead of the configured DeepSeek declaration', () => {
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    const generation = {
+      model: 'deepseek-v4.1-flash-1017',
+      authType: 'openai',
+      baseUrl,
+      thinkingMandatory: true,
+      extra_body: { model: 'deepseek-v4-pro' },
+      reasoningSnapshot: [
+        {
+          id: 'deepseek-v4.1-flash-1017',
+          authType: 'openai',
+          baseUrl,
+          reasoning: {
+            thinking: true,
+            disableField: 'enable_thinking',
+            efforts: ['low'],
+            defaultEffort: 'low',
+          },
+        },
+        {
+          id: 'deepseek-v4-pro',
+          authType: 'openai',
+          baseUrl,
+          reasoning: {
+            thinking: true,
+            disableField: 'enable_thinking',
+            efforts: ['max'],
+            defaultEffort: 'max',
+          },
+        },
+      ],
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+    } as unknown as Config;
+    const reasoning = resolveReasoningForModel(config, generation);
+    expect(getConfiguredModelReasoning(config)).toEqual(reasoning);
+    expect(reasoning).toMatchObject({ efforts: ['max'], defaultEffort: 'max' });
+    expect(
+      buildModelReasoningRoutePreview(generation, reasoning, undefined)?.[0],
+    ).toMatchObject({
+      currentValue: 'max',
+      options: [{ value: 'none' }, { value: 'max' }],
+    });
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: 'max',
+    });
+  });
+
+  it('does not restore the configured model manifest after a static model override', () => {
+    const generation = {
+      model: 'gpt-5.5',
+      authType: 'openai',
+      extra_body: { model: 'unknown-target' },
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+    } as unknown as Config;
+    expect(getConfiguredModelReasoning(config)).toBeUndefined();
+    expect(
+      buildModelReasoningRoutePreview(generation, undefined, 'high'),
+    ).toBeUndefined();
+    expect(
+      getGptReasoningOverrideState({
+        ...generation,
+        samplingParams: { reasoning_effort: 'high' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each([
     ['deepseek-flash', 'https://api.deepseek.com/v1', ['low', 'high', 'max']],
     [
       'deepseek-v4.1-flash-1017',
