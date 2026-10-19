@@ -10871,7 +10871,7 @@ async function runQwenServeImpl(
         );
       }
       writeStderrLine(
-        `qwen serve: manage this daemon with \`qwen daemon status --port ${actualPort}\`, ` +
+        `qwen serve: manage this daemon with \`qwen daemon status\`, ` +
           `\`qwen daemon logs --port ${actualPort} --follow\`, or ` +
           `\`qwen daemon stop --port ${actualPort}\`.`,
       );
