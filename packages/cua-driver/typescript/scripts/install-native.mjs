@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { execFile } from "node:child_process"
 import { x as extractTar } from "tar"
+import { EnvHttpProxyAgent, fetch as proxyFetch } from "undici"
 
 const DEFAULT_RELEASE_ROOT =
   "https://github.com/QwenLM/qwen-code/releases/download"
@@ -185,7 +186,7 @@ export async function ensureNativePayload({
   platform = process.platform,
   arch = process.arch,
   version,
-  fetchImpl = fetch,
+  fetchImpl,
 } = {}) {
   const {
     cachedNativeDirectory,
@@ -225,7 +226,16 @@ export async function ensureNativePayload({
   })
 
   const temporary = await mkdtemp(join(tmpdir(), "qwen-cua-sdk-"))
+  let dispatcher
   try {
+    if (!fetchImpl) {
+      dispatcher = new EnvHttpProxyAgent({
+        httpProxy: env.http_proxy ?? env.HTTP_PROXY ?? "",
+        httpsProxy: env.https_proxy ?? env.HTTPS_PROXY ?? "",
+        noProxy: env.no_proxy ?? env.NO_PROXY ?? "",
+      })
+      fetchImpl = (url, options) => proxyFetch(url, { ...options, dispatcher })
+    }
     const checksumResult = await fetchFirst(
       "checksums.txt",
       version,
@@ -274,7 +284,10 @@ export async function ensureNativePayload({
     }
     return destination
   } finally {
-    await rm(temporary, { recursive: true, force: true })
+    await Promise.all([
+      dispatcher?.close(),
+      rm(temporary, { recursive: true, force: true }),
+    ])
   }
 }
 
