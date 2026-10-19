@@ -6,6 +6,7 @@
 
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { LEADER_NAME } from '@qwen-code/qwen-code-core/agents/team/types.js';
+import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
@@ -4816,18 +4817,16 @@ export class Session implements SessionContext {
    * the stored-session close path `recorder.close()` precedes `dispose()`, and
    * `appendRecord` is already a no-op by then.
    */
-  #landUndrainedPeerNotifications(): void {
+  #landUndrainedPeerNotifications(
+    items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
+  ): void {
     const recording = this.config.getChatRecordingService();
     if (!recording) return;
-    for (const item of this.notificationQueue) {
+    for (const item of items) {
       if (item.kind !== 'peer' || item.persisted) continue;
-      // Envelope the cold copy only. This report was never delivered, so the
-      // model was never asked anything; bare text makes recovery's shape
-      // predicate reject the entry, leaving a `user` tail that classifies a
-      // cleanly-closed session as `interrupted_prompt`. The warm record sites
-      // stay bare on purpose: there the model *was* asked, so a tail with no
-      // assistant record really is an interrupted turn and trimming it would
-      // certify `clean` falsely.
+      // Only cold copies get the task envelope: recovery trims these because
+      // the model was never asked anything. Warm copies keep their peer
+      // envelope so an unanswered delivered turn remains `interrupted_prompt`.
       recording.recordNotification(
         [
           {
@@ -11565,7 +11564,7 @@ export class Session implements SessionContext {
       // on `taskId`, and teammate reports must never collapse into one another.
       taskId: `teammate-message-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
       status: 'message',
-      modelText,
+      modelText: `<peer-notification>\n${escapeXml(modelText)}\n</peer-notification>`,
       displayText,
       ...(sender
         ? {
@@ -11606,7 +11605,7 @@ export class Session implements SessionContext {
       kind: 'peer',
       taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
       status: change.type,
-      modelText: `Teammate ${change.name} ${tail}.`,
+      modelText: `<peer-notification>\n${escapeXml(`Teammate ${change.name} ${tail}.`)}\n</peer-notification>`,
       displayText: `teammate ${change.name} ${tail}`,
       agent: {
         agentName: `${ROOT_AGENT_IDENTITY.agentName}/${change.name}`,
@@ -11933,6 +11932,7 @@ export class Session implements SessionContext {
             ? `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`
             : `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
         );
+        this.#landUndrainedPeerNotifications([item]);
         this.droppedNotifications.record(toAdmissibleNotification(item));
         return;
       }
@@ -11942,6 +11942,7 @@ export class Session implements SessionContext {
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
       if (evicted) {
+        this.#landUndrainedPeerNotifications([evicted]);
         this.droppedNotifications.record(toAdmissibleNotification(evicted));
       }
     }

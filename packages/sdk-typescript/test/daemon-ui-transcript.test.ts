@@ -582,6 +582,44 @@ describe('teammate_activity status events', () => {
     expect(rows[0]).toMatchObject({ data: { status: 'failed' } });
   });
 
+  it('keeps failed rows distinct from each other and from tool progress', () => {
+    const frame = (text: string, status: string): DaemonUiEvent => ({
+      ...activity(text, '/root/checker'),
+      data: { status },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        frame('checker failed read_file', 'failed'),
+        frame('checker started write_file', 'call'),
+        frame('checker failed write_file', 'failed'),
+        frame('checker finished retry', 'result'),
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'status',
+        source: 'teammate_activity',
+        text: 'checker failed read_file',
+        data: { status: 'failed' },
+      },
+      {
+        kind: 'status',
+        source: 'teammate_activity',
+        text: 'checker finished retry',
+        data: { status: 'result' },
+      },
+      {
+        kind: 'status',
+        source: 'teammate_activity',
+        text: 'checker failed write_file',
+        data: { status: 'failed' },
+      },
+    ]);
+  });
+
   it('appends a separate row when the activity carries no identity', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
