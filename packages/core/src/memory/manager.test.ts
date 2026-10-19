@@ -2795,6 +2795,22 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
     });
 
+    it('supplements only past the capture window, measured from the slice base', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // Exactly the window: 42 - 2 = 40. The parked slice still fits the
+      // captured tail, so this turn extracts without prepending it; the case
+      // above pins the other side at 43, where one more entry leaves it out.
+      const atWindow = await turn(mgr, 42);
+      expect(atWindow.skippedReason).toBeUndefined();
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[1][0].skippedHistory,
+      ).toBeUndefined();
+    });
+
     it('runs when a carried settle let the parked span outgrow the skip window', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
