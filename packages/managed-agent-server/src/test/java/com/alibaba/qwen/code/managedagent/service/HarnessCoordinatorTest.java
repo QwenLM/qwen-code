@@ -3443,6 +3443,104 @@ class HarnessCoordinatorTest {
     }
 
     @Test
+    void parksAnUnknownToolOutcomeInsteadOfFailingTheTurn() {
+        String tenantId = "tenant-tool-park";
+        String sessionId = "session-tool-park";
+        String turnId = "turn-tool-park";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-old", "epoch-old", 7,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = turn(tenantId, sessionId, turnId, promptId,
+                "epoch-old", 7);
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.hasUnknownOutcome()).thenReturn(true);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedRuntime(tenantId, sessionId, false))
+                .thenReturn(new Attachment("boot-new", recovery, 2L,
+                        "epoch-new"));
+        when(store.parkTurnForToolRecovery(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), anyLong(), anyString()))
+                .thenReturn(true);
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        verify(store).parkTurnForToolRecovery(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), anyLong(), anyString());
+        verify(store, never()).failRecoveryBlockedTurn(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).continueManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void rechecksAParkedToolOutcomeThroughTheCancellationLoad() {
+        String tenantId = "tenant-tool-recheck";
+        String sessionId = "session-tool-recheck";
+        String turnId = "turn-tool-recheck";
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, "ACTIVE", "boot-old", "epoch-old", 7,
+                0, 1, 1, null, 1);
+        TurnRecord claimed = new TurnRecord(tenantId, sessionId, turnId,
+                promptId, List.of(Map.of("type", "text", "text", "recover")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-old", 7L,
+                "previous-owner", Long.MAX_VALUE, 0, 0, 0, null,
+                AgentStateStore.TOOL_RECOVERY_BLOCKED, "parked", 1, 1, null, 1);
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession(tenantId, sessionId)).thenReturn(session);
+        when(harness.recoverManagedFailureCancellation(eq(tenantId),
+                eq(sessionId), eq(turnId), anyString()))
+                .thenReturn(new Attachment("boot-new", recovery, 2L,
+                        "epoch-new"));
+        when(recovery.hasUnknownOutcome()).thenReturn(false);
+        when(recovery.isCancellationReady()).thenReturn(true);
+        when(recovery.getCheckpointId()).thenReturn("checkpoint");
+        when(recovery.getActivationId()).thenReturn("activation");
+        when(store.failRecoveryBlockedTurn(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), anyString())).thenReturn(true);
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch(tenantId, sessionId, turnId);
+        } finally {
+            coordinator.close();
+        }
+
+        verify(harness).cancelManagedRuntime(tenantId, sessionId, promptId,
+                "checkpoint", "activation");
+        verify(store).failRecoveryBlockedTurn(eq(tenantId), eq(sessionId),
+                eq(turnId), anyString(), anyString());
+        verify(harness, never()).recoverManagedRuntime(anyString(),
+                anyString(), anyBoolean());
+    }
+
+    @Test
     void continuesRecoveredRuntimeWithoutReplayingThePrompt() {
         String tenantId = "tenant-recovery";
         String sessionId = "session-recovery";

@@ -422,6 +422,13 @@ public class HarnessCoordinator {
             AtomicBoolean recoveryPath) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        // D7-2: a Turn parked on unknown tool evidence re-drives the
+        // cancellation load on its recheck, never a continuation that could
+        // replay the unobserved execution.
+        if (AgentStateStore.TOOL_RECOVERY_BLOCKED.equals(claimed.errorCode())
+                && !"CANCELLING".equals(claimed.status())) {
+            return driveToolRecovery(claimed, session, leaseLost);
+        }
         // A bound Session re-attaches through the takeover load: failures
         // here wait on the prior generation's lease, a wait bounded by that
         // lease itself rather than by the pre-admission retry budget.
@@ -483,9 +490,10 @@ public class HarnessCoordinator {
         if (runtimeRecovery != null
                 && runtimeRecovery.hasUnknownOutcome()
                 && !recoveringCancellation) {
-            return fail(claimed, "managed_runtime_recovery_blocked",
-                    "A prior tool execution has an unknown outcome; the"
-                            + " Session was blocked without replaying it.");
+            // Never fail a Turn as if an unobserved tool outcome had been
+            // observed. Park it until the Broker can reconcile the
+            // execution; the recheck takes the cancellation load.
+            return parkToolRecovery(claimed, leaseLost);
         }
         TurnRecord current;
         boolean recoveredCancellation = false;
@@ -1468,6 +1476,79 @@ public class HarnessCoordinator {
                     claimed.turnId());
         }
         return true;
+    }
+
+    // D7-2: a Turn whose tool evidence is still unknown is parked, never
+    // failed as if the outcome had been observed. The row stays active and
+    // the sweep re-claims it after the recheck.
+    private boolean parkToolRecovery(TurnRecord claimed,
+            AtomicBoolean leaseLost) {
+        if (leaseLost.get()) {
+            return true;
+        }
+        long retryAt = Math.addExact(clock.millis(),
+                OperationReconciler.RECHECK.toMillis());
+        if (!store.parkTurnForToolRecovery(claimed.tenantId(),
+                claimed.sessionId(), claimed.turnId(), owner, retryAt,
+                "A prior tool execution has an unknown outcome; the Turn"
+                        + " waits for the original Runtime to reconcile it.")) {
+            LOG.warn("Managed tool recovery park lost to a lease CAS"
+                            + " tenant={} session={} turn={}",
+                    claimed.tenantId(), claimed.sessionId(),
+                    claimed.turnId());
+        }
+        return true;
+    }
+
+    // D7-2: the recheck of a parked tool-outcome Turn. The cancellation
+    // load is the one that may journal what the original Runtime observed
+    // without re-executing; a still-unknown answer parks the Turn again.
+    private boolean driveToolRecovery(TurnRecord claimed,
+            SessionRecord session, AtomicBoolean leaseLost) {
+        if (leaseLost.get()) {
+            return true;
+        }
+        try {
+            Attachment takeover = harness.recoverManagedFailureCancellation(
+                    session.tenantId(), session.sessionId(),
+                    claimed.turnId(), owner);
+            HarnessRuntimeRecovery recovery = takeover.runtimeRecovery();
+            if (recovery == null || recovery.hasUnknownOutcome()
+                    || !recovery.isCancellationReady()) {
+                return parkToolRecovery(claimed, leaseLost);
+            }
+            harness.cancelManagedRuntime(session.tenantId(),
+                    session.sessionId(), claimed.promptId(),
+                    recovery.getCheckpointId(), recovery.getActivationId());
+            requireLease(leaseLost);
+            // The cancel route journaled what it observed. The Turn's
+            // terminal record keeps the recovery code: no continuation
+            // was driven over the unobserved execution.
+            return settleToolRecoveryFailure(claimed);
+        } catch (RuntimeException error) {
+            LOG.warn("Managed tool recovery recheck failed tenant={}"
+                            + " session={} turn={} failure={}",
+                    claimed.tenantId(), claimed.sessionId(),
+                    claimed.turnId(), error.getClass().getSimpleName());
+            return parkToolRecovery(claimed, leaseLost);
+        }
+    }
+
+    private boolean settleToolRecoveryFailure(TurnRecord claimed) {
+        if (store.failRecoveryBlockedTurn(claimed.tenantId(),
+                claimed.sessionId(), claimed.turnId(), owner,
+                "A prior tool execution's outcome could not be observed;"
+                        + " the Turn ended through cancellation without"
+                        + " replaying it.")) {
+            return true;
+        }
+        // The fenced CAS missed; the next claim re-drives the same
+        // reconciliation instead of leaving the Turn unsettled silently.
+        LOG.warn("Managed tool recovery settlement lost to a lease CAS"
+                        + " tenant={} session={} turn={}",
+                claimed.tenantId(), claimed.sessionId(),
+                claimed.turnId());
+        return false;
     }
 
     // #14387: a workflow Turn's work is one deterministic in-process script

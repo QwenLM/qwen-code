@@ -4672,7 +4672,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // per tick forever. A cancel still scans it: settling the Turn
         // cancelled is the cancel's own act, not a re-dispatch.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code <> '" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "') AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (status = 'CANCELLING' OR retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code <> '" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "') AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -4691,7 +4691,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
                         + " 'CANCELLING') AND (dispatch_lease_until IS NULL"
                         + " OR dispatch_lease_until < ?) AND (retry_after IS"
-                        + " NULL OR retry_after <= ?)",
+                        + " NULL OR retry_after <= ? OR status ="
+                        + " 'CANCELLING')",
                 owner, now + leaseDuration.toMillis(), now, tenantId,
                 sessionId, turnId, now, now);
         return updated == 0 ? Optional.empty()
@@ -4740,6 +4741,27 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " 'CANCELLING')",
                 errorCode, errorMessage, now, tenantId, sessionId, turnId,
                 owner, now) == 1;
+    }
+
+    @Override
+    @Transactional
+    public boolean parkTurnForToolRecovery(String tenantId, String sessionId,
+            String turnId, String owner, long retryAfter, String message) {
+        requireLegacyMutation(tenantId, sessionId);
+        long now = clock.millis();
+        // The row keeps its active status: no terminal claim is made while
+        // the tool outcome is unproven. retry_after takes it out of the
+        // sweep until the next reconciliation, and the mark tells that
+        // drive which evidence path to take.
+        return jdbc.update("UPDATE ma_turn SET error_code = ?,"
+                        + " error_message = ?, retry_after = ?,"
+                        + " dispatch_owner = NULL, dispatch_lease_until = NULL,"
+                        + " gmt_modified = ?, version = version + 1 WHERE"
+                        + " tenant_id = ? AND session_id = ? AND turn_id = ?"
+                        + " AND dispatch_owner = ? AND dispatch_lease_until >= ?"
+                        + " AND status IN ('ACCEPTED', 'RUNNING')",
+                AgentStateStore.TOOL_RECOVERY_BLOCKED, message, retryAfter,
+                now, tenantId, sessionId, turnId, owner, now) == 1;
     }
 
     @Override

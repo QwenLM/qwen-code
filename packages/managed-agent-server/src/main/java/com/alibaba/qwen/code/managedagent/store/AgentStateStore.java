@@ -53,6 +53,16 @@ public interface AgentStateStore {
      */
     String WORKFLOW_RECOVERY_BLOCKED = "hosted_workflow_recovery_blocked";
 
+    /**
+     * D7-2: the durable mark a Turn carries while one of its tool
+     * executions has an unknown outcome. Unlike the workflow mark, this
+     * park is re-driven: the dispatch sweep re-claims the Turn after
+     * {@code retry_after}, and the coordinator asks the Broker's
+     * cancellation evidence again. A cancel still scans it — settling the
+     * Turn cancelled is the cancel's own act.
+     */
+    String TOOL_RECOVERY_BLOCKED = "hosted_tool_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional
@@ -716,6 +726,15 @@ public interface AgentStateStore {
     boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
             String turnId, String owner, String errorCode,
             String errorMessage);
+
+    /**
+     * D7-2: parks an active Turn until {@code retryAfter} while its tool
+     * evidence stays unknown. The row keeps its active status — no
+     * terminal claim is made — and clearing the dispatch lease takes it
+     * out of the sweep until the recheck is due.
+     */
+    boolean parkTurnForToolRecovery(String tenantId, String sessionId,
+            String turnId, String owner, long retryAfter, String message);
 
     void deferTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
