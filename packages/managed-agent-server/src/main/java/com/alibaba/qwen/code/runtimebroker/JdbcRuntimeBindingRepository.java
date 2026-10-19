@@ -1,6 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
+import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
+
+import javax.sql.DataSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -19,8 +24,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
-
-import javax.sql.DataSource;
 
 /** JDBC Runtime binding repository coordinated through a shared database. */
 public final class JdbcRuntimeBindingRepository
@@ -697,11 +700,17 @@ public final class JdbcRuntimeBindingRepository
     }
 
     Map<String, Object> readCsiBatch(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeBindingRecord hint, String promptId, String batchId) {
+        return readCsiBatch(sessions, executions, hint, promptId, batchId, null);
+    }
+
+    Map<String, Object> readCsiBatch(
             RuntimeSessionRepository sessions,
             ToolExecutionRepository executions,
             RuntimeBindingRecord hint,
             String promptId,
-            String batchId) {
+            String batchId, Map<String, Object> recoveryOwner) {
         requireCsiRepositories(sessions, executions);
         return JdbcRepositorySupport.transaction(
                 dataSource,
@@ -728,6 +737,10 @@ public final class JdbcRuntimeBindingRepository
                                 "Original CSI Runtime Session is not ready",
                                 false);
                     }
+                    if (recoveryOwner != null) {
+                        admission.head().requireRecoveryOwner(recoveryOwner);
+                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
+                    }
                     var result =
                             CsiNativeToolReservation.read(
                                     connection,
@@ -735,7 +748,7 @@ public final class JdbcRuntimeBindingRepository
                                     admission.prefix(),
                                     resources,
                                     promptId,
-                                    batchId);
+                                    batchId, recoveryOwner != null);
                     admission.head().requireCurrentTime(connection);
                     return result;
                 });
@@ -1935,7 +1948,7 @@ public final class JdbcRuntimeBindingRepository
             return new BindingControl(connection, original, null);
         }
         return new BindingControl(
-                connection, original, JdbcCsiReadyAdmission.lock(connection, original));
+                connection, original, JdbcCsiApplicationProgress.lock(connection, original));
     }
 
     private static void requireControlBinding(
@@ -2007,7 +2020,7 @@ public final class JdbcRuntimeBindingRepository
     private record BindingControl(
             Connection connection,
             JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiReadyAdmission.Admission progress) {}
+            JdbcCsiApplicationProgress.Continuation progress) {}
 
     private static void ensureSlot(Connection connection, String requestKey,
             RuntimeProvisionRequest request) throws SQLException {

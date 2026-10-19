@@ -1,15 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitReceipt;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitResource;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.RestoreHead;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -49,7 +49,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
         TransactionTemplate transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         ManagedSessionStore store = new ManagedSessionStore(
-                new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource));
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource));
         String action = required("D1_PROCESS_ACTION");
         switch (action) {
             case "commit-and-crash" -> commitAndCrash(store, transactions);
@@ -74,8 +74,8 @@ public final class ManagedSessionStoreProcessFixtureMain {
         try {
             receipt = inTransaction(transactions,
                     () -> store.commit(TENANT, SESSION, TOKEN_A, genesis()));
-        } catch (ApiException error) {
-            JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(
+        } catch (ManagedAgentException error) {
+            JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(
                     required("D1_MYSQL_URL"), required("D1_MYSQL_USER"),
                     System.getenv().getOrDefault("D1_MYSQL_PASSWORD", "")));
             Map<String, Object> head = jdbc.queryForMap(
@@ -119,7 +119,7 @@ public final class ManagedSessionStoreProcessFixtureMain {
             inTransaction(transactions,
                     () -> store.commit(TENANT, SESSION, TOKEN_A,
                             staleTurn()));
-        } catch (ApiException error) {
+        } catch (ManagedAgentException error) {
             require(ManagedSessionStoreModels.ERROR_WRITER_CONFLICT
                             .equals(error.getCode()),
                     "the stale writer returned an unexpected error");
