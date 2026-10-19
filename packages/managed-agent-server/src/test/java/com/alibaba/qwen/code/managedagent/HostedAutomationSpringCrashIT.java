@@ -515,6 +515,9 @@ class HostedAutomationSpringCrashIT {
             return watermarkSlot(definition) != null && chains != null
                     && chains == 1 ? true : null;
         });
+        assertThat(committedRuns(runIdOf(definition)))
+                .as("one committed automation_run across the crash")
+                .isEqualTo(1);
         // The kill also drops the Harness's Session connection, so the
         // wake turn may be aborted before its model call; the turn count is
         // the kill-before-answer cell's property, not this one's.
@@ -584,6 +587,9 @@ class HostedAutomationSpringCrashIT {
         });
         // `fired` lands with the fire answer, before the wake turn's model
         // call starts, so wait for the turn and then pin it to exactly one.
+        assertThat(committedRuns(runIdOf(definition)))
+                .as("one committed automation_run for the re-driven slot")
+                .isEqualTo(1);
         await("the re-driven run's model Turn", 120,
                 () -> modelPrompts.stream()
                         .anyMatch(prompt -> prompt.contains(
@@ -607,6 +613,22 @@ class HostedAutomationSpringCrashIT {
         } catch (Exception unavailable) {
             return false;
         }
+    }
+
+    private String runIdOf(String schedule) {
+        return jdbc.queryForObject(
+                "SELECT run_id FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                        + " AND schedule_id = ? AND run_id IS NOT NULL"
+                        + " ORDER BY slot DESC LIMIT 1", String.class, tenant,
+                schedule);
+    }
+
+    private int committedRuns(String runId) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ?"
+                        + " AND domain = 'automation_run' AND record_id = ?",
+                Integer.class, tenant, runId);
+        return count == null ? 0 : count;
     }
 
     private String occurrenceOutcome(String schedule) {
@@ -677,6 +699,9 @@ class HostedAutomationSpringCrashIT {
                         && "fired".equals(occurrenceOutcome(definition))
                         ? true : null;
             });
+            assertThat(committedRuns(runIdOf(definition)))
+                    .as("one committed automation_run for the raced slot")
+                    .isEqualTo(1);
             await("one model Turn for the raced slot", 120,
                     () -> modelPrompts.stream().anyMatch(prompt -> prompt
                             .contains("FG11C2_RACE")) ? true : null);

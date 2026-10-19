@@ -15,9 +15,9 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -202,7 +202,7 @@ public final class HostedAutomationCrashFixtureMain {
         }
     }
 
-    @Configuration
+    @TestConfiguration
     static class FireHold {
         @Bean
         @Primary
@@ -223,6 +223,16 @@ public final class HostedAutomationCrashFixtureMain {
                             HarnessConnector.class.getClassLoader(),
                             new Class<?>[] {HarnessConnector.class},
                             (proxy, method, args) -> {
+                                Object result;
+                                try {
+                                    result = method.invoke(connector, args);
+                                } catch (InvocationTargetException
+                                        failure) {
+                                    throw failure.getCause();
+                                }
+                                // Hold the answer after the Harness committed:
+                                // Spring still sees the occurrence as `firing`,
+                                // which is the ambiguous-answer window.
                                 if ("runAutomationOperation".equals(
                                         method.getName())
                                         && ARMED.get()) {
@@ -234,12 +244,7 @@ public final class HostedAutomationCrashFixtureMain {
                                         Thread.currentThread().interrupt();
                                     }
                                 }
-                                try {
-                                    return method.invoke(connector, args);
-                                } catch (InvocationTargetException
-                                        failure) {
-                                    throw failure.getCause();
-                                }
+                                return result;
                             });
                 }
             };

@@ -9,12 +9,12 @@ Issue #14446 是 #12380 的 Stage F 第 FG11 轮，覆盖自动化域 `schedule`
 的三个 revision 上各 SIGKILL 一次，跑在打包栈上。本片覆盖住在 Spring 里的格——
 scanner 及其租约所在处：
 
-| 用例                           | 注入                                                                                                         | 期望                                                                                                                                           |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spring-kill-before-answer`    | occurrence 行已记 `firing`，夹具把 scanner 的 `runAutomationOperation` 调用挂起；SIGKILL Spring 子进程后重启 | 重新驱动的 fire 命中同一个派生的 `arun_` id。一条 run 链、一个被接受的 input、一次模型 Turn；occurrence 恰好 `fired` 一次                      |
-| `spring-kill-before-watermark` | 应答已落（revision 2 已提交），夹具把 `advanceWatermark` 挂起；SIGKILL Spring 子进程后重启                   | 同一 slot 不出现第二次 fire；watermark 追上，账本只有一条 run 链。杀进程会断开 Harness 的会话，wake turn 可能被中止，因此这一格不断言模型 Turn |
-| `two-scanner-race`             | 两个 Spring 子进程共用一台 MySQL 与同一个 tenant，租约设短，只有一个到期 slot                                | 恰好一个子进程认领该 slot；输者不写 occurrence、不写 run、不推进 watermark，账本只有一条链                                                     |
-| `parked-tool-harness-kill`     | wake turn 停在 Runtime 工具调用上时 SIGKILL Harness 子进程                                                   | 延期：见预算段说明                                                                                                                             |
+| 用例                           | 注入                                                                                                    | 期望                                                                                                                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spring-kill-before-answer`    | occurrence 处于 `firing`，Harness 已提交 run，夹具在 Spring 结算前扣住应答；SIGKILL Spring 子进程后重启 | 重新驱动的 fire 复用已提交的 `arun_` 身份：一条已提交的 `automation_run`、一个被接受的 input、一次模型 Turn，occurrence 恰好 `fired` 一次                                                              |
+| `spring-kill-before-watermark` | 应答已落（revision 2 已提交），夹具把 `advanceWatermark` 挂起；SIGKILL Spring 子进程后重启              | 同一 slot 不出现第二次 fire；watermark 追上，账本只有一条 run 链。杀进程会断开 Harness 的会话，wake turn 可能被中止，因此这一格不断言模型 Turn                                                         |
+| `two-scanner-race`             | 两个 Spring 子进程共用一台 MySQL 与同一 tenant，只有一个到期 slot，二者都被驱动一次                     | 账本去重：一行 occurrence、一条已提交的 `automation_run`、一次模型 Turn。本用例不构造租约接管；fencing 由 store 在 `claim`、`settleOccurrence`、`advanceWatermark` 上的 `lease_owner`/`fence` 谓词保证 |
+| `parked-tool-harness-kill`     | wake turn 停在 Runtime 工具调用上时 SIGKILL Harness 子进程                                              | 延期：见预算段说明                                                                                                                                                                                     |
 
 live-run reconcile 格（存活 turn 经 overlap-`skip` slot 驱动 `reconcile_run`，run
 保持 `running`）已由 #14480 的路由测试钉住，本片不重复。
@@ -39,7 +39,8 @@ live-run reconcile 格（存活 turn 经 overlap-`skip` slot 驱动 `reconcile_r
   `lease`、`late-tolerance` 按测试尺度调小；scanner 是 `AutomationScanner`，
   调度在 `managedAutomationScheduler` 上。
 - **fire 挂起。** 夹具用 `BeanPostProcessor` 包装 `HarnessConnector`，把
-  `runAutomationOperation` 停在控制面 arm 的闩锁上。测试侧代理表达不了
+  `runAutomationOperation` 在 Harness 提交之后停在控制面 arm 的闩锁上，
+  使应答丢失而 run 已持久化。测试侧代理表达不了
   这个窗口：转接 Spring 与 Harness 的连接会破坏其流式通道，warm turn 永远
   不完成。
 - **watermark 挂起。** `spring-kill-before-watermark` 由夹具注册一个 primary
