@@ -182,6 +182,12 @@ details.section {
   font-variant-numeric: tabular-nums;
 }
 
+.modelTiming {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
 .modelBreakdown {
   display: flex;
   flex-direction: column;
