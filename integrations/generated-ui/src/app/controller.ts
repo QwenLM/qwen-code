@@ -114,9 +114,6 @@ export class ViewController {
       this.queue[this.queue.length - 1] = event;
     } else if (this.queue.length < 16) {
       this.queue.push(event);
-    } else {
-      this.fail('The view received too many pending interactions.');
-      return;
     }
     this.next();
   }

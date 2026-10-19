@@ -89,6 +89,32 @@ async function harness(
 }
 
 describe('interactions while a worker response is pending', () => {
+  it('keeps guest mutations after discarding patches and catches up on a fresh render', async () => {
+    const h = await harness(
+      `let count = 0;
+      ui.on('resetButton', 'click', () => {
+        count++;
+        ui.text('answer', String(count));
+        ui.value('rate', '');
+      });
+      ui.on('rate', 'input', () => ui.text('eventValue', ui.input('rate').value));`,
+      '<input id="rate"><button id="resetButton">Add</button><output id="answer">0</output><output id="eventValue"></output>',
+    );
+    h.click('resetButton');
+    h.enter('newer');
+    h.deliver();
+    expect(h.content.getElementById('answer')!.textContent).toBe('0');
+    h.deliver();
+    expect(h.input.value).toBe('newer');
+    expect(h.content.getElementById('eventValue')!.textContent).toBe('newer');
+    expect(h.content.getElementById('answer')!.textContent).toBe('0');
+
+    h.click('resetButton');
+    h.deliver();
+    expect(h.content.getElementById('answer')!.textContent).toBe('2');
+    expect(h.input.value).toBe('');
+  });
+
   it.each([
     [
       'dropdown options',

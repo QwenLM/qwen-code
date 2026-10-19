@@ -80,6 +80,48 @@ describe('one generated view activation', () => {
     h.controller.stop();
   });
 
+  it.each(['startup', 'event'])(
+    'ignores queue overflow during %s without ending the activation',
+    async (phase) => {
+      vi.useFakeTimers();
+      const h = harness();
+      await h.controller.receive(createShowResult(document));
+      let sequence = 1;
+      if (phase === 'event') {
+        h.reply({ sequence: sequence++, patches: [] });
+        h.controller.event(event);
+      }
+      const sent = h.worker.postMessage.mock.calls.length;
+      const types = ['click', 'input', 'change'] as const;
+      for (let click = 0; click < 6; click++) {
+        for (const type of types) h.controller.event({ ...event, type });
+      }
+      expect(h.worker.postMessage).toHaveBeenCalledTimes(sent);
+      expect(h.worker.terminate).not.toHaveBeenCalled();
+      expect(h.surface.stop).not.toHaveBeenCalled();
+
+      h.reply({ sequence: sequence++, patches: [] });
+      for (let index = 0; index < 16; index++) {
+        expect(h.worker.postMessage).toHaveBeenLastCalledWith({
+          type: 'event',
+          sequence,
+          event: { ...event, type: types[index % types.length] },
+          inputs,
+        });
+        h.reply({ sequence: sequence++, patches: [] });
+      }
+      expect(h.worker.postMessage).toHaveBeenCalledTimes(sent + 16);
+      expect(h.onStatus).toHaveBeenLastCalledWith('ready', expect.any(String));
+
+      h.controller.event(event);
+      expect(h.worker.postMessage).toHaveBeenCalledTimes(sent + 17);
+      h.reply({ sequence, patches: [] });
+      expect(h.onStatus).toHaveBeenLastCalledWith('ready', expect.any(String));
+      expect(h.worker.terminate).not.toHaveBeenCalled();
+      h.controller.stop();
+    },
+  );
+
   it('rejects a different document within one activation', async () => {
     const h = harness();
     await h.controller.receive(createShowResult(document));
