@@ -159,6 +159,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
         this.environment = environment;
     }
 
+    /** Runs the startup validation without a Spring context. */
+    public void validateForPreflight() {
+        validateWorkspaceFiles();
+    }
+
     @PostConstruct
     void validateWorkspaceFiles() {
         // The sweep runs first, so a bare milliseconds-style override
@@ -225,6 +230,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         || runtimeBroker.isChildWorkspacesEnabled())) {
             throw new IllegalStateException("Workspace-isolated bound Sessions require a durable"
                     + " local-process Broker and cannot combine with child Workspaces");
+        }
+        // Under Session isolation, which SSH-bound Sessions always use, a
+        // create warm would start one worker per unused Session and
+        // disqualify its never-initialized close receipt.
+        if (runtimeBroker.isSessionCreateWarm() && (!"workspace".equals(boundSessionIsolation)
+                || !runtimeBroker.getSsh().getNodes().isEmpty())) {
+            throw new IllegalStateException("Session-create warm requires Workspace-isolated"
+                    + " bound Sessions and no SSH nodes");
         }
         if (!runtimeBroker.getWorkspaceCreationRoot().isBlank()
                 && (!harness.isWorkspaceFilesEnabled()
@@ -992,6 +1005,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String workspaceCreationRoot = "";
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
+        private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
         private boolean trustedLocalRebootRecovery = true;
@@ -1137,6 +1151,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setBoundSessionIsolationClass(String boundSessionIsolationClass) {
             this.boundSessionIsolationClass = boundSessionIsolationClass;
+        }
+
+        public boolean isSessionCreateWarm() {
+            return sessionCreateWarm;
+        }
+
+        public void setSessionCreateWarm(boolean sessionCreateWarm) {
+            this.sessionCreateWarm = sessionCreateWarm;
         }
 
         public List<WorkspaceMount> getWorkspaceMounts() {
