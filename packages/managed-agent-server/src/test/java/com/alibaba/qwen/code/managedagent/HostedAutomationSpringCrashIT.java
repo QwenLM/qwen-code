@@ -137,7 +137,12 @@ class HostedAutomationSpringCrashIT {
     }
 
     private void control(String endpoint, String query) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(controlUrl
+        controlAt(controlUrl, endpoint, query);
+    }
+
+    private void controlAt(String base, String endpoint, String query)
+            throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(base
                 + "/control/" + endpoint + (query.isEmpty() ? "" : "?"
                         + query))).timeout(Duration.ofSeconds(10)).POST(
                 HttpRequest.BodyPublishers.noBody()).build();
@@ -146,13 +151,14 @@ class HostedAutomationSpringCrashIT {
         assertThat(response.statusCode()).as(response.body()).isEqualTo(204);
     }
 
-    private void startFixture(Path root, String tenant) throws Exception {
+    private record Child(Process process, String controlUrl,
+            String publicUrl) {
+    }
+
+    private Child startChild(Path root, String tenant, int internalPort,
+            int publicPort, int broker) throws Exception {
         Path log = root.resolve("fixture.log");
         Files.deleteIfExists(root.resolve("ready.json"));
-        if (fixtureInternalPort == 0) {
-            fixtureInternalPort = freePort();
-            fixturePublicPort = freePort();
-        }
         ProcessBuilder builder = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java")
                         .toString(),
@@ -160,18 +166,18 @@ class HostedAutomationSpringCrashIT {
                 HostedAutomationCrashFixtureMain.class.getName(),
                 root.toString(), required("node.executable"),
                 cliEntry().toString(), tenant,
-                String.valueOf(fixtureInternalPort), String.valueOf(brokerPort),
-                String.valueOf(fixturePublicPort));
+                String.valueOf(internalPort), String.valueOf(broker),
+                String.valueOf(publicPort));
         builder.environment().put("FG11C_MYSQL_URL", fixtureDatabaseUrl);
         builder.environment().put("FG11C_MYSQL_USER", required("mysql.user"));
         builder.environment().put("FG11C_MYSQL_PASSWORD",
                 System.getProperty("mysql.password", ""));
         builder.environment().put("FG11C_HARNESS_URL",
                 "http://127.0.0.1:" + harnessPort);
-        fixture = builder.redirectErrorStream(true)
+        Process process = builder.redirectErrorStream(true)
                 .redirectOutput(log.toFile()).start();
         await("fixture ready", 90, () -> {
-            if (!fixture.isAlive()) {
+            if (!process.isAlive()) {
                 return new IllegalStateException("fixture exited:\n"
                         + HostedChannelGateSupport.safeRead(log));
             }
@@ -179,9 +185,23 @@ class HostedAutomationSpringCrashIT {
         });
         JsonNode ready = json.readTree(
                 Files.readString(root.resolve("ready.json")));
-        controlUrl = ready.path("controlUrl").asText();
-        internalUrl = ready.path("internalUrl").asText();
-        publicUrl = ready.path("publicUrl").asText();
+        return new Child(process, ready.path("controlUrl").asText(),
+                ready.path("publicUrl").asText());
+    }
+
+    private void startFixture(Path root, String tenant) throws Exception {
+        if (fixtureInternalPort == 0) {
+            fixtureInternalPort = freePort();
+            fixturePublicPort = freePort();
+        }
+        Child child = startChild(root, tenant, fixtureInternalPort,
+                fixturePublicPort, brokerPort);
+        fixture = child.process();
+        controlUrl = child.controlUrl();
+        publicUrl = child.publicUrl();
+        internalUrl = json.readTree(
+                Files.readString(root.resolve("ready.json")))
+                .path("internalUrl").asText();
         this.tenant = tenant;
     }
 
@@ -589,6 +609,81 @@ class HostedAutomationSpringCrashIT {
                 "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
                         + " AND schedule_id = ? ORDER BY slot", String.class,
                 tenant, schedule);
+    }
+
+    @Test
+    @Timeout(900)
+    void fg11c2TwoScannerRaceFiresOnce() throws Exception {
+        assertThat(System.getProperty("mysql.url"))
+                .as("FG11c slice 2 requires -Dmysql.url")
+                .startsWith("jdbc:mysql:");
+        String databaseUrl = freshDatabaseUrl();
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+                new DriverManagerDataSource(databaseUrl,
+                        required("mysql.user"),
+                        System.getProperty("mysql.password", "")));
+        jdbc.setQueryTimeout(10);
+        temporary = temporary.toRealPath();
+        String tenantName = "hosted-automation-race-" + UUID.randomUUID();
+        startModel();
+        harnessPort = freePort();
+        brokerPort = freePort();
+        Path rootA = Files.createDirectories(temporary.resolve("race-a"));
+        Path rootB = Files.createDirectories(temporary.resolve("race-b"));
+        startFixture(rootA, tenantName);
+        startHarness();
+        Child second = startChild(rootB, tenantName, freePort(), freePort(),
+                freePort());
+        try {
+            String session = createSession("race");
+            String definition = apiRequest("POST", "/v1/agent-automations",
+                    definition(session, "FG11C2_RACE"), "fg11c2-race-def",
+                    202).path("id").asText();
+            // Two scanners, one due slot: the lease fence must let exactly
+            // one of them claim it.
+            Thread left = Thread.ofPlatform().start(() -> {
+                try {
+                    control("scan", "");
+                } catch (Exception lost) {
+                    // The race's loser may answer late; the ledger decides.
+                }
+            });
+            Thread right = Thread.ofPlatform().start(() -> {
+                try {
+                    controlAt(second.controlUrl(), "scan", "");
+                } catch (Exception lost) {
+                    // Same for the second child.
+                }
+            });
+            left.join();
+            right.join();
+            await("one occurrence and one run chain", 180, () -> {
+                Integer occurrences = jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_schedule_occurrence"
+                                + " WHERE tenant_id = ? AND schedule_id = ?",
+                        Integer.class, tenant, definition);
+                Integer chains = jdbc.queryForObject(
+                        "SELECT COUNT(DISTINCT run_id) FROM"
+                                + " ma_schedule_occurrence WHERE tenant_id = ?"
+                                + " AND schedule_id = ? AND run_id IS NOT NULL",
+                        Integer.class, tenant, definition);
+                return occurrences != null && occurrences == 1
+                        && chains != null && chains == 1
+                        && "fired".equals(occurrenceOutcome(definition))
+                        ? true : null;
+            });
+            await("one model Turn for the raced slot", 120,
+                    () -> modelPrompts.stream().anyMatch(prompt -> prompt
+                            .contains("FG11C2_RACE")) ? true : null);
+            long turns = modelPrompts.stream()
+                    .filter(prompt -> prompt.contains("FG11C2_RACE"))
+                    .count();
+            assertThat(turns).as("one model Turn for the raced slot")
+                    .isEqualTo(1);
+        } finally {
+            second.process().destroyForcibly();
+            second.process().waitFor(15, TimeUnit.SECONDS);
+        }
     }
 
     private String createSession(String name) throws Exception {
