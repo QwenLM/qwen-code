@@ -5,7 +5,7 @@
 ## 问题与范围
 
 Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 覆盖了
-owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，补齐
+owner 重启矩阵；本切片覆盖 **FG13d 的取消、超时与异步 drain 臂**，补齐
 `HostedExtensionsIT` 没有覆盖的 “cgroup 执行 / drain” 其余部分。
 
 托管命令 Hook 跑在 Runtime worker 的委派 cgroup v2 单元里，命令还可能留下
@@ -19,9 +19,10 @@ owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，
    打包 Harness、durable worker 与委派 cgroup 根，测的是同一条 owner 路径。
 2. **夹具增加忽略 TERM 的后代。** 只发 SIGTERM 无法清空仍被后代占据的单元；
    夹具子进程在 `hook-ignore-term` 模式下安装 `SIGTERM` handler。
-3. **三个独立用例，各自一套夹具。** 取消、超时与 worker 停止时取消分别启动自己的
-   Spring、Harness 与 worker，一格的停顿不会掩盖另一格。三格均保留
-   `@Timeout(300)`，该类按 350 s 计入预算。
+3. **独立用例，各自一套夹具。** 取消、超时、worker 停止时取消与 DELETE drain 分别
+   启动自己的 Spring、Harness 与 worker，一格的停顿不会掩盖另一格。Hook 各格保留
+   `@Timeout(300)`；DELETE-drain 格因等待两个生命周期 Hook 使用 `@Timeout(600)`。
+   该类共享 fork 增加 150 秒。
 4. **取消与状态探针都走 Harness 路由。** 两者都通过认证的
    `/session/:id/hooks/operations/:operationId` 路由并携带契约头，与 FG13c 的
    状态探针同一入口。

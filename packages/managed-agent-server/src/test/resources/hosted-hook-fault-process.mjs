@@ -53,8 +53,12 @@ if (mode === 'child') {
   for await (const chunk of process.stdin) input += chunk;
   const value = JSON.parse(input);
   // FG13d: lifecycle events (SessionEnd/SessionDelete) must not answer with a
-  // PreToolUse decision, so the fixture only records their completion.
-  const lifecycle = value.hook_event_name !== 'PreToolUse';
+  // PreToolUse decision, so the fixture only records their completion. Match
+  // the two names positively: an absent or renamed event must not take this
+  // path and silently exit without a decision.
+  const lifecycle = ['SessionEnd', 'SessionDelete'].includes(
+    value.hook_event_name,
+  );
   record('hook.call', { eventName: value.hook_event_name, input: value });
   let child;
   if (!solo && !lifecycle) {

@@ -5,9 +5,9 @@
 ## Problem and scope
 
 Issue #14449 tracks FG13, the Stage F fault-gate round for the Hosted Hook
-domains. FG13c covered the owner-restart matrix; this slice is **FG13d's
-first half: cancellation and timeout**, the arms that close the rest of
-"cgroup execution/drain" that `HostedExtensionsIT` did not.
+domains. FG13c covered the owner-restart matrix; this slice covers **FG13d's
+cancellation, timeout and async-drain arms**, the rest of "cgroup
+execution/drain" that `HostedExtensionsIT` did not.
 
 A managed command Hook runs in the Runtime worker's delegated cgroup v2
 unit, and a command may leave a descendant behind. Cancelling or timing it
@@ -24,10 +24,12 @@ once the unit is empty (`hook-command-cgroup.ts:227-248`,
 2. **The fixture gets a TERM-ignoring descendant.** A cancel that only sends
    SIGTERM cannot empty the unit while a descendant ignores it; the fixture
    child installs a `SIGTERM` handler in the `hook-ignore-term` mode.
-3. **Independent cells, each its own fixture.** Cancellation, timeout and the
-   stopped-worker cancel boot separate Spring/Harness/worker stacks, so a
-   stall in one cannot mask the other. Each keeps `@Timeout(300)`, and the
-   class is budgeted at 350 s.
+3. **Independent cells, each its own fixture.** Cancellation, timeout, the
+   stopped-worker cancel and the DELETE drain boot separate
+   Spring/Harness/worker stacks, so a stall in one cannot mask the other. The
+   Hook cells keep `@Timeout(300)`; the DELETE-drain cell uses
+   `@Timeout(600)` because it waits for both lifecycle Hooks. The class adds
+   150 s to the shared fork.
 4. **The cancel and status probes use the Harness routes.** Both go through
    the authenticated `/session/:id/hooks/operations/:operationId` routes
    with the contract headers, the same entry the FG13c status probe uses.

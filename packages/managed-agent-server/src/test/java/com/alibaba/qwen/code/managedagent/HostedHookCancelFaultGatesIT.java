@@ -240,18 +240,30 @@ class HostedHookCancelFaultGatesIT {
 
         String operation = api("DELETE", "/v1/agents/sessions/" + session, null, "delete-" + session, 202)
                 .path("id").asText();
+        // The unit must already be empty when the first lifecycle Hook starts:
+        // sampling after the operation settles cannot tell a drain that ran
+        // before the lifecycle Hooks from one that ran after them. SessionEnd
+        // holds for three seconds, so a reordered drain keeps the unit
+        // populated inside this window.
+        waitFor(() -> assertThat(events("hook.call").stream()
+                .anyMatch(event -> "SessionEnd".equals(event.path("eventName").asText()))).isTrue());
+        assertThat(running(hook)).as("async command alive when SessionEnd started").isFalse();
+        assertThat(running(child)).as("descendant alive when SessionEnd started").isFalse();
+        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events")))
+                .as("PreToolUse unit when SessionEnd started").contains("populated 0");
         waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
                 null, null, 200).path("status").asText()).isEqualTo("completed"));
 
-        // DELETE drains the held async command before the lifecycle Hooks run,
-        // and each lifecycle event runs exactly once.
-        assertThat(running(hook)).isFalse();
-        assertThat(running(child)).isFalse();
-        assertHookUnitsEmpty();
+        // The evidence file is append-ordered, so the call order is itself the
+        // ordering witness the design doc promises. Each lifecycle event runs
+        // exactly once.
+        assertThat(events("hook.call").stream().map(event -> event.path("eventName").asText()).toList())
+                .containsExactly("PreToolUse", "SessionEnd", "SessionDelete");
         assertThat(events("hook.done").stream()
                 .filter(event -> "SessionEnd".equals(event.path("eventName").asText())).count()).isEqualTo(1);
         assertThat(events("hook.done").stream()
                 .filter(event -> "SessionDelete".equals(event.path("eventName").asText())).count()).isEqualTo(1);
+        assertHookUnitsEmpty();
         assertThat(events("hook.allow")).isEmpty();
         assertThat(modelFailure.get()).isNull();
     }
@@ -306,7 +318,9 @@ class HostedHookCancelFaultGatesIT {
         List<Map<String, Object>> hooks = new ArrayList<>();
         hooks.add(hook("pre", "PreToolUse", lifecycle, program, timeoutMs, holdMs, signalMode));
         if (lifecycle) {
-            hooks.add(hook("session-end", "SessionEnd", false, program, timeoutMs, "0", "hook-solo"));
+            // SessionEnd holds long enough to observe whether the async unit is
+            // already empty when the first lifecycle Hook starts.
+            hooks.add(hook("session-end", "SessionEnd", false, program, timeoutMs, "3000", "hook-solo"));
             hooks.add(hook("session-delete", "SessionDelete", false, program, timeoutMs, "0", "hook-solo"));
         }
         json.writeValue(temporary.resolve("hooks.json").toFile(), Map.of("version", 1, "catalogs", List.of(
