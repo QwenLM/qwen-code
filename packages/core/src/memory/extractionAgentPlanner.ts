@@ -327,45 +327,72 @@ function uncoveredParkedPrefix(
   if (skippedHistory.length === 0 || capturedTail.length === 0) {
     return skippedHistory;
   }
-  // Texts and call names survive the capture's shallow copy, curation and
-  // payload slimming unchanged; a part without either (media, code) has no
-  // stable key, so its entry never matches and fails safe toward a duplicate.
-  const partKey = (part: NonNullable<Content['parts']>[number]): string =>
-    typeof part.text === 'string'
-      ? `text:${part.text}`
-      : part.functionCall
-        ? `call:${part.functionCall.name ?? ''}`
-        : part.functionResponse
-          ? `response:${part.functionResponse.name ?? ''}`
-          : '';
-  const keysOf = (entry: Content): string[] => (entry.parts ?? []).map(partKey);
-  const sameEntry = (a: Content, b: Content): boolean => {
-    if (a.role !== b.role) return false;
-    const left = keysOf(a);
-    const right = keysOf(b);
-    return (
-      left.length === right.length &&
-      left.every((key, i) => key !== '' && key === right[i])
-    );
+  // Texts, tool names and tool arguments survive the capture's shallow copy
+  // unchanged; a part with none of them (media) has no stable key, so its
+  // entry never matches and fails safe toward a duplicate. Arguments keep the
+  // key injective: two `read_file` calls on different paths are not the same
+  // turn.
+  const partKey = (part: NonNullable<Content['parts']>[number]): string => {
+    if (typeof part.text === 'string') return `text:${part.text}`;
+    if (part.functionCall) {
+      return `call:${part.functionCall.name ?? ''}:${JSON.stringify(
+        part.functionCall.args ?? null,
+      )}`;
+    }
+    if (part.functionResponse) {
+      return `response:${part.functionResponse.name ?? ''}:${
+        part.functionResponse.id ?? ''
+      }`;
+    }
+    return '';
+  };
+  // `null` marks an entry that cannot be compared: it never proves coverage.
+  const keysOf = (entry: Content): string[] | null => {
+    const keys = (entry.parts ?? []).map(partKey);
+    if (keys.length === 0 || keys.some((key) => key === '')) return null;
+    return [`role:${entry.role ?? ''}`, ...keys];
+  };
+  const sliceKeys = skippedHistory.map(keysOf);
+  const tailKeys = capturedTail.map(keysOf);
+  const runMatches = (
+    sliceStart: number,
+    tailStart: number,
+    count: number,
+  ): boolean => {
+    for (let k = 0; k < count; k++) {
+      const left = sliceKeys[sliceStart + k];
+      const right = tailKeys[tailStart + k];
+      if (
+        left === null ||
+        right === null ||
+        left === undefined ||
+        right === undefined ||
+        left.length !== right.length
+      ) {
+        return false;
+      }
+      for (let p = 0; p < left.length; p++) {
+        if (left[p] !== right[p]) return false;
+      }
+    }
+    return true;
   };
 
-  const anchor = capturedTail[0];
-  for (let i = skippedHistory.length - 1; i >= 0; i--) {
-    if (sameEntry(skippedHistory[i], anchor)) {
-      return skippedHistory.slice(0, i);
-    }
-  }
+  // The tail may hold the slice whole (the close-flush shape, where the tail
+  // is the whole short history): drop it.
   for (
     let start = 0;
     start + skippedHistory.length <= capturedTail.length;
     start++
   ) {
-    if (
-      skippedHistory.every((entry, j) =>
-        sameEntry(entry, capturedTail[start + j]),
-      )
-    ) {
-      return [];
+    if (runMatches(0, start, skippedHistory.length)) return [];
+  }
+  // Or the tail may begin inside the slice: the slice's suffix is then the
+  // tail's prefix. Require the whole overlap to match, and take the longest
+  // one, so repeated content cannot cut turns the tail never held.
+  for (let i = skippedHistory.length - 1; i >= 1; i--) {
+    if (runMatches(i, 0, skippedHistory.length - i)) {
+      return skippedHistory.slice(0, i);
     }
   }
   return skippedHistory;

@@ -579,6 +579,71 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ]);
   });
 
+  it('forwards parked turns when the tail only shares their first entry', async () => {
+    // The tail begins after the slice, and only the slice's first entry
+    // happens to equal the tail's first one. A single equal entry is not
+    // proof of coverage: dropping the rest would lose the skipped turn.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+        { role: 'user', parts: [{ text: 'turn 3' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toContain('turn 2');
+  });
+
+  it('does not treat two tool calls with the same name as the same turn', async () => {
+    // Two `read_file` calls on different paths compare equal by name alone,
+    // which would drop the parked instruction behind the unrelated call.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { path: '/repo/OTHER.ts' },
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'turn 4' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { path: '/repo/a.ts' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Remember: every release PR targets release/2.6.' }],
+      },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toContain(
+      'Remember: every release PR targets release/2.6.',
+    );
+  });
+
   it('uses a scoped config that denies shell and outside writes', async () => {
     await extract([], { written: false });
 

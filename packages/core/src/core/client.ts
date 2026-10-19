@@ -1256,6 +1256,12 @@ export class LlmClient {
     // its chain so the next turn cannot continue work the restore removed.
     this.activeTodoWorkChainPromptId = undefined;
     this.config.clearActiveTodoReminders();
+    // A restore/rewind rewrites the timeline the parked cadence snapshot was
+    // cut from; replaying it at close would fork turns this history no longer
+    // holds.
+    this.config
+      .getMemoryManager()
+      .invalidatePendingExtract(this.config.getSessionId());
     this.forceFullIdeContext = true;
   }
 
@@ -1290,6 +1296,11 @@ export class LlmClient {
       // continuing work that was rewound away.
       this.activeTodoWorkChainPromptId = undefined;
       this.config.clearActiveTodoReminders();
+      // Same rewind hazard for the parked cadence snapshot: its history is the
+      // one this truncation just discarded.
+      this.config
+        .getMemoryManager()
+        .invalidatePendingExtract(this.config.getSessionId());
     }
     this.forceFullIdeContext = true;
   }
