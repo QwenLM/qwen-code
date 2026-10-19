@@ -91,10 +91,14 @@ Harness generation changed` WARN；下一个到期 slot 会重新驱动修复，
 | c2   | `wakeHasPriorAttempt` 恒答复 false                         | `turn-crash`：pump 重跑 turn 而不是结算它，run 不是 `failed`，并出现第二次模型 Turn |
 | c3   | `HostedAutomationSession.reconcileRuns()` 直接返回空       | `settled-crash`：revision 3 永不提交，run 停在 `running`                            |
 
-**c3 只能打在方法上，不能只打在 open 路径。** 只让 open 路径跳过
-`reconcileRuns` 时 `settled-crash` 仍绿（39.6 秒）：崩溃后的 Harness 由后续
-slot 驱动 `reconcile_run`，路由同样走到 `reconcileRuns()` 并提交 revision 3，
-所以那条单点变异被路由覆盖，不咬人。把方法整体短路后 `settled-crash` 变红：
+**c3 只能打在方法上，不能只打某一个调用点。** 这次变异只跳过了 lifecycle
+处理器里的调用（`POST /session/:id/lifecycle`，
+`hosted-harness-session.ts:6206`），`settled-crash` 仍绿（39.6 秒）。存活的是
+会话打开路径上的调用（`hosted-harness-session.ts:5946`）：它紧接 Session
+注册之后执行，`POST /session/:id/load` 经 `open` 辅助函数走到它；崩溃后的
+Harness 由后续 slot 驱动 `reconcile_run`，该路由加载 Session，加载路径就在那里
+reconcile 了 run。`reconcile_run` 路由本身没有独立的 `reconcileRuns()` 调用——
+它按需跑 wake aftermath 并读取 run。把方法整体短路后 `settled-crash` 变红：
 `ConditionTimeoutException: expected "completed"`，落在 `settledCrash` 的终态
 断言上，耗时 216.5 秒。本用例门控的是「被崩掉的 run 会不会被 reconcile」这一
 性质，不是某一个调用点。

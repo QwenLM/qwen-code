@@ -107,11 +107,17 @@ for byte; the table records the expected red.
 | c2      | `wakeHasPriorAttempt` always answers false                                | `turn-crash`: the pump re-runs the turn instead of settling it, so the run is not `failed` and a second model Turn appears |
 | c3      | `HostedAutomationSession.reconcileRuns()` returns early                   | `settled-crash`: revision 3 never commits and the run stays `running`                                                      |
 
-**c3 must target the method, not the open path.** Skipping only the open
-path's `reconcileRuns` left `settled-crash` green (39.6 s): the crashed
-Harness is re-driven by the next slot's `reconcile_run`, and that route
-reaches `reconcileRuns()` too, so the single-site mutation is covered.
-Short-circuiting the method turns `settled-crash` red with
+**c3 must target the method, not one call site.** The mutation skipped only
+the lifecycle handler's call (`POST /session/:id/lifecycle`,
+`hosted-harness-session.ts:6206`) and `settled-crash` stayed green (39.6 s).
+The surviving path is the session-open call at
+`hosted-harness-session.ts:5946`, which runs right after the Session is
+registered and which `POST /session/:id/load` reaches through the `open`
+helper: the crashed Harness is re-driven by the next slot's `reconcile_run`,
+that route loads the Session, and the load reconciles the runs there. The
+`reconcile_run` route has no independent `reconcileRuns()` call of its own —
+it runs the wake aftermath when needed and reads the run. Short-circuiting
+`HostedAutomationSession.reconcileRuns()` turns `settled-crash` red with
 `ConditionTimeoutException: expected "completed"` at the case's terminal
 state assertion, after 216.5 s. The case gates whether a crashed run gets
 reconciled at all, not one particular call site.
