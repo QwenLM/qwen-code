@@ -395,6 +395,11 @@ public final class ManagedAgentPreflight {
         }
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
+        if ("static".equals(broker.getProvisioner())) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace files cannot use the static provisioner",
+                    "use the local-process provisioner");
+        }
         if (!"local-process".equals(broker.getProvisioner())) {
             return new Check("tool-path", Status.WARN,
                     "not evaluated for provisioner " + broker.getProvisioner(),
