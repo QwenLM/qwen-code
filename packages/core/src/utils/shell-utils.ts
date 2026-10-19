@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parse, quote } from 'shell-quote';
 import { isTool } from './is-tool.js';
+import { isBashWordSeparator } from './bash-lexer.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   execFile,
@@ -283,10 +284,18 @@ export function splitCommands(command: string): string[] {
   const quoteStack: Array<{ single: boolean; double: boolean }> = [];
   let i = 0;
 
-  const previousNonWhitespaceChar = (index: number): string | undefined => {
+  // Skip only the characters bash's lexer discards — space, tab and newline.
+  // `/\s/` also skipped `\r`, `\v`, `\f`, `\u00a0` and the rest of Unicode
+  // whitespace, which bash treats as ordinary word characters, so
+  // `echo x >\r& rm -rf /` read the `\r` as if it were spacing and kept the
+  // `& rm` in one segment with the `echo` (#12089).
+  const previousNonWordSeparatorChar = (index: number): string | undefined => {
     for (let j = index - 1; j >= 0; j--) {
       const ch = command[j];
-      if (ch && !/\s/.test(ch)) {
+      if (ch === undefined) {
+        break;
+      }
+      if (!isBashWordSeparator(ch)) {
         return ch;
       }
     }
@@ -367,36 +376,36 @@ export function splitCommands(command: string): string[] {
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the next character
       } else if (char === ';') {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else if (char === '&') {
-        const prevChar = previousNonWhitespaceChar(i);
+        const prevChar = previousNonWordSeparatorChar(i);
         if (prevChar === '>' || prevChar === '<') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '|') {
-        const prevChar = previousNonWhitespaceChar(i);
+        const prevChar = previousNonWordSeparatorChar(i);
         if (prevChar === '>') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the \n
       } else if (char === '\n') {
         // Unix-style \n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else {
         currentCommand += char;
@@ -407,8 +416,9 @@ export function splitCommands(command: string): string[] {
     i++;
   }
 
-  if (currentCommand.trim()) {
-    commands.push(currentCommand.trim());
+  const finalSegment = trimBashEdgeSeparators(currentCommand);
+  if (finalSegment) {
+    commands.push(finalSegment);
   }
 
   return commands.filter(Boolean); // Filter out any empty strings

@@ -517,6 +517,25 @@ describe('getCommandRoots', () => {
     expect(result).toEqual(['grep', 'curl']);
   });
 
+  // Bash's lexer skips only space, tab and newline, so a bare CR (not part of a
+  // CRLF pair) and NBSP are ordinary word characters. Reading them via `/\s/`
+  // hid the `&`/`|` that follows a redirection, and the trailing command
+  // vanished from the roots (#12089).
+  it('should split on a bare CR or NBSP before an async operator', async () => {
+    expect(getCommandRoots('echo x >\r& rm -rf /tmp/x')).toEqual([
+      'echo',
+      'rm',
+    ]);
+    expect(getCommandRoots('echo x >\u00a0& rm -rf /tmp/x')).toEqual([
+      'echo',
+      'rm',
+    ]);
+    expect(getCommandRoots('echo x > \u00a0| rm -rf /tmp/x')).toEqual([
+      'echo',
+      'rm',
+    ]);
+  });
+
   it('should handle mixed newlines and operators', async () => {
     const result = getCommandRoots('ls\necho hello && cat file\r\nrm -rf /');
     expect(result).toEqual(['ls', 'echo', 'cat', 'rm']);
@@ -1272,6 +1291,22 @@ describe('splitCommands', () => {
   // The segments this returns decide which sub-commands the shell tool asks
   // about and which one it reads for git attribution, so a command that goes
   // missing here goes missing from those too.
+
+  // `String.prototype.trim` strips `\r`, `\v`, `\f` and `\u00a0`, which bash
+  // treats as ordinary word characters. Trimming a segment with it both deleted
+  // a redirection target made of those characters and hid the operator that
+  // followed, so the trailing command disappeared (#12089).
+  it('keeps a bare CR or NBSP and still splits on the operator that follows', () => {
+    expect(splitCommands('echo x >\r& rm -rf /tmp/x')).toEqual([
+      'echo x >\r',
+      'rm -rf /tmp/x',
+    ]);
+    expect(splitCommands('echo x >\u00a0& rm -rf /tmp/x')).toEqual([
+      'echo x >\u00a0',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
   describe('command substitution containing a quoted paren', () => {
     it.each([
       [
