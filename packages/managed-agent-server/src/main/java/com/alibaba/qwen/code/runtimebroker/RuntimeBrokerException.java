@@ -19,7 +19,7 @@ public final class RuntimeBrokerException extends RuntimeException {
         this(statusCode, code, message, retryable, cause, Map.of());
     }
 
-    RuntimeBrokerException(int statusCode, String code, String message,
+    public RuntimeBrokerException(int statusCode, String code, String message,
             boolean retryable, Throwable cause, Map<String, Object> details) {
         super(message, cause);
         this.details = Map.copyOf(details);

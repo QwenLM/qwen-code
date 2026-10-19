@@ -1,12 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.withIdentity;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
+
+import javax.sql.DataSource;
 
 import java.math.BigDecimal;
 import java.net.URI;
@@ -29,7 +26,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
-import javax.sql.DataSource;
+
+import static com.alibaba.qwen.code.runtimebroker.ToolExecutionRecordFixtures.withIdentity;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Contract for the JDBC repositories. It is public so that
