@@ -10728,6 +10728,7 @@ async function runQwenServeImpl(
           `workspace=${boundWorkspace})`,
       );
       try {
+        const discoveryLogPath = daemonLog.getLogPath();
         discoveryRecordPath = writeDaemonDiscovery({
           v: DAEMON_DISCOVERY_VERSION,
           pid: process.pid,
@@ -10739,7 +10740,7 @@ async function runQwenServeImpl(
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),
-          logPath: daemonLog.getLogPath(),
+          ...(discoveryLogPath ? { logPath: discoveryLogPath } : {}),
         });
         process.once('exit', removeDiscoveryRecord);
       } catch (err) {

@@ -174,7 +174,9 @@ function fallbackLogPath(): string {
 }
 
 function logPathFor(record: DaemonDiscoveryRecord): string {
-  return record.logPath ?? fallbackLogPath();
+  return record.logPath && record.logPath.length > 0
+    ? record.logPath
+    : fallbackLogPath();
 }
 
 async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
