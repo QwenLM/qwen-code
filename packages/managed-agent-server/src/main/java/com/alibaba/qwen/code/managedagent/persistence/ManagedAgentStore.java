@@ -153,6 +153,13 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final ResidentWorkspaces residentWorkspaces;
     private final WorkspaceCreationRoots createdRoots;
+    private JournalEventTransport journalEventTransport;
+    private final boolean journalEventTransportEnabled;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setJournalEventTransport(JournalEventTransport transport) {
+        this.journalEventTransport = transport;
+    }
     private static final String SESSION_WITH_STREAM =
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
     private final RowMapper<SessionRecord> sessionMapper = (result, row) -> {
@@ -321,6 +328,7 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new WebShellModelOption(id, label);
         }).toList();
+        this.journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
@@ -511,6 +519,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestedRevision,
             String title,
             WorkspaceSelection selection) {
+        requireCsiJournalIsolation();
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Private CSI CREATE requires a transaction");
         }
@@ -546,8 +555,16 @@ public class ManagedAgentStore implements AgentStateStore {
                 registration);
     }
 
+    private void requireCsiJournalIsolation() {
+        if (journalEventTransportEnabled || journalEventTransport != null) {
+            throw new ApiException(HttpStatus.CONFLICT, "csi_journal_transport_unsupported",
+                    "The private CSI lane requires an isolated journal without an event transport.");
+        }
+    }
+
     RuntimeProvisionRequest requireCsiRequest(
             WorkspaceCsiRegistration registration, String sessionId) {
+        requireCsiJournalIsolation();
         SessionRecord session = requireSessionForUpdate(registration.tenantId(), sessionId);
         if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
                 || session.workspace() == null
