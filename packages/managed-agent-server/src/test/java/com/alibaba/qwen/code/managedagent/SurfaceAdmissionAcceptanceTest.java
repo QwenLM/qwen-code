@@ -490,6 +490,10 @@ class SurfaceAdmissionAcceptanceTest {
                         (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? "actor_required"
                                 : "session_not_found");
             }
+            case WORKSPACE_FILES -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "workspace_not_found");
+            }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 409, "workspace_creation_unavailable");
@@ -1611,6 +1615,8 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
+            case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS -> "{\"sessionId\":\"" + session + "\"}";
