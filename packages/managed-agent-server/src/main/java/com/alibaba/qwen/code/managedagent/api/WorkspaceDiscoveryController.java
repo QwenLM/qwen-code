@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService;
-import com.alibaba.qwen.code.managedagent.service.WorkspaceDiscoveryService.WorkspacePage;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.WorkspaceSummary;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCreationStore;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry.WorkspaceSummary;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCreationStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService.WorkspacePage;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
