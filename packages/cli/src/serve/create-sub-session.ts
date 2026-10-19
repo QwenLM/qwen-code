@@ -43,10 +43,12 @@
  * forever. Removal is an allowlist: failed and cancelled turns keep their
  * diagnostic transcripts. A revived sub-session (a new prompt after completion)
  * restarts its clock from the latest activity; running sub-sessions are never
- * removal candidates. After a daemon restart the launcher rediscover this
+ * removal candidates. After a daemon restart the launcher re-discovers this
  * workspace's persisted sub-session rows and starts their clocks from the
- * transcript's last write, so removal is not blind to transcripts written by
- * a previous daemon lifetime. Once removed, the session is not continuable.
+ * transcript's last write — but only for rows whose last persisted turn result
+ * is a clean completion (`completed`/`end_turn`): the restart path reaps only
+ * what it can prove clean, and a failed, cancelled, or unclassifiable transcript
+ * stays with the user. Once removed, the session is not continuable.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -162,13 +164,75 @@ export const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
  * enable it. */
 export const DEFAULT_SUB_SESSION_COMPLETION_TTL_MS = 0;
 
-/** Discovery pages the persisted session listing in bounded batches. */
-const TTL_DISCOVERY_PAGE_SIZE = 500;
+/** How far back (bytes) discovery reads a transcript's tail to find the last
+ * persisted turn result. Turn results are small and are appended at turn
+ * settle, so a bounded tail reaches them for any realistic transcript; a tail
+ * that cannot reach one yields "unclassifiable" and the row is kept. */
+const TTL_DISCOVERY_TAIL_BYTES = 1024 * 1024;
 
 /** How often the launcher looks for expired completed sub-sessions. TTL
  * precision is not user-visible at hour scale, so a five-minute cadence keeps
  * each sweep to a handful of map lookups and (at removal) file ops. */
 const COMPLETION_TTL_SWEEP_INTERVAL_MS = 5 * 60_000;
+
+/** Reads the state/stop-reason of the transcript's last persisted turn
+ * result (`turn_result` system record, appended at turn settle). Returns
+ * undefined when the transcript or a turn result cannot be read: discovery
+ * must then treat the row as unclassifiable and keep it, so a bounded tail
+ * that cannot reach the record fails toward retention, never toward removal.
+ * Scans the tail window from the end; the window's first line may be a
+ * fragment of an earlier record, and a fragment fails to parse and is
+ * skipped. */
+async function lastPersistedTurnOutcome(
+  service: SessionService,
+  sessionId: string,
+): Promise<{ state?: string; stopReason?: string } | undefined> {
+  let filePath: string;
+  try {
+    filePath = service.getSessionTranscriptPath(sessionId);
+  } catch {
+    return undefined;
+  }
+  let size: number;
+  try {
+    size = fs.statSync(filePath).size;
+  } catch {
+    return undefined;
+  }
+  const start = Math.max(0, size - TTL_DISCOVERY_TAIL_BYTES);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(size - start);
+    fs.readSync(fd, buffer, 0, buffer.length, start);
+    const lines = buffer.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof record !== 'object' || record === null) continue;
+      const typed = record as { subtype?: unknown; systemPayload?: unknown };
+      if (typed.subtype !== 'turn_result') continue;
+      const payload = typed.systemPayload;
+      if (typeof payload !== 'object' || payload === null) continue;
+      const outcome = payload as { state?: unknown; stopReason?: unknown };
+      return {
+        state: typeof outcome.state === 'string' ? outcome.state : undefined,
+        stopReason:
+          typeof outcome.stopReason === 'string'
+            ? outcome.stopReason
+            : undefined,
+      };
+    }
+    return undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
@@ -974,11 +1038,14 @@ export function createSubSessionLauncher(
    * The in-memory clocks are process-local, so after a daemon restart every
    * previously completed sub-session would be orphaned — its transcript would
    * outlive the configured retention indefinitely. A one-time disk scan
-   * re-arms those transcripts: every active catalog row that names a parent
-   * session is a finished or abandoned sub-session (it cannot be the daemon's
-   * primary session, and no live entry for it exists in this fresh process),
-   * so its TTL clock starts at the transcript's last write. Discovered rows
-   * are seeded into `completedAt` only — never into `spawnedSessionIds`,
+   * re-arms the transcripts it can prove finished: an active catalog row whose
+   * persisted creation metadata names a parent session is a sub-session (it
+   * cannot be the daemon's primary session), and its last persisted turn
+   * result must be a clean completion (`completed`/`end_turn`) — a failed or
+   * cancelled turn keeps its diagnostic transcript, and a transcript without
+   * a readable turn result is unclassifiable, so it stays with the user. An
+   * armed row's TTL clock starts at the transcript's last write. Discovered
+   * rows are seeded into `completedAt` only — never into `spawnedSessionIds`,
    * whose depth-1 gate must count only the live roster. A scan failure
    * re-arms the discovery for the next sweep. */
   let persistedSubSessionsDiscovered = false;
@@ -987,23 +1054,30 @@ export function createSubSessionLauncher(
     persistedSubSessionsDiscovered = true;
     const listAll = async (): Promise<void> => {
       const service = new SessionService(boundWorkspace);
-      let cursor: number | undefined;
-      for (;;) {
-        const page = await service.listSessions({
-          archiveState: 'active',
-          size: TTL_DISCOVERY_PAGE_SIZE,
-          ...(cursor !== undefined ? { cursor } : {}),
-        });
-        for (const item of page.items) {
-          if (
-            item.parentSessionId !== undefined &&
-            !completedAt.has(item.sessionId)
-          ) {
-            completedAt.set(item.sessionId, item.mtime);
-          }
+      // Tie-safe exhaustive enumeration (see listAllProjectSessionIds): the
+      // paged listSessions mtime cursor silently skips sessions whose mtime
+      // ties with a page's last entry, which an all-sessions sweep must
+      // never do.
+      const sessionIds = await service.listAllProjectSessionIds('active');
+      for (const sessionId of sessionIds) {
+        if (completedAt.has(sessionId)) continue;
+        // Only sub-sessions are TTL candidates: the persisted creation
+        // metadata names a parent session.
+        const parentSessionId = await service.readParentSessionId(sessionId);
+        if (parentSessionId === undefined) continue;
+        // The restart path reaps only what it can prove clean.
+        const outcome = await lastPersistedTurnOutcome(service, sessionId);
+        if (
+          outcome?.state !== 'completed' ||
+          outcome?.stopReason !== 'end_turn'
+        ) {
+          continue;
         }
-        if (!page.hasMore || page.nextCursor === undefined) return;
-        cursor = page.nextCursor;
+        const lastActivity = (await persistedRemovalState(sessionId))
+          .lastActivity;
+        if (lastActivity !== undefined) {
+          completedAt.set(sessionId, lastActivity);
+        }
       }
     };
     try {

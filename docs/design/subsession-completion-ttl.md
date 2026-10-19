@@ -97,14 +97,20 @@ caller.
 
 The completion clocks are process-local, so a daemon restart would orphan
 every previously completed sub-session transcript. To bound that, the first
-sweep performs a one-time disk discovery: it pages the active session
-listing (`SessionService.listSessions`, `archiveState: 'active'`) and re-arms
-every row that names a `parentSessionId` — such a row is a finished or
-abandoned sub-session in the fresh process (it cannot be a primary session
-and has no live entry), so its clock starts at the transcript's `mtime`.
-Discovered rows are seeded into the completion clock only, never into the
-roster set whose depth-1 gate must count only the live roster. A scan
-failure re-arms the discovery for the next sweep.
+sweep performs a one-time disk discovery: it enumerates the active session
+files exhaustively (`SessionService.listAllProjectSessionIds`,
+`archiveState: 'active'` — not the paged `listSessions`, whose strict
+`mtime < cursor` filter silently skips rows that share an mtime with a
+page's last entry) and re-arms the rows it can prove finished: the persisted
+creation metadata names a `parentSessionId` (such a row is a sub-session,
+never a primary session), and the transcript's last persisted turn result
+(`turn_result` record, appended at turn settle) is a clean completion
+(`completed`/`end_turn`). A failed or cancelled turn keeps its diagnostic
+transcript, and a transcript without a readable turn result is
+unclassifiable, so it stays with the user. An armed row's clock starts at
+the transcript's `mtime`. Discovered rows are seeded into the completion
+clock only, never into the roster set whose depth-1 gate must count only the
+live roster. A scan failure re-arms the discovery for the next sweep.
 
 ## Design decisions and rationale
 
@@ -142,8 +148,10 @@ failure re-arms the discovery for the next sweep.
   (fake timers, 5-minute sweep cadence, per-test `mkdtemp` workspaces and a
   real transcript fixture for the discovery path) covering: clean-completion
   removal, second-sweep no-op (terminal state), discovery of a persisted
-  completed transcript in a fresh launcher, revival restart, failed/cancelled
-  retention, work-state guards, removal retry after close/removal failure,
+  completed transcript in a fresh launcher, exhaustive discovery of an
+  mtime-tied batch (the old paged cursor's skip class), failed/cancelled and
+  unclassifiable transcript retention after a restart, revival restart,
+  work-state guards, removal retry after close/removal failure,
   serialization of overlapping sweeps, FIFO-eviction retention, and the
   sent-mode completion path.
 - Settings tests pin the schema default (`0`), the reader's warning
@@ -158,7 +166,9 @@ failure re-arms the discovery for the next sweep.
   is removed (live entry closed, transcript removed, one operator line)
   after the TTL elapses, and never removed before it; a revival restarts the
   clock; failed/cancelled sub-sessions are never removed; a daemon restart
-  does not orphan previously completed transcripts.
+  does not orphan previously completed transcripts — the restart path reaps
+  only rows whose last persisted turn result is a clean completion, and
+  failed, cancelled, or unclassifiable rows are kept.
 
 ## Open questions
 

@@ -87,13 +87,16 @@ status: 'implemented'
 ### 重启后的发现
 
 完成时钟是进程本地的，因此守护进程重启会把所有之前已完成的
-子会话 transcript 变成孤儿。为有界地处理这一点，第一次清扫执行
-一次性的磁盘发现：分页读取活动会话列表
-（`SessionService.listSessions`，`archiveState: 'active'`），
-并为每个带有 `parentSessionId` 的行重新上发时钟——
-这样的行在全新进程中是已完成或被放弃的子会话
-（它不可能是主会话，也没有活动条目），其时钟从
-transcript 的 `mtime` 启动。发现的行只注入完成时钟，
+子会话 transcript 变成孤儿。第一次清扫执行一次性的磁盘发现：
+遍历本 workspace 持久化的所有活动会话
+（`SessionService.listAllProjectSessionIds('active')` —— 穷尽式
+枚举；分页的 mtime 游标 `mtime < cursor` 会静默跳过与某页最后
+mtime 相同的行，这类行从此永远不会被重试），并为每个带有
+`parentSessionId` 且最后一条持久化的 turn 结果是干净完成
+（`state: 'completed'` + `stopReason: 'end_turn'`）的行重新上发
+时钟——时钟从 transcript 的 `mtime` 启动。重启路径只收割可证明
+的干净完成：最后一条 turn 是失败或取消的 transcript（以及无法
+判定的 transcript）留在用户手中。发现的行只注入完成时钟，
 绝不注入名册集合（深度 1 门只应计数活动名册）。
 扫描失败会为下一次清扫重新武装发现。
 
@@ -134,7 +137,8 @@ transcript 的 `mtime` 启动。发现的行只注入完成时钟，
   第二次清扫空操作（终结状态）、全新启动器中发现持久化已完成
   transcript、复活重启时钟、失败/取消保留、工作状态守卫、
   关闭/删除失败后的删除重试、重叠清扫的串行化、
-  FIFO 逐出保留，以及 sent 模式完成路径。
+  FIFO 逐出保留、mtime 同值批次的穷尽发现（旧分页游标的
+  跳过类），以及 sent 模式完成路径。
 - 设置测试钉住 schema 默认值（`0`）、读取器的警告契约
   以及键缺失时的空操作。
 - 对触及的文件运行 `tsc --noEmit` 和 `eslint`。
@@ -146,7 +150,9 @@ transcript 的 `mtime` 启动。发现的行只注入完成时钟，
 - 配置了正 TTL 时，以干净回合结束完成的子会话在 TTL 到期后
   被删除（活动条目关闭、transcript 删除、一条操作者日志行），
   且在此之前绝不被删除；复活会重启时钟；失败/已取消的子会话
-  绝不被删除；守护进程重启不会使之前已完成的 transcript 成为孤儿。
+  绝不被删除；守护进程重启不会使之前已完成的 transcript 成为
+  孤儿——重启路径只收割最后一条持久化的 turn 结果为干净完成
+  的行，失败、取消或无法判定的行保留。
 
 ## 未决问题
 

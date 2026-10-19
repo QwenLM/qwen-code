@@ -2233,6 +2233,9 @@ describe('sub-session completion TTL', () => {
   // flush microtasks only, while the sweep chain may wait on real fs I/O
   // (the disk discovery), which needs real event-loop turns.
   const realSetImmediate = globalThis.setImmediate;
+  // Real setTimeout, captured before fake timers: a fire-and-forget sweep
+  // driven by real fs I/O must be awaited on real time, not fake turns.
+  const realSetTimeout = globalThis.setTimeout;
   const drainRealEvents = (check: () => boolean, maxTurns = 5000) => {
     let turns = 0;
     return new Promise<void>((resolve) => {
@@ -2403,6 +2406,20 @@ describe('sub-session completion TTL', () => {
             sessionId,
             cwd: ws,
           }),
+          // The persisted turn result discovery classifies on: a clean
+          // completion is what the restart path reaps.
+          JSON.stringify({
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'p1',
+              state: 'completed',
+              stopReason: 'end_turn',
+              endedAt: Date.parse(OLD),
+            },
+            sessionId,
+            cwd: ws,
+          }),
         );
       }
       fs.writeFileSync(p, lines.map((l) => `${l}\n`).join(''), 'utf8');
@@ -2443,6 +2460,195 @@ describe('sub-session completion TTL', () => {
       expect(stderrLines.join('\n')).toContain(
         `removed completed sub-session ${childId}`,
       );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('discovers every persisted sub-session whose mtime ties across the old page boundary', async () => {
+    // The paged listSessions mtime cursor silently skipped rows whose mtime
+    // tied with a page's last entry; discovery enumerates exhaustively
+    // instead, so a same-mtime batch must be fully discovered and reaped.
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const writeCleanChild = (sessionId: string) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const head = {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: OLD,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'x' }] },
+        cwd: ws,
+        version: '1.0.0',
+      };
+      fs.writeFileSync(
+        p,
+        [
+          JSON.stringify(head),
+          JSON.stringify({
+            type: 'system',
+            subtype: 'parent_session',
+            systemPayload: { parentSessionId: 'parent-1' },
+            sessionId,
+            cwd: ws,
+          }),
+          JSON.stringify({
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'p1',
+              state: 'completed',
+              stopReason: 'end_turn',
+              endedAt: Date.parse(OLD),
+            },
+            sessionId,
+            cwd: ws,
+          }),
+        ]
+          .map((l) => `${l}\n`)
+          .join(''),
+        'utf8',
+      );
+      return p;
+    };
+    // One more than one old discovery page (500 rows), all sharing a single
+    // mtime: the paged cursor would have stopped after the first page.
+    const ids: string[] = [];
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    for (let i = 0; i < 520; i++) {
+      const id =
+        '990e8400-e29b-41d4-a716-' +
+        (0x446600000000 + i).toString(16).padStart(12, '0');
+      ids.push(id);
+      fs.utimesSync(writeCleanChild(id), aged, aged);
+      liveSummaries.set(id, null);
+    }
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // The sweep is fire-and-forget and its per-child discovery + removal
+      // is a chain of real fs reads, so wait on real time (the fake clock
+      // is already at the sweep tick) until every child is removed. The
+      // cap stays under the test timeout (15s local / 60s ECS).
+      const maxRealWaits = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+        ? 3000
+        : 1000;
+      let realWaits = 0;
+      while (
+        removeSession.mock.calls.length < ids.length &&
+        realWaits < maxRealWaits
+      ) {
+        await new Promise((resolve) => realSetTimeout(resolve, 10));
+        realWaits++;
+      }
+      expect(removeSession.mock.calls.length).toBe(ids.length);
+      expect(fake.closes).toHaveLength(ids.length);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps persisted sub-sessions whose last turn failed, was cancelled, or has no persisted turn result', async () => {
+    // After a restart the discovery may only reap what it can prove clean:
+    // the last persisted turn result must be completed/end_turn. A failed or
+    // cancelled turn keeps its diagnostic transcript, and a transcript
+    // without a readable turn result is unclassifiable, so it stays too.
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const writeChild = (sessionId: string, turnResult: unknown | null) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const lines = [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: OLD,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'x' }] },
+          cwd: ws,
+          version: '1.0.0',
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId: 'parent-1' },
+          sessionId,
+          cwd: ws,
+        }),
+      ];
+      if (turnResult !== null) {
+        lines.push(
+          JSON.stringify({
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: turnResult,
+            sessionId,
+            cwd: ws,
+          }),
+        );
+      }
+      fs.writeFileSync(p, lines.map((l) => `${l}\n`).join(''), 'utf8');
+      return p;
+    };
+    const erroredId = '770e8400-e29b-41d4-a716-446655440001';
+    const cancelledId = '770e8400-e29b-41d4-a716-446655440002';
+    const unclassifiedId = '770e8400-e29b-41d4-a716-446655440003';
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    fs.utimesSync(
+      writeChild(erroredId, {
+        promptId: 'p1',
+        state: 'error',
+        endedAt: Date.parse(OLD),
+      }),
+      aged,
+      aged,
+    );
+    fs.utimesSync(
+      writeChild(cancelledId, {
+        promptId: 'p1',
+        state: 'cancelled',
+        endedAt: Date.parse(OLD),
+      }),
+      aged,
+      aged,
+    );
+    fs.utimesSync(writeChild(unclassifiedId, null), aged, aged);
+    for (const id of [erroredId, cancelledId, unclassifiedId]) {
+      liveSummaries.set(id, null);
+    }
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // Let the discovery and sweep chain settle on real event-loop turns.
+      for (let i = 0; i < 200; i++) {
+        await new Promise((resolve) => realSetImmediate(resolve));
+      }
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
     } finally {
       launcher.stop();
       removeSession.mockRestore();
