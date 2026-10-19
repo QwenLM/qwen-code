@@ -16,6 +16,7 @@ import {
 import {
   applyContainerSandboxNoProxy,
   fakeServerHostOptions,
+  IS_CONTAINER_SANDBOX,
   TestRig,
 } from '../test-helper.js';
 
@@ -179,6 +180,11 @@ describe('headless local workflow ancestor discovery', () => {
     vi.stubEnv('QWEN_RUNTIME_DIR', join(fixtureRoot, '.runtime'));
     vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', trustPath);
     vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '0');
+    if (IS_CONTAINER_SANDBOX) {
+      // The container bind-mounts only the workdir (packages/a); the trusted
+      // ancestors under test sit above it, so mount the fixture root too.
+      vi.stubEnv('SANDBOX_MOUNTS', fixtureRoot);
+    }
     rig.testDir = target;
     await rig.run(
       'Run the shared workflow with the probe argument.',
