@@ -53,17 +53,17 @@ bean。故障打在 `OSS` 客户端上，真实的 `AliyunToolPublicationObjectS
 适配器仍在路径上，因此门禁同时覆盖它的错误映射
 （`ToolPublicationStorageException`）；手写 store 会跳过这一段。
 
-| 故障臂                       | 在 `putObject` 注入                                                      | 预期                                                                                                                               |
-| ---------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `fail-before-write`          | 抛 `OSSException`（`InternalError`），不写对象                           | 操作留在 `UNKNOWN`；下一次尝试读对象对账，读不到，以 `409 tool_output_put_unresolved` 拒绝。工具结果如实失败或未知，Shell 不被重跑 |
-| `drop-ack-after-write`       | 先写入对象，再抛 `ClientException`，让调用方分不清「已提交」与「已丢失」 | 下一次尝试对账：读到对象、摘要匹配并结算为 `RETURNED`。工具结果成功，且背靠一个按字节一致、可读的对象；Shell 不被重跑              |
-| `timeout`                    | 静默超过 `operation-timeout`，再抛 `SocketTimeout`，不写对象             | 与 `fail-before-write` 同样被拒绝；wake turn 的 Workspace lease 被释放；一次 run、一次 Turn、一次执行                              |
-| `publisher-death`（第 2 片） | 在子 JVM 内扣住 put，随后 SIGKILL                                        | 重启后 run 从 journal 恰好结算一次；已提交的对象对账为 `RETURNED`，不存在的则被拒绝；Shell 不被重跑，lease 被释放                  |
+| 故障臂                       | 在 `putObject` 注入                                                      | 预期                                                                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fail-before-write`          | 抛 `OSSException`（`InternalError`），不写对象                           | 操作留在 `UNKNOWN`；下一次尝试读对象对账，读不到，以 `409 tool_output_put_unresolved` 拒绝。工具结果如实失败或未知，Shell 不被重跑                                                  |
+| `drop-ack-after-write`       | 先写入对象，再抛 `ClientException`，让调用方分不清「已提交」与「已丢失」 | store 保留对象、`OBJECT_PUT` 停在 `UNKNOWN`，调用内不重试（`abandonScan` 只释放 claim）。是否有下一次尝试取决于调用方，因此断言只钉：对象按字节一致可读、工具结果如实、Shell 不重跑 |
+| `timeout`                    | 静默超过 `operation-timeout`，再抛 `SocketTimeout`，不写对象             | 与 `fail-before-write` 同样被拒绝；wake turn 的 Workspace lease 被释放；一次 run、一次 Turn、一次执行                                                                               |
+| `publisher-death`（第 2 片） | 在子 JVM 内扣住 put，随后 SIGKILL                                        | 重启后 run 从 journal 恰好结算一次；已提交的对象对账为 `RETURNED`，不存在的则被拒绝；Shell 不被重跑，lease 被释放                                                                   |
 
 两种形态刻意不同：`fail-before-write` 钉住拒绝
 （`tool_output_put_unresolved`）与如实失败；`drop-ack-after-write` 钉住
-「丢失的 ack 靠**读取对象**恢复」，既不重写对象、也不重跑 Shell。只注入
-一种形态会漏掉对账路径的另一半。
+「丢失的 ack 绝不靠**重写对象**或重跑 Shell 恢复」——对象已在，后续尝试靠
+读取它完成对账。只注入一种形态会漏掉对账路径的另一半。
 
 `publisher-death` 需要进程在 capture 中途死亡，因此使用子 JVM 夹具
 （`HostedAutomationCrashFixtureMain`）而不是进程内类。第 1 片覆盖前三个臂。
