@@ -82,8 +82,10 @@ describe('qwen daemon command', () => {
   it('treats a process that started after the record as a reused pid', () => {
     const recorded = '2026-10-19T00:00:00.000Z';
     const at = Date.parse(recorded);
-    // A slow start may predate the record by any amount.
+    // A slow start may predate the record, but a much older process cannot
+    // be the daemon (e.g. a pid reused across a namespace).
     expect(processStartMatchesRecord(recorded, at - 60_000)).toBe(true);
+    expect(processStartMatchesRecord(recorded, at - 3_600_000)).toBe(false);
     // Clock precision inside the tolerance is still the recorded daemon.
     expect(processStartMatchesRecord(recorded, at + 1_000)).toBe(true);
     // A later start cannot be the daemon that wrote the record.

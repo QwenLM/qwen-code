@@ -65,7 +65,7 @@ qwen daemon stop [--port <port>] [--all] [--force]
 - `status` 列出所有记录及其健康状态：`running`、`unreachable`、`stale`。`/health` 返回任何 HTTP 响应都证明监听器存活，包括 `--require-auth` 下的 `401`。
 - `status --prune` 清理进程已消失的记录。
 - `logs` 打印末尾若干行；带 `--follow` 时轮询记录中的文件直到中断，遇到截断会重置偏移，轮转时先排空旧文件再跟随新文件。
-- `stop` 仅在监听器有响应或 PID 仍存活时发送 `SIGTERM`，且进程启动时间必须匹配记录（POSIX，或 Windows 上可通过 PowerShell 读取时）；启动时间晚于记录的 PID 视为复用，读不到启动时间的 PID 同样绝不发信号。`--force` 在优雅超时后发送 `SIGKILL`。`stale` 记录只删除，不发信号。
+- `stop` 仅在监听器有响应或 PID 仍存活时发送 `SIGTERM`，且进程启动时间必须接近记录、命令行为 `serve` 进程（POSIX，或 Windows 上可通过 PowerShell 读取时）；窗口之外或身份读不到的 PID 绝不发信号。Windows 上 `stop` 是硬杀且必须显式 `--force`，关闭处理器不会执行；POSIX 上 `--force` 在优雅超时后发送 `SIGKILL`。`stale` 记录只删除，不发信号。
 - 只注册了一个 daemon 时，`logs` 与 `stop` 隐式选中它；多个注册必须用 `--port`，`stop` 也支持 `--all`。
 
 ## 生命周期

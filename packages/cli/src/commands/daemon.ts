@@ -29,6 +29,7 @@ const STOP_TIMEOUT_MS = 10_000;
 const STOP_POLL_MS = 100;
 const FOLLOW_POLL_MS = 250;
 const PROCESS_START_TOLERANCE_MS = 5_000;
+const PROCESS_START_LEAD_MS = 10 * 60_000;
 
 type DaemonHealth = 'running' | 'unreachable' | 'stale';
 
@@ -106,7 +107,42 @@ export function processStartMatchesRecord(
   if (processStartedAt === undefined) return true;
   const recorded = Date.parse(recordStartedAt);
   if (!Number.isFinite(recorded)) return true;
-  return processStartedAt <= recorded + PROCESS_START_TOLERANCE_MS;
+  // The daemon starts shortly before it writes the record. A process that
+  // started much earlier cannot be it (a pid from another namespace or an
+  // older unrelated process), and a later start is a reused pid.
+  return (
+    processStartedAt >= recorded - PROCESS_START_LEAD_MS &&
+    processStartedAt <= recorded + PROCESS_START_TOLERANCE_MS
+  );
+}
+
+/** The target's command line, used to reject a pid that only shares the
+ * number across a PID namespace. */
+export function processCommand(pid: number): string | undefined {
+  if (process.platform === 'win32') {
+    const result = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+      ],
+      { encoding: 'utf8' },
+    );
+    if (result.status !== 0 || typeof result.stdout !== 'string') {
+      return undefined;
+    }
+    return result.stdout.trim() || undefined;
+  }
+  const result = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+  });
+  if (result.status !== 0 || typeof result.stdout !== 'string') {
+    return undefined;
+  }
+  return result.stdout.trim() || undefined;
 }
 
 export function formatDaemonAge(ms: number): string {
@@ -131,10 +167,10 @@ async function probeHealth(
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       redirect: 'manual',
     });
-    // Any HTTP answer — including 401 from --require-auth — proves a
-    // listener, but the recorded process must still exist for it to be this
-    // daemon's; another application may have taken the old port.
-    return isProcessAlive(record.pid) ? 'running' : 'stale';
+    // Any HTTP answer — including 401 from --require-auth — proves the
+    // listener is alive. A private PID namespace may not expose the recorded
+    // pid, so the answer, not pid liveness, is the health proof.
+    return 'running';
   } catch {
     return isProcessAlive(record.pid) ? 'unreachable' : 'stale';
   }
@@ -345,9 +381,12 @@ async function followFile(file: string, startOffset: number): Promise<void> {
           if (stat.size < offset) offset = 0;
           offset = await drain(offset);
         }
-      } catch {
-        // A rotated or removed file is picked up on the next poll.
+      } catch (error) {
+        // A rotated or removed file is picked up on the next poll; a closed
+        // stdout ends the follow instead of spinning.
+        if ((error as NodeJS.ErrnoException).code === 'EPIPE') break;
       }
+      if (process.stdout.destroyed || !process.stdout.writable) break;
       await new Promise((resolve) => setTimeout(resolve, FOLLOW_POLL_MS));
     }
   } finally {
@@ -430,7 +469,26 @@ async function handleStop(argv: StopArgs): Promise<void> {
     }
     if (!processStartMatchesRecord(record.startedAt, processStarted)) {
       writeStderrLine(
-        `qwen daemon: refusing to signal pid ${record.pid}: it started after the daemon recorded at ${record.startedAt}, so the pid was reused.`,
+        `qwen daemon: refusing to signal pid ${record.pid}: its start time does not match the daemon recorded at ${record.startedAt}.`,
+      );
+      failed = true;
+      continue;
+    }
+    const command = processCommand(record.pid);
+    if (
+      command === undefined ||
+      !command.includes('serve') ||
+      !/(qwen|cli\.js)/.test(command)
+    ) {
+      writeStderrLine(
+        `qwen daemon: refusing to signal pid ${record.pid}: its command line is not the recorded daemon.`,
+      );
+      failed = true;
+      continue;
+    }
+    if (process.platform === 'win32' && argv.force !== true) {
+      writeStderrLine(
+        'qwen daemon: Windows stop is a hard kill; pass --force to confirm (shutdown handlers do not run).',
       );
       failed = true;
       continue;

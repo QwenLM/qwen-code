@@ -86,12 +86,13 @@ qwen daemon stop [--port <port>] [--all] [--force]
   file until interrupted. It survives truncation by resetting its offset and
   drains the old file before following a rotated replacement.
 - `stop` sends `SIGTERM` to the recorded PID only after the listener answers
-  or the PID is still alive, and only when the process start time matches the
-  record (POSIX, or Windows through PowerShell when available). A PID that
-  started after the record is a reused id and is never signalled; a PID whose
-  start time cannot be read is never signalled. `--force` sends `SIGKILL`
-  after the graceful timeout. A stale record is removed without signalling
-  anything.
+  or the PID is still alive, and only when the process start time is close to
+  the record and its command line is a `serve` process (POSIX, or Windows
+  through PowerShell when available). A PID outside that window or without a
+  readable identity is never signalled. On Windows `stop` is a hard kill and
+  requires `--force`: shutdown handlers do not run. On POSIX `--force` sends
+  `SIGKILL` after the graceful timeout. A stale record is removed without
+  signalling anything.
 - When exactly one daemon is registered, `logs` and `stop` select it
   implicitly. Multiple registrations require `--port` or, for `stop`, `--all`.
 
