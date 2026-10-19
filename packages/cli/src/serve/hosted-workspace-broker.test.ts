@@ -84,6 +84,21 @@ it.each([false, true])(
   },
 );
 
+it.each([false, true])(
+  'carries the drain marker without a cleanup fence (drain=%s)',
+  async (drain) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return { body: { ...identity, released: true } };
+    });
+    await broker.release(drain ? { drain: true } : undefined);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]['drain']).toBe(drain ? true : undefined);
+    expect('cleanupBindingId' in requests[0]).toBe(false);
+  },
+);
+
 it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
   'rejects a mismatched %s at acquisition',
   async (field) => {

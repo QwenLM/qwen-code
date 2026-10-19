@@ -340,16 +340,27 @@ public final class JdbcCsiActivationAdmission {
             History history) throws SQLException {
         original.requireAdmission();
         var prefix = history.prefix();
-        require(history.activation() != null && prefix.input() != null && prefix.pendingBatch() != null
-                && prefix.input().noDeadline() && prefix.batches().size() == 1
-                && prefix.checkpoint() != null && prefix.attempt() != null
+        require(history.activation() != null);
+        var head = new NativeHead(history.revision(), history.sequence(), history.digest(), prefix,
+                0, history.activation().expiresAt(), history.activation());
+        if (prefix.attempt() != null && prefix.attempt().finalMessageRef() != null) {
+            JdbcCsiExecutionAdmission.verifyColdFinalOutput(connection, original, head);
+        } else {
+            requireRecoveryTail(connection, original, head);
+        }
+    }
+
+    static void requireRecoveryTail(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            NativeHead head) throws SQLException {
+        var prefix = head.prefix();
+        require(prefix.input() != null && prefix.pendingBatch() != null
+                && prefix.input().noDeadline()
+                && prefix.batches().size() == 1 && prefix.checkpoint() != null && prefix.attempt() != null
                 && "output_committed".equals(prefix.attempt().stage())
                 && !prefix.assistantCommitted() && prefix.stream() == null
                 && java.util.Set.of("await_runtime", "results_ready").contains(
                         prefix.checkpoint().state().path("continuation").path("phase").textValue()));
-        JdbcCsiExecutionAdmission.verifyColdReceipts(connection, original,
-                new NativeHead(history.revision(), history.sequence(), history.digest(), prefix,
-                        0, history.activation().expiresAt(), history.activation()));
+        JdbcCsiExecutionAdmission.verifyColdReceipts(connection, original, head);
     }
 
     public record NativeHead(long revision, long sequence, String digest, CsiNativeActivationProof.Prefix prefix,
@@ -357,6 +368,15 @@ public final class JdbcCsiActivationAdmission {
         public void requireCurrentTime(Connection connection) throws SQLException {
             long now = JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli();
             require(writerExpiresAt > now && activationExpiresAt > now);
+        }
+
+        void requireRecoveryOwner(Map<String, Object> owner) {
+            var value = JSON.valueToTree(owner);
+            CsiNativeActivationProof.closed(value, java.util.Set.of("writerId", "writerGeneration", "activationId", "activationEpoch"));
+            require(activation.workerId().equals(CsiNativeActivationProof.id(value, "writerId"))
+                    && activation.writerGeneration() == CsiNativeActivationProof.number(value.get("writerGeneration"))
+                    && activation.activationId().equals(CsiNativeActivationProof.id(value, "activationId"))
+                    && activation.epoch() == CsiNativeActivationProof.number(value.get("activationEpoch")));
         }
     }
 

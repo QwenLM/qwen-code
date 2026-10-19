@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.service.EventTransportNodeMain;
-import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.event.EventTransportNodeMain;
+import com.alibaba.qwen.code.managedagent.event.ManagedEventEnvelope;
+import com.alibaba.qwen.code.managedagent.event.ManagedEventEnvelopes;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

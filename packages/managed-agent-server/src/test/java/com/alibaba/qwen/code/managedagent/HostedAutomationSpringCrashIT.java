@@ -6,7 +6,7 @@
 
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -113,7 +113,7 @@ class HostedAutomationSpringCrashIT {
                 .startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user"))
                 .as("FG11c slice 2 requires -Dmysql.user").isNotBlank();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(required("mysql.url"),
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -413,7 +413,7 @@ class HostedAutomationSpringCrashIT {
         assertThat(System.getProperty("mysql.url"))
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(required("mysql.url"),
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -485,7 +485,7 @@ class HostedAutomationSpringCrashIT {
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         String databaseUrl = freshDatabaseUrl();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(databaseUrl,
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -561,7 +561,7 @@ class HostedAutomationSpringCrashIT {
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         String databaseUrl = freshDatabaseUrl();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(databaseUrl,
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -687,7 +687,7 @@ class HostedAutomationSpringCrashIT {
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         String databaseUrl = freshDatabaseUrl();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(databaseUrl,
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));

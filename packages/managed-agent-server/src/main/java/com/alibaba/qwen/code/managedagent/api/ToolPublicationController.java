@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
@@ -244,7 +246,7 @@ public class ToolPublicationController {
 
     private <T> T limited(Supplier<T> operation) {
         if (!entries.tryAcquire()) {
-            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS,
+            throw new ManagedAgentException(HttpStatus.TOO_MANY_REQUESTS,
                     "managed_tool_publication_busy", "Tool publication entry capacity is exhausted");
         }
         try {
@@ -258,7 +260,7 @@ public class ToolPublicationController {
         try {
             byte[] body = request.getInputStream().readNBytes(maximum + 1);
             if (body.length > maximum) {
-                throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE,
+                throw new ManagedAgentException(HttpStatus.PAYLOAD_TOO_LARGE,
                         "managed_tool_publication_too_large", "Tool publication body exceeds its limit");
             }
             return body;
@@ -275,7 +277,7 @@ public class ToolPublicationController {
     private static void requireScope(TenantContext tenant, String sessionId, JsonNode key) {
         if (!tenant.tenantId().equals(key.path("tenantId").asText())
                 || !sessionId.equals(key.path("sessionId").asText())) {
-            throw new ApiException(HttpStatus.NOT_FOUND,
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND,
                     "managed_tool_publication_scope", "Publication Session scope conflicts");
         }
     }
