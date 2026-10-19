@@ -28,7 +28,10 @@ const reliefResponse = 'G3_STEP3_RELIEF_COMPLETED';
 let originalApprovalId: string | undefined;
 interface SavedApprovalOptions {
   v: number;
+  inputRevision: number;
   policyRevision: string;
+  createdAt: number;
+  expiresAt: number;
   continuationRef: { resourceId: string };
 }
 interface SavedApprovalPlan {
@@ -1352,7 +1355,7 @@ try {
               QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
               QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: `http://127.0.0.1:${springPort}`,
               QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
-              QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
+              QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
@@ -1633,10 +1636,13 @@ try {
       );
       if (
         originalApprovalOptions?.v !== 3 ||
-        !originalApprovalOptions.continuationRef
+        !originalApprovalOptions.continuationRef ||
+        !Number.isSafeInteger(originalApprovalOptions.createdAt) ||
+        !Number.isSafeInteger(originalApprovalOptions.expiresAt) ||
+        originalApprovalOptions.expiresAt <= originalApprovalOptions.createdAt
       ) {
         throw new Error(
-          `New approval omitted the recovery continuation: version=${originalApprovalOptions?.v}`,
+          `New approval omitted the recovery continuation or its deadline: version=${originalApprovalOptions?.v} createdAt=${originalApprovalOptions?.createdAt} expiresAt=${originalApprovalOptions?.expiresAt}`,
         );
       }
       originalApprovalPlan = JSON.parse(
@@ -1938,7 +1944,7 @@ try {
         ) {
           break;
         }
-        if (attempt === 20) {
+        if (attempt === 100) {
           throw new Error(
             'The original control plane never stopped outside a store transaction',
           );
@@ -1946,7 +1952,9 @@ try {
         for (const [child] of formerPair) {
           signalProcessTree(child.child, 'SIGCONT');
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        // InnoDB reuses its transaction snapshot until no reader has
+        // queried it for 100ms; faster polling can keep a stale busy view.
+        await new Promise((resolve) => setTimeout(resolve, 150));
       }
     } else if (harnessOnly) {
       // Kill only the Harness: a live control plane must adopt the next
@@ -2068,7 +2076,7 @@ try {
             QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
             QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: replacementSpringUrl,
             QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
-            QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
+            QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
             QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(
@@ -2201,6 +2209,27 @@ try {
           'Replacement did not preserve the original requested Action',
         );
       }
+      // The replacement must hand the parked wait the deadline it already
+      // had; a reset deadline would extend expiry and hide a lost clock.
+      const optionsAfterReplacement = JSON.parse(
+        runMysql(
+          mysqlPort,
+          `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}`,
+        ),
+      );
+      if (
+        actionBeforeResponse.created_at !==
+          originalApprovalOptions!.createdAt ||
+        actionBeforeResponse.expires_at !==
+          originalApprovalOptions!.expiresAt ||
+        optionsAfterReplacement.createdAt !==
+          originalApprovalOptions!.createdAt ||
+        optionsAfterReplacement.expiresAt !== originalApprovalOptions!.expiresAt
+      ) {
+        throw new Error(
+          `Replacement reset the original approval deadline: action=${String(actionBeforeResponse.created_at)}..${String(actionBeforeResponse.expires_at)} record=${optionsAfterReplacement.createdAt}..${optionsAfterReplacement.expiresAt} saved=${originalApprovalOptions!.createdAt}..${originalApprovalOptions!.expiresAt}`,
+        );
+      }
       let responseOperation: Record<string, unknown> | undefined;
       if (verificationMode === 'allow' || verificationMode === 'deny') {
         const response = await fetch(
@@ -2214,7 +2243,7 @@ try {
             },
             body: JSON.stringify({
               kind: 'permission',
-              input_revision: 1,
+              input_revision: originalApprovalOptions!.inputRevision,
               policy_revision: originalApprovalOptions!.policyRevision,
               option_id: verificationMode,
             }),
@@ -2319,6 +2348,50 @@ try {
         throw new Error(
           `Original approval identity/state differs: ${actionRows}`,
         );
+      // State alone proves a decision was committed, not which option won.
+      // Read the committed decision resource back for the browser-facing
+      // intent, and hold it to the revision and policy the browser answered.
+      const decisionOption =
+        verificationMode === 'allow' || verificationMode === 'deny'
+          ? JSON.parse(
+              runMysql(
+                mysqlPort,
+                `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}) AND r.kind='managed-action-decision'`,
+              ),
+            )
+          : undefined;
+      if (
+        decisionOption &&
+        (decisionOption.optionId !== verificationMode ||
+          decisionOption.inputRevision !==
+            originalApprovalOptions!.inputRevision ||
+          decisionOption.policyRevision !==
+            originalApprovalOptions!.policyRevision)
+      ) {
+        throw new Error(
+          `Stored approval decision differs from the chosen option: ${JSON.stringify(decisionOption)}`,
+        );
+      }
+      // Expiry may only close the wait at or after the deadline it was
+      // given; an early terminal would mean the replacement invented one.
+      const expiryTerminalAt =
+        verificationMode === 'expiry'
+          ? Number(
+              runMysql(
+                mysqlPort,
+                `SELECT gmt_create FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE ORDER BY sequence_id DESC LIMIT 1`,
+              ),
+            )
+          : undefined;
+      if (
+        expiryTerminalAt !== undefined &&
+        (!Number.isSafeInteger(expiryTerminalAt) ||
+          expiryTerminalAt < originalApprovalOptions!.expiresAt)
+      ) {
+        throw new Error(
+          `Expiry closed before the original deadline: terminalAt=${expiryTerminalAt} expiresAt=${originalApprovalOptions!.expiresAt}`,
+        );
+      }
       const requestBodies = (fake?.requests ?? []).filter((request) =>
         JSON.stringify(request.body.messages).includes(continuationMarker),
       );
@@ -2400,6 +2473,16 @@ try {
         sessionId: session.id,
         actionId: originalApprovalId,
         replacementActionBeforeResponse: actionBeforeResponse,
+        chosenOption: decisionOption?.optionId,
+        savedDeadline: {
+          createdAt: originalApprovalOptions!.createdAt,
+          expiresAt: originalApprovalOptions!.expiresAt,
+        },
+        recoveredDeadline: {
+          createdAt: optionsAfterReplacement.createdAt,
+          expiresAt: optionsAfterReplacement.expiresAt,
+        },
+        expiryTerminalAt: expiryTerminalAt ?? null,
         expectedTerminal,
         terminalCount: terminals.length,
         executions,
@@ -2921,6 +3004,28 @@ try {
           `SELECT COUNT(*) FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter}`,
         ),
       );
+      // B1: the replacement reissues the model request but must not admit
+      // the prompt again. One journal transaction under the Harness prompt
+      // id proves one admission and one user record; the admission resource
+      // is published once by that same original command. The Turn's public
+      // id and the prompt id are generated independently, so the journal is
+      // keyed by the latter.
+      const firstPromptId = runMysql(
+        mysqlPort,
+        `SELECT prompt_id FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create LIMIT 1`,
+      );
+      const admissionCount = Number(
+        runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(firstPromptId)}`,
+        ),
+      );
+      const admissionResources = Number(
+        runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND kind='managed-admission'`,
+        ),
+      );
       if (
         recovered.terminals.length !== 1 ||
         recovered.terminals[0].type !== 'turn.completed' ||
@@ -2933,6 +3038,8 @@ try {
         ) ||
         executionCount !== 0 ||
         turnCount !== 1 ||
+        admissionCount !== 1 ||
+        admissionResources !== 1 ||
         boots.some((boot) => boot.length === 0) ||
         new Set(boots).size !== boots.length ||
         // Writer generation, journal revision and committed sequence all
@@ -2947,7 +3054,7 @@ try {
         )
       ) {
         throw new Error(
-          `Model-round failover audit failed: terminals=${JSON.stringify(recovered.terminals)} text=${JSON.stringify(recovered.text)} retractedBeforeNewDeltas=${retractedBeforeNewDeltas} terminalRows=${terminalRows()} roundRequests=${roundRequests.length} equalRequests=${roundRequests.every((request) => isDeepStrictEqual(request.body, roundRequests[0]?.body))} executions=${executionCount} turns=${turnCount} boots=${boots.join('->')} heads=${heads.map((head) => head.join(',')).join('->')}`,
+          `Model-round failover audit failed: terminals=${JSON.stringify(recovered.terminals)} text=${JSON.stringify(recovered.text)} retractedBeforeNewDeltas=${retractedBeforeNewDeltas} terminalRows=${terminalRows()} roundRequests=${roundRequests.length} equalRequests=${roundRequests.every((request) => isDeepStrictEqual(request.body, roundRequests[0]?.body))} executions=${executionCount} turns=${turnCount} admissions=${admissionCount} admissionResources=${admissionResources} boots=${boots.join('->')} heads=${heads.map((head) => head.join(',')).join('->')}`,
         );
       }
 
@@ -3140,7 +3247,7 @@ try {
           30_000,
           owners,
         );
-        // Several lease periods for anything the wake set in motion.
+        // Several dispatch lease periods for anything the wake set in motion.
         await new Promise((resolve) => setTimeout(resolve, 6_000));
         const afterWake = fencedState();
         // The probes are synchronous: let the loop record an exit during
@@ -3292,6 +3399,8 @@ try {
           visibleText: recovered.text,
           physicalToolExecutions: executionCount,
           terminalTurns: terminalRows(),
+          journalAdmissions: admissionCount,
+          admissionResources,
           nextTurnHistoryClean: true,
           // As in the frozen-owner arm, one key cannot mean both intents.
           oldHarnessDiskDeleted:

@@ -279,6 +279,10 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record WebShellSkill(String name, String description) { }
+
+    public record WebShellSessionSkills(List<WebShellSkill> skills) { }
+
     public record WebShellTranscriptRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {
     }
@@ -666,6 +670,13 @@ public final class ApiModels {
     public record ArtifactAccess(@JsonProperty("can_read_content") boolean canReadContent) { }
 
     public record ToolResultResponse(JsonNode result, ArtifactAccess access) { }
+
+    public record WebShellToolDetails(JsonNode input, String output, boolean truncated,
+            @JsonInclude(JsonInclude.Include.NON_NULL) WebShellShellResult shellResult) { }
+
+    public record WebShellShellResult(String type, int version, String text, String output,
+            String directory, Long exitCode, Long signal, Long pid, String error,
+            String outcome, List<String> notices, boolean truncated, List<String> outputFiles) { }
 
     public record ArtifactResponse(JsonNode artifact, ArtifactAccess access) { }
 

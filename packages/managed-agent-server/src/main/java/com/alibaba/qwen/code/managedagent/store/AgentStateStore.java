@@ -53,6 +53,15 @@ public interface AgentStateStore {
      */
     String WORKFLOW_RECOVERY_BLOCKED = "hosted_workflow_recovery_blocked";
 
+    /**
+     * D7-2: the durable code a Turn carries while its parked Runtime
+     * execution's acceptance is still unknown. The dispatch sweep parks it,
+     * and the reconciler re-drives the cancellation load on its RECHECK
+     * cadence; the code never settles the Turn by itself. A cancel still
+     * scans it — settling the Turn cancelled is the cancel's own act.
+     */
+    String RUNTIME_RECOVERY_BLOCKED = "hosted_runtime_recovery_blocked";
+
     // The annotation must sit on the default itself: the delegating body runs
     // on the target instance, so without it the self-call bypasses the proxy.
     @org.springframework.transaction.annotation.Transactional
@@ -697,6 +706,13 @@ public interface AgentStateStore {
 
     List<DispatchTarget> findDispatchable(long now, int limit);
 
+    /**
+     * D7-2: active Turns parked on an unresolved Runtime execution whose
+     * recheck is due. They are never dispatched; the reconciler drives a
+     * fresh cancellation load instead.
+     */
+    List<DispatchTarget> findRuntimeRecoveryParked(long now, int limit);
+
     Optional<TurnRecord> claimTurn(String tenantId, String sessionId,
             String turnId, String owner, Duration leaseDuration);
 
@@ -716,6 +732,14 @@ public interface AgentStateStore {
     boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
             String turnId, String owner, String errorCode,
             String errorMessage);
+
+    /**
+     * D7-2: parks an active Turn on {@link #RUNTIME_RECOVERY_BLOCKED} until
+     * {@code retryAfter}, releasing the dispatch lease. The Turn keeps its
+     * status: only a proven cancel may settle it.
+     */
+    boolean parkTurnForRuntimeRecovery(String tenantId, String sessionId,
+            String turnId, String owner, String message, long retryAfter);
 
     void deferTurnRetry(String tenantId, String sessionId, String turnId,
             String owner, long retryAfter);
