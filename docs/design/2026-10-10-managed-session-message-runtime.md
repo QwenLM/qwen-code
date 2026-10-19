@@ -86,17 +86,17 @@ tool answer is committed. This change does not truncate or rewrite that record.
 Making oversized transcript records recoverable remains follow-up work requiring
 the issue owner's scope decision; neither shared limit is changed here.
 
-| Bound                         | Value                                                                 | Refusal                                                                                                                |
-| ----------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Message to a child task       | fits the task's continuation envelope (≤ 32 KiB)                      | tool error, `byte_limit`, unless the assistant record exceeds its inline bound first                                   |
-| Message to the parent         | ≤ 64 KiB of UTF-8                                                     | tool error, `byte_limit` (including the raw content bound), unless the assistant record exceeds its inline bound first |
-| Messages in flight per edge   | 8 per direction (not yet handed over)                                 | tool error, `count_limit`                                                                                              |
-| Messages per child run        | 64 per direction                                                      | tool error, `budget_exhausted`                                                                                         |
-| Wait for a message turn       | 30 minutes without any event in the child journal but a lease renewal | the child fails, `child_failed`                                                                                        |
-| Carrying notification         | ≤ 48 KiB serialized, escaped then cut with marker                     | truncation, never refusal                                                                                              |
-| Continuation first input      | ≤ 48 KiB of JSON text; oldest runs left out                           | truncation, never refusal                                                                                              |
-| Relay attempts per message    | 64, with backoff                                                      | ledger `unknown`, never a second delivery                                                                              |
-| Continuation launch admission | H4b/H4c: closing, active cap 4, launch budget 64                      | tool error naming the reason                                                                                           |
+| Bound                         | Value                                                                 | Refusal                                                                                                                                                   |
+| ----------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Message to a child task       | fits the task's continuation envelope (≤ 32 KiB)                      | tool error, `byte_limit`, unless the assistant record exceeds its inline bound first                                                                      |
+| Message to the parent         | ≤ 64 KiB of UTF-8                                                     | tool error, `byte_limit` for the encoded request; a bare tool error for the raw content bound, unless the assistant record exceeds its inline bound first |
+| Messages in flight per edge   | 8 per direction (not yet handed over)                                 | tool error, `count_limit`                                                                                                                                 |
+| Messages per child run        | 64 per direction                                                      | tool error, `budget_exhausted`                                                                                                                            |
+| Wait for a message turn       | 30 minutes without any event in the child journal but a lease renewal | the child fails, `child_failed`                                                                                                                           |
+| Carrying notification         | ≤ 48 KiB serialized, escaped then cut with marker                     | truncation, never refusal                                                                                                                                 |
+| Continuation first input      | ≤ 48 KiB of JSON text; oldest runs left out                           | truncation, never refusal                                                                                                                                 |
+| Relay attempts per message    | 64, with backoff                                                      | ledger `unknown`, never a second delivery                                                                                                                 |
+| Continuation launch admission | H4b/H4c: closing, active cap 4, launch budget 64                      | tool error naming the reason                                                                                                                              |
 
 ## Non-goals
 
