@@ -544,6 +544,41 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ]);
   });
 
+  it('drops a parked slice the captured tail covers from before it', async () => {
+    // The close-flush shape: the tail is the whole short history, so it starts
+    // before the parked slice instead of inside it. Whole-slice contiguity is
+    // the only proof that the slice is covered, and it must drop it entirely.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        { role: 'user', parts: [{ text: 'turn 1' }] },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+        { role: 'user', parts: [{ text: 'turn 2' }] },
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts.filter((text) => text === 'turn 2')).toHaveLength(1);
+    expect(texts).toEqual([
+      'turn 0',
+      'reply 0',
+      'turn 1',
+      'reply 1',
+      'turn 2',
+      'reply 2',
+    ]);
+  });
+
   it('uses a scoped config that denies shell and outside writes', async () => {
     await extract([], { written: false });
 

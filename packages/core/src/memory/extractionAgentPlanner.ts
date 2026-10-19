@@ -300,23 +300,31 @@ function touchedTopicsFromFilePaths(
 
 /**
  * #13004: the parked skipped slice and the captured tail both come from the
- * same live history, and the tail often still holds the slice's newest
- * entries — the skip window (≤ half the tail) makes an un-shrunk tail the
- * common case, not the exception. Concatenating both then forks those turns
- * twice. Coverage cannot come from raw offsets (the tail is curated and
- * payload-slimmed), so anchor on values: the tail's first entry is its
- * oldest, and the LAST slice entry equal to it starts the overlap. Drop that
- * entry and everything after it. The last match, never an earlier one:
- * repeated content would otherwise cut turns the tail never held. When
- * curation or slimming rewrote the anchor so nothing matches, the slice
- * passes through whole — the pre-existing duplicate, never a loss.
+ * same live history, and the tail usually still holds the slice — the skip
+ * window (≤ half the tail) makes that the common case, not the exception.
+ * Concatenating both then forks those turns twice. Coverage cannot come from
+ * raw offsets (the tail is curated and payload-slimmed), so it is proved by
+ * value:
+ *
+ * - The tail may begin inside the slice: its first entry is then one of the
+ *   slice's own entries, and the LAST slice entry equal to it starts the
+ *   overlap; drop that entry and everything after it. The last match, never
+ *   an earlier one: repeated content would otherwise cut turns the tail never
+ *   held.
+ * - The tail may begin before the slice (the close-flush shape, where the
+ *   tail is the whole short history): the whole slice then appears as one
+ *   contiguous run inside the tail, so drop it entirely. Whole-slice
+ *   contiguity, not a single-entry match: one matching value cannot tell
+ *   "fully covered" from "the same value repeated later".
+ *
+ * When curation or slimming rewrote an entry so neither proof holds, the
+ * slice passes through whole — the pre-existing duplicate, never a loss.
  */
 function uncoveredParkedPrefix(
   skippedHistory: Content[],
   capturedTail: Content[],
 ): Content[] {
-  const anchor = capturedTail[0];
-  if (skippedHistory.length === 0 || anchor === undefined) {
+  if (skippedHistory.length === 0 || capturedTail.length === 0) {
     return skippedHistory;
   }
   // Texts and call names survive the capture's shallow copy, curation and
@@ -331,15 +339,33 @@ function uncoveredParkedPrefix(
           ? `response:${part.functionResponse.name ?? ''}`
           : '';
   const keysOf = (entry: Content): string[] => (entry.parts ?? []).map(partKey);
-  const anchorKeys = keysOf(anchor);
+  const sameEntry = (a: Content, b: Content): boolean => {
+    if (a.role !== b.role) return false;
+    const left = keysOf(a);
+    const right = keysOf(b);
+    return (
+      left.length === right.length &&
+      left.every((key, i) => key !== '' && key === right[i])
+    );
+  };
+
+  const anchor = capturedTail[0];
   for (let i = skippedHistory.length - 1; i >= 0; i--) {
-    const skippedKeys = keysOf(skippedHistory[i]);
-    if (
-      skippedHistory[i].role === anchor.role &&
-      skippedKeys.length === anchorKeys.length &&
-      skippedKeys.every((key, j) => key !== '' && key === anchorKeys[j])
-    ) {
+    if (sameEntry(skippedHistory[i], anchor)) {
       return skippedHistory.slice(0, i);
+    }
+  }
+  for (
+    let start = 0;
+    start + skippedHistory.length <= capturedTail.length;
+    start++
+  ) {
+    if (
+      skippedHistory.every((entry, j) =>
+        sameEntry(entry, capturedTail[start + j]),
+      )
+    ) {
+      return [];
     }
   }
   return skippedHistory;
