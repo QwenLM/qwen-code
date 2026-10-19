@@ -61,8 +61,12 @@ then sorts content IDs and packs at most eight sections / 64 KiB of source per m
 request. A response must contain exactly one native-validated decision per source ID.
 Per-source identity and publication ledgers remain unchanged. Before the first write,
 the complete batch response and baseline document hashes are journaled. Later items
-accept only that baseline plus this batch's verified publications; external edits,
-deletions or additions cause conflicts. Recovery reuses journaled responses. Scope validation happens before journaling a
+accept that baseline plus verified publications from all groups of the same task
+in this scope, without replacing hashes already in the baseline. External edits,
+deletions or additions cause conflicts. An unpublished intent invalidated by the
+pre-publication check is removed with its staged files. A new task encountering
+such a stale interrupted intent can consolidate against current memory. Published
+documents retain edit/forget protection and are never rolled back or regenerated. Recovery reuses journaled responses. Scope validation happens before journaling a
 model response. If an older journal contains a scope-invalid item, retry discards
 only that item and requests a fresh response within the remaining budget, retaining
 sibling decisions, baselines and publication records.

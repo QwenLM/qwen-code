@@ -761,14 +761,12 @@ export class MemoryImportService {
     const expected = new Map(
       journal.baseline.map((item) => [item.ref, item.digest]),
     );
-    for (const item of journal.sections) {
-      const record = ledger[item.key];
-      if (record?.batchId === task.id && record.phase === 'committed')
-        for (const output of record.outputs)
-          expected.set(
-            `${section.scope}:${output.relativePath}`,
-            output.digest,
-          );
+    for (const record of Object.values(ledger)) {
+      if (record.batchId === task.id && record.phase === 'committed')
+        for (const output of record.outputs) {
+          const ref = `${section.scope}:${output.relativePath}`;
+          if (!expected.has(ref)) expected.set(ref, output.digest);
+        }
     }
     if (
       expected.size !== before.existing.length ||
@@ -830,7 +828,15 @@ export class MemoryImportService {
           ? await this.readState(ledgerPath)
           : {};
         const key = section.id;
-        const previous = ledger[key];
+        let previous: LedgerRecord | undefined = ledger[key];
+        const discardUnpublishedIntent = async (stage: string) => {
+          signal.throwIfAborted();
+          this.options.assertActive();
+          delete ledger[key];
+          await writeJson(ledgerPath, ledger);
+          heldLocks.getStore()?.throwIfAborted();
+          await fs.rm(stage, { recursive: true, force: true });
+        };
         const outcome = (
           status: ImportItemResult['status'],
           reason?: string,
@@ -840,6 +846,18 @@ export class MemoryImportService {
           status,
           ...(reason ? { reason } : {}),
         });
+        if (previous?.phase === 'intent') {
+          const stage = path.join(scopeState, previous.stage);
+          if (
+            (await exists(stage)) &&
+            !(await exists(path.join(root, 'imported', key))) &&
+            (await this.snapshot(section.scope)).version !==
+              previous.memoryVersion
+          ) {
+            await discardUnpublishedIntent(stage);
+            previous = undefined;
+          }
+        }
         if (previous) {
           const stage = path.join(scopeState, previous.stage);
           const destination = path.join(root, 'imported', key);
@@ -848,14 +866,6 @@ export class MemoryImportService {
             (await exists(stage)) &&
             !(await exists(destination))
           ) {
-            if (
-              (await this.snapshot(section.scope)).version !==
-              previous.memoryVersion
-            )
-              return outcome(
-                'conflict',
-                'Existing memory changed after an interrupted proposal.',
-              );
             for (const output of previous.outputs) {
               const file = path.join(stage, path.basename(output.relativePath));
               if (digest(await fs.readFile(file, 'utf8')) !== output.digest)
@@ -1040,11 +1050,13 @@ export class MemoryImportService {
         await privateDirectory(path.join(root, 'imported'), this.base);
         signal.throwIfAborted();
         this.options.assertActive();
-        if ((await this.snapshot(section.scope)).version !== before.version)
+        if ((await this.snapshot(section.scope)).version !== before.version) {
+          await discardUnpublishedIntent(stage);
           return outcome(
             'conflict',
             'Existing memory changed before publication.',
           );
+        }
         await assertCommit();
         heldLocks.getStore()?.throwIfAborted();
         await fs.rename(stage, path.join(root, 'imported', key));

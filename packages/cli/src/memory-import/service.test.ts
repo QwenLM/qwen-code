@@ -611,9 +611,62 @@ describe('durable memory import', () => {
         const snapshot = await scanAutoMemorySnapshot(project);
         expect(snapshot.docs).toHaveLength(1);
         expect(snapshot.docs[0].body).toContain('only additive');
+        const state = path.join(
+          runtime,
+          'memory-import',
+          'scopes',
+          digest(target),
+        );
+        const ledger = JSON.parse(
+          await fs.readFile(path.join(state, 'ledger.json'), 'utf8'),
+        );
+        expect(ledger[selection()[0].id]).toBeUndefined();
+        expect(
+          (await fs.readdir(state)).some((entry) => entry.startsWith('stage-')),
+        ).toBe(false);
+        const next = await svc.submit(source, selection(), 'after-late-edit');
+        expect((await svc.idle(next.id)).items[0].status).toBe('added');
+        expect(
+          await fs.readFile(path.join(target, 'user-edit.md'), 'utf8'),
+        ).toBe(doc.replace('every schema', 'only additive schema'));
       } finally {
         rename.mockRestore();
       }
+    }));
+  it('reconsolidates an unpublished interrupted intent against changed memory in a new task', () =>
+    context(async () => {
+      const original = fs.rename;
+      const rename = vi
+        .spyOn(fs, 'rename')
+        .mockImplementation(async (from, to) => {
+          if (path.basename(String(from)).startsWith('stage-'))
+            throw new Error('Synthetic interruption before publication');
+          return original(from, to);
+        });
+      const propose = vi.fn(
+        async (): Promise<MemoryImportProposal> => ({
+          decision: 'new',
+          reason: 'new',
+          documents: [doc],
+        }),
+      );
+      const svc = service(propose);
+      const first = await svc.submit(source, selection(), 'interrupted-intent');
+      expect((await svc.idle(first.id)).items[0].status).toBe('failed');
+      rename.mockRestore();
+      const target = getImportedProjectMemoryRoot(project);
+      const edited = doc.replace('every schema', 'only additive schema');
+      await fs.writeFile(path.join(target, 'external.md'), edited);
+      const next = await svc.submit(
+        source,
+        selection(),
+        'fresh-after-interruption',
+      );
+      expect((await svc.idle(next.id)).items[0].status).toBe('added');
+      expect(propose).toHaveBeenCalledTimes(2);
+      expect(await fs.readFile(path.join(target, 'external.md'), 'utf8')).toBe(
+        edited,
+      );
     }));
   it('honors cancellation from another service instance before publication', () =>
     context(async () => {
@@ -966,6 +1019,87 @@ describe('bounded project batches', () => {
       expect(propose).toHaveBeenCalledTimes(1);
       expect(done.usage).toEqual(first.usage);
     }));
+  it.each(['unchanged', 'edited', 'forgotten', 'unrelated'])(
+    'retries earlier groups after a later group publishes: %s',
+    (change) =>
+      context(async () => {
+        const input = many(2, true);
+        const propose = vi.fn(async (request: MemoryImportModelInput) => ({
+          items: request.sources.map(({ id }) => ({
+            id,
+            decision: 'new' as const,
+            reason: 'new',
+            documents: [
+              doc.replace(
+                'Validate rollback paths for every schema migration.',
+                `Distinct fact ${id}.`,
+              ),
+            ],
+          })),
+        }));
+        const create = () =>
+          new MemoryImportService({
+            projectRoot: project,
+            assertActive: () => {},
+            propose,
+          });
+        const original = fs.writeFile;
+        let interrupted = false;
+        const write = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (file, ...args) => {
+            if (
+              !interrupted &&
+              path.basename(path.dirname(String(file))).startsWith('stage-')
+            ) {
+              interrupted = true;
+              throw new Error(
+                'Synthetic failure after proposal and before intent',
+              );
+            }
+            return original(file, ...args);
+          });
+        const svc = create();
+        const task = await svc.submit(input, selections(input), 'cross-group');
+        const first = await svc.idle(task.id);
+        expect(first.items.map((item) => item.status).sort()).toEqual([
+          'added',
+          'failed',
+        ]);
+        write.mockRestore();
+        const snapshot = await scanAutoMemorySnapshot(project);
+        expect(snapshot.docs).toHaveLength(1);
+        const file = snapshot.docs[0].filePath;
+        const existing = await fs.readFile(file, 'utf8');
+        if (change === 'edited')
+          await fs.writeFile(file, existing + '\nUser correction.\n');
+        if (change === 'forgotten') await fs.unlink(file);
+        if (change === 'unrelated')
+          await fs.writeFile(
+            path.join(getImportedProjectMemoryRoot(project), 'unrelated.md'),
+            doc,
+          );
+        const restarted = create();
+        await restarted.retry(task.id);
+        const done = await restarted.idle(task.id);
+        const retried = done.items.find(
+          (item) =>
+            item.id ===
+            first.items.find((item) => item.status === 'failed')!.id,
+        )!;
+        expect(retried.status).toBe(
+          change === 'unchanged' ? 'added' : 'conflict',
+        );
+        expect(propose).toHaveBeenCalledTimes(2);
+        expect(done.usage).toEqual(first.usage);
+        if (change === 'forgotten')
+          await expect(fs.stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+        else
+          expect(await fs.readFile(file, 'utf8')).toBe(
+            existing + (change === 'edited' ? '\nUser correction.\n' : ''),
+          );
+      }),
+  );
   it('rejects missing response IDs as a whole batch without repeated calls', () =>
     context(async () => {
       const input = many(3);
