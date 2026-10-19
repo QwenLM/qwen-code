@@ -314,6 +314,70 @@ describe('turnOutputSelectors', () => {
     );
   });
 
+  it('also shows a recorded workspace artifact in the turn that last wrote it', () => {
+    const messages = [
+      userMessage('u1', 'record notes'),
+      toolGroup('tg1', [
+        {
+          callId: 'record-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'notes.md' },
+        },
+      ]),
+      userMessage('u2', 'tidy notes'),
+      toolGroup('tg2', [
+        {
+          callId: 'edit-2',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'notes.md' },
+        },
+      ]),
+    ];
+    const artifact = {
+      id: 'notes',
+      storage: 'workspace',
+      workspacePath: 'notes.md',
+      toolCallId: 'edit-2',
+    } as DaemonSessionArtifact;
+
+    const byTurn = getArtifactsByTurn(messages, [artifact]);
+    expect(byTurn.get('u1')).toEqual([artifact]);
+    expect(byTurn.get('u2')).toEqual([artifact]);
+    expect(getFileChangesByTurn(messages, byTurn).get('u2')).toEqual([
+      expect.objectContaining({ path: 'notes.md', isArtifact: true }),
+    ]);
+  });
+
+  it('keeps a recorded published artifact out of the turn that produced it', () => {
+    const messages = [
+      userMessage('u1', 'publish'),
+      toolGroup('tg1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'record link'),
+      toolGroup('tg2', [
+        {
+          callId: 'record-2',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { url: 'https://example.com/page' },
+        },
+      ]),
+    ];
+    const artifact = {
+      id: 'page',
+      storage: 'published',
+      url: 'https://example.com/page',
+      toolCallId: 'publish-1',
+    } as DaemonSessionArtifact;
+
+    const byTurn = getArtifactsByTurn(messages, [artifact]);
+    expect(byTurn.has('u1')).toBe(false);
+    expect(byTurn.get('u2')).toEqual([artifact]);
+  });
+
   it('merges multiple edits for the same file in one turn', () => {
     const messages = [
       userMessage('u1', 'edit file'),

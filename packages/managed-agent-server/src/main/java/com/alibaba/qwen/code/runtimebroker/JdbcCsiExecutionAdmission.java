@@ -1,13 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-
-import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
-import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
-import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.number;
-
+import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiNativeReadbackProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -17,6 +15,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+
+import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.canonical;
+import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.id;
+import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.number;
 
 /** Joins an immutable native grant to the original execution, never to a new head. */
 public final class JdbcCsiExecutionAdmission {
@@ -47,17 +49,48 @@ public final class JdbcCsiExecutionAdmission {
     static void verifyReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head, CsiNativeActivationProof.Prefix prefix,
             long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
-        receiptMembers(connection, original, head, prefix, candidateHistorySequence, candidateHistoryRevision);
+        receiptMembers(connection, original, head, prefix, false, candidateHistorySequence, candidateHistoryRevision);
         head.requireCurrentTime(connection);
+    }
+
+    static List<ToolExecutionRecord> verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
+        var members = receiptMembers(connection, original, head, head.prefix(), true, 0, 0);
+        require(!members.isEmpty() && head.prefix().batches().size() == 1);
+        var batch = head.prefix().batches().values().iterator().next().batch();
+        require(members.stream().map(member -> member.getReference().get("functionCallId"))
+                .collect(java.util.stream.Collectors.toSet()).equals(batch.calls().stream()
+                        .map(CsiNativeActivationProof.FunctionCall::id)
+                        .filter(id -> !batch.refusedFunctionIds().contains(id))
+                        .collect(java.util.stream.Collectors.toSet())));
+        for (var member : members) {
+            require(member.getState() == ToolExecutionRecord.State.SETTLED && !member.isCancelRequested()
+                    && member.getResult() != null && member.getAuthorizedDispatchGeneration() != null
+                    && java.util.Set.of("success", "error").contains(member.getExecutionStatus()));
+            var ref = JSON.valueToTree(member.getReference());
+            var call = head.prefix().batches().get(id(ref, "batchId")).batch().calls()
+                    .get((int) number(ref.get("ordinal")));
+            CsiNativeActivationProof.convertedResult(JSON.valueToTree(member.getResult()), call);
+        }
+        return members;
+    }
+
+    static void verifyColdFinalOutput(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
+        var expected = CsiNativeActivationProof.completeOutputTail(head.prefix(), head.sequence());
+        var members = verifyColdReceipts(connection, original, head);
+        require(members.size() == expected.size()
+                && members.stream().map(ToolExecutionRecord::getExecutionCallId)
+                        .collect(java.util.stream.Collectors.toSet()).equals(expected));
     }
 
     private static List<ToolExecutionRecord> receiptMembers(Connection connection,
             JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
-            CsiNativeActivationProof.Prefix prefix,
+            CsiNativeActivationProof.Prefix prefix, boolean recovery,
             long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
         CsiNativeToolReservation.requireReady(connection, original);
         var members = CsiNativeToolReservation.complete(connection, original, prefix,
-                CsiNativeToolReservation.inventory(connection, original), candidateHistorySequence, candidateHistoryRevision);
+                CsiNativeToolReservation.inventory(connection, original), recovery, candidateHistorySequence, candidateHistoryRevision);
         for (var member : members) {
             grant(connection, original, member, head);
         }

@@ -1,13 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
+import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
 import java.net.URI;
@@ -36,7 +30,15 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuntimeBrokerServiceTest {
     private static final String MOUNT_CLAIM = "claim";
@@ -2913,8 +2915,14 @@ class RuntimeBrokerServiceTest {
                         "background_v3_process");
                 expected.add(runtime);
             }
+            fixture.sessionRepository.batchReads.set(0);
+            fixture.sessionRepository.pointReads.set(0);
             assertEquals(expected, Set.copyOf(join(fixture.service
                     .listActiveHoldRuntimeSessionIds("harness"))));
+            // #13986 review R1-9: the release state resolves in one read per
+            // hundred candidates, never one point read per candidate.
+            assertEquals(2, fixture.sessionRepository.batchReads.get());
+            assertEquals(0, fixture.sessionRepository.pointReads.get());
         }
     }
 
@@ -6954,8 +6962,8 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger bindingIds = new AtomicInteger();
         final AtomicInteger executionIds = new AtomicInteger();
         final InMemoryRuntimeBindingRepository bindingRepository;
-        final InMemoryRuntimeSessionRepository sessionRepository =
-                new InMemoryRuntimeSessionRepository();
+        final CountingSessionRepository sessionRepository =
+                new CountingSessionRepository();
         final InMemoryToolExecutionRepository executionRepository;
         final FakeResolver resolver;
         final FakeProvisioner provisioner = new FakeProvisioner();
@@ -7007,6 +7015,29 @@ class RuntimeBrokerServiceTest {
         @Override
         public void close() {
             service.close();
+        }
+    }
+
+    private static final class CountingSessionRepository
+            extends InMemoryRuntimeSessionRepository {
+        final AtomicInteger batchReads = new AtomicInteger();
+        final AtomicInteger pointReads = new AtomicInteger();
+
+        @Override
+        public synchronized RuntimeSessionRecord findHistorical(String tenantId,
+                String harnessSessionId, String runtimeSessionId) {
+            pointReads.incrementAndGet();
+            return super.findHistorical(tenantId, harnessSessionId,
+                    runtimeSessionId);
+        }
+
+        @Override
+        public synchronized List<RuntimeSessionRecord> findHistoricalByIds(
+                String tenantId, String harnessSessionId,
+                java.util.Collection<String> runtimeSessionIds) {
+            batchReads.incrementAndGet();
+            return super.findHistoricalByIds(tenantId, harnessSessionId,
+                    runtimeSessionIds);
         }
     }
 
@@ -7420,7 +7451,7 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
-        public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+        public List<ToolHoldRow> findHoldRowsByHarnessSession(
                 String harnessSessionId, String afterExecutionCallId,
                 int limit) {
             return delegate.findHoldRowsByHarnessSession(harnessSessionId,
@@ -7583,7 +7614,7 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
-        public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+        public List<ToolHoldRow> findHoldRowsByHarnessSession(
                 String harnessSessionId, String afterExecutionCallId,
                 int limit) {
             return delegate.findHoldRowsByHarnessSession(harnessSessionId,

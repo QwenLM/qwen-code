@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -125,6 +126,52 @@ class ManagedAgentPreflightTest {
                     ManagedAgentPreflight.harnessCheck(harness(
                             "http://127.0.0.1:"
                                     + server.getAddress().getPort())).status());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void sendsTheConfiguredHarnessToken() throws IOException {
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<String> authorization = new AtomicReference<>();
+        server.createContext("/capabilities", exchange -> {
+            authorization.set(
+                    exchange.getRequestHeaders().getFirst("Authorization"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.harnessCheck(harness(
+                            "http://127.0.0.1:"
+                                    + server.getAddress().getPort())).status());
+            assertEquals("Bearer token", authorization.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void explainsARejectedHarnessToken() throws IOException {
+        HttpServer server = HttpServer.create(
+                new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/capabilities", exchange -> {
+            exchange.sendResponseHeaders(401, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            ManagedAgentPreflight.Check check =
+                    ManagedAgentPreflight.harnessCheck(harness(
+                            "http://127.0.0.1:"
+                                    + server.getAddress().getPort()));
+            assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+            assertTrue(check.detail().contains("401"));
+            assertTrue(check.fix().contains(
+                    "QWEN_MANAGED_AGENT_HARNESS_TOKEN"));
         } finally {
             server.stop(0);
         }
@@ -247,6 +294,41 @@ class ManagedAgentPreflightTest {
     void rejectsWorkspaceFilesWithTheStaticProvisioner() {
         ManagedAgentProperties properties = toolProperties();
         properties.getRuntimeBroker().setProvisioner("static");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsSshWithoutNodes() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                        "tenant-1", "storage-1", "/tmp/workspace-mount")));
+        properties.getRuntimeBroker().getSsh().setEnabled(true);
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.toolPathCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertTrue(check.detail().contains("SSH Runtime"));
+    }
+
+    @Test
+    void rejectsWorkspaceCreationWithoutWorkspaceFiles() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsAnUnsupportedIsolationClass() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
+        properties.getRuntimeBroker()
+                .setVerifiedWorkspaceRecoveryEnabled(true);
+        properties.getRuntimeBroker().setIsolationClass("tenant");
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
     }

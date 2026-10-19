@@ -74,6 +74,16 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 基础配置支持纯文本 Hosted Session。除非配置签名或认证入口，否则服务只能监听 loopback。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
 
+## 生成凭据
+
+`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token 以及 Runtime 凭据密钥。它写出 `config/harness.env`、`config/server.env` 与 `config/application.yml`，权限为 0600；目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径，不打印 secret：
+
+```bash
+bin/qwen-managed-agent-bootstrap
+```
+
+生成的 `harness.env` 与 `server.env` 既可直接被 shell source，也可作为 systemd 的 `EnvironmentFile`。systemd 布局下传入 `--directory /etc/qwen-managed-agent`，随后填写 `SPRING_DATASOURCE_PASSWORD`，并把文件属主调整为服务账号。
+
 ## 预检
 
 在首次启动前以及每次安装新产物后，用启动脚本运行 `--check`。它绑定与服务器相同的配置（`config/application.yml` 加环境变量），不启动监听，并按输入项逐行输出结果：
@@ -82,7 +92,11 @@ curl --fail http://127.0.0.1:8080/actuator/health
 bin/qwen-managed-agent-server --check
 ```
 
-检查范围包括 JDK、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验 Workspace mount 注册。
+检查范围包括 JDK、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验原生 Workspace storage 注册。
+
+## systemd
+
+分发产物包含面向既定单机拓扑的 `systemd/` unit 与环境模板。控制面 unit 使用 `KillMode=process`，使 Runtime worker 在 Broker 重启后继续存活；Harness unit 使用 `KillMode=mixed`，使其工具进程随 Harness 终止。安装步骤见 `systemd/README.zh-CN.md`。
 
 ## 开启已接受的 local-process 工具路径
 
@@ -108,7 +122,7 @@ export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 1. 下载并校验新压缩包，读取新旧两个 manifest。在改动运行中部署前，确认新的 Qwen Code/Harness、Java、协议与数据库要求。
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
 3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、完整 Runtime credential key ring 和精确旧版分发产物。分发产物升级期间不要轮换 credential key。
-4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。
+4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。随包的控制面 unit 使用 `KillMode=process`，`systemctl stop` 不会终止 Runtime worker；启动新版本前先用 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` 回收。
 5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。
 6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。

@@ -260,6 +260,17 @@ export function extractText(tool: ACPToolCall): string | null {
   return extractRawOutputText(tool.rawOutput);
 }
 
+export function hasRecordedOutput(tool: ACPToolCall): boolean {
+  return (
+    tool.rawOutput != null ||
+    (tool.content?.some(
+      (block) =>
+        block.type === 'content' && typeof block.content?.text === 'string',
+    ) ??
+      false)
+  );
+}
+
 export function getAdvisorDisplayText(tool: ACPToolCall): string | null {
   return extractRawOutputText(tool.rawOutput) ?? extractText(tool);
 }
