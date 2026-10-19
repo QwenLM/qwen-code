@@ -2,7 +2,7 @@
 
 [English](2026-10-19-managed-agent-package-boundaries.md) | [简体中文](2026-10-19-managed-agent-package-boundaries.zh-CN.md)
 
-Status: implemented and verified locally. Remote CI and the optional MySQL, Hosted and Linux fault profiles were not run for this package reorganization.
+Status: implemented and verified locally on main base `f37e003d9450`. Remote CI and formal review are tracked on [PR #14710](https://github.com/QwenLM/qwen-code/pull/14710). The optional MySQL, Hosted and Linux fault profiles were not run locally for this package reorganization.
 
 ## Problem and current state
 
@@ -68,9 +68,9 @@ Compare source bodies after normalizing package names, imports and required visi
 
 Local verification with JDK 21 passed:
 
-- `mvn clean verify`: 4,795 tests, zero failures/errors and 18 existing skips; both Checkstyle executions and SpotBugs reported zero findings. All existing Maven verification gates remain enabled.
+- `mvn clean verify`: 4,796 tests, zero failures/errors and 18 existing skips; both Checkstyle executions and SpotBugs reported zero findings. All existing Maven verification gates remain enabled.
 - Root `npm run build` and `npm run typecheck`, all 39 affected script tests, targeted ESLint, and Javadoc reference checks passed.
-- All 321 production source bodies are unchanged after namespace/import/visibility normalization. All 876 compiled classes and 16,845 declaration signatures are retained, with no reduction of existing public access.
+- All 322 production source bodies are unchanged after namespace/import/visibility normalization. All 877 compiled classes and 16,860 declaration signatures are retained, with no reduction of existing public access.
 - All seven executable JARs contain the expected entry points and unchanged resources. Four maintenance entry points reject empty arguments before file, database or cloud access.
 
 ## Acceptance criteria

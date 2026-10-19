@@ -2,7 +2,7 @@
 
 [English](2026-10-19-managed-agent-package-boundaries.md) | [简体中文](2026-10-19-managed-agent-package-boundaries.zh-CN.md)
 
-状态：已实现并完成本地验证。本次包调整未运行远端 CI，以及可选的 MySQL、Hosted 和 Linux 故障专项 profile。
+状态：已在主干基点 `f37e003d9450` 上实现并完成本地验证。远端 CI 与正式评审状态见 [PR #14710](https://github.com/QwenLM/qwen-code/pull/14710)。本次包调整未在本地运行可选的 MySQL、Hosted 和 Linux 故障专项 profile。
 
 ## 问题与现状
 
@@ -68,9 +68,9 @@ Broker 供应器和传输组件复用现有协议校验及值操作，只公开�
 
 JDK 21 本地验证通过：
 
-- `mvn clean verify`：4,795 项测试，零失败、零错误，18 项既有跳过；两项 Checkstyle 执行和 SpotBugs 均为零问题。全部既有 Maven 验证门禁保持开启。
+- `mvn clean verify`：4,796 项测试，零失败、零错误，18 项既有跳过；两项 Checkstyle 执行和 SpotBugs 均为零问题。全部既有 Maven 验证门禁保持开启。
 - 根目录 `npm run build`、`npm run typecheck`、全部 39 项相关脚本测试、针对性 ESLint 和 Javadoc 引用检查均通过。
-- 规范化包名、import 和可见性后，全部 321 个生产源码主体保持不变。全部 876 个编译类及 16,845 个声明签名完整保留，既有公开访问权限没有收窄。
+- 规范化包名、import 和可见性后，全部 322 个生产源码主体保持不变。全部 877 个编译类及 16,860 个声明签名完整保留，既有公开访问权限没有收窄。
 - 7 个可执行 JAR 均包含预期入口和未变的资源。4 个维护入口在访问文件、数据库或云服务之前正确拒绝空参数。
 
 ## 验收标准

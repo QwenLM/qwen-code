@@ -43,7 +43,7 @@ public enum ManagedHoldFamily {
         return ofDispatchMode(row.getReference().get("dispatchMode"));
     }
 
-    static ManagedHoldFamily ofDispatchMode(Object dispatchMode) {
+    public static ManagedHoldFamily ofDispatchMode(Object dispatchMode) {
         for (ManagedHoldFamily family : values()) {
             if (family.dispatchMode.equals(dispatchMode)) {
                 return family;
