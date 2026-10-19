@@ -618,6 +618,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/files/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read-only Workspace file query
+         * @description Browse directories or search file names within the persisted Workspace working directory. Requires a trusted actor with current OPERATOR or OWNER access to an ACTIVE Workspace, the deployment Workspace-files opt-in, and verified LOCAL or SSH_LOCAL storage. Authorization and binding are rechecked after I/O. Paths are relative to the working directory; host paths and Runtime credentials are never returned. Unsupported storage never falls back to the local daemon, and no Session, worker or model request is created.
+         */
+        post: operations["webShellWorkspaceFilesQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/files/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read-only Workspace file read
+         * @description Read one selection-time snapshot of a nonempty, NUL-free UTF-8 file, at most 24 KiB, using the scope revision returned by query. Requires a trusted actor with current OPERATOR or OWNER access to an ACTIVE Workspace, the deployment Workspace-files opt-in, and verified LOCAL or SSH_LOCAL storage. Authorization and binding are rechecked after I/O. Paths are relative to the working directory; host paths and Runtime credentials are never returned. Unsupported storage never falls back to the local daemon, and no Session, worker or model request is created.
+         */
+        post: operations["webShellWorkspaceFilesRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1549,6 +1589,41 @@ export interface components {
         };
         WebShellSessionSkills: {
             skills: components["schemas"]["WebShellSkill"][];
+        };
+        WebShellWorkspaceFileQueryRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            directory: string;
+            query?: string;
+            expectedScopeRevision?: string;
+        };
+        WebShellWorkspaceFileReadRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            path: string;
+            expectedScopeRevision: string;
+        };
+        WebShellWorkspaceFileEntry: {
+            path: string;
+            name: string;
+            /** @enum {string} */
+            kind: "file" | "directory";
+        };
+        WebShellWorkspaceFilePage: {
+            scopeRevision: string;
+            directory: string;
+            entries: components["schemas"]["WebShellWorkspaceFileEntry"][];
+            truncated: boolean;
+        };
+        WebShellWorkspaceFileSnapshot: {
+            scopeRevision: string;
+            path: string;
+            name: string;
+            /** @enum {string} */
+            mimeType: "text/plain";
+            text: string;
+            byteLength: number;
+            sha256: string;
         };
     };
     responses: {
@@ -2855,6 +2930,66 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellWorkspaceFilesQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized Workspace file result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFilePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellWorkspaceFilesRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileReadRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized Workspace file result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFileSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

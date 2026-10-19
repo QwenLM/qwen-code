@@ -74,6 +74,16 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 This base configuration supports text-only Hosted Sessions. Keep the listener on loopback unless a signed or authenticated ingress is configured. The complete authentication, API, and capability configuration is bundled as `docs/server-reference.md`.
 
+## Preflight check
+
+Run the bundled launcher with `--check` before the first start and after installing each new artifact. It binds the same configuration (`config/application.yml` plus the environment), starts no listener, and prints one row per input:
+
+```bash
+bin/qwen-managed-agent-server --check
+```
+
+It covers the JDK, the configuration file and its permissions, the credential key ring, the startup property validation, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings, broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or Workspace mount registration.
+
 ## Enable the accepted local-process tool path
 
 Tool execution requires the existing fail-closed Runtime and Workspace setup. At minimum, configure:
@@ -135,7 +145,7 @@ FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
 
 The result lists the key IDs that persisted rows still require: expect the active ID (`reference-v2`) only. While `reference-v1` appears, that key must stay configured.
 
-The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` in `config/application.yml`. The distribution ships `config/application.example.yml`, and both launchers export `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml` when that file exists, so the location no longer depends on the process working directory and no option is added to the command's positional arguments. When the variable is already set, the launchers leave it in effect instead. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable.
+The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` in `config/application.yml`. The distribution ships `config/application.example.yml`, and both launchers export `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml` when that file exists, so the location no longer depends on the process working directory and no option is added to the command's positional arguments. When the variable is already set, the launchers leave it in effect instead. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable. An explicit `--spring.config.additional-location` command-line argument outranks this environment default; when both are present, the command-line value wins and the bundled `config/application.yml` is not loaded.
 
 The operator-recovery entry reads the same active pair and `previous-credential-keys` map as the server. Its launcher loads `config/application.yml` the same way; when the file lives elsewhere, set `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<absolute-path>/application.yml`. Keep the new key active while retaining every key still referenced by a binding. The CSI/migration maintenance mains, including the CSI Hosted probe, still read a single credential key pair; launch those entries with the key that encrypted their target binding as the active pair.
 
