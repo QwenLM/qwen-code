@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
+  makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
@@ -38,6 +39,10 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { helpCommand } from '../commands/helpCommand.js';
+import { clearCommand } from '../commands/clearCommand.js';
+import { OpenTuiSlashGateway } from './slash-gateway.js';
 
 const { logSlashCommandSpy, loadInteractiveCommandsMock } = vi.hoisted(() => ({
   logSlashCommandSpy: vi.fn(),
@@ -229,6 +234,132 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it.each([
+    ['startup', 'Error'],
+    ['startup', 'string'],
+    ['command', 'Error'],
+    ['command', 'string'],
+  ])(
+    'sanitizes Mod %s errors thrown as %s before display and recording',
+    async (phase, errorType) => {
+      const message =
+        '\u001b[31mMod failed\u001b[0m\u0007\u0008\u007f\u009f\u202e\n\t检查配置 \u001b]8;;https://example.invalid\u0007details\u001b]8;;\u0007\u2066\u2069';
+      const error = errorType === 'Error' ? new Error(message) : message;
+      const recordSlashCommand = vi.fn();
+      const config = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        getChatRecordingService: () => ({ recordSlashCommand }),
+      } as unknown as Config;
+      const initialize = vi.fn().mockImplementation(async () => {
+        if (phase === 'startup') throw error;
+      });
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const action = vi.fn().mockRejectedValue(error);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [stub({ name: 'test', kind: CommandKind.FILE, action })],
+      );
+      try {
+        expect(await dispatcher.handle('/test')).toEqual({ kind: 'handled' });
+        expect(initialize).toHaveBeenCalledOnce();
+        expect(action).toHaveBeenCalledTimes(phase === 'startup' ? 0 : 1);
+        const expected = {
+          type: 'error',
+          text: 'Mod failed\n\t检查配置 details',
+        };
+        expect(host.items).toContainEqual(expect.objectContaining(expected));
+        expect(recordSlashCommand).toHaveBeenCalledWith({
+          phase: 'result',
+          rawCommand: '/test',
+          outputHistoryItems: [expected],
+        });
+        expect(error instanceof Error ? error.message : error).toBe(message);
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['/compress', 'compress', CommandKind.BUILT_IN, false],
+    ['/summarize', 'compress', CommandKind.BUILT_IN, false],
+    ['/help', 'help', CommandKind.FILE, false],
+    ['/exit', 'quit', CommandKind.FILE, false],
+    ['/alpha /beta work', 'alpha', CommandKind.SKILL, false],
+    ['/help', 'help', CommandKind.BUILT_IN, true],
+    ['/exit', 'quit', CommandKind.BUILT_IN, true],
+  ])(
+    'allows only actual recovery commands after startup failure: %s (%s, %s)',
+    async (input, name, kind, recovery) => {
+      const error = new Error('Config startup failed');
+      const config = {
+        initialize: vi.fn().mockRejectedValue(error),
+        getGeminiClient: () => undefined,
+        getSessionId: () => 'mod-startup-failed',
+      } as unknown as Config;
+      const failStartup = vi.fn();
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          ready: new Promise(() => {}),
+          failStartup,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const action = vi
+        .fn()
+        .mockResolvedValue({ type: 'submit_prompt', content: 'must not run' });
+      const command = recovery
+        ? name === 'help'
+          ? helpCommand
+          : quitCommand
+        : stub({
+            name,
+            kind,
+            altNames:
+              name === 'compress'
+                ? ['summarize']
+                : name === 'quit'
+                  ? ['exit']
+                  : undefined,
+            action,
+          });
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command, stub({ name: 'beta', kind: CommandKind.SKILL, action })],
+      );
+      try {
+        const outcome = await dispatcher.handle(input);
+        expect(action).not.toHaveBeenCalled();
+        expect(failStartup).toHaveBeenCalledTimes(recovery ? 0 : 1);
+        if (recovery) {
+          expect(outcome).toMatchObject({
+            kind: name === 'help' ? 'open_dialog' : 'quit',
+          });
+          expect(config.initialize).not.toHaveBeenCalled();
+        } else {
+          expect(outcome).toEqual({ kind: 'handled' });
+          expect(host.items).toContainEqual(
+            expect.objectContaining({
+              type: 'error',
+              text: 'Config startup failed',
+            }),
+          );
+        }
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
   it('returns false for non-slash input and path-like input', async () => {
     const { outcome: plain } = await dispatch('hello world', []);
     expect(plain).toBe(false);
@@ -1133,6 +1264,126 @@ describe('stacked skills (ink merge parity)', () => {
 describe('cancellation, telemetry and recording', () => {
   beforeEach(() => {
     logSlashCommandSpy.mockClear();
+  });
+
+  it.each(['/clear', '/reset', '/new'])(
+    '%s retains input ownership through Mod shutdown and chat reset',
+    async (input) => {
+      let finishEnd = () => {};
+      const ending = new Promise<void>((resolve) => {
+        finishEnd = resolve;
+      });
+      let finishReset = () => {};
+      const resetting = new Promise<void>((resolve) => {
+        finishReset = resolve;
+      });
+      const syncSession = vi.fn(() => ending);
+      const resetChat = vi.fn(() => resetting);
+      const config = makeFakeConfig();
+      vi.spyOn(config, 'initialize').mockResolvedValue();
+      vi.spyOn(config, 'startNewSession').mockReturnValue('new-session');
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(undefined!);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue({
+        resetChat,
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize: vi.fn().mockResolvedValue(undefined),
+          syncSession,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [clearCommand],
+      );
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(dispatcher);
+      const pending = gateway.dispatch(input);
+      try {
+        await vi.waitFor(() =>
+          expect(syncSession).toHaveBeenCalledWith('clear'),
+        );
+        gateway.cancel();
+        await Promise.resolve();
+        expect(gateway.isBusy()).toBe(true);
+        expect(host.processingFlags.at(-1)).toBe(true);
+        expect(
+          host.items.some((item) => item.text === 'Command cancelled.'),
+        ).toBe(false);
+        expect(await gateway.dispatch('next prompt')).toMatchObject({
+          kind: 'rejected',
+        });
+        expect(host.calls).not.toContain('clearItems');
+
+        finishEnd();
+        await vi.waitFor(() => expect(resetChat).toHaveBeenCalledOnce());
+        gateway.cancel();
+        await Promise.resolve();
+        expect(gateway.isBusy()).toBe(true);
+        expect(host.processingFlags.at(-1)).toBe(true);
+        finishReset();
+        await pending;
+        expect(gateway.isBusy()).toBe(false);
+        expect(host.processingFlags.at(-1)).toBe(false);
+        expect(await gateway.dispatch('next prompt')).toEqual({
+          kind: 'dispatched',
+          outcome: false,
+        });
+      } finally {
+        finishEnd();
+        finishReset();
+        await pending;
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it('keeps a file command named clear cancellable', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      stub({
+        name: 'clear',
+        kind: CommandKind.FILE,
+        action: () => new Promise(() => {}),
+      }),
+    ]);
+    const pending = dispatcher.handle('/clear');
+    dispatcher.cancel();
+    await expect(pending).resolves.toEqual({ kind: 'handled' });
+    expect(host.processingFlags.at(-1)).toBe(false);
+    expect(host.items.some((item) => item.text === 'Command cancelled.')).toBe(
+      true,
+    );
+  });
+
+  it('releases a failed clear and lets the next command cancel normally', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      {
+        ...clearCommand,
+        action: async () => {
+          throw new Error('reset failed');
+        },
+      },
+      stub({ name: 'compress', action: () => new Promise(() => {}) }),
+    ]);
+    const gateway = new OpenTuiSlashGateway();
+    gateway.attach(dispatcher);
+    await gateway.dispatch('/clear');
+    expect(gateway.isBusy()).toBe(false);
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'error',
+      text: 'reset failed',
+    });
+    const pending = gateway.dispatch('/compress');
+    await Promise.resolve();
+    gateway.cancel();
+    await pending;
+    expect(gateway.isBusy()).toBe(false);
+    expect(host.processingFlags.at(-1)).toBe(false);
+    expect(host.items.at(-1)).toMatchObject({ text: 'Command cancelled.' });
   });
 
   it('cancel() aborts the action and reports like ink', async () => {

@@ -75,6 +75,7 @@ const mocks = vi.hoisted(() => {
     /** One entry per dispatcher construction: churn means the host was rebuilt. */
     hosts: [] as unknown[],
     dispatcherConstructions: 0,
+    cancelCommand: vi.fn(),
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
@@ -197,7 +198,10 @@ vi.mock('./commands-dispatch.js', () => ({
         trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)
       );
     }
-    cancel() {}
+    cancel() {
+      mocks.state.cancelCommand();
+      mocks.state.releaseHandle?.();
+    }
     dispose() {}
     async handle(text: string) {
       if (
@@ -332,6 +336,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
+    mocks.state.cancelCommand.mockClear();
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
     mocks.state.toolConfirmProps = null;
@@ -359,6 +364,26 @@ describe('OpenTuiApp shell wiring', () => {
     renderApp();
     await settle();
     expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+
+  it('routes composer cancellation to the running command without interrupting the model', async () => {
+    const onInterrupt = vi.fn();
+    renderApp({ onInterrupt });
+    await settle();
+    const cancel = () =>
+      (mocks.state.inputProps?.['onCancelCommand'] as () => boolean)();
+    expect(cancel()).toBe(false);
+    mocks.state.holdHandleOn = '/slow';
+    await submit('/slow');
+    expect(mocks.state.releaseHandle).not.toBeNull();
+    await act(async () => {
+      expect(cancel()).toBe(true);
+    });
+    expect(mocks.state.cancelCommand).toHaveBeenCalledOnce();
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(cancel()).toBe(false);
+    await submit('/next');
+    expect(mocks.state.handledTexts).toEqual(['/slow', '/next']);
   });
 
   it('mounts the restored banner and footer, and feeds them the streaming flag', async () => {

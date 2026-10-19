@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
@@ -20,6 +22,7 @@ import type {
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
   ServerLlmStreamEvent,
+  UserPromptAdmission,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -92,7 +95,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
-import { ModSession } from './nonInteractive/mod-session.js';
+import { ModSession } from './services/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -1200,15 +1203,21 @@ export async function runNonInteractive(
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
+      let promptAdmission: UserPromptAdmission | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
         // client.ts strips the ENTIRE trailing user run, so detection must
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
+        const history = llmClient.getChat().getHistory();
+        const cancellation = getLastApiPromptCancellation(
+          llmClient.getChat().getHistoryShallow(),
+          await config.getChatRecordingService()!.readActiveTranscriptChain(),
+        );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: llmClient.getChat().getHistory(),
+          apiHistory: cancellation ? [] : history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
@@ -1261,6 +1270,19 @@ export async function runNonInteractive(
             undefined,
             undefined,
             modSession,
+            // Core runs no UserPromptSubmit for a notification batch.
+            (options.sendMessageType ?? SendMessageType.UserQuery) ===
+              SendMessageType.UserQuery
+              ? async () => {
+                  if (abortController.signal.aborted) await routeAbort();
+                  promptAdmission = await llmClient.admitUserPrompt(
+                    input,
+                    prompt_id,
+                  );
+                  if (abortController.signal.aborted) await routeAbort();
+                  return !promptAdmission.blocked;
+                }
+              : undefined,
           );
           await modSession?.syncSession(
             slashCommandResult.resolvedCommand?.name === 'clear'
@@ -2597,6 +2619,7 @@ export async function runNonInteractive(
               sendType === SendMessageType.UserQuery &&
               !options.continueInterrupted &&
               submittedPrompt.trim().length > 0 && { submittedPrompt }),
+            ...(isFirstTurn && promptAdmission && { promptAdmission }),
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,

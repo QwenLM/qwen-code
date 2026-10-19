@@ -227,9 +227,10 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
- 'workspace_file_upload',
+ 'workspace_file_upload', 'workspace_file_delete', 'workspace_directory_create', 'workspace_directory_delete',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
+ 'workspace_session_refresh',
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
  'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
@@ -328,7 +329,7 @@ The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` ad
 
 `session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. When both `session_organization` and `workspace_qualified_rest_core` are advertised, the workspace-qualified organization mutation `PATCH /workspaces/:workspace/session/:id/organization` is also available. The legacy mutation remains primary-workspace-only. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight these tags before showing the matching grouping or pinning UI.
 
-`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
+`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_archive_idle_guard` advertises the additive `requireIdle` archive option: the owning runtime checks that active work is confirmed idle immediately before it begins the close, and leaves the active transcript in place otherwise. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
 
 `workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability documents a narrower policy: `workspace_persisted_transcript` (read-only), or the trust grant mutation, which is accepted for a registered untrusted workspace whether or not `workspace_trust_grant` is advertised — that tag reports only whether trust hot-reload is wired, so a recorded decision can reach the running runtime without a daemon restart; it never reports whether the route is served. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
@@ -364,7 +365,11 @@ written into the workspace without ever overwriting — an occupied name is
 auto-numbered (`name (1).ext`, `name (2).ext`, ...). It is also a strict
 mutation route.
 
-When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, and `/workspaces/:workspace/file/upload`.
+`workspace_file_delete` covers only `POST /workspaces/:workspace/file/delete`; no legacy-primary `/file/delete` route exists. The JSON body is `{ "path": "relative/file.txt" }`, and success returns `{ "kind": "file_delete", "path": "relative/file.txt" }`. This strict mutation route permanently removes one regular file from the selected trusted local workspace. Directories and symlinks are rejected; unsupported factories (including SSH) return 422. The capability describes protocol support, not permission to delete in every workspace. Clients must also preflight `workspace_qualified_rest_core`.
+
+When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, `/workspaces/:workspace/file/upload`, and `/workspaces/:workspace/file/delete` (the last route additionally requires `workspace_file_delete`).
+
+`workspace_directory_create` and `workspace_directory_delete` independently advertise `POST /workspaces/:workspace/directory/create` and `POST /workspaces/:workspace/directory/delete`. Preflight the operation's tag alongside `workspace_qualified_rest_core`; older qualified daemons may lack these routes. Both are strict mutations owned by the trusted active selected local runtime, with no primary fallback or legacy-primary counterpart. Creation is exclusive under an existing parent; deletion is permanent and recursive.
 
 The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
 
@@ -376,7 +381,7 @@ The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces
 
 `extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist changed targets in one generation, and return one `202` operation handle. A target does not need to be installed when setting `enabled` or `disabled`: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"` and writes V2 `defaultActivation`; the workspace route also accepts `"inherit"` and applies or clears exact overrides for the selected trusted runtime. `inherit` does not declare an unknown name, and an all-unknown clear reports `updated: false`.
 
-`extension_activation_explicit_refresh` means singular and batch activation operations finish after the durable policy commit without directly refreshing active sessions. Callers that need immediate application should wait for activation success and then submit either the synchronous primary-workspace `POST /workspace/extensions/refresh`, which returns refresh counts directly, or the selected workspace's asynchronous `POST /workspaces/:workspace/extensions/refresh`, which returns a separate operation handle. The two forms are not interchangeable: the asynchronous operation records the applied generation when its runtime reconciliation completes, while the synchronous route records nothing, so the generation reconciler still treats that workspace as pending and refreshes its sessions again on its next pass. Callers that can address a specific workspace should prefer the asynchronous form. A refresh failure does not roll back or downgrade the activation result. Daemons without this capability already include runtime refresh in activation, so compatibility clients must not submit a second refresh. The independent 30-second generation reconciler remains enabled and normally applies the committed policy by its next pass; failed reconciliation is retried by later passes.
+`extension_activation_explicit_refresh` means singular and batch activation operations finish after the durable policy commit without directly refreshing active sessions. Callers that need immediate application should wait for activation success and then submit either the synchronous primary-workspace `POST /workspace/extensions/refresh`, which returns refresh counts directly, or the selected workspace's asynchronous `POST /workspaces/:workspace/extensions/refresh`, which returns a separate operation handle. The two forms are not interchangeable: the asynchronous operation records the applied generation when its full runtime reconciliation completes, while the synchronous route records nothing, so the generation reconciler still treats that workspace as pending and refreshes its sessions again on its next pass. Callers that can address a specific workspace should prefer the asynchronous form. A refresh failure does not roll back or downgrade the activation result. Daemons without this capability already include runtime refresh in activation, so compatibility clients must not submit a second refresh. The independent 30-second generation reconciler remains enabled and normally applies the committed policy by its next pass; failed reconciliation is retried by later passes.
 
 ### Extension Management V2 wire contract
 
@@ -399,6 +404,20 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | `PUT /workspaces/:workspace/extensions/:extensionId/activation`    | `202` exact workspace-activation operation                                  |
 | `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
 | `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
+
+#### Explicit Extension refresh
+
+Capability tag: `workspace_session_refresh` for the optional session selection. Both `POST /workspace/extensions/refresh` (primary runtime) and `POST /workspaces/:workspace/extensions/refresh` (selected runtime) accept:
+
+```json
+{ "sessionIds": ["session-1", "session-2"] }
+```
+
+Omitting `sessionIds` preserves full runtime refresh. A supplied array is deduplicated in request order, and `[]` refreshes no sessions or bootstrap caches. IDs must be non-empty strings. Invalid request shapes return HTTP 400; unknown IDs, including sessions owned by another workspace, return HTTP 404 before work starts. Session ownership is checked only inside the resolved runtime, with no primary-runtime fallback. Existing authentication, strict mutation, workspace trust and client identity gates apply.
+
+The primary route still returns HTTP 200 with `{ refreshed, failed }`; the qualified route still returns HTTP 202 with an operation handle. Counts describe the selected sessions. A refresh with `sessionIds` does not advance the workspace-wide applied generation, even if the selection covers every current session. Automatic full reconciliation remains unchanged and may refresh other sessions later. Selection does not create session-scoped activation policy: shared runtime caches can change, and workspace events remain workspace-wide.
+
+Clients must preflight `workspace_session_refresh` before supplying the field, including an empty array; older daemons can silently ignore it. Existing calls without the field need no new capability check.
 
 #### Workspace resource state
 
@@ -2053,7 +2072,7 @@ treat `404` as unsupported.
 
 ### Workspace file routes
 
-All file paths are resolved through the daemon's primary workspace. Responses use
+Legacy file routes resolve paths through the primary workspace; `/workspaces/:workspace/...` routes resolve paths through the selected runtime's workspace. Responses use
 workspace-relative paths and never return absolute filesystem paths for normal
 success cases. Successful file responses include:
 
@@ -2327,6 +2346,52 @@ caller named the path. Success responses and audit events include
   "matchedIgnore": null
 }
 ```
+
+#### `POST /workspaces/:workspace/directory/create`
+
+Requires `workspace_qualified_rest_core` and `workspace_directory_create`, strict
+mutation authority, and a trusted active local workspace. Body:
+
+```json
+{ "path": "src/new-folder" }
+```
+
+The parent must exist. Creation is exclusive: an existing file or directory
+returns `409 file_already_exists`; a final symlink returns `400 symlink_escape`.
+Success is `201 { "kind": "directory_create", "path": "src/new-folder" }`.
+The SDK method is
+`WorkspaceDaemonClient.createWorkspaceDirectory(path, clientId?)`.
+
+#### `POST /workspaces/:workspace/directory/delete`
+
+Requires `workspace_qualified_rest_core` and `workspace_directory_delete` under
+the same strict mutation and trusted local-runtime policy. Body:
+
+```json
+{ "path": "src/old-folder" }
+```
+
+Deletes an empty or nonempty directory recursively. Workspace roots, regular
+files, and final symlinks are rejected; nested symlink entries are removed
+without following their targets. A missing target returns `404 path_not_found`.
+Success is `200 { "kind": "directory_delete", "path": "src/old-folder" }`.
+The SDK method is
+`WorkspaceDaemonClient.deleteWorkspaceDirectory(path, clientId?)`.
+
+Both directory routes preserve the lexical final name while resolving its
+parent inside the selected workspace. Paths must not end in a separator;
+suspicious path patterns return `400 path_outside_workspace`, while malformed
+leaf shapes return `400 parse_error`. Unsupported custom factories return `422`;
+SSH workspaces are rejected by the SSH boundary with `501`. Unknown,
+unavailable, removed, or untrusted owners never fall back to primary.
+
+Deletion is permanent and failures may leave partial removal. A concurrent
+writer can cause `ENOTEMPTY`, returned as `503 io_error`; retry the same
+operation after the writer stops. Per-path locks do not serialize a directory
+against every child write, and external directory replacement cannot be made
+atomic by portable path-based checks. Explicit ignored-directory mutations are
+allowed and audit events annotate `matchedIgnore` when applicable; creation
+records `sizeBytes: 0`.
 
 ### `GET /session/:id/context`
 
@@ -3217,7 +3282,7 @@ Archive one or more sessions. Archive is a state transition, not deletion: the J
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true, "requireIdle": true }
 ```
 
 `sessionIds` must be a non-empty string array with at most 100 ids. Duplicates are collapsed.
@@ -3235,6 +3300,8 @@ Response:
 ```
 
 `resolveConflicts` is optional and defaults to `false`. By default, active and archived files with the same id are reported in `errors`, and neither copy is moved, removed, or overwritten. Archiving a live session still performs the strict close described above before classifying the conflict, so that close may flush queued records to the active transcript. With `resolveConflicts: true`, archive repairs the conflict only when both copies are regular transcript files that the selected workspace may maintain, including owned empty or damaged transcripts. It keeps the archived copy, removes the active copy, and reports the id in both `archived` and `resolvedConflicts`. The option does not bypass ownership checks; mixed local/foreign or otherwise ambiguous ownership is reported in `errors`, and neither copy is moved. `errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`.
+
+`requireIdle` is optional and defaults to `false`. Clients must pre-flight `session_archive_idle_guard` before sending it. With `requireIdle: true`, a live owner whose active-work state is active, unknown, or unsupported returns that session in `errors`; the daemon does not close it or move its transcript. The check and transition into closing occur in one owning-runtime control-plane turn, so new work cannot enter between them. A persisted session whose live child has already been reaped remains eligible for archive.
 
 An archived-only session is returned in `alreadyArchived` after the daemon acquires a writer or maintenance lease to reconcile pending sidecar cleanup. If another process still holds the writer lease, the archived-only id is reported in `errors` until the lease becomes available.
 
@@ -3743,6 +3810,32 @@ Global installation and deletion use `POST /workspace/config/skills/install` and
 Config deletion returns `503 skills_config_unavailable` instead of a definitive not-found response when the daemon-local Skill inventory cannot be enumerated.
 
 The singular mutation owner rejects workspace scope with `400 workspace_scope_requires_qualified_workspace`; qualified mutations reject global scope with `400 global_scope_requires_singular_owner`. Qualified writes require a trusted workspace. A legacy injected bridge returns `501 workspace_runtime_not_supported` for qualified config writes that require runtime coordination. Unknown, removed, transitioning, and draining workspaces follow the standard qualified-workspace errors and never fall back to primary.
+
+#### `POST /workspace/skills/refresh`
+
+Capability tag: `workspace_session_refresh`. The workspace-qualified form is `POST /workspaces/:workspace/skills/refresh`. The singular route owns the primary runtime; the qualified route resolves the exact selected trusted runtime and never falls back to primary. Both use the strict mutation gate and existing client identity checks.
+
+Explicitly reload Skill settings and content for all live sessions, or only the supplied session IDs:
+
+```json
+{ "sessionIds": ["session-1", "session-2"] }
+```
+
+Omitting `sessionIds` refreshes all live sessions. IDs must be non-empty strings and are deduplicated in request order; `[]` returns zero counts without refreshing sessions or caches. Invalid request shapes return HTTP 400. Unknown IDs and IDs owned by another workspace return HTTP 404 before any refresh begins. Selected sessions are routed only to their owning execution-engine channels; unrelated channels receive no refresh command.
+
+Response (200):
+
+```json
+{
+  "sessionsRefreshed": 2,
+  "sessionsFailed": 0,
+  "configsRefreshed": 3,
+  "configsFailed": 0,
+  "reason": "all"
+}
+```
+
+Counts describe the selected sessions and the shared/session configurations refreshed for their owner channels. Selection controls immediate session refresh and command notifications; shared channel caches can change, and workspace events remain workspace-wide. The explicit request does not update the Skill coordinator's revision or readiness. Skill enable/disable, install/delete and automatic reconciliation retain their existing full-refresh behavior. This route does not add `refreshRuntime` or `sessionIds` to Skill toggle bodies.
 
 #### `POST /workspace/skills/:name/enable`
 

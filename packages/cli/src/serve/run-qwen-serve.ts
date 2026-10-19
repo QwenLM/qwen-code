@@ -27,7 +27,10 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import {
+  validateHostedHarnessProfile,
+  HOSTED_CSI_SESSION_STORE_URL_ENV,
+} from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
@@ -2297,6 +2300,7 @@ async function loadServeRuntimeModules() {
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
     sessionExecutionEngineSelectorModule,
+    managedExecutionEngineModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -2312,6 +2316,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
     import('./session-execution-engine-selector.js'),
+    import('./managed-execution-engine.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -2344,6 +2349,8 @@ async function loadServeRuntimeModules() {
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
     createPairedExecutionEngines:
       sessionExecutionEngineSelectorModule.createPairedExecutionEngines,
+    createManagedExecutionEngine:
+      managedExecutionEngineModule.createManagedExecutionEngine,
   };
 }
 
@@ -3431,12 +3438,16 @@ async function runQwenServeImpl(
     (optsIn.profile === 'hosted-harness'
       ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]
       : undefined);
+  const hostedCsiSessionStoreUrl =
+    optsIn.hostedCsiSessionStoreUrl ??
+    process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
   validateHostedHarnessProfile({
     ...optsIn,
     token,
     requireAuth:
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
+    hostedCsiSessionStoreUrl,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3573,6 +3584,7 @@ async function runQwenServeImpl(
     ),
     token,
     hostedHarnessCapabilityDigest,
+    hostedCsiSessionStoreUrl,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -5088,6 +5100,7 @@ async function runQwenServeImpl(
       stopLiveCoordinator?: () => void;
       stopAgentHostRestore?: () => void;
       stopWebTerminalRegistry?: () => void;
+      stopHostedMountHandbacks?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -5107,6 +5120,7 @@ async function runQwenServeImpl(
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
     stopSafely('Agent Host reconnect', locals.stopAgentHostRestore);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
+    stopSafely('Hosted mount handbacks', locals.stopHostedMountHandbacks);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -5632,7 +5646,9 @@ async function runQwenServeImpl(
       generationGuard: primaryGenerationGuard,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
-    const channelFactory = runtime.createSpawnChannelFactory({
+    const channelFactoryOptions: NonNullable<
+      Parameters<typeof runtime.createSpawnChannelFactory>[0]
+    > = {
       processRegistry,
       childHeapPolicy,
       reclaimIdleChild: async (signal) => {
@@ -5655,7 +5671,10 @@ async function runQwenServeImpl(
       ...(acpChildExtraArgs(opts)
         ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
-    });
+    };
+    const channelFactory = runtime.createSpawnChannelFactory(
+      channelFactoryOptions,
+    );
     const statusProvider = runtime.createDaemonStatusProvider({
       env: runtimeEffectiveEnv,
     });
@@ -6205,6 +6224,17 @@ async function runQwenServeImpl(
           ? {
               executionEngines: runtime.createPairedExecutionEngines({
                 legacy: channelFactory,
+                managed: runtime.createManagedExecutionEngine({
+                  legacy: channelFactoryOptions,
+                  host: {
+                    workspaceCwd: boundWorkspace,
+                    workspaceTrusted: trustedWorkspace,
+                    environment: runtimeEffectiveEnv,
+                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    hasLiveMcpServers: () =>
+                      bridgeRef?.hasRuntimeMcpServers() === true,
+                  },
+                }),
                 runtimeBaseDir: primarySessionRuntimeBaseDir,
               }),
             }
@@ -6358,8 +6388,10 @@ async function runQwenServeImpl(
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
-      refreshExtensionsForAllSessions: () =>
-        bridge.refreshExtensionsForAllSessions(),
+      refreshExtensionsForAllSessions: (sessionIds) =>
+        sessionIds === undefined
+          ? bridge.refreshExtensionsForAllSessions()
+          : bridge.refreshExtensionsForAllSessions(undefined, { sessionIds }),
       publishWorkspaceEvent: (event) => {
         if (
           event.type === 'settings_changed' ||
@@ -6681,7 +6713,9 @@ async function runQwenServeImpl(
           ? { customIgnoreFiles: secondaryCustomIgnoreFiles }
           : {}),
       });
-      const secondaryChannelFactory = runtime.createSpawnChannelFactory({
+      const secondaryChannelFactoryOptions: NonNullable<
+        Parameters<typeof runtime.createSpawnChannelFactory>[0]
+      > = {
         processRegistry,
         childHeapPolicy,
         reclaimIdleChild: async (signal) => {
@@ -6704,7 +6738,10 @@ async function runQwenServeImpl(
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
-      });
+      };
+      const secondaryChannelFactory = runtime.createSpawnChannelFactory(
+        secondaryChannelFactoryOptions,
+      );
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
       // Wire sub-session support for the secondary workspace too — without
       // this, create_sub_session calls from sessions bound to a secondary
@@ -6813,6 +6850,17 @@ async function runQwenServeImpl(
           ? {
               executionEngines: runtime.createPairedExecutionEngines({
                 legacy: secondaryChannelFactory,
+                managed: runtime.createManagedExecutionEngine({
+                  legacy: secondaryChannelFactoryOptions,
+                  host: {
+                    workspaceCwd: workspaceInput.cwd,
+                    workspaceTrusted: secondaryTrusted,
+                    environment: secondaryEnv.effectiveEnv,
+                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    hasLiveMcpServers: () =>
+                      secondaryBridgeRef?.hasRuntimeMcpServers() === true,
+                  },
+                }),
                 runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
               }),
             }
@@ -6990,8 +7038,12 @@ async function runQwenServeImpl(
           secondaryBridge.queryWorkspaceStatus(method, idle),
         invokeWorkspaceCommand: (method, params, invokeOpts) =>
           secondaryBridge.invokeWorkspaceCommand(method, params, invokeOpts),
-        refreshExtensionsForAllSessions: () =>
-          secondaryBridge.refreshExtensionsForAllSessions(),
+        refreshExtensionsForAllSessions: (sessionIds) =>
+          sessionIds === undefined
+            ? secondaryBridge.refreshExtensionsForAllSessions()
+            : secondaryBridge.refreshExtensionsForAllSessions(undefined, {
+                sessionIds,
+              }),
         publishWorkspaceEvent: (event) =>
           secondaryBridge.publishWorkspaceEvent(event),
       });
@@ -7363,7 +7415,9 @@ async function runQwenServeImpl(
                 : {}),
             })
           : wsFsFactory;
-      const wsChannelFactory = runtime.createSpawnChannelFactory({
+      const wsChannelFactoryOptions: NonNullable<
+        Parameters<typeof runtime.createSpawnChannelFactory>[0]
+      > = {
         processRegistry,
         childHeapPolicy,
         reclaimIdleChild: async (signal) => {
@@ -7386,7 +7440,10 @@ async function runQwenServeImpl(
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
-      });
+      };
+      const wsChannelFactory = runtime.createSpawnChannelFactory(
+        wsChannelFactoryOptions,
+      );
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
       // eslint-disable-next-line prefer-const
       let wsBridgeRef:
@@ -7531,6 +7588,17 @@ async function runQwenServeImpl(
             ? {
                 executionEngines: runtime.createPairedExecutionEngines({
                   legacy: wsChannelFactory,
+                  managed: runtime.createManagedExecutionEngine({
+                    legacy: wsChannelFactoryOptions,
+                    host: {
+                      workspaceCwd: cwd,
+                      workspaceTrusted: trusted,
+                      environment: wsEnv.effectiveEnv,
+                      forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                      hasLiveMcpServers: () =>
+                        wsBridgeRef?.hasRuntimeMcpServers() === true,
+                    },
+                  }),
                   runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
                 }),
               }
@@ -7726,8 +7794,12 @@ async function runQwenServeImpl(
             wsBridge.queryWorkspaceStatus(method, idle),
           invokeWorkspaceCommand: (method, params, invokeOpts) =>
             wsBridge.invokeWorkspaceCommand(method, params, invokeOpts),
-          refreshExtensionsForAllSessions: () =>
-            wsBridge.refreshExtensionsForAllSessions(),
+          refreshExtensionsForAllSessions: (sessionIds) =>
+            sessionIds === undefined
+              ? wsBridge.refreshExtensionsForAllSessions()
+              : wsBridge.refreshExtensionsForAllSessions(undefined, {
+                  sessionIds,
+                }),
           publishWorkspaceEvent: (event) => {
             if (
               buildOptions?.primary === true &&
@@ -10143,6 +10215,9 @@ async function runQwenServeImpl(
               ?.locals?.['conversationRuntimeActivity'] as
               | { sealAndWait?: () => Promise<void> }
               | undefined;
+            const initiallyMountedCsiStop = initiallyMountedApp?.locals?.[
+              'stopHostedCsiSessions'
+            ] as (() => Promise<void>) | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
@@ -10157,6 +10232,7 @@ async function runQwenServeImpl(
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             const initialConversationActivityWait =
               initiallyMountedConversationActivity?.sealAndWait?.();
+            const initialCsiWait = initiallyMountedCsiStop?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
             const startProcessRegistryShutdown = () => {
               processRegistryShutdown ??= managedProcessRegistry
@@ -10340,6 +10416,11 @@ async function runQwenServeImpl(
                 ) {
                   await conversationActivity?.sealAndWait?.();
                 }
+                const csiStop = appForCleanup?.locals?.[
+                  'stopHostedCsiSessions'
+                ] as (() => Promise<void>) | undefined;
+                await initialCsiWait;
+                if (csiStop !== initiallyMountedCsiStop) await csiStop?.();
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[
                   'waitForTrustPolicyIdle'

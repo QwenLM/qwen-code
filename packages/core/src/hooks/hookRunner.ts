@@ -36,6 +36,7 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import {
   HookCommandCgroup,
   HookCommandIsolationUnavailableError,
@@ -1254,7 +1255,7 @@ export class HookRunner {
         delete supervisorEnv['NODE_OPTIONS'];
         try {
           child = spawn(
-            process.execPath,
+            getJsInterpreterCommand(import.meta.url).command,
             [
               '--input-type=commonjs',
               '--eval',

@@ -503,6 +503,11 @@ export function ensureLedgerDirectory(ledgerDir: string): void {
 export class ManagedRuntimeLedger {
   private readonly groups = new Map<number, ManagedRuntimeLedgerGroupRecord>();
   private watchdog?: NodeJS.Timeout;
+  private writeFailed = false;
+
+  get hasIntegrityFailure(): boolean {
+    return this.writeFailed;
+  }
 
   private constructor(
     readonly workFile: string,
@@ -544,11 +549,16 @@ export class ManagedRuntimeLedger {
       (group) => group.pgid !== record.pgid,
     );
     updated.push(stamped);
-    writeLedgerDocument(
-      this.workFile,
-      this.worker,
-      updated.map((group) => ({ ...group })),
-    );
+    try {
+      writeLedgerDocument(
+        this.workFile,
+        this.worker,
+        updated.map((group) => ({ ...group })),
+      );
+    } catch (error) {
+      this.writeFailed = true;
+      throw error;
+    }
     this.groups.set(record.pgid, stamped);
   }
 
@@ -567,6 +577,7 @@ export class ManagedRuntimeLedger {
     try {
       this.rewrite();
     } catch (error) {
+      this.writeFailed = true;
       debugLogger.warn(
         `Managed Runtime ledger ${this.workFile} could not be rewritten: ${
           error instanceof Error ? error.message : String(error)
@@ -660,6 +671,15 @@ export class ManagedRuntimeLedger {
       this.safeRewrite();
     }
     return state;
+  }
+
+  async stopGroup(pgid: number, budgetMs: number): Promise<ProcessLiveness> {
+    const record = this.groups.get(pgid);
+    if (record === undefined) return 'gone';
+    if ((await this.waitForGroupExit(pgid, 0)) === 'gone') return 'gone';
+    if (this.groups.get(pgid) !== record) return 'denied';
+    signalProcessGroup(pgid, 'SIGKILL');
+    return this.waitForGroupExit(pgid, budgetMs);
   }
 
   /** Starts pruning dead groups in the background; nothing to await. */

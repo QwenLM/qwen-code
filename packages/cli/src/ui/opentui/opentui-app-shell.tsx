@@ -1092,6 +1092,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 focus
                 streaming={streaming}
                 onInterrupt={onInterrupt}
+                onCancelCommand={() => {
+                  if (!gateway.isBusy()) return false;
+                  gateway.cancel();
+                  return true;
+                }}
                 approvalMode={currentApprovalMode}
                 queueLength={queueLength}
                 onPopQueue={onPopQueue}
