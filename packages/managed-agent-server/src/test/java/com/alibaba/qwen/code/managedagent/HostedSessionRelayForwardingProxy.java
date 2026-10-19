@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 
 /**
  * The FG9 lose-once/hold reverse proxy. One instance fronts one HTTP
@@ -68,26 +69,37 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         private final Disposition disposition;
         private final String name;
         private final int occurrences;
+        private final Predicate<String> responseMatcher;
         private final AtomicInteger seen = new AtomicInteger();
 
         private Rule(Matcher matcher, Disposition disposition, String name,
-                int occurrences) {
+                int occurrences, Predicate<String> responseMatcher) {
             this.matcher = matcher;
             this.disposition = disposition;
             this.name = name;
             this.occurrences = occurrences;
+            this.responseMatcher = responseMatcher;
         }
 
         static Rule drop(Matcher matcher, String name) {
-            return new Rule(matcher, Disposition.DROP, name, 1);
+            return new Rule(matcher, Disposition.DROP, name, 1, null);
+        }
+
+        /** Drops the first reply whose body satisfies {@code responseMatcher}.
+         * A reply that does not match passes through without consuming the
+         * occurrence, so a running receipt cannot spend the settled drop. */
+        static Rule dropResponse(Matcher matcher,
+                Predicate<String> responseMatcher, String name) {
+            return new Rule(matcher, Disposition.DROP, name, 1,
+                    responseMatcher);
         }
 
         static Rule hold(Matcher matcher, String name, int occurrence) {
-            return new Rule(matcher, Disposition.HOLD, name, occurrence);
+            return new Rule(matcher, Disposition.HOLD, name, occurrence, null);
         }
 
         static Rule swallow(Matcher matcher, String name) {
-            return new Rule(matcher, Disposition.SWALLOW, name, 1);
+            return new Rule(matcher, Disposition.SWALLOW, name, 1, null);
         }
 
         /** Whether this request takes the armed disposition. */
@@ -100,6 +112,18 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
                 return index == occurrences;
             }
             return index <= occurrences;
+        }
+
+        boolean matchesRequest(String method, String path, String body) {
+            return matcher.test(method, path, body);
+        }
+
+        boolean matchesResponse(String reply) {
+            return responseMatcher != null && responseMatcher.test(reply);
+        }
+
+        boolean consume() {
+            return seen.incrementAndGet() <= occurrences;
         }
     }
 
@@ -184,10 +208,16 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
         String text = new String(body, StandardCharsets.UTF_8);
         String kind = tagOf(text);
         Rule armed = null;
+        Rule responseRule = null;
         for (Rule rule : rules) {
-            if (rule.fires(method, path, text)) {
-                armed = rule;
-                break;
+            if (rule.responseMatcher == null) {
+                if (rule.fires(method, path, text)) {
+                    armed = rule;
+                    break;
+                }
+            } else if (responseRule == null
+                    && rule.matchesRequest(method, path, text)) {
+                responseRule = rule;
             }
         }
         CompletableFuture<Void> holdLatch = null;
@@ -210,6 +240,12 @@ final class HostedSessionRelayForwardingProxy implements AutoCloseable {
                             : HttpRequest.BodyPublishers.ofByteArray(body));
             HttpResponse<byte[]> response = client.send(forward.build(),
                     HttpResponse.BodyHandlers.ofByteArray());
+            if (armed == null && responseRule != null
+                    && responseRule.matchesResponse(
+                            new String(response.body(), StandardCharsets.UTF_8))
+                    && responseRule.consume()) {
+                armed = responseRule;
+            }
             String status = " status=" + response.statusCode();
             if (armed == null) {
                 record("PROXY passthru " + tag + status);
