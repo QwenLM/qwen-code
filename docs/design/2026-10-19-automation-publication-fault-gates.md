@@ -90,9 +90,13 @@ differ:
 1. **One run, one Turn.** `ma_session_record` holds one `automation_run` for
    the session, and the run's persisted Turn identity is a single Turn. The
    model stub's prompt list cannot carry this property: the Shell-then-final
-   flow sends two model requests inside one Turn, so count the occurrence's
-   `ma_turn` rows (or count only the initial request and exclude tool-result
-   continuations) rather than prompts.
+   flow sends two model requests inside one Turn. Count the occurrence's Turn
+   in the Harness journal instead — the `turn.settled` event whose `turnId` is
+   that run's automation input — or count only the initial model request and
+   exclude tool-result continuations. `ma_turn` cannot witness this:
+   automation dispatch commits its input through the hosted session journal,
+   and the only production inserts into `ma_turn` are Session creation and
+   public input admission.
 2. **No recovery by re-execution.** `ma_tool_execution` has one row for the
    Shell call. A lost ack must never buy a second execution.
 3. **Honest result.** The published object, when it exists, is byte-identical

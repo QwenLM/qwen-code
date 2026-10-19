@@ -77,9 +77,11 @@ bean。故障打在 `OSS` 客户端上，真实的 `AliyunToolPublicationObjectS
 
 1. **一次 run、一次 Turn。** `ma_session_record` 中该会话只有一条
    `automation_run`，且该 run 的持久 Turn 身份只有一个 Turn。模型桩的 prompt
-   列表承载不了这条性质：Shell-then-final 会在同一个 Turn 内发两次模型请求，
-   因此按 occurrence 的 `ma_turn` 行计数（或只计首次请求、排除 tool-result
-   续轮），而不是按 prompt 计数。
+   列表承载不了这条性质：Shell-then-final 会在同一个 Turn 内发两次模型请求。
+   因此改为在 Harness journal 里按 occurrence 计数——`turn.settled` 事件的
+   `turnId` 即该 run 的 automation 输入；或只计首次模型请求、排除 tool-result
+   续轮。`ma_turn` 承载不了这条性质：automation 派发经 hosted 会话 journal
+   提交输入，生产代码里 `ma_turn` 的插入点只有会话创建与公开输入准入。
 2. **不靠重跑恢复。** `ma_tool_execution` 对这次 Shell 调用只有一行。丢失
    ack 绝不能换来第二次执行。
 3. **结果如实。** 对象存在时，按字节与期望一致、经 store 可读；否则工具
