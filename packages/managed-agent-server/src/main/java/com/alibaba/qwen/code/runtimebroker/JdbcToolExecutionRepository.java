@@ -99,15 +99,18 @@ public final class JdbcToolExecutionRepository
         List<ToolExecutionRecord> result = new ArrayList<>();
         try (PreparedStatement statement =
                 connection.prepareStatement(
-                        "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns("e") + ", b.isolation_class, b.isolation_key FROM ma_tool_execution e JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE b.tenant_id = ? AND e.harness_session_id = ? ORDER BY e.execution_call_id_hash FOR UPDATE")) {
+                        "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns("e") + ", b.isolation_class, b.isolation_key, "
+                                + JdbcRuntimeBindingRepository.REQUEST_COLUMNS_AS_B
+                                + " FROM ma_tool_execution e JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE b.tenant_id = ? AND e.harness_session_id = ? ORDER BY e.execution_call_id_hash FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     ToolExecutionRecord record = mapExecution(rows);
                     if (!harnessSessionId.equals(record.getHarnessSessionId())
-                            || !"session".equals(rows.getString("isolation_class"))
-                            || !harnessSessionId.equals(rows.getString("isolation_key"))) {
+                            || !("session".equals(rows.getString("isolation_class"))
+                                            && harnessSessionId.equals(rows.getString("isolation_key"))
+                                    || JdbcRuntimeBindingRepository.sharesRuntimeSessions(rows, "b_"))) {
                         throw new RuntimeBrokerException(
                                 409,
                                 "workspace_close_identity_unverified",
@@ -955,6 +958,32 @@ public final class JdbcToolExecutionRepository
                 hasActiveByRuntimeSession(connection, bindingId,
                         runtimeGeneration, runtimeSessionId,
                         excludingExecutionCallIds));
+    }
+
+    @Override
+    public boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT binding_id, runtime_session_id, result_json FROM"
+                            + " ma_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
+                            + " AND runtime_session_key = ? AND execution_state = 'SETTLED'")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
+                statement.setLong(2, runtimeGeneration);
+                statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        if (bindingId.equals(result.getString("binding_id"))
+                                && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                                && ToolExecutionRepository.captureStopUnproven(
+                                        fromJson(result.getString("result_json")))) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        });
     }
 
     static boolean hasActiveByRuntimeSession(Connection connection,

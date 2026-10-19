@@ -106,7 +106,9 @@ export function createJavaManagedAgentProvider(
       workspaceId: string;
       cwdRelative: string;
       text?: string;
+      input?: import('./managed-agent-provider').ManagedInputBlock[];
       approvalMode?: ManagedApprovalMode;
+      planMode?: boolean;
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -118,10 +120,14 @@ export function createJavaManagedAgentProvider(
         ...(request.approvalMode === undefined
           ? {}
           : { approvalMode: request.approvalMode }),
+        ...(request.planMode === undefined
+          ? {}
+          : { planMode: request.planMode }),
         input:
-          request.text === undefined
+          request.input ??
+          (request.text === undefined
             ? []
-            : [{ type: 'input_text', text: request.text }],
+            : [{ type: 'input_text', text: request.text }]),
         metadata: { clientId: command.clientId },
         workspace: {
           workspaceId: request.workspaceId,
@@ -141,6 +147,10 @@ export function createJavaManagedAgentProvider(
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    skills: {
+      list: (sessionId, request) =>
+        client.getSessionSkills(sessionId, request.signal),
+    },
     tasks: {
       list: (sessionId, request) =>
         client.listTasks(
@@ -219,6 +229,12 @@ export function createJavaManagedAgentProvider(
                 approvalRevision: result.approvalRevision,
                 availableApprovalModes: result.availableApprovalModes,
                 supported: result.supported,
+                ...(typeof result.planMode === 'boolean'
+                  ? { planMode: result.planMode }
+                  : {}),
+                ...(typeof result.planModeSupported === 'boolean'
+                  ? { planModeSupported: result.planModeSupported }
+                  : {}),
               };
             },
             async submit(sessionId, request, command) {
@@ -244,6 +260,9 @@ export function createJavaManagedAgentProvider(
                 approvalMode: result.approvalMode,
                 approvalRevision: result.approvalRevision,
                 replayed: result.replayed,
+                ...(typeof result.planMode === 'boolean'
+                  ? { planMode: result.planMode }
+                  : {}),
               };
             },
           },
@@ -411,6 +430,46 @@ export function createJavaManagedAgentProvider(
           workspaceBinding: {
             agentId,
             modelPresets: options.modelPresets,
+            registration: {
+              listNodes: (request) => client.listRuntimeNodes(request.signal),
+              async checkDirectory(request, options) {
+                const checked = await client.checkWorkspaceDirectory(
+                  request,
+                  options.signal,
+                );
+                if (checked.nodeId !== request.nodeId)
+                  throw new Error('Workspace directory identity mismatch');
+                return checked;
+              },
+              async create(request, command) {
+                const operation = await client.registerWorkspace(
+                  {
+                    ...request,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  !operation.operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+              async query(operationId, request) {
+                const operation = await client.getWorkspaceOperation(
+                  operationId,
+                  request.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  operation.operationId !== operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+            },
             async list(request) {
               const page = await client.listWorkspaces(
                 { cursor: request.cursor, limit: request.limit },
@@ -423,6 +482,8 @@ export function createJavaManagedAgentProvider(
                 supported: page.capabilities?.workspaceBinding === true,
                 canCreateWorkspace:
                   page.capabilities?.workspaceCreation === true,
+                canSelectDirectory:
+                  page.capabilities?.workspaceDirectorySelection === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
@@ -435,14 +496,16 @@ export function createJavaManagedAgentProvider(
                 { ...request, idempotencyKey: command.idempotencyKey },
                 command.signal,
               ),
+            directories: (request, command) =>
+              client.workspaceDirectories(request, command.signal),
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (
-              { agentId, workspaceId, cwdRelative, approvalMode },
+              { agentId, workspaceId, cwdRelative, approvalMode, planMode },
               command,
             ) =>
               createWorkspaceSession(
-                { agentId, workspaceId, cwdRelative, approvalMode },
+                { agentId, workspaceId, cwdRelative, approvalMode, planMode },
                 command,
               ),
             createSession: createWorkspaceSession,
@@ -495,7 +558,7 @@ export function createJavaManagedAgentProvider(
           // environmentId scopes the storageKey only: the standalone Java
           // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
-          input: [{ type: 'input_text', text: request.text }],
+          input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -511,7 +574,7 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
-          input: [{ type: 'input_text', text: request.text }],
+          input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -581,6 +644,12 @@ function toSessionSummary(
   return {
     sessionId: session.sessionId,
     agentId: session.agentId,
+    ...(typeof session.planMode === 'boolean'
+      ? { planMode: session.planMode }
+      : {}),
+    ...(typeof session.planModeSupported === 'boolean'
+      ? { planModeSupported: session.planModeSupported }
+      : {}),
     ...(isManagedApprovalMode(session.approvalMode)
       ? { approvalMode: session.approvalMode }
       : {}),
@@ -625,6 +694,9 @@ function toSessionSummary(
         ? { approvalModeChange: true }
         : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
+      ...(session.capabilities?.inputAttachments === true
+        ? { inputAttachments: true }
+        : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };

@@ -58,6 +58,14 @@ public class WorkspaceLifecycleStore {
         });
     }
 
+    /** Bounded variant for hot paths: fails instead of out-waiting the caller (#13800). */
+    public static void lockPlacement(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
+        jdbc.execute((ConnectionCallback<Void>) connection -> {
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, timeoutSeconds);
+            return null;
+        });
+    }
+
     public static void requireClaim(JdbcTemplate jdbc, String tenant, String session,
             RuntimeLifecycleAuthority authority, boolean drainingAllowed) {
         if (authority == null) {
@@ -100,23 +108,60 @@ public class WorkspaceLifecycleStore {
         requireIdleJournal(jdbc, json, tenant, session, allowCleanup, false);
     }
 
-    public static void requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2) {
-        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision FROM ma_session_head"
+    public static java.util.Set<String> requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup, boolean v2) {
+        var heads = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, compacted_through_revision, journal_revision"
+                + " FROM ma_session_head"
                 + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session));
         if (heads.isEmpty()) {
-            return;
+            return java.util.Set.of();
         }
         if (!tenant.equals(heads.getFirst().get("tenant_id")) || !session.equals(heads.getFirst().get("session_id"))
                 || ((Number) heads.getFirst().get("compacted_through_revision")).longValue() != 0) {
             throw blocked("workspace_lifecycle_journal_unverified");
         }
+        long headRevision = ((Number) heads.getFirst().get("journal_revision")).longValue();
+        // The head row locked above is the per-Session fence: writers append
+        // revisions only behind it, so the ordered scan first runs without a
+        // lock of its own, and a lifecycle settle does not pin every revision
+        // of the journal while it parses them in Java (#13800). That scan is
+        // a snapshot read, though, and the enclosing lifecycle transaction
+        // may have pinned its snapshot with plain reads before the head lock
+        // was granted. A revision committed in that window is invisible to
+        // it, so when the scan stops short of the locked head's revision it
+        // is repeated as a locking read, which reads the journal as committed
+        // now and decides on that (#13800 R2-3). Only a journal that still
+        // falls short of its own head fails closed.
+        var scan = scanJournal(jdbc, json, tenant, session, v2, false);
+        if (scan.maxRevision() < headRevision) {
+            scan = scanJournal(jdbc, json, tenant, session, v2, true);
+            if (scan.maxRevision() < headRevision) {
+                throw blocked("workspace_lifecycle_journal_unverified");
+            }
+        }
+        var pending = scan.pending();
+        var cleanup = scan.cleanup();
+        if (!pending.isEmpty() || !allowCleanup && cleanup.values().stream().anyMatch(state -> !"confirmed".equals(state))) {
+            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
+        }
+        return java.util.Set.copyOf(scan.accepted());
+    }
+
+    private record JournalScan(long maxRevision, java.util.Set<String> pending, java.util.Map<String, String> cleanup,
+            java.util.Set<String> accepted) {
+    }
+
+    private static JournalScan scanJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session,
+            boolean v2, boolean locking) {
+        final long[] maxScanned = {0};
         var pending = new java.util.HashSet<String>();
         var cleanup = new java.util.HashMap<String, String>();
         var settled = new java.util.HashSet<String>();
-        jdbc.query("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY journal_revision FOR UPDATE", row -> {
-                for (String line : new String(row.getBytes(1), StandardCharsets.UTF_8).split("\n")) {
+        var accepted = new java.util.HashSet<String>();
+        jdbc.query("SELECT journal_revision, record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                + " ORDER BY journal_revision" + (locking ? " FOR UPDATE" : ""), row -> {
+                maxScanned[0] = Math.max(maxScanned[0], row.getLong("journal_revision"));
+                for (String line : new String(row.getBytes("record_bytes"), StandardCharsets.UTF_8).split("\n")) {
                     try {
                         JsonNode event = json.readTree(line).path("managedSession");
                         String turn = event.path("payload").path("turnId").asText();
@@ -124,6 +169,7 @@ public class WorkspaceLifecycleStore {
                             cleanup.put(event.path("payload").path("cleanupId").asText(), event.path("payload").path("state").asText());
                         }
                         if ("input.accepted".equals(event.path("kind").asText())) {
+                            accepted.add(turn);
                             String source = event.path("payload").path("source").asText();
                             if (!v2 || !List.of("monitor", "child_agent", "automation", "session_message", "channel").contains(source)) {
                                 pending.add(turn);
@@ -143,9 +189,7 @@ public class WorkspaceLifecycleStore {
                     }
                 }
             }, tenant, session);
-        if (!pending.isEmpty() || !allowCleanup && cleanup.values().stream().anyMatch(state -> !"confirmed".equals(state))) {
-            throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
-        }
+        return new JournalScan(maxScanned[0], pending, cleanup, accepted);
     }
 
     @Transactional
@@ -401,6 +445,8 @@ public class WorkspaceLifecycleStore {
                 && (operation.lifecycleProtocolVersion() != 2 || jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding"
                         + " WHERE tenant_id = ? AND isolation_class = 'session' AND isolation_key = ?", Integer.class,
                         operation.tenantId(), operation.sessionId()) == 0
+                        && !jdbc.execute((ConnectionCallback<Boolean>) connection -> JdbcRuntimeBindingRepository
+                                .hasSharedRuntimeSessions(connection, operation.tenantId(), operation.sessionId()))
                         && jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ?",
                                 Integer.class, operation.tenantId(), operation.sessionId()) == 0);
     }

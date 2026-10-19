@@ -193,7 +193,7 @@ if (registerStorage && process.platform !== 'linux') {
 // orphaned, and no reclaim is needed.
 if (runtimeTakeover && !harnessOnly && process.platform !== 'linux') {
   throw new Error(
-    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted MySQL CI job or a Linux container.`,
+    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
   );
 }
 // The Stage A acceptance criterion names a 15-second Runtime delay; the

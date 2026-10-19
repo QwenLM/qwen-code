@@ -14,6 +14,7 @@ import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/manage
 export interface HostedApprovalSelection {
   mode: HostedApprovalMode;
   revision: number;
+  planMode?: true;
 }
 
 export function parseHostedApprovalSelection(
@@ -24,18 +25,21 @@ export function parseHostedApprovalSelection(
     throw new Error('Invalid Hosted approval selection.');
   const selection = value as Record<string, unknown>;
   if (
-    Object.keys(selection).length !== 2 ||
+    Object.keys(selection).length !==
+      (selection['planMode'] === true ? 3 : 2) ||
+    (Object.hasOwn(selection, 'planMode') && selection['planMode'] !== true) ||
     (selection['mode'] !== 'default' &&
       selection['mode'] !== 'auto-edit' &&
       selection['mode'] !== 'yolo') ||
     typeof selection['revision'] !== 'number' ||
     !Number.isSafeInteger(selection['revision']) ||
-    selection['revision'] < 0
+    selection['revision'] < (selection['planMode'] === true ? 1 : 0)
   )
     throw new Error('Invalid Hosted approval selection.');
   return {
     mode: selection['mode'] as HostedApprovalMode,
     revision: selection['revision'],
+    ...(selection['planMode'] === true ? { planMode: true as const } : {}),
   };
 }
 
