@@ -71,6 +71,8 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionWritesStoppedError,
   type ManagedSessionDomain,
   type ManagedSessionDurableRef,
@@ -311,17 +313,19 @@ function shellHistoryId(executionCallId: string): string {
 }
 
 // H4d-b: a refusal the store makes at commit (a closing Session, a rule the
-// authority holds) is a send_message call's answer, never a failed turn. A
-// conflict and the store's own transient faults fail the call like any
-// other store fault: a refusal answer would tell the model a message that
-// may yet commit was never sent.
+// authority holds) is a send_message or member-command call's answer, never
+// a failed turn. A conflict and the store's own transient faults fail the
+// call like any other store fault: a refusal answer would tell the model a
+// command that may yet commit was never sent.
 function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
   return (
     cause instanceof ManagedSessionRecordError &&
     !(cause instanceof ManagedSessionConflictError) &&
     !(cause instanceof ManagedSessionStoreHttpError) &&
     !(cause instanceof ManagedSessionStoreTransportError) &&
-    !(cause instanceof ManagedSessionWritesStoppedError)
+    !(cause instanceof ManagedSessionWritesStoppedError) &&
+    !(cause instanceof ManagedSessionAppendUnsettledError) &&
+    !(cause instanceof ManagedSessionJournalFencedError)
   );
 }
 
@@ -340,6 +344,26 @@ function isPublicationLimitRefusal(
       (cause.status === 409 &&
         cause.remoteCode === 'managed_tool_publication_retention_exhausted'))
   );
+}
+
+// #14518: a limit refusal of a batch that needs more reservations than its
+// Session could ever hold at once. The store counts them under every limit,
+// less the output the Session retains until it is deleted: waiting cannot
+// make such a batch fit, only a smaller one does.
+// Returns that count, or undefined when the batch could fit or the refusal
+// does not say. A 409 is never retried, and its answer comes first.
+function unreservableBatchFit(
+  cause: unknown,
+  reservations: number,
+): number | undefined {
+  if (!isPublicationLimitRefusal(cause)) return undefined;
+  const admits = cause.details?.['admits'];
+  return typeof admits === 'number' &&
+    Number.isSafeInteger(admits) &&
+    admits >= 1 &&
+    reservations > admits
+    ? admits
+    : undefined;
 }
 
 // H3: background admissions exist only while the child_run domain's shell
@@ -671,6 +695,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
 const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
   'read_file',
   'glob',
+  'skill',
   'task_list',
   'send_message',
 ]);
@@ -680,7 +705,7 @@ const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
  * (decision 5): it says the run may only read and never names it.
  */
 function hostedPlanModeRefusal(): string {
-  return `This run is in plan mode until the leader approves its plan: only read_file, glob, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
+  return `This run is in plan mode until the leader approves its plan: only read_file, glob, static skill loading, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
 }
 
 export const HOSTED_MEMBER_PLAN_TOOL: FunctionDeclaration = {
@@ -1826,16 +1851,7 @@ export class HostedWorkspaceToolTurn {
               parametersJsonSchema: schema,
             };
           }
-          return ['write_file', 'edit'].includes(tool.name ?? '')
-            ? {
-                ...tool,
-                description:
-                  tool.description +
-                  (this.mcp
-                    ? ' This MCP profile provides no file backups or undo for Write/Edit.'
-                    : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
-              }
-            : tool;
+          return hostedWorkspaceDeclarations([tool], Boolean(this.mcp))[0];
         }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
@@ -4410,11 +4426,13 @@ export class HostedWorkspaceToolTurn {
               break;
             } catch (cause) {
               const retryable =
-                (cause instanceof ManagedSessionStoreHttpError &&
+                ((cause instanceof ManagedSessionStoreHttpError &&
                   (cause.status === 429 || cause.status >= 500)) ||
-                cause instanceof TypeError ||
-                (cause instanceof DOMException &&
-                  ['AbortError', 'TimeoutError'].includes(cause.name));
+                  cause instanceof TypeError ||
+                  (cause instanceof DOMException &&
+                    ['AbortError', 'TimeoutError'].includes(cause.name))) &&
+                // A batch its limit never admits at once fits no sooner.
+                unreservableBatchFit(cause, shellBindings.size) === undefined;
               if (!retryable || attempt === 2) throw cause;
               await new Promise((resolve) => setTimeout(resolve, 250));
             }
@@ -4961,6 +4979,28 @@ export class HostedWorkspaceToolTurn {
         writeStderrLineSafe(
           `qwen serve: Tool publication refused batch ${messageId} before any call started: ${limitRefusal.message}`,
         );
+        // Only the calls that capture output reserve: the answer tells the
+        // model whether waiting can help them, and that the others can go
+        // in a batch without them (#14518).
+        const capturing = requests.flatMap((request, index) => {
+          const id = reserved.get(index);
+          return id !== undefined && shellBindings.has(id) ? [index] : [];
+        });
+        const kinds = [
+          ...new Set(capturing.map((index) => requests[index]!.call.name)),
+        ].join(' and ');
+        const fit = unreservableBatchFit(limitRefusal, shellBindings.size);
+        const refused = limitRefusal.message.slice(0, 512);
+        const captureReason =
+          `This call was not started: ${refused}. ` +
+          (limitRefusal.status === 409
+            ? 'Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.'
+            : fit !== undefined
+              ? `This batch has ${capturing.length} ${kinds} calls, but this Session can run at most ${fit} of them at a time, so retrying the same batch will not succeed. Send at most ${fit} of them in one batch.`
+              : capturing.length > 1
+                ? `Retry after the running tools finish, or send fewer ${kinds} calls in one batch.`
+                : 'Retry after the running tools finish.');
+        const otherReason = `This call was not started: another call in its batch was refused before any call ran (${refused}). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.`;
         try {
           return await this.answerUnstartedBatch(
             requests,
@@ -4968,10 +5008,8 @@ export class HostedWorkspaceToolTurn {
             reserved,
             paths,
             model,
-            `This call was not started: ${limitRefusal.message.slice(0, 512)}. ` +
-              (limitRefusal.status === 429
-                ? 'Retry after the running tools finish.'
-                : 'Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.'),
+            (index) =>
+              capturing.includes(index) ? captureReason : otherReason,
           );
         } catch (answerCause) {
           throw new HostedToolRecoveryRequiredError(answerCause);
@@ -5024,7 +5062,7 @@ export class HostedWorkspaceToolTurn {
 
   /**
    * Answers a batch none of whose calls started: each call gets its
-   * pre-dispatch refusal or `reason`. A reserved execution resolves its
+   * pre-dispatch refusal or its `reason`. A reserved execution resolves its
    * await_runtime item with that answer, after the tool_result commits, in
    * the order the Runtime result path uses.
    */
@@ -5034,7 +5072,7 @@ export class HostedWorkspaceToolTurn {
     reserved: ReadonlyMap<number, string>,
     paths: readonly string[],
     model: string,
-    reason: string,
+    reason: (index: number) => string,
   ): Promise<Part[]> {
     const responses: Part[] = [];
     for (const [index, request] of requests.entries()) {
@@ -5044,7 +5082,7 @@ export class HostedWorkspaceToolTurn {
           request.call.name,
           request.call.callId,
           [],
-          reason,
+          reason(index),
         );
       if (!this.messageFitsInline('tool_result', parts, model))
         throw new Error(
@@ -6278,7 +6316,7 @@ export class HostedWorkspaceToolTurn {
     } catch (cause) {
       // byte_limit and budget_exhausted are the funnel's member-facing
       // refusals; a store fault is recovery's, never the call's answer.
-      if (cause instanceof ManagedSessionRecordError) {
+      if (isMessageRefusal(cause)) {
         const parts = await answer(cause.message, true);
         // A normal local refusal still owes the parked wait its fold —
         // a durable wait it leaves behind turns the Turn's next call
@@ -7672,4 +7710,22 @@ export function truncateHostedGlobResponse(
     lines.pop();
   }
   return undefined;
+}
+
+export function hostedWorkspaceDeclarations(
+  tools: readonly FunctionDeclaration[],
+  mcp: boolean,
+): FunctionDeclaration[] {
+  return tools.map((tool) =>
+    ['write_file', 'edit'].includes(tool.name ?? '')
+      ? {
+          ...tool,
+          description:
+            tool.description +
+            (mcp
+              ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+              : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+        }
+      : tool,
+  );
 }

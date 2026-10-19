@@ -10,7 +10,11 @@ import {
   hostedTurnApproval,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
-import { parseHostedInput, readHostedInput } from './hosted-input.js';
+import {
+  HOSTED_ATTACHMENT_INPUT_BYTES,
+  parseHostedInput,
+  readHostedInput,
+} from './hosted-input.js';
 import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
@@ -115,6 +119,8 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   CHILD_NOTIFICATION_SOURCES,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionModeGateError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
@@ -199,6 +205,7 @@ import {
 } from './hosted-automation-session.js';
 import {
   AUTOMATION_INPUT_SOURCE,
+  automationInputId,
   MANAGED_AUTOMATION_LIMITS,
   automationRunId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
@@ -222,6 +229,7 @@ import {
   MonitorWakeTransientReadError,
   settlePendingMonitorInputs,
   wakeHasPriorAttempt,
+  type HostedMonitorWakeTurn,
 } from './hosted-monitor-wake.js';
 import {
   createMonitorWakeRunTurn,
@@ -345,6 +353,18 @@ const HOSTED_TURN_DEADLINE = new Error(
 const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
 
 /**
+ * How long a route that settles a crashed wake input outside the pump (a
+ * `reconcile_run` repair, a message stop) waits for a pump pass in
+ * flight. The load's pass over a crashed input is its reads, its
+ * transcript projection and the aftermath's Broker and Store calls. A
+ * pass still running after this (a live turn, or a slow Store or Broker)
+ * keeps the pump, and the route answers without settling. Well inside the
+ * control plane's 30 s request timeout, which the settle itself still has
+ * to fit in.
+ */
+const HOSTED_WAKE_PASS_WAIT_MS = 10_000;
+
+/**
  * The terminal classification of a turn whose runner threw. A deadline
  * expiry is an attributable failure, never a cancellation.
  */
@@ -369,6 +389,8 @@ function settledTurnOutcome(abort: AbortController): {
  */
 function namedStoreFailure(cause: unknown): string | undefined {
   if (
+    cause instanceof ManagedSessionAppendUnsettledError ||
+    cause instanceof ManagedSessionJournalFencedError ||
     cause instanceof ManagedSessionStoreTransportError ||
     (cause instanceof ManagedSessionStoreHttpError &&
       cause.status >= 500 &&
@@ -936,20 +958,21 @@ function unansweredPrompts(session: HostedSession): Set<string> {
 
 /** Which input sources ride the wake pump — the one predicate the probe,
  * the park guard, the pump's pick and the wake-owned classifier share:
- * a monitor notification, an H6 automation input, and a child
+ * a monitor notification, a channel input, an H6 automation input, and a child
  * acceptance notification of either child Session kind alike (child
  * runs park as Turns, never here; #13803 widened the child source to
  * the record's own kind, `child_agent` or `workflow`). */
 function isWakeInputSource(source: string): boolean {
   return (
     source === 'monitor' ||
+    source === CHANNEL_INPUT_SOURCE ||
     source === AUTOMATION_INPUT_SOURCE ||
     isChildNotificationSource(source) ||
     source === SESSION_MESSAGE_INPUT_SOURCE
   );
 }
 
-/** The oldest pending wake input (monitor or automation), as the pump's
+/** The oldest pending wake input, as the pump's
  * own read order sees it. */
 function firstPendingWakeInput(session: HostedSession) {
   const authority = session.managed.authority;
@@ -1296,7 +1319,6 @@ export async function settleCrashedWakeTurnAftermath(params: {
 function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   if (event.kind !== 'input.accepted') return false;
   if (isWakeInputSource(event.payload['source'] as string)) return true;
-  if (event.payload['source'] === CHANNEL_INPUT_SOURCE) return true;
   const turnId = event.payload['turnId'];
   const source = event.payload['source'];
   return (
@@ -2194,6 +2216,7 @@ async function verifyWorkspaceRestore(
           : parseHostedRecoveryResource(
               bytes,
               authority.sessionHeader.sessionKey,
+              ref.kind,
             );
       for (const nested of hostedRecoveryReferences(body))
         await readRef(nested);
@@ -4806,6 +4829,127 @@ export function registerHostedHarnessSessionRoutes(
           session.managed.authority.currentActivation?.phase !== 'active' ||
           (session.mcp?.hasPendingOperations() ?? false) ||
           (session.hooks?.hasPendingOperations ?? false);
+        // One deferral log per turn, ever: a transiently faulting
+        // recovery retries on the busy cadence, and seven hundred
+        // identical lines an hour hide the one that matters.
+        const deferredWakeRecovery = new Set<string>();
+        const settleInterruptedChannelWake = async (
+          turn: HostedMonitorWakeTurn,
+        ): Promise<'settled' | 'held' | 'busy' | false> => {
+          if (turn.source !== CHANNEL_INPUT_SOURCE || !session.channels)
+            return false;
+          // F5 follow-up: a turn that died inside a tool call parked
+          // its checkpoint in `await_runtime`, where the terminal
+          // record cannot advance it — the next wake turn's
+          // requireModelStart refuses and the Session wedges. Stop
+          // and settle the parked executions first, mirroring the
+          // takeover cancellation. A wait that cannot be verified or
+          // proven stopped keeps the recovery fleet's freeze; a
+          // pending approval holds the turn instead — blocking the
+          // Session would refuse the approval's own resolve route.
+          let runtime;
+          // The same cross-retry honesty carry the takeover cancel
+          // drive keeps: a stop that throws after counting unobserved
+          // ids must hand them to the busy-cadence retry, or the
+          // reclaimed record certifies as a witnessed cancellation.
+          const carried = new Set(session.recoveryUnobserved?.get(turn.turnId));
+          try {
+            runtime = await settleInterruptedTurnRuntime({
+              session: session.managed,
+              sessionId,
+              cwd,
+              promptId: turn.turnId,
+              brokerOptions,
+              toolProfile: session.toolProfile !== undefined,
+              shell: session.shell,
+              carryUnobservedInto: carried,
+              children: session.childAgents,
+              consume: (childRunId) => session.childConsumption.add(childRunId),
+              teams: session.teams,
+              messages: session.messages,
+              commands: session.commands,
+            });
+          } catch (cause) {
+            // R6 P1: a durable decline freezes for the fleet, but a
+            // transient fault — a faulting Store read, a Broker
+            // hiccup behind an otherwise verifiable checkpoint —
+            // must stay retryable on the busy cadence instead of
+            // latching the Session blocked on the first attempt.
+            if (!(cause instanceof RecoveryDeclined)) {
+              const retryable = await session.managed.authority
+                .harnessRunAuthorization()
+                .then(
+                  (verdict) =>
+                    verdict.status !== 'blocked' ||
+                    !isDurableBlockedVerdict(verdict),
+                )
+                .catch(() => true);
+              if (retryable) {
+                if (!deferredWakeRecovery.has(turn.turnId)) {
+                  deferredWakeRecovery.add(turn.turnId);
+                  writeStderrLineSafe(
+                    'qwen serve: Interrupted channel wake turn ' +
+                      turn.turnId +
+                      ' defers its recovery to the next wake attempt: ' +
+                      String(cause),
+                  );
+                }
+                return 'busy';
+              }
+            }
+            writeStderrLineSafe(
+              'qwen serve: Interrupted channel wake turn ' +
+                turn.turnId +
+                ' keeps its durable wait for the recovery fleet: ' +
+                String(cause),
+            );
+            return false;
+          } finally {
+            persistRecoveryUnobserved(session, turn.turnId, carried);
+          }
+          if (runtime.kind === 'held') return 'held';
+          // The settle journaled durably, so retries re-derive the
+          // outcomes from the journal and the carry has no more work.
+          session.recoveryUnobserved?.delete(turn.turnId);
+          const settled = await session.channels.settleInterruptedWake(
+            turn.turnId,
+          );
+          // The recovered lease hands back only once the terminal
+          // record is durable: a release persisted earlier would
+          // wedge the retry on runtime_session_not_acquirable.
+          if (brokerOptions && hasHostedCleanupDebt(session.managed)) {
+            try {
+              if (
+                runtime.broker &&
+                !(await releaseHeldRuntime(session, brokerOptions, {
+                  promptId: turn.turnId,
+                  runtimeSessionId: runtime.broker.runtimeSessionId,
+                }))
+              )
+                return 'busy';
+              await retryHostedCleanup(session, brokerOptions);
+            } catch (cause) {
+              if (!session.blocked) session.cleanupBlocked = true;
+              session.blocked = true;
+              throw cause;
+            }
+          } else {
+            await runtime.broker?.release().catch((cause: unknown) => {
+              if (
+                cause instanceof HostedWorkspaceBrokerRejection &&
+                cause.status === 404
+              )
+                return;
+              writeStderrLineSafe(
+                'qwen serve: Interrupted channel wake turn ' +
+                  turn.turnId +
+                  ' could not hand back its recovered Runtime: ' +
+                  String(cause),
+              );
+            });
+          }
+          return settled ? 'settled' : false;
+        };
         // The one aftermath of a wake turn that died inside its attempt,
         // serialized per Session: the pump's recovery branch, its blocked
         // retry cycle and the reconcile route may all want it at once.
@@ -4814,6 +4958,31 @@ export function registerHostedHarnessSessionRoutes(
           if (wakeAftermathInFlight) return 'pending';
           wakeAftermathInFlight = true;
           try {
+            const authority = session.managed.authority;
+            const channelInput = pendingSessionInputs(
+              authority.eventsInSequenceRange(1, authority.committedSequence),
+            ).find(
+              (input) =>
+                input.turnId === turnId &&
+                input.source === CHANNEL_INPUT_SOURCE,
+            );
+            if (channelInput !== undefined) {
+              if (
+                !wakeHasPriorAttempt(
+                  await session.managed.sink.project(),
+                  turnId,
+                )
+              ) {
+                return 'pending';
+              }
+              const outcome = await settleInterruptedChannelWake({
+                turnId,
+                source: CHANNEL_INPUT_SOURCE,
+                text: '',
+              });
+              if (outcome === 'held') liftRecoveryBlock(session);
+              return outcome === 'settled' ? 'settled' : 'pending';
+            }
             return await settleCrashedWakeTurnAftermath({
               session,
               sessionId,
@@ -4840,8 +5009,7 @@ export function registerHostedHarnessSessionRoutes(
               authority.eventsInSequenceRange(1, authority.committedSequence),
             ).find(
               (input) =>
-                (isWakeInputSource(input.source) ||
-                  input.source === CHANNEL_INPUT_SOURCE) &&
+                isWakeInputSource(input.source) &&
                 !stoppedMessage(input.source),
             );
             if (first === undefined) return undefined;
@@ -4886,10 +5054,6 @@ export function registerHostedHarnessSessionRoutes(
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
           runTurn: (() => {
-            // One deferral log per turn, ever: a transiently faulting
-            // recovery retries on the busy cadence, and seven hundred
-            // identical lines an hour hide the one that matters.
-            const deferredWakeRecovery = new Set<string>();
             const runWakeTurn = createMonitorWakeRunTurn({
               session,
               sessionId,
@@ -4906,128 +5070,14 @@ export function registerHostedHarnessSessionRoutes(
                 ),
               busy: wakeBusy,
               held: (turn) => stoppedMessage(turn.source),
+              cancelled: (turn) =>
+                turn.source === AUTOMATION_INPUT_SOURCE &&
+                session.automations?.cancelRequested(turn.turnId) === true,
               needsRecovery: monitorWakeNeedsRecovery,
               // F5/direction (a): channel turns interrupted mid-flight get
               // terminal settlement from their own funnel; monitor turns
               // keep the recovery-blocked freeze their fleet owns.
-              settleInterrupted: async (turn) => {
-                if (turn.source !== CHANNEL_INPUT_SOURCE || !session.channels)
-                  return false;
-                // F5 follow-up: a turn that died inside a tool call parked
-                // its checkpoint in `await_runtime`, where the terminal
-                // record cannot advance it — the next wake turn's
-                // requireModelStart refuses and the Session wedges. Stop
-                // and settle the parked executions first, mirroring the
-                // takeover cancellation. A wait that cannot be verified or
-                // proven stopped keeps the recovery fleet's freeze; a
-                // pending approval holds the turn instead — blocking the
-                // Session would refuse the approval's own resolve route.
-                let runtime;
-                // The same cross-retry honesty carry the takeover cancel
-                // drive keeps: a stop that throws after counting unobserved
-                // ids must hand them to the busy-cadence retry, or the
-                // reclaimed record certifies as a witnessed cancellation.
-                const carried = new Set(
-                  session.recoveryUnobserved?.get(turn.turnId),
-                );
-                try {
-                  runtime = await settleInterruptedTurnRuntime({
-                    session: session.managed,
-                    sessionId,
-                    cwd,
-                    promptId: turn.turnId,
-                    brokerOptions,
-                    toolProfile: session.toolProfile !== undefined,
-                    shell: session.shell,
-                    carryUnobservedInto: carried,
-                    children: session.childAgents,
-                    consume: (childRunId) =>
-                      session.childConsumption.add(childRunId),
-                    teams: session.teams,
-                    messages: session.messages,
-                    commands: session.commands,
-                  });
-                } catch (cause) {
-                  // R6 P1: a durable decline freezes for the fleet, but a
-                  // transient fault — a faulting Store read, a Broker
-                  // hiccup behind an otherwise verifiable checkpoint —
-                  // must stay retryable on the busy cadence instead of
-                  // latching the Session blocked on the first attempt.
-                  if (!(cause instanceof RecoveryDeclined)) {
-                    const retryable = await session.managed.authority
-                      .harnessRunAuthorization()
-                      .then(
-                        (verdict) =>
-                          verdict.status !== 'blocked' ||
-                          !isDurableBlockedVerdict(verdict),
-                      )
-                      .catch(() => true);
-                    if (retryable) {
-                      if (!deferredWakeRecovery.has(turn.turnId)) {
-                        deferredWakeRecovery.add(turn.turnId);
-                        writeStderrLineSafe(
-                          'qwen serve: Interrupted channel wake turn ' +
-                            turn.turnId +
-                            ' defers its recovery to the next wake attempt: ' +
-                            String(cause),
-                        );
-                      }
-                      return 'busy';
-                    }
-                  }
-                  writeStderrLineSafe(
-                    'qwen serve: Interrupted channel wake turn ' +
-                      turn.turnId +
-                      ' keeps its durable wait for the recovery fleet: ' +
-                      String(cause),
-                  );
-                  return false;
-                } finally {
-                  persistRecoveryUnobserved(session, turn.turnId, carried);
-                }
-                if (runtime.kind === 'held') return 'held';
-                // The settle journaled durably, so retries re-derive the
-                // outcomes from the journal and the carry has no more work.
-                session.recoveryUnobserved?.delete(turn.turnId);
-                const settled = await session.channels.settleInterruptedWake(
-                  turn.turnId,
-                );
-                // The recovered lease hands back only once the terminal
-                // record is durable: a release persisted earlier would
-                // wedge the retry on runtime_session_not_acquirable.
-                if (brokerOptions && hasHostedCleanupDebt(session.managed)) {
-                  try {
-                    if (
-                      runtime.broker &&
-                      !(await releaseHeldRuntime(session, brokerOptions, {
-                        promptId: turn.turnId,
-                        runtimeSessionId: runtime.broker.runtimeSessionId,
-                      }))
-                    )
-                      return 'busy';
-                    await retryHostedCleanup(session, brokerOptions);
-                  } catch (cause) {
-                    if (!session.blocked) session.cleanupBlocked = true;
-                    session.blocked = true;
-                    throw cause;
-                  }
-                } else {
-                  await runtime.broker?.release().catch((cause: unknown) => {
-                    if (
-                      cause instanceof HostedWorkspaceBrokerRejection &&
-                      cause.status === 404
-                    )
-                      return;
-                    writeStderrLineSafe(
-                      'qwen serve: Interrupted channel wake turn ' +
-                        turn.turnId +
-                        ' could not hand back its recovered Runtime: ' +
-                        String(cause),
-                    );
-                  });
-                }
-                return settled ? 'settled' : false;
-              },
+              settleInterrupted: settleInterruptedChannelWake,
               writeStderr: writeStderrLineSafe,
             });
             // H6c: the automation turn settled; its run settles from the
@@ -6401,7 +6451,11 @@ export function registerHostedHarnessSessionRoutes(
     const text = workflowLaunch
       ? workflowLaunchSummaryText(workflowLaunch)
       : promptInput!.text;
-    const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const attachments = (promptInput?.attachments.length ?? 0) > 0;
+    const maxBytes = attachments
+      ? HOSTED_ATTACHMENT_INPUT_BYTES
+      : HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const maxUserRecordBytes = attachments ? maxBytes + 1024 * 1024 : maxBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
       daemonPromptId: promptId,
@@ -6409,7 +6463,7 @@ export function registerHostedHarnessSessionRoutes(
     });
     if (
       Buffer.byteLength(JSON.stringify(prompt)) > maxBytes ||
-      Buffer.byteLength(JSON.stringify(userRecord)) > maxBytes
+      Buffer.byteLength(JSON.stringify(userRecord)) > maxUserRecordBytes
     )
       return error(res, 413, 'hosted_prompt_too_large');
     const existing = session.admissions.get(promptId);
@@ -7666,6 +7720,15 @@ export function registerHostedHarnessSessionRoutes(
         if (cause instanceof ChildMessagesPendingError) {
           return error(res, 409, 'child_messages_pending', undefined, message);
         }
+        if (
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        ) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} has an unknown store outcome: ${message}`,
+          );
+          return error(res, 503, 'child_operation_failed', undefined, message);
+        }
         if (cause instanceof ManagedSessionConflictError) {
           return error(
             res,
@@ -7739,13 +7802,32 @@ export function registerHostedHarnessSessionRoutes(
     }
     // What is left owed is a message turn that crashed in an earlier
     // process: its aftermath, which the pump no longer picks for a stopped
-    // Session, settles it.
+    // Session, settles it. A pass that picked it before the stop runs that
+    // same aftermath, holding no turn slot while it reads and classifies,
+    // so this one waits for the pass (#14538).
     const authority = session.managed.authority;
-    for (const input of pendingSessionInputs(
-      authority.eventsInSequenceRange(1, authority.committedSequence),
-    ))
-      if (input.source === SESSION_MESSAGE_INPUT_SOURCE)
-        await session.wakeAftermath?.(input.turnId);
+    const owed = () =>
+      pendingSessionInputs(
+        authority.eventsInSequenceRange(1, authority.committedSequence),
+      ).filter((input) => input.source === SESSION_MESSAGE_INPUT_SOURCE);
+    if (owed().length === 0) return;
+    await session.monitorWake?.exclusive(async () => {
+      // Re-read after the wait. A pass that left the Session blocked owns
+      // the crash: its blocked cycle retries the aftermath and lifts the
+      // block, which this consume would leave in place. A prompt or a
+      // lifecycle claim admitted meanwhile keeps the Session to itself.
+      // The relay repeats the stop either way.
+      if (
+        session.blocked ||
+        session.active !== undefined ||
+        session.mcpBusy ||
+        session.hooksBusy ||
+        session.mcpRecovering ||
+        session.mcpClosing
+      )
+        return;
+      for (const input of owed()) await session.wakeAftermath?.(input.turnId);
+    }, HOSTED_WAKE_PASS_WAIT_MS);
   };
 
   // One message verb onto the Session's journal, for the route below.
@@ -7868,7 +7950,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
-        cause instanceof ManagedSessionWritesStoppedError
+        cause instanceof ManagedSessionWritesStoppedError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -7937,7 +8021,17 @@ export function registerHostedHarnessSessionRoutes(
               parseSessionCommandReply(body?.['reply']),
             );
           } catch (cause) {
-            if (cause instanceof ManagedSessionRecordError) {
+            // A store-side append outcome is not the request's shape: let it
+            // reach the outer catch, which answers the retryable 503.
+            if (
+              cause instanceof ManagedSessionRecordError &&
+              !(cause instanceof ManagedSessionConflictError) &&
+              !(cause instanceof ManagedSessionStoreHttpError) &&
+              !(cause instanceof ManagedSessionStoreTransportError) &&
+              !(cause instanceof ManagedSessionWritesStoppedError) &&
+              !(cause instanceof ManagedSessionAppendUnsettledError) &&
+              !(cause instanceof ManagedSessionJournalFencedError)
+            ) {
               return error(res, 400, 'invalid_command_operation');
             }
             throw cause;
@@ -8040,7 +8134,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
-        cause instanceof ManagedSessionWritesStoppedError
+        cause instanceof ManagedSessionWritesStoppedError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted command operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -8262,7 +8358,11 @@ export function registerHostedHarnessSessionRoutes(
         cause instanceof ManagedSessionRecordError &&
         !(cause instanceof ManagedSessionConflictError) &&
         !(cause instanceof ManagedSessionStoreHttpError) &&
-        !(cause instanceof ManagedSessionStoreTransportError)
+        !(cause instanceof ManagedSessionStoreTransportError) &&
+        !(
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        )
       )
         return error(res, 400, 'invalid_channel_operation', undefined, message);
       if (
@@ -10364,6 +10464,29 @@ export function registerHostedHarnessSessionRoutes(
           };
           break;
         }
+        case 'cancel_run': {
+          const occurrenceKey = body?.['occurrenceKey'];
+          if (
+            typeof occurrenceKey !== 'string' ||
+            occurrenceKey.length < 1 ||
+            occurrenceKey.length > 512 ||
+            body?.['automationRunId'] !==
+              automationRunId(scheduleId, occurrenceKey)
+          ) {
+            return error(res, 400, 'invalid_automation_operation');
+          }
+          const runId = automationRunId(scheduleId, occurrenceKey);
+          const run = await automations.requestCancel(runId);
+          const turnId = automationInputId(runId);
+          if (
+            automations.cancelRequested(turnId) &&
+            session.active?.promptId === turnId
+          ) {
+            session.active.abort.abort();
+          }
+          result = { run: runSummary(run) };
+          break;
+        }
         case 'reconcile_run': {
           const occurrenceKey = body?.['occurrenceKey'];
           if (
@@ -10383,18 +10506,23 @@ export function registerHostedHarnessSessionRoutes(
           // pump slot instead, and the answer reports rather than
           // touches it.
           let repaired = false;
-          if (
+          const repairable = () =>
             session.wakeAftermath !== undefined &&
             session.active === undefined &&
             !session.mcpBusy &&
             !session.mcpRecovering &&
             !session.hooksBusy &&
-            !session.mcpClosing
-          ) {
+            !session.mcpClosing &&
+            firstPendingWakeInput(session) !== undefined;
+          const repair = async () => {
+            // Re-read after any wait: the pass may have settled the crash
+            // itself, and a prompt or a close may have claimed the Session
+            // meanwhile.
+            const aftermathOf = session.wakeAftermath;
+            if (aftermathOf === undefined || !repairable()) return;
             // Claim the turn slot for the repair, exactly like a turn
-            // start: the pump reads it as busy instead of beginning the
-            // pending input mid-aftermath, which is the one way this
-            // route could settle a run out from under a live turn.
+            // start: a prompt or a lifecycle close reads it as busy
+            // instead of starting mid-aftermath.
             session.active = {
               promptId: `wake-reconcile:${operationId}`,
               digest: '',
@@ -10403,7 +10531,7 @@ export function registerHostedHarnessSessionRoutes(
             try {
               const first = firstPendingWakeInput(session);
               if (first !== undefined) {
-                const aftermath = await session.wakeAftermath(first.turnId);
+                const aftermath = await aftermathOf(first.turnId);
                 if (aftermath === 'settled') {
                   liftRecoveryBlock(session);
                   repaired = true;
@@ -10412,7 +10540,18 @@ export function registerHostedHarnessSessionRoutes(
             } finally {
               session.active = undefined;
             }
-          }
+          };
+          // A wake pump pass holds no turn slot while it reads, projects
+          // and classifies the crashed input, so the repair runs with the
+          // pump held: it waits for the load's pass to settle the crash
+          // first (the run then answers failed, and the occurrence
+          // resolves), and repairs only what that pass left blocked
+          // (#14538).
+          if (repairable())
+            await session.monitorWake?.exclusive(
+              repair,
+              HOSTED_WAKE_PASS_WAIT_MS,
+            );
           const reconciled = automations.run(
             automationRunId(scheduleId, occurrenceKey as string),
           );
@@ -10465,7 +10604,9 @@ export function registerHostedHarnessSessionRoutes(
       // would skip the occurrence while the fault is quite recoverable.
       if (
         cause instanceof ManagedSessionStoreHttpError ||
-        cause instanceof ManagedSessionStoreTransportError
+        cause instanceof ManagedSessionStoreTransportError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} lost its store: ${message}`,

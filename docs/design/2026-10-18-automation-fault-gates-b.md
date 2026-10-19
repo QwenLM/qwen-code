@@ -28,14 +28,15 @@ Six cases ship, all in one boot:
 Every case ends with the tenant holding no `skipped` or `unknown`
 occurrence.
 
-Deferred to the second slice of FG11b: the Harness-side store faults.
+The Harness-side store faults are the second slice of FG11b:
 
-- Refusing revision 1 or revision 2 of a run.
-- Refusing the `schedule` projection, so it rolls back with the journal.
-- Failing the Harness's store transport.
+- refusing revision 1 or revision 2 of a run;
+- refusing the `schedule` projection, so it rolls back with the journal;
+- failing the Harness's store transport.
 
-Those leave the Harness Session with its writes stopped, so a gate has to
-restart the Harness the way FG9b and FG10c do.
+Those leave the Harness Session with its writes stopped, so their cells
+restart the Harness. They are in
+[slice 2's design](2026-10-18-automation-fault-gates-b2.md).
 
 ## Current state
 
@@ -95,8 +96,9 @@ and the evidence directory (`target/fg11-cases/fg11b/`).
   past the connector's 30 s request timeout would be re-driven on its own.
   An earlier draft that updated from the settle phase showed exactly that:
   the re-drive fired revision 1 while the parked request was still waiting.
-- Teardown drops every trigger and releases every hold, so nothing leaks
-  into the classes after it on the shared fork's schema.
+- Teardown releases every hold, then drops each trigger on its own (one
+  failing drop leaves none of the others behind) and the refusal table, so
+  nothing leaks into the classes after it on the shared fork's schema.
 
 ## Mutation witnesses
 
@@ -142,9 +144,11 @@ the step moves to 105 minutes and the job ceiling from 195 to 200 (steps
 
 ## Open questions
 
-- Slice 2's Harness-side faults stop the Session's writes. Each one needs
-  a restart, and its expectation (a retryable `503 automation_operation_failed`,
-  then a completed replay) has to be shown on a reloaded Session.
+- Slice 2's Harness-side faults stop the Session's writes. Each needs a
+  restart, and its expectation has to be shown on a reloaded Session. This
+  is answered in [slice 2](2026-10-18-automation-fault-gates-b2.md): the
+  public answer is a retryable `503 automation_operation_unknown`, and the
+  reloaded Session completes the operation once.
 - Whether `revision-race` should also cover a fire parked past the request
   timeout. That interleaving re-drives under the old revision while the
   original request is still in flight. This slice only records that it

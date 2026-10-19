@@ -386,22 +386,51 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         if (session.workspace() != null
                 && !approvalModeConfirmed(session, attached, minted)) {
-            attachments.remove(key);
+            attachments.remove(key, attached);
             throw new IllegalStateException(
                     "Hosted Harness did not confirm the Session approval mode");
         }
-        attachments.put(key, attached);
-        // A passive re-attach (rename / close / the adoptGeneration notices)
-        // carries the takeover recovery snapshot exactly like the
-        // recovery-load path that re-mints it: restore the pending marker
-        // or the next dispatch's cached branch answers "nothing parked"
-        // over the snapshot it still holds (R11-3). The marker is safe
-        // here: it was minted under the live boot, so a boot-identity
-        // eviction drops the attachment itself first.
-        if (attached.getRuntimeRecovery() != null) {
-            pendingRecovery.add(key);
-        } else {
-            pendingRecovery.remove(key);
+        HarnessSessionRef loaded = attached;
+        attachments.compute(key, (ignored, held) -> {
+            if (passiveManagedRuntimeRecovery && loadExisting) {
+                HostedHarnessClient current = client;
+                if (current == null) {
+                    throw new IllegalStateException("Hosted Harness generation moved during passive load");
+                }
+                String liveBootId = current.capabilities().getBootId();
+                if (!liveBootId.equals(loaded.getHarnessBootId())) {
+                    throw new IllegalStateException("Hosted Harness generation moved during passive load");
+                }
+            }
+            return loaded;
+        });
+        HarnessSessionRef published = attachments.computeIfPresent(key, (ignored, held) -> {
+            if (held != loaded) {
+                return held;
+            }
+            if (passiveManagedRuntimeRecovery && loadExisting) {
+                HostedHarnessClient current = client;
+                if (current == null || !current.capabilities().getBootId().equals(loaded.getHarnessBootId())) {
+                    pendingRecovery.remove(key);
+                    return null;
+                }
+            }
+            // A passive re-attach (rename / close / the adoptGeneration notices)
+            // carries the takeover recovery snapshot exactly like the
+            // recovery-load path that re-mints it: restore the pending marker
+            // or the next dispatch's cached branch answers "nothing parked"
+            // over the snapshot it still holds (R11-3). The ref must already
+            // be published for adoption's orphan-marker cleanup, and this
+            // slot prevents a late response changing a newer ref's marker.
+            if (loaded.getRuntimeRecovery() != null) {
+                pendingRecovery.add(key);
+            } else {
+                pendingRecovery.remove(key);
+            }
+            return loaded;
+        });
+        if (passiveManagedRuntimeRecovery && loadExisting && published != loaded) {
+            throw new IllegalStateException("Hosted Harness generation moved during passive load");
         }
         return new Attachment(attached.getHarnessBootId(),
                 attached.getRuntimeRecovery(),
@@ -690,6 +719,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Map<String, Object> runAutomationOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
         try {
+            if ("cancel_run".equals(body.get("kind"))) {
+                HarnessSessionRef ref = committedStopAttachment(tenantId,
+                        sessionId, false);
+                return client().runAutomationOperation(ref, body);
+            }
             // Automation operations drive new work (a fire admits an input
             // and wakes a turn), so a cached attachment is no admission:
             // the Workspace checks submit and continueManagedRuntime run
@@ -776,6 +810,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      */
     private HarnessSessionRef messageStopAttachment(String tenantId,
             String sessionId) {
+        return committedStopAttachment(tenantId, sessionId, true);
+    }
+
+    private HarnessSessionRef committedStopAttachment(String tenantId,
+            String sessionId, boolean stopMessages) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
@@ -793,8 +832,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             workspaceExecution.authorizeCommittedStop(session);
         }
-        HarnessSessionRef attached = client().loadSession(
-                new LoadHarnessSession(session.sessionId(),
+        LoadHarnessSession load = new LoadHarnessSession(session.sessionId(),
                         managedSessionStore(session),
                         session.harnessBootId() != null, toolProfile(session),
                         false, false,
@@ -803,8 +841,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         .withMcpServers(mcpServers(session))
                         .withHookCatalog(hookCatalog(session))
                         .withForegroundOnly(foregroundOnly(session))
-                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session))
-                        .withStoppedMessages());
+                        .withChildWorkspaces(childWorkspaces && !foregroundOnly(session), childSnapshots && !foregroundOnly(session));
+        HarnessSessionRef attached = client().loadSession(
+                stopMessages ? load.withStoppedMessages() : load);
         if (session.workspace() != null && !actions.approvalMode(tenantId,
                 sessionId).equals(attached.getApprovalMode())) {
             throw new IllegalStateException(
@@ -866,6 +905,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return current.capabilities().getBootId();
         } catch (RuntimeException closed) {
             return null;
+        }
+    }
+
+    @Override
+    public void recoverForWake(String tenantId, String sessionId) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            // Passive load always makes a round trip, even with a cached ref, and never
+            // drives an unrelated foreground Turn. The loaded wake pump owns its inputs.
+            doCreateOrLoad(tenantId, sessionId, true, true, false);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
         }
     }
 
