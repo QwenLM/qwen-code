@@ -1029,6 +1029,10 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'session_history_context_unavailable') {
+        res.status(503).json({ error: errorMessage(err), code: kind });
+        return;
+      }
       if (kind === 'message_deletion_context_unavailable') {
         res.status(503).json({
           error: errorMessage(err),

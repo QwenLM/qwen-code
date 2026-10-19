@@ -253,7 +253,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
-> Conditional tags appear only when their matching deployment toggle is on (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
+> Conditional tags appear only when their deployment or runtime availability condition is met (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
 
 `session_startup_config` advertises optional `startupConfig: { modelServiceId, reasoningEffort? }` on ordinary and standalone creation. Always preflight this tag: older ordinary-create routes may silently ignore the object. `modelServiceId` is required (1–256 characters); `reasoningEffort` accepts `none`, `default`, `low`, `medium`, `high`, `xhigh`, or `max` when supported by the selected model. Omission applies only the model, without a reasoning setter or implicit `default`. The object cannot be combined with the legacy top-level `modelServiceId` or explicit single scope and implies a new thread. Startup never saves shared defaults; later session behavior is unchanged.
 
@@ -3683,7 +3683,7 @@ Response (200):
 }
 ```
 
-A successful response may additionally contain `removedApiPromptIds` for removed API-history identities. Selected original records and their owned raw compression context are physically removed from JSONL. Existing summary text, command effects, and project files are preserved. Deleting every group leaves the session available for later prompts.
+Selected original records and their owned raw compression context are physically removed from JSONL. Existing summary text, command effects, and project files are preserved. Deleting every group leaves the session available for later prompts.
 
 Errors:
 
@@ -3695,9 +3695,11 @@ Errors:
 - `409 message_history_invalid` — history cannot be safely attributed; changing the selection token alone cannot repair it.
 - `400 unsupported_operation` / `422 session_message_deletion_unsupported` — session/workspace storage does not support this operation; refreshing and repeating the request will not enable it.
 - `409 session_writer_conflict`, `409 session_writer_lost`, `409 session_transcript_changed`, or `503 session_writer_unavailable` — exclusive transcript ownership could not be established or retained.
-- `503 message_deletion_context_unavailable` — deletion **has persisted**, but the live context could not be installed. The JSON body includes `persisted: true`, `deletedGroupIds`, and `deletedPromptIds`. Reconcile the UI from authoritative history and reopen the session before sending another prompt. Do not retry deletion as though nothing was removed; later prompts remain refused with this code until reopening.
+- `503 message_deletion_context_unavailable` — deletion **has persisted**, but the live context could not be installed. The JSON body includes `persisted: true`, `deletedGroupIds`, and `deletedPromptIds`. Reconcile the UI from authoritative history and reopen the session before sending another prompt. Do not retry deletion as though nothing was removed; later prompts remain refused until context recovery succeeds.
 
-After persistence the session publishes `session_messages_deleted` with data `{sessionId, deletedGroupIds, deletedPromptIds, removedApiPromptIds?}` and optional `originatorClientId` on the **event envelope**. This event also occurs for the persisted-503 path. Peers must invalidate cached transcript, navigation, search and selection state and reload authoritative history. The originator must reconcile both successful HTTP responses and `persisted: true` errors; it must not rely on processing its own SSE echo.
+Subsequent requests while context recovery is pending return 503 `session_history_context_unavailable` without `persisted` or deletion identities. Loading or resuming the session retries installing authoritative JSONL context; only successful installation reopens model admission. Lifecycle close remains available.
+
+After persistence the session publishes `session_messages_deleted` with data `{sessionId, deletedGroupIds, deletedPromptIds}` and optional `originatorClientId` on the **event envelope**. Internal API-history identities are not published on this wire. This event also occurs for the persisted-503 path. Peers must invalidate cached transcript, navigation, search and selection state and reload authoritative history. The originator must reconcile both successful HTTP responses and `persisted: true` errors; it must not rely on processing its own SSE echo.
 
 ### `POST /session/:id/recap`
 

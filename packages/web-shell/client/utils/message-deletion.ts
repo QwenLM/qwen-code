@@ -70,6 +70,49 @@ export function localDeletionBlocks(blocks: readonly DaemonTranscriptBlock[]) {
   });
 }
 
+export function removeDeletedMessageBlocks(
+  store: DaemonTranscriptStore,
+  deletedGroupIds: readonly string[],
+  deletedPromptIds: readonly string[],
+) {
+  const groups = new Set(deletedGroupIds);
+  const prompts = new Set(deletedPromptIds);
+  const snapshot = store.getSnapshot();
+  const local = new Set(localDeletionBlocks(snapshot.blocks));
+  let removing = false;
+  store.reset({
+    ...snapshot,
+    retainedBytes: undefined,
+    activeUserBlockId: undefined,
+    activeAssistantBlockId: undefined,
+    activeThoughtBlockId: undefined,
+    blocks: snapshot.blocks.filter((block) => {
+      if (local.has(block)) return true;
+      const selected =
+        groups.has(block.id) ||
+        block.sourceRecordIds?.some((id) => groups.has(id)) ||
+        (block.promptId !== undefined && prompts.has(block.promptId));
+      if (
+        block.kind === 'user' ||
+        block.kind === 'user_shell' ||
+        block.promptId
+      )
+        removing = selected === true;
+      if (selected) removing = true;
+      const reply = [
+        'assistant',
+        'thought',
+        'tool',
+        'shell',
+        'permission',
+        'error',
+        'prompt_cancelled',
+      ].includes(block.kind);
+      return !(selected || (removing && reply));
+    }),
+  });
+}
+
 const pendingLocalHistory = new WeakMap<
   DaemonTranscriptStore,
   readonly (DaemonTranscriptBlock | string | undefined)[]
@@ -132,13 +175,21 @@ export function restoreLocalDeletionBlocks(
     { length: blocks.length + 1 },
     () => [],
   );
-  let next = blocks.length;
+  const left: (number | undefined)[] = [];
+  let previous: number | undefined;
+  for (const entry of reference) {
+    if (typeof entry === 'string') previous = indices.get(entry) ?? previous;
+    left.push(previous);
+  }
+  let next: number | undefined;
   for (let index = reference.length - 1; index >= 0; index--) {
     const block = reference[index]!;
-    if (typeof block === 'object') slots[next]!.unshift(block);
-    else {
-      const position = block && indices.get(block);
-      if (typeof position === 'number') next = position;
+    if (typeof block === 'object') {
+      const slot =
+        next ?? (left[index] !== undefined ? left[index]! + 1 : blocks.length);
+      slots[slot]!.unshift(block);
+    } else if (typeof block === 'string') {
+      next = indices.get(block) ?? next;
     }
   }
   store.reset({

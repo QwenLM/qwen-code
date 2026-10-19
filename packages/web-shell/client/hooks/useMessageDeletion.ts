@@ -13,6 +13,7 @@ import {
   localMessageDeletionGroups,
   hasPendingLocalCommands,
   restoreLocalDeletionBlocks,
+  removeDeletedMessageBlocks,
   messageDeletionGroups,
   type MessageDeletionGroup,
 } from '../utils/message-deletion';
@@ -37,11 +38,13 @@ export interface MessageDeletionControls {
 export function useMessageDeletion(
   messages: Message[],
   sessionBlocked: boolean,
+  historical = false,
 ) {
   const connection = useConnection();
   const actions = useActions();
   const store = useTranscriptStore();
-  const blocked = sessionBlocked || hasPendingLocalCommands(store);
+  const blocked =
+    historical || sessionBlocked || hasPendingLocalCommands(store);
   const { client } = useWorkspace();
   const { t } = useI18n();
   const registerBlocker = useInteractionBlocker();
@@ -82,7 +85,7 @@ export function useMessageDeletion(
     setBusy(false);
     setError(undefined);
     setConfirming(false);
-  }, [key]);
+  }, [key, historical]);
   useEffect(
     () => (active || busy ? registerBlocker() : undefined),
     [active, busy, registerBlocker],
@@ -185,6 +188,7 @@ export function useMessageDeletion(
     setBusy(true);
     setError(undefined);
     let reopenRequired = false;
+    let deleted = false;
     try {
       const persisted = selection.groups.filter((group) =>
         selection.selected.has(group.id),
@@ -227,6 +231,7 @@ export function useMessageDeletion(
           reopenRequired = true;
         }
       }
+      deleted = true;
       if (currentKey.current !== key || token !== operation.current) return;
       if (localIds.size > 0) {
         const snapshot = store.getSnapshot();
@@ -243,7 +248,14 @@ export function useMessageDeletion(
         const retained = before.blocks.filter(
           (block) => !localIds.has(block.id),
         );
-        store.reset();
+        removeDeletedMessageBlocks(
+          store,
+          persisted.map((group) => group.id),
+          persisted.flatMap((group) => [
+            ...(group.promptIds ?? []),
+            ...(group.promptId ? [group.promptId] : []),
+          ]),
+        );
         try {
           await actions.reloadSession(new AbortController().signal);
         } finally {
@@ -266,7 +278,9 @@ export function useMessageDeletion(
           setError(
             reopenRequired
               ? t('messageDelete.reopenRequired')
-              : failureMessage(cause),
+              : deleted
+                ? t('messageDelete.reloadFailed')
+                : failureMessage(cause),
           );
       }
     } finally {

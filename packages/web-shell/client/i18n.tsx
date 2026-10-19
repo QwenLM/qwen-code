@@ -1,3 +1,8 @@
+import { plural } from './utils/plural.js';
+import {
+  MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_ZH,
+} from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
@@ -57,13 +62,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/** English count plus its noun, pluralised the regular way. */
-function plural(count: string | number | undefined, noun: string): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
-}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -3755,32 +3753,7 @@ const EN: Messages = {
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
   'message.moreActions': 'More message actions',
-  'messageDelete.commandFailed': 'Command failed.',
-  'messageDelete.entry': 'Delete messages',
-  'messageDelete.selected': (vars) =>
-    `${plural(vars?.['count'], 'group')} selected`,
-  'messageDelete.delete': 'Delete selected',
-  'messageDelete.confirm': 'Delete permanently',
-  'messageDelete.confirmTitle': (vars) =>
-    `Delete ${plural(vars?.['count'], 'message group')}?`,
-  'messageDelete.confirmDescription':
-    'This permanently deletes the selected original messages from history. Existing summaries, command effects and project files are preserved. Information already included in a summary may still influence future replies.',
-  'messageDelete.selectGroup': 'Select message group',
-  'messageDelete.processing': 'Processing…',
-  'messageDelete.failed':
-    'Unable to delete messages. Please reload and try again.',
-  'messageDelete.unsupported':
-    'Deleting saved messages is not supported for this session.',
-  'messageDelete.conflict':
-    'Session history changed. Select the messages again before deleting.',
-  'messageDelete.reopenRequired':
-    'Messages were deleted. Reopen this session before sending another message.',
-  'messageDelete.busy':
-    'The session is processing a turn. Try again when it finishes.',
-  'messageDelete.invalidHistory':
-    'This history lacks reliable identities needed to safely delete the selected messages.',
-  'messageDelete.unavailable':
-    'This message cannot be safely matched to its saved history. Please reload and try again.',
+  ...MESSAGE_DELETION_MESSAGES_EN,
   'userMessage.editSubmit': 'Send',
   'userMessage.editSending': 'Sending…',
   'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
@@ -7983,26 +7956,7 @@ const ZH: Messages = {
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
   'message.moreActions': '更多操作',
-  'messageDelete.commandFailed': '命令执行失败。',
-  'messageDelete.entry': '删除消息',
-  'messageDelete.selected': (vars) => `已选 ${vars?.['count'] ?? 0} 组`,
-  'messageDelete.delete': '删除所选',
-  'messageDelete.confirm': '确认删除',
-  'messageDelete.confirmTitle': (vars) =>
-    `删除 ${vars?.['count'] ?? 0} 组消息？`,
-  'messageDelete.confirmDescription':
-    '所选原始消息将从历史中永久删除。已有摘要、命令执行效果和项目文件保持不变。已进入摘要的信息仍可能影响后续回复。',
-  'messageDelete.selectGroup': '选择消息组',
-  'messageDelete.processing': '处理中…',
-  'messageDelete.failed': '无法删除消息，请刷新后重试。',
-  'messageDelete.unsupported': '此会话不支持删除已保存的消息。',
-  'messageDelete.conflict': '会话历史已变化，请重新选择要删除的消息。',
-  'messageDelete.reopenRequired': '消息已删除，请重新打开此会话后再发送消息。',
-  'messageDelete.busy': '会话正在处理消息，请结束后重试。',
-  'messageDelete.invalidHistory':
-    '当前历史缺少安全删除所需的可靠身份信息，无法删除所选消息。',
-  'messageDelete.unavailable':
-    '无法安全匹配此消息对应的历史记录，请刷新后重试。',
+  ...MESSAGE_DELETION_MESSAGES_ZH,
   'userMessage.editSubmit': '发送',
   'userMessage.editSending': '发送中…',
   'userMessage.editBusy': '请先等待当前轮次结束再编辑。',

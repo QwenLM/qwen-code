@@ -9003,13 +9003,23 @@ describe('Session', () => {
           deletedGroupIds: ['group'],
         },
       });
-      expect(session.isTurnIdle()).toBe(false);
+      expect(session.isTurnIdle()).toBe(true);
       await expect(session.assertCanStartTurn()).rejects.toMatchObject({
         data: {
-          errorKind: 'message_deletion_context_unavailable',
-          deletedGroupIds: ['group'],
+          errorKind: 'session_history_context_unavailable',
         },
       });
+      await expect(
+        session.deleteMessageGroups({ snapshot: 'v2', groupIds: ['other'] }),
+      ).rejects.toMatchObject({
+        data: { errorKind: 'session_history_context_unavailable' },
+      });
+      expect(
+        mockChatRecordingService.deleteMessageGroups,
+      ).toHaveBeenCalledTimes(1);
+      await session.waitForActiveTurnsToSettle();
+      await session.recoverMessageDeletionContext();
+      await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
     });
 
     it('rejects an active history mutation before touching storage', async () => {

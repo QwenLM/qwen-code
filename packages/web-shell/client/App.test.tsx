@@ -33936,6 +33936,28 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
   });
 
+  it('gives extension install usage and its echo one restorable local identity', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/extensions install';
+    await clickSubmit(container);
+    await flush();
+    const echo = mockStore.appendLocalUserMessage.mock.calls.find(
+      (call) => call[0] === '/extensions install',
+    );
+    expect(echo).toEqual([
+      '/extensions install',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
+    ]);
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'error',
+        promptId: echo![2].localCommandId,
+      }),
+    ]);
+  });
+
   it('does not open the extensions manager page with /extension manage', async () => {
     const { container } = renderApp();
     await flush();
@@ -41966,10 +41988,10 @@ describe('App session callbacks', () => {
     });
     expect(testState.latestModelManagement?.busy).toBe(true);
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-      },
+      }),
     ]);
 
     await act(async () => {
@@ -42042,16 +42064,16 @@ describe('App session callbacks', () => {
     });
 
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-      },
+      }),
     ]);
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'This change requires a restart to take effect.',
-      },
+      }),
     ]);
   });
 
@@ -45237,6 +45259,8 @@ describe('App /goal command', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
       '/goal ship it',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
     );
   });
 
@@ -45625,6 +45649,8 @@ describe('App /goal command', () => {
     expect(mockWorkspaceActions.controlGoal).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
       '/goal first objective',
+      undefined,
+      expect.objectContaining({ localCommandId: expect.any(String) }),
     );
   });
 
@@ -45643,6 +45669,8 @@ describe('App /goal command', () => {
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
       '/goal clear',
+      undefined,
+      expect.objectContaining({ localCommandId: expect.any(String) }),
     );
   });
 

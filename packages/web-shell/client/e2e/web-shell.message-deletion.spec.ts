@@ -847,6 +847,7 @@ test('message actions use a hoverable menu that also supports click and keyboard
   await expect(menu).toHaveCount(0);
   await trigger.hover();
   await expect(menu).toBeVisible();
+  await expect(composer).toBeFocused();
   await expect(menu.getByRole('menuitem')).toHaveText([
     'View tool calls',
     'Edit message',
@@ -868,14 +869,24 @@ test('message actions use a hoverable menu that also supports click and keyboard
     .hover();
   await page.waitForTimeout(180);
   await expect(menu).toBeVisible();
+  await expect(composer).toBeFocused();
   await page.screenshot({
     path: info.outputPath('actions-hover-mock-daemon.png'),
     fullPage: true,
   });
   await page.locator('[data-web-shell-composer-editor]').hover();
   await expect(menu).toHaveCount(0);
+  await composer.focus();
+  await trigger.hover();
+  await expect(menu).toHaveAttribute('data-state', 'open');
+  await expect(composer).toBeFocused();
+  await page.locator('[data-web-shell-composer-editor]').hover();
+  await expect(menu).toHaveCount(0);
+  await expect(composer).toBeFocused();
   await trigger.click();
-  await expect(menu).toBeVisible();
+  await expect(menu).toHaveAttribute('data-state', 'open');
+  await page.waitForTimeout(250);
+  await expect(menu).toHaveAttribute('data-state', 'open');
   await page.keyboard.press('Escape');
   await expect(menu).toHaveCount(0);
   await trigger.focus();
@@ -1029,7 +1040,7 @@ test('unselected local echo and result survive failed reload and later peer reco
   const { daemon, scenario } = await setup(
     page,
     String(info.project.use.baseURL),
-    1,
+    2,
   );
   const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
   await editor.fill('/tools');
@@ -1037,7 +1048,7 @@ test('unselected local echo and result survive failed reload and later peer reco
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(
     page.getByRole('button', { name: 'More message actions', exact: true }),
-  ).toHaveCount(3);
+  ).toHaveCount(4);
   const result = (
     await page.locator('[data-web-shell-message-row]').allTextContents()
   ).at(-1)!;
@@ -1072,6 +1083,15 @@ test('unselected local echo and result survive failed reload and later peer reco
   await expect(
     page.locator('[data-web-shell-message-deletion] [role=alert]'),
   ).toBeVisible();
+  await expect(page.getByText('Question 1', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Question 2', { exact: true })).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-message-deletion] [role=alert]'),
+  ).toContainText('Messages were deleted');
+  await page.screenshot({
+    path: info.outputPath('deleted-reload-failed-mock-daemon.png'),
+    fullPage: true,
+  });
   await expect(page.getByText('/tools', { exact: true })).toBeVisible();
   expect(
     await page.locator('[data-web-shell-message-row]').allTextContents(),
@@ -1092,4 +1112,37 @@ test('unselected local echo and result survive failed reload and later peer reco
   expect(
     await page.locator('[data-web-shell-message-row]').allTextContents(),
   ).toContain(result);
+});
+
+test('peer deletion preserves surviving rows if history reload is unavailable @smoke', async ({
+  page,
+}, info) => {
+  const { daemon, scenario } = await setup(
+    page,
+    String(info.project.use.baseURL),
+    2,
+  );
+  await page.route(
+    /\/session\/[^/]+\/(load|resume|transcript)(?:\?|$)/,
+    (route) =>
+      route.fulfill({ status: 503, json: { error: 'Reload unavailable' } }),
+  );
+  await daemon.sendEvent({
+    v: 1,
+    type: 'session_messages_deleted',
+    originatorClientId: 'peer',
+    data: {
+      sessionId: scenario.sessionId,
+      deletedGroupIds: ['u0'],
+      deletedPromptIds: ['p0'],
+    },
+  });
+  await expect(page.getByText('Question 1', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Question 2', { exact: true })).toBeVisible();
+  await expect
+    .poll(() =>
+      daemon.requests.some((request) => /\/(load|resume)$/.test(request.path)),
+    )
+    .toBe(true);
+  await expect(page.getByText('Question 2', { exact: true })).toBeVisible();
 });

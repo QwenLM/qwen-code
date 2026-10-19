@@ -274,6 +274,19 @@ describe('recorded message deletion', () => {
       }),
     ).rejects.toThrow();
     expect(await fs.readFile(transcriptPath, 'utf8')).toBe(unchanged);
+    expect(recorder.supportsMessageGroupDeletion()).toBe(true);
+    expect(recorder.hasWriteOwnership()).toBe(true);
+    recorder.recordUserMessage(
+      'next',
+      undefined,
+      undefined,
+      'api-next',
+      'daemon-next',
+    );
+    await recorder.flush();
+    expect((await recorder.getMessageGroups()).groups).toHaveLength(
+      before.groups.length + 1,
+    );
   });
 
   it.skipIf(process.platform === 'win32')(

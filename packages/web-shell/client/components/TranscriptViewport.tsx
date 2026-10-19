@@ -88,6 +88,7 @@ export const TranscriptViewport = forwardRef<
       props.loadingTranscript === true ||
       props.catchingUp === true ||
       props.pendingApproval !== null,
+    viewport.historical,
   );
   const openTurnCalls = useOpenTurnCalls();
   const openViewportTurnCalls = useCallback(
@@ -543,7 +544,7 @@ export const TranscriptViewport = forwardRef<
               key={viewport.viewKey}
               ref={list}
               messages={viewport.messages}
-              deletion={deletion}
+              deletion={historical ? undefined : deletion}
               mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
               timelineAction={
                 globalNavigation || !navigationVisible
@@ -593,7 +594,9 @@ export const TranscriptViewport = forwardRef<
                 : {})}
             />
           </TurnCallsProvider>
-          {deletion && <MessageDeletionToolbar controls={deletion} />}
+          {deletion && !historical && (
+            <MessageDeletionToolbar controls={deletion} />
+          )}
           {historical && !onCanScrollToBottomChange && (
             <Button
               className="absolute bottom-3 left-1/2 -translate-x-1/2"

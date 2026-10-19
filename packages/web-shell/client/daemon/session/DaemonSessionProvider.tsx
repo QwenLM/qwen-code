@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { restoreLocalDeletionBlocks } from '../../utils/message-deletion.js';
+import {
+  restoreLocalDeletionBlocks,
+  removeDeletedMessageBlocks,
+} from '../../utils/message-deletion.js';
 import {
   createContext,
   type Dispatch,
@@ -3589,7 +3592,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     loadingTranscript: true,
                   }));
                   const before = store.getSnapshot().blocks;
-                  store.reset();
+                  const data = event.data as {
+                    deletedGroupIds: string[];
+                    deletedPromptIds: string[];
+                  };
+                  removeDeletedMessageBlocks(
+                    store,
+                    data.deletedGroupIds,
+                    data.deletedPromptIds,
+                  );
                   void repairReloadRef
                     .current?.(new AbortController().signal)
                     .finally(() => {

@@ -27,29 +27,24 @@ import type {
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 describe('session_messages_deleted', () => {
-  it.each([undefined, ['api-1']])(
-    'accepts optional removed API identities: %j',
-    (removedApiPromptIds) => {
-      const data = {
+  it('validates the identities published on the wire', () => {
+    const event: DaemonEvent = {
+      v: 1,
+      type: 'session_messages_deleted',
+      data: {
         sessionId: 'session',
         deletedGroupIds: ['g'],
         deletedPromptIds: ['p'],
-        removedApiPromptIds,
-      };
-      const event: DaemonEvent = {
-        v: 1,
-        type: 'session_messages_deleted',
-        data,
-      };
-      expect(asKnownDaemonEvent(event)).toBe(event);
-      expect(
-        asKnownDaemonEvent({
-          ...event,
-          data: { ...data, removedApiPromptIds: [42] },
-        }),
-      ).toBeUndefined();
-    },
-  );
+      },
+    };
+    expect(asKnownDaemonEvent(event)).toBe(event);
+    expect(
+      asKnownDaemonEvent({
+        ...event,
+        data: { ...(event.data as object), deletedPromptIds: [42] },
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {

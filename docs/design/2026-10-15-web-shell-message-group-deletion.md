@@ -26,7 +26,7 @@ Reject busy sessions instead of queueing deletion. The bridge queue serializes o
 
 Listing a legacy transcript serializes with its writer without acquiring a lease or changing its write mode. Only deletion upgrades it to lease ownership. Telemetry belongs to its explicit prompt/tool identity, including late arrivals; events owned by deleted groups are discarded during and after replacement.
 
-After a snapshot conflict, clear selection and require the user to select again with a fresh snapshot; never automatically retry deletion. A committed deletion with failed context installation returns its deleted identities and a reopen requirement, refreshes the originating client, and keeps admission closed with the same explicit error. Preserve local command positions and IDs through reload, including failed reloads.
+After a snapshot conflict, clear selection and require the user to select again with a fresh snapshot; never automatically retry deletion. A committed deletion with failed context installation returns its deleted identities and a reopen requirement, refreshes the originating client, and blocks stale-context admission while releasing the operation lock so close can drain. Later requests receive a fresh context-unavailable error without a persisted claim or earlier deletion identities; reopening rebuilds context from JSONL before admission resumes. Failed transcript reloads retain surviving saved messages and local commands and explain that deletion succeeded but refresh failed. Preserve local command positions and IDs through reload, including failed reloads.
 
 ## Persistence and model context
 

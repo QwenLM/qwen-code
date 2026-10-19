@@ -2377,7 +2377,7 @@ export class Session implements SessionContext {
   private closing = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
-  private historyMutationFailure: RequestError | undefined;
+  private pendingDeletedApiPromptIds: Set<string> | undefined;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -4498,7 +4498,15 @@ export class Session implements SessionContext {
   }
 
   assertHistoryContextAvailable(): void {
-    if (this.historyMutationFailure) throw this.historyMutationFailure;
+    if (this.pendingDeletedApiPromptIds) {
+      throw new RequestError(
+        -32000,
+        'Reload the session before using its history',
+        {
+          errorKind: 'session_history_context_unavailable',
+        },
+      );
+    }
   }
 
   isIdle(): boolean {
@@ -4646,8 +4654,10 @@ export class Session implements SessionContext {
       this.historyMutationActive = false;
       if (this.disposed) return;
       this.#activeWorkChanged();
-      void this.#drainCronQueue();
-      void this.#drainNotificationQueue();
+      if (!this.pendingDeletedApiPromptIds) {
+        void this.#drainCronQueue();
+        void this.#drainNotificationQueue();
+      }
     };
   }
 
@@ -4932,6 +4942,7 @@ export class Session implements SessionContext {
     targetTurnIndex: number;
     apiTruncateIndex: number;
   } {
+    this.assertHistoryContextAvailable();
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -5024,9 +5035,9 @@ export class Session implements SessionContext {
   }
 
   async deleteMessageGroups(request: { snapshot: string; groupIds: string[] }) {
+    this.assertHistoryContextAvailable();
     const release = this.beginHistoryMutation();
     let persisted = false;
-    let installed = false;
     let deletedGroupIds: string[] = [];
     let deletedPromptIds: string[] = [];
     try {
@@ -5039,29 +5050,12 @@ export class Session implements SessionContext {
       persisted = true;
       deletedGroupIds = result.deletedGroupIds;
       deletedPromptIds = result.deletedPromptIds;
-      const removed = new Set(result.removedApiPromptIds);
-      const records = await recording.readActiveTranscriptChain();
-      const restored = buildSessionHistoryFromConversation({
-        messages: records,
-      });
-      const current = this.captureHistorySnapshot();
-      const prelude = current.slice(0, getStartupContextLength(current));
-      const llmClient = this.config.getLlmClient()!;
-      llmClient.setHistory([...prelude, ...restored.apiHistory]);
-      llmClient
-        .getChat()
-        .setCompletedToolCallIds(restored.completedToolCallIds);
-      const fileHistory = this.config.getFileHistoryService();
-      fileHistory.restoreFromSnapshots(
-        fileHistory
-          .getSnapshots()
-          .filter((snapshot) => !removed.has(snapshot.promptId)),
-      );
-      installed = true;
+      this.pendingDeletedApiPromptIds = new Set(result.removedApiPromptIds);
+      await this.installDeletedMessageHistory();
       return { deletedGroupIds, deletedPromptIds };
     } catch (error) {
       if (persisted) {
-        this.historyMutationFailure = new RequestError(
+        throw new RequestError(
           -32000,
           'Messages were deleted, but the session must be reopened before sending another message',
           {
@@ -5070,13 +5064,41 @@ export class Session implements SessionContext {
             deletedPromptIds,
           },
         );
-        throw this.historyMutationFailure;
       }
       throw error;
     } finally {
-      // A committed deletion must never resume automatic work on stale context.
-      if (!persisted || installed) release();
+      release();
     }
+  }
+
+  async recoverMessageDeletionContext(): Promise<void> {
+    if (!this.pendingDeletedApiPromptIds) return;
+    const release = this.beginHistoryMutation();
+    try {
+      await this.installDeletedMessageHistory();
+    } finally {
+      release();
+    }
+  }
+
+  private async installDeletedMessageHistory(): Promise<void> {
+    const removed = this.pendingDeletedApiPromptIds!;
+    const records = await this.config
+      .getChatRecordingService()!
+      .readActiveTranscriptChain();
+    const restored = buildSessionHistoryFromConversation({ messages: records });
+    const current = this.captureHistorySnapshot();
+    const prelude = current.slice(0, getStartupContextLength(current));
+    const llmClient = this.config.getLlmClient()!;
+    llmClient.setHistory([...prelude, ...restored.apiHistory]);
+    llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
+    const fileHistory = this.config.getFileHistoryService();
+    fileHistory.restoreFromSnapshots(
+      fileHistory
+        .getSnapshots()
+        .filter((snapshot) => !removed.has(snapshot.promptId)),
+    );
+    this.pendingDeletedApiPromptIds = undefined;
   }
 
   captureHistorySnapshot(): Content[] {

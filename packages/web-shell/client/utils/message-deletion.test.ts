@@ -7,6 +7,7 @@ import type { Message } from '../adapters/types';
 import {
   messageDeletionGroups,
   restoreLocalDeletionBlocks,
+  removeDeletedMessageBlocks,
 } from './message-deletion';
 
 const groups = [
@@ -144,6 +145,85 @@ describe('local history restoration', () => {
     ).toBe(3);
     restoreLocalDeletionBlocks(store, before);
     expect(store.getSnapshot().blocks).toHaveLength(3);
+  });
+
+  it('keeps local blocks after the replay head when live tail identities change', () => {
+    const head = {
+      ...block('head', 'old'),
+      promptId: undefined,
+      sourceRecordIds: ['r1'],
+    };
+    const local = block('local', 'local-command:stats');
+    const store = createDaemonTranscriptStore({
+      blocks: [
+        head,
+        {
+          ...block('tail-replay', 'new'),
+          promptId: undefined,
+          sourceRecordIds: ['r2'],
+        },
+      ],
+    });
+    restoreLocalDeletionBlocks(store, [head, local, block('tail-live', 'p2')]);
+    expect(store.getSnapshot().blocks.map((item) => item.id)).toEqual([
+      'head',
+      'local',
+      'tail-replay',
+    ]);
+  });
+
+  it('prunes confirmed deletion immediately while retaining other turns and local commands', () => {
+    const local = {
+      ...block('echo', ''),
+      promptId: undefined,
+      meta: { localCommandId: 'local-command:extension' },
+    };
+    const first = {
+      ...block('first', ''),
+      promptId: undefined,
+      sourceRecordIds: ['r1'],
+    };
+    const firstReply = {
+      ...block('answer', ''),
+      kind: 'assistant' as const,
+      promptId: undefined,
+      sourceRecordIds: ['r1-answer'],
+    };
+    const next = {
+      ...block('next', ''),
+      promptId: undefined,
+      sourceRecordIds: ['r2'],
+    };
+    const store = createDaemonTranscriptStore({
+      blocks: [
+        first,
+        local,
+        firstReply,
+        {
+          ...block('notice', ''),
+          kind: 'status',
+          promptId: undefined,
+          source: 'background_notification',
+          sourceRecordIds: ['notice-record'],
+        },
+        next,
+        block('answer2', 'p2'),
+      ],
+    });
+    removeDeletedMessageBlocks(store, ['r1'], ['p1']);
+    expect(store.getSnapshot().blocks.map((item) => item.id)).toEqual([
+      'echo',
+      'notice',
+      'next',
+      'answer2',
+    ]);
+    restoreLocalDeletionBlocks(store, store.getSnapshot().blocks);
+    expect(store.getSnapshot().blocks.map((item) => item.id)).toEqual([
+      'echo',
+      'notice',
+      'next',
+      'answer2',
+    ]);
   });
 
   it('retains local messages when reload fails without any server blocks', () => {

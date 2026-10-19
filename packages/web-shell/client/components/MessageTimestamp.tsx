@@ -69,6 +69,7 @@ export function MessageTimestamp({
     undefined,
   );
   const openedByHover = useRef(false);
+  const hoverFocus = useRef<HTMLElement | null>(null);
   const cancelClose = () => clearTimeout(closeTimer.current);
   const handleDirectInteraction = () => {
     cancelClose();
@@ -129,11 +130,26 @@ export function MessageTimestamp({
             onPointerEnter={(event) => {
               if (event.pointerType !== 'mouse') return;
               cancelClose();
-              openedByHover.current = true;
-              setMenuOpen(true);
+              if (!menuOpen) {
+                hoverFocus.current =
+                  document.activeElement instanceof HTMLElement
+                    ? document.activeElement
+                    : null;
+                openedByHover.current = true;
+                setMenuOpen(true);
+              }
             }}
             onPointerLeave={scheduleClose}
-            onPointerDown={handleDirectInteraction}
+            onPointerDown={(event) => {
+              if (
+                event.pointerType === 'mouse' &&
+                event.button === 0 &&
+                !event.ctrlKey &&
+                menuOpen
+              )
+                event.preventDefault();
+              handleDirectInteraction();
+            }}
             onKeyDown={handleDirectInteraction}
           >
             <EllipsisVerticalIcon strokeWidth={1.6} aria-hidden="true" />
@@ -145,6 +161,14 @@ export function MessageTimestamp({
           onPointerEnter={cancelClose}
           onPointerLeave={scheduleClose}
           onKeyDown={handleDirectInteraction}
+          onPointerDown={handleDirectInteraction}
+          onFocusCapture={() => {
+            if (openedByHover.current)
+              hoverFocus.current?.focus({ preventScroll: true });
+          }}
+          onFocusOutside={(event) => {
+            if (openedByHover.current) event.preventDefault();
+          }}
           onCloseAutoFocus={(event) => {
             if (openedByHover.current) event.preventDefault();
           }}

@@ -481,7 +481,13 @@ export function deleteTranscriptMessageGroups(
             ancestor.subtype === undefined &&
             !displayCommandRecords.has(ancestor.uuid)
           ) {
-            if (ancestor.promptId) earlierPromptIds.add(ancestor.promptId);
+            if (!ancestor.promptId) {
+              throw new MessageGroupDeletionError(
+                'invalid_history',
+                'This legacy turn has no compression identity',
+              );
+            }
+            earlierPromptIds.add(ancestor.promptId);
           }
           parent = ancestor.parentUuid;
         }

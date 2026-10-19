@@ -527,6 +527,29 @@ describe('message group deletion', () => {
     ).not.toThrow();
   });
 
+  it('rejects unidentified removed ancestors of abandoned compression checkpoints', () => {
+    const legacy = record('legacy', null, 'user');
+    const compression = record('compression', 'legacy', 'system', {
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          originalTokenCount: 20,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [legacy.message!],
+      },
+    });
+    const tail = user('tail', 'legacy');
+    expect(() =>
+      deleteTranscriptMessageGroups(
+        [legacy, compression, tail],
+        ['legacy'],
+        anchor,
+      ),
+    ).toThrow('legacy turn');
+  });
+
   it('rejects a legacy turn whose compression ownership is unknown', () => {
     const legacy = record('legacy', null, 'user');
     const compression = record('compression', 'legacy', 'system', {

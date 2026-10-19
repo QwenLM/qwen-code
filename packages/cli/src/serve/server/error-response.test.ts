@@ -57,6 +57,21 @@ function responseMock(): {
 }
 
 describe('message deletion errors', () => {
+  it('does not certify a later request as persisted while context recovery is required', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reload the session', {
+        errorKind: 'session_history_context_unavailable',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reload the session',
+      code: 'session_history_context_unavailable',
+    });
+  });
+
   it('preserves committed deletion identities in the 503 response', () => {
     const { response, status, json } = responseMock();
     sendBridgeError(

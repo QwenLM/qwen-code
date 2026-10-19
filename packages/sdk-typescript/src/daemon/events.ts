@@ -871,7 +871,6 @@ export interface DaemonSessionMessagesDeletedData {
   sessionId: string;
   deletedGroupIds: string[];
   deletedPromptIds: string[];
-  removedApiPromptIds?: string[];
   [key: string]: unknown;
 }
 
@@ -1895,10 +1894,7 @@ function isSessionMessagesDeletedData(
     Array.isArray(value['deletedGroupIds']) &&
     value['deletedGroupIds'].every((id) => typeof id === 'string') &&
     Array.isArray(value['deletedPromptIds']) &&
-    value['deletedPromptIds'].every((id) => typeof id === 'string') &&
-    (value['removedApiPromptIds'] === undefined ||
-      (Array.isArray(value['removedApiPromptIds']) &&
-        value['removedApiPromptIds'].every((id) => typeof id === 'string')))
+    value['deletedPromptIds'].every((id) => typeof id === 'string')
   );
 }
 

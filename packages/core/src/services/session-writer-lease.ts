@@ -2573,6 +2573,7 @@ export class SessionWriterLease {
         `.${randomUUID()}.jsonl.tmp`,
       );
       let temporary: fs.FileHandle | undefined;
+      let replaced = false;
       try {
         temporary = await fs.open(temporaryPath, 'wx', 0o600);
         const mode = this.expectedTranscriptState?.exists
@@ -2589,6 +2590,7 @@ export class SessionWriterLease {
         await syncDurableLockDirectory(directory);
         await this.assertOwnedAndUnchangedOnce();
         await fs.rename(temporaryPath, this.transcriptPath);
+        replaced = true;
         await syncDurableLockDirectory(directory);
         const snapshot = await captureTranscriptSnapshot(
           this.transcriptPath,
@@ -2604,6 +2606,10 @@ export class SessionWriterLease {
         this.expectedTranscriptHasher = snapshot.hasher;
       } catch (error) {
         if (error instanceof SessionWriterError) throw error;
+        if (!replaced) {
+          await this.assertOwnedAndUnchangedOnce();
+          throw error;
+        }
         throw new SessionWriterUnavailableError({
           cause: error instanceof Error ? error : undefined,
         });

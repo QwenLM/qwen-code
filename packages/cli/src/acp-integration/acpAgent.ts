@@ -4759,6 +4759,7 @@ class QwenAgent implements Agent {
       projection: SessionLiveRestoreProjection | undefined,
     ) => Promise<T>,
   ): Promise<T> {
+    await session.recoverMessageDeletionContext();
     await session.assertCanStartTurn();
     const config = session.getConfig();
     const releaseGate = session.beginClose();

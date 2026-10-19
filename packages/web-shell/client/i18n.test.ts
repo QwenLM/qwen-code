@@ -24,11 +24,15 @@ describe('web-shell i18n catalog', () => {
     expect(en('messageDelete.confirmTitle', { count: 2 })).toBe(
       'Delete 2 message groups?',
     );
-    for (const language of ['en', 'zh-CN'] as const) {
-      expect(getTranslator(language)('messageDelete.unsupported')).not.toBe(
-        'messageDelete.unsupported',
-      );
-    }
+    expect(en('messageDelete.unsupported')).toBe(
+      'Deleting saved messages is not supported for this session.',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.unsupported')).toBe(
+      '此会话不支持删除已保存的消息。',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.selected', { count: 2 })).toBe(
+      '已选 2 组',
+    );
   });
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
