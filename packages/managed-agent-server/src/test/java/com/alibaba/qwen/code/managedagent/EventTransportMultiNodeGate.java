@@ -507,6 +507,8 @@ class EventTransportMultiNodeGate {
         // Establish a's writer before b joins: either dispatcher can claim
         // a fresh Turn, but a live writer keeps its journal ownership.
         Node b = node("b").start(true);
+        // The surviving node must still own the journal whose failed sends we await.
+        assertThat(writerId(session)).isEqualTo(a.bootId);
 
         try (Frozen proxy = freezeProxy()) {
             turn(a, session, "MQ3_DURING_LONG_OUTAGE");
