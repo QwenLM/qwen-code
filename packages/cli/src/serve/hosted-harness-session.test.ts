@@ -359,16 +359,16 @@ const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 
-// Every turn-settling wait in this file polls the daemon until the pipeline
-// reports a terminal state. On a loaded runner that pipeline outlasts a 10 s
-// budget long before anything is wrong with it, which is how the same file
-// came to fail on different assertions on different days (#14406, #14023).
-// Use the slow-host policy the file already applies elsewhere (evaluated once
-// at module load, so the budget is stable across the whole file run) instead
-// of a fresh number, and clamp to the per-test ceiling the runner actually
-// sets (60 s on the ecs-qwen pool, 15 s elsewhere — packages/cli/vitest.config.ts)
-// so a genuine hang still fails on the assertion inside the test rather than
-// as a bare runner timeout.
+// Turn-settling waits poll the daemon until the pipeline reports a terminal
+// state. On a loaded runner that pipeline outlasts a fixed budget long before
+// anything is wrong with it: #14406 and #14023 both failed on waits running on
+// vitest's 1 s default. Budget them through the slow-host policy the file
+// already applies elsewhere (evaluated once at module load, so the budget is
+// stable across the whole file run) instead of a fresh number, clamped to the
+// per-test ceiling the runner actually sets (60 s on the ecs-qwen pool, 15 s
+// elsewhere — packages/cli/vitest.config.ts) so a genuine hang still fails on
+// the assertion inside the test rather than as a bare runner timeout. Waits
+// still carrying a fixed budget are outside this change.
 const SETTLE_TIMEOUT_MS = isSlowTestHost()
   ? Math.min(
       45_000,
@@ -1875,8 +1875,9 @@ describe('Hosted Harness no-tool session', () => {
       return app;
     });
     try {
-      await vi.waitFor(() =>
-        expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1),
+      await vi.waitFor(
+        () => expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1),
+        { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(opened).toBe(false);
     } finally {
@@ -5816,6 +5817,8 @@ describe('Hosted Harness no-tool session', () => {
       releaseModel();
       // A failed assertion must not leave the turn running into the
       // teardown, whose close refuses an active turn.
+      // Cleanup, not proof: keep it short so a wedged turn still leaves the
+      // assertion above inside this test's `}, 45_000);` ceiling.
       await vi
         .waitFor(
           async () => {
@@ -5824,7 +5827,7 @@ describe('Hosted Harness no-tool session', () => {
             );
             expect(idle.body.hasActivePrompt).toBe(false);
           },
-          { timeout: SETTLE_TIMEOUT_MS },
+          { timeout: 10_000 },
         )
         .catch(() => undefined);
     }
@@ -14158,6 +14161,8 @@ describe('Hosted Harness no-tool session', () => {
       } finally {
         finish();
         await submitted;
+        // Cleanup, not proof: a wedged turn must still report the try block's
+        // assertion rather than this wait's timeout.
         await vi.waitFor(
           async () => {
             const status = await authorize(
@@ -14167,7 +14172,7 @@ describe('Hosted Harness no-tool session', () => {
               true,
             );
           },
-          { timeout: SETTLE_TIMEOUT_MS },
+          { timeout: 10_000 },
         );
         await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
       }
@@ -15124,12 +15129,15 @@ describe('Hosted Harness no-tool session', () => {
           })
       ).status,
     ).toBe(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(createDeclarations).toEqual([
       'read_file',
       'write_file',
@@ -15170,12 +15178,15 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(resumedDeclarations).toEqual([
       'read_file',
       'write_file',
@@ -17093,13 +17104,16 @@ describe('Hosted Harness no-tool session', () => {
           payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
         })
         .expect(202);
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', created.body.clientId);
-        expect(status.body.hasActivePrompt).toBe(false);
-        expect(status.body.recoveryBlocked).toBe(true);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
       await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .set('X-Qwen-Client-Id', created.body.clientId)
         .expect(204);
@@ -17109,31 +17123,37 @@ describe('Hosted Harness no-tool session', () => {
         supertest(replacementServer).post(`/session/${SESSION_ID}/load`),
       ).send({ managedSessionStore: store(), driveRuntimeRecovery: true });
       expect(loaded.status).toBe(200);
-      await vi.waitFor(async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
-            tenantId: 'tenant',
-            workspaceId: 'workspace',
-            sessionId: SESSION_ID,
-          },
-        );
-        const terminals = journal.events.filter(
-          (event) => event.kind === 'turn.settled',
-        );
-        expect(terminals).toHaveLength(1);
-        expect(terminals[0].payload['outcome']).toBe('cancelled');
-      });
+      await vi.waitFor(
+        async () => {
+          const journal = await LocalJsonlManagedSessionJournalStore.read(
+            path.join(state.root, `${SESSION_ID}.jsonl`),
+            {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          );
+          const terminals = journal.events.filter(
+            (event) => event.kind === 'turn.settled',
+          );
+          expect(terminals).toHaveLength(1);
+          expect(terminals[0].payload['outcome']).toBe('cancelled');
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
       expect(state.model).toHaveBeenCalledTimes(1);
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', loaded.body.clientId);
-        expect(status.body).toMatchObject({
-          hasActivePrompt: false,
-          recoveryBlocked: false,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId);
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
       await headers(
         supertest(replacementServer).post(`/session/${SESSION_ID}/detach`),
       )
@@ -20075,8 +20095,10 @@ describe('Hosted Harness no-tool session', () => {
       });
     });
     await f.submit(10_000);
+    // Bounded by the submitted deadline: a later model entry would put /cancel
+    // past the deadline the ordering assertion below pins.
     await vi.waitFor(() => expect(modelWaiting).toBe(true), {
-      timeout: SETTLE_TIMEOUT_MS,
+      timeout: 10_000,
     });
     await f
       .authorize(supertest(f.server).post(`/session/${SESSION_ID}/cancel`))
@@ -35005,13 +35027,15 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
 
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
