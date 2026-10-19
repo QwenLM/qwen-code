@@ -852,8 +852,8 @@ qwen:
 
 New credentials use only the active key; reads select the active or previous
 key by the ID stored with the ciphertext, and an unavailable ID fails closed.
-The YAML-only ring, the retirement query and the single-key-pair maintenance
-entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
+The YAML-only ring, the retirement query, the operator-recovery ring and the
+single-key-pair CSI/migration entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
 with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
 Two optional knobs change how the Broker listens and how long it waits for a
