@@ -167,6 +167,8 @@ export interface ProcessTableRow {
    * unproven), never 'gone' and never 'recycled'.
    */
   readonly runningMs: number | undefined;
+  /** ps's STAT column; a leading `Z` is a zombie awaiting reap, not live. */
+  readonly state?: string;
   readonly args: string;
 }
 
@@ -193,11 +195,14 @@ function parseProcessTable(
 ): ReadonlyMap<number, ProcessTableRow> {
   const rows = new Map<number, ProcessTableRow>();
   for (const line of stdout.split('\n')) {
-    const match = /^(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/u.exec(line.trim());
+    const match = /^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/u.exec(
+      line.trim(),
+    );
     if (!match) continue;
     const pid = Number.parseInt(match[1]!, 10);
     const pgid = Number.parseInt(match[2]!, 10);
     const runningMs = parsePsElapsed(match[3]!);
+    const state = match[4]!;
     if (
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
@@ -209,7 +214,7 @@ function parseProcessTable(
     // A row whose elapsed column cannot be dated stays in the table:
     // dropping it would read the group's only member as absent — 'gone',
     // resolved silently, ledger deleted with the live group running.
-    rows.set(pid, { pid, pgid, runningMs, args: match[4] ?? '' });
+    rows.set(pid, { pid, pgid, runningMs, state, args: match[5] ?? '' });
   }
   return rows;
 }
@@ -227,7 +232,7 @@ export function queryProcessTable(): ReadonlyMap<number, ProcessTableRow> {
     // -ww: procps truncates every row to the terminal width even into a
     // pipe, and the identity markers are matched at the END of the args
     // column — a narrow inherited COLUMNS would cut them off a live row.
-    ['-A', '-ww', '-o', 'pid=,pgid=,etime=,args='],
+    ['-A', '-ww', '-o', 'pid=,pgid=,etime=,stat=,args='],
     {
       encoding: 'utf8',
       maxBuffer: PROCESS_QUERY_MAX_BUFFER,
@@ -303,6 +308,7 @@ function judgeWorkerIdentity(
   now: number,
   platform: NodeJS.Platform = process.platform,
 ): WorkerIdentity {
+  if (isZombieRow(row)) return 'recycled';
   if (!row.args.includes('managed-runtime-worker')) return 'recycled';
   // The pid answers but its age cannot be read: nothing here dates the
   // process AS the record's, and nothing proves it a recycler either.
@@ -345,6 +351,11 @@ function groupMatchesRecord(
   );
 }
 
+/** A zombie has exited and only awaits its parent's reap; it runs nothing. */
+function isZombieRow(row: ProcessTableRow): boolean {
+  return row.state?.startsWith('Z') ?? false;
+}
+
 /** What the live table can prove about the group a record holds. */
 type GroupIdentity = 'gone' | 'ours' | 'recycled' | 'unknown';
 
@@ -370,7 +381,9 @@ function judgeGroupIdentity(
   platform: NodeJS.Platform = process.platform,
 ): GroupIdentity | undefined {
   if (table === undefined) return undefined;
-  const members = [...table.values()].filter((row) => row.pgid === record.pgid);
+  const members = [...table.values()].filter(
+    (row) => row.pgid === record.pgid && !isZombieRow(row),
+  );
   if (members.length === 0) return 'gone';
   if (groupMatchesRecord(members, record, now, platform)) return 'ours';
   const leader = members.find((member) => member.pid === record.pgid);
@@ -1185,7 +1198,7 @@ function holdsForLiveHost(
   if (!alive(worker.hostPid)) return false;
   if (table === undefined) return worker.hostPid !== 1;
   const host = table.get(worker.hostPid);
-  if (host === undefined) return false;
+  if (host === undefined || isZombieRow(host)) return false;
   if (
     !host.args.includes('--acp') &&
     !host.args.includes('--experimental-acp')
