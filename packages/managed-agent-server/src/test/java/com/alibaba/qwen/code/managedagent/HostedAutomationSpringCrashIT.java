@@ -30,6 +30,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -53,6 +55,8 @@ class HostedAutomationSpringCrashIT {
             "listening on http://127\\.0\\.0\\.1:(\\d+)");
     private final ObjectMapper json = new ObjectMapper();
     private final StringBuilder harnessLog = new StringBuilder();
+    private final List<String> modelPrompts =
+            Collections.synchronizedList(new ArrayList<>());
 
     @TempDir
     private Path temporary;
@@ -68,6 +72,9 @@ class HostedAutomationSpringCrashIT {
     private String internalUrl;
     private String publicUrl;
     private String tenant;
+    private int fixtureInternalPort;
+    private int fixturePublicPort;
+    private String fixtureDatabaseUrl;
 
     @AfterEach
     void tearDown() throws Exception {
@@ -141,6 +148,11 @@ class HostedAutomationSpringCrashIT {
 
     private void startFixture(Path root, String tenant) throws Exception {
         Path log = root.resolve("fixture.log");
+        Files.deleteIfExists(root.resolve("ready.json"));
+        if (fixtureInternalPort == 0) {
+            fixtureInternalPort = freePort();
+            fixturePublicPort = freePort();
+        }
         ProcessBuilder builder = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java")
                         .toString(),
@@ -148,9 +160,9 @@ class HostedAutomationSpringCrashIT {
                 HostedAutomationCrashFixtureMain.class.getName(),
                 root.toString(), required("node.executable"),
                 cliEntry().toString(), tenant,
-                String.valueOf(freePort()), String.valueOf(brokerPort),
-                String.valueOf(freePort()));
-        builder.environment().put("FG11C_MYSQL_URL", required("mysql.url"));
+                String.valueOf(fixtureInternalPort), String.valueOf(brokerPort),
+                String.valueOf(fixturePublicPort));
+        builder.environment().put("FG11C_MYSQL_URL", fixtureDatabaseUrl);
         builder.environment().put("FG11C_MYSQL_USER", required("mysql.user"));
         builder.environment().put("FG11C_MYSQL_PASSWORD",
                 System.getProperty("mysql.password", ""));
@@ -189,7 +201,8 @@ class HostedAutomationSpringCrashIT {
 
     private void respondToModel(HttpExchange exchange) throws IOException {
         try {
-            json.readTree(exchange.getRequestBody());
+            String prompt = json.readTree(exchange.getRequestBody()).toString();
+            modelPrompts.add(prompt);
             ObjectNode chunk = json.createObjectNode();
             chunk.put("id", "fg11c2-fixture")
                     .put("object", "chat.completion.chunk")
@@ -394,6 +407,101 @@ class HostedAutomationSpringCrashIT {
                     Integer.class, tenant, definition);
             return count != null && count > 0 ? true : null;
         });
+    }
+
+    private String freshDatabaseUrl() {
+        String base = required("mysql.url");
+        String name = "fg11c2_" + UUID.randomUUID().toString().replace("-", "");
+        fixtureDatabaseUrl = base.replaceFirst("^(jdbc:mysql://[^/]+/)[^?]+",
+                "$1" + name);
+        return fixtureDatabaseUrl;
+    }
+
+    private void killFixture() throws Exception {
+        assertThat(fixture).as("a fixture to kill").isNotNull();
+        fixture.destroyForcibly();
+        assertThat(fixture.waitFor(15, TimeUnit.SECONDS))
+                .as("the killed Spring generation exited").isTrue();
+        fixture = null;
+    }
+
+    @Test
+    @Timeout(900)
+    void fg11c2SpringKillBeforeAnswerNeverFiresTwice() throws Exception {
+        assertThat(System.getProperty("os.name"))
+                .as("FG11c slice 2 sends POSIX signals")
+                .doesNotContainIgnoringCase("windows");
+        assertThat(System.getProperty("mysql.url"))
+                .as("FG11c slice 2 requires -Dmysql.url")
+                .startsWith("jdbc:mysql:");
+        String databaseUrl = freshDatabaseUrl();
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+                new DriverManagerDataSource(databaseUrl,
+                        required("mysql.user"),
+                        System.getProperty("mysql.password", "")));
+        jdbc.setQueryTimeout(10);
+        temporary = temporary.toRealPath();
+        String tenantName = "hosted-automation-kill-answer-" + UUID.randomUUID();
+        startModel();
+        harnessPort = freePort();
+        brokerPort = freePort();
+        Path root = Files.createDirectories(temporary.resolve("kill-answer"));
+        startFixture(root, tenantName);
+        startHarness();
+        String session = createSession("kill-answer");
+        String definition = apiRequest("POST", "/v1/agent-automations",
+                definition(session, "FG11C2_KILL_ANSWER"), "fg11c2-ka-def", 202)
+                .path("id").asText();
+        control("arm-fire", "");
+        control("scan", "");
+        await("the scanner's fire reached the hold", 120,
+                () -> fireReached() ? true : null);
+        assertThat(occurrenceOutcome(definition)).isEqualTo("firing");
+        // Kill Spring with the answer in flight: the occurrence is committed,
+        // the answer never lands.
+        killFixture();
+        startFixture(root, tenantName);
+        await("one run chain for the re-driven slot", 240, () -> {
+            Integer chains = jdbc.queryForObject(
+                    "SELECT COUNT(DISTINCT run_id) FROM ma_schedule_occurrence"
+                            + " WHERE tenant_id = ? AND schedule_id = ?"
+                            + " AND run_id IS NOT NULL",
+                    Integer.class, tenant, definition);
+            return "fired".equals(occurrenceOutcome(definition))
+                    && chains != null && chains == 1 ? true : null;
+        });
+        // `fired` lands with the fire answer, before the wake turn's model
+        // call starts, so wait for the turn and then pin it to exactly one.
+        await("the re-driven run's model Turn", 120,
+                () -> modelPrompts.stream()
+                        .anyMatch(prompt -> prompt.contains(
+                                "FG11C2_KILL_ANSWER")) ? true : null);
+        long turns = modelPrompts.stream()
+                .filter(prompt -> prompt.contains("FG11C2_KILL_ANSWER"))
+                .count();
+        assertThat(turns).as("one model Turn for the re-driven run")
+                .isEqualTo(1);
+    }
+
+    private boolean fireReached() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder(
+                            URI.create(controlUrl + "/control/fire-reached"))
+                    .timeout(Duration.ofSeconds(5)).GET().build();
+            HttpResponse<String> response = HttpClient.newHttpClient()
+                    .send(request, HttpResponse.BodyHandlers.ofString());
+            return response.statusCode() == 200
+                    && response.body().contains("\"reached\":true");
+        } catch (Exception unavailable) {
+            return false;
+        }
+    }
+
+    private String occurrenceOutcome(String schedule) {
+        return jdbc.queryForObject(
+                "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                        + " AND schedule_id = ? ORDER BY slot", String.class,
+                tenant, schedule);
     }
 
     private String createSession(String name) throws Exception {

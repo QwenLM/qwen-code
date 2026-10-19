@@ -6,22 +6,31 @@
 
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.AutomationScanner;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 // FG11c slice 2 (issue #14446): the killable control plane of the automation
 // crash gates. Sibling of HostedChannelCrashFixtureMain (FG7c) with the
@@ -33,6 +42,12 @@ import java.util.Map;
 // carries the ports the test needs. Everything else is ordinary traffic
 // through the internal server.
 public final class HostedAutomationCrashFixtureMain {
+    private static final AtomicBoolean ARMED = new AtomicBoolean();
+    private static final CountDownLatch FIRE_REACHED =
+            new CountDownLatch(1);
+    private static final CountDownLatch FIRE_RELEASE =
+            new CountDownLatch(1);
+
     public static void main(String[] args) throws Exception {
         Path root = Path.of(args[0]);
         String node = args[1];
@@ -44,7 +59,7 @@ public final class HostedAutomationCrashFixtureMain {
         ObjectMapper mapper = new ObjectMapper();
         Files.createDirectories(root.resolve("workspace-mount"));
         var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
-                ManagedAgentServerApplication.class).run(
+                ManagedAgentServerApplication.class, FireHold.class).run(
                 "--server.address=127.0.0.1", "--server.port=" + publicPort,
                 "--spring.datasource.url=" + System.getenv("FG11C_MYSQL_URL"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -100,6 +115,21 @@ public final class HostedAutomationCrashFixtureMain {
         }
         HttpServer control = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0), 0);
+        control.createContext("/control/arm-fire", exchange -> {
+            ARMED.set(true);
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        control.createContext("/control/fire-reached", exchange -> {
+            byte[] body = ("{\"reached\":"
+                    + (FIRE_REACHED.getCount() == 0) + "}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type",
+                    "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
         control.createContext("/control/scan", exchange -> {
             try {
                 spring.getBean(AutomationScanner.class).scan();
@@ -119,6 +149,48 @@ public final class HostedAutomationCrashFixtureMain {
         Files.move(ready, root.resolve("ready.json"),
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    // FG11c slice 2: the fire window. The scanner writes the occurrence as
+    // `firing` and then calls runAutomationOperation; holding that call
+    // leaves the occurrence in exactly the state a Spring crash between the
+    // occurrence and its answer produces, without touching the wire.
+    @Configuration
+    static class FireHold {
+        @Bean
+        static BeanPostProcessor holdHarnessConnector() {
+            return new BeanPostProcessor() {
+                @Override
+                public Object postProcessAfterInitialization(Object bean,
+                        String name) {
+                    if (!(bean instanceof HarnessConnector connector)) {
+                        return bean;
+                    }
+                    return Proxy.newProxyInstance(
+                            HarnessConnector.class.getClassLoader(),
+                            new Class<?>[] {HarnessConnector.class},
+                            (proxy, method, args) -> {
+                                if ("runAutomationOperation".equals(
+                                        method.getName())
+                                        && ARMED.get()) {
+                                    FIRE_REACHED.countDown();
+                                    try {
+                                        FIRE_RELEASE.await(180,
+                                                TimeUnit.SECONDS);
+                                    } catch (InterruptedException interrupted) {
+                                        Thread.currentThread().interrupt();
+                                    }
+                                }
+                                try {
+                                    return method.invoke(connector, args);
+                                } catch (InvocationTargetException
+                                        failure) {
+                                    throw failure.getCause();
+                                }
+                            });
+                }
+            };
+        }
     }
 
     private static void respondFailure(HttpExchange exchange,
