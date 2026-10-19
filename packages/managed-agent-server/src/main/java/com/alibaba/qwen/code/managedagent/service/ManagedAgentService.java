@@ -382,6 +382,10 @@ public class ManagedAgentService {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
         }
+        // A creation with input warms through its first Turn's dispatch.
+        if (admission.turnId() == null) {
+            coordinator.warmSession(tenantId, admission.sessionId());
+        }
         dispatch(tenantId, admission, true);
         return response(admission);
     }
@@ -1852,7 +1856,7 @@ public class ManagedAgentService {
         if (normalized.stream().anyMatch(block -> !"text".equals(block.get("type")))
                 && digests.byteLength(normalized) > ManagedInputAttachments.MAX_INPUT_BYTES) {
             throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE, "input_too_large",
-                    "An input containing attachments must fit within 48 KiB of encoded JSON.");
+                    "An input containing attachments must fit within 8 MiB of encoded JSON.");
         }
         return normalized;
     }
