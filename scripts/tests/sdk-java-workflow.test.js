@@ -679,6 +679,37 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     ).toHaveLength(1);
   });
 
+  it('sets the packet budget above the escaped inventory fixture before JDBC verification', () => {
+    const steps = parse(workflow).jobs['mysql-integration'].steps;
+    const index = steps.findIndex(
+      (candidate) =>
+        candidate.name ===
+        'Configure MariaDB packet budget for large-object tests',
+    );
+    expect(index).toBeGreaterThan(-1);
+    const configure = steps[index];
+    const packetBytes = Number(
+      configure.run.match(/SET GLOBAL max_allowed_packet=(\d+)/)?.[1],
+    );
+    const inventory = readFileSync(
+      'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationInventory.java',
+      'utf8',
+    );
+    const inventoryMiB = Number(
+      inventory.match(/MAX_BYTES = (\d+) \* 1024 \* 1024;/)?.[1],
+    );
+    expect(packetBytes).toBeGreaterThan(
+      2 * (inventoryMiB * 1024 * 1024 + 1) + 1024,
+    );
+    expect(configure.env.MARIADB_CONTAINER).toBe(
+      '${{ job.services.mariadb.id }}',
+    );
+    const verify = steps.findIndex((candidate) =>
+      candidate.run?.includes('clean verify'),
+    );
+    expect(verify).toBeGreaterThan(index);
+  });
+
   it('keeps the MariaDB datadir on tmpfs so a pool run strands no anonymous volume', () => {
     // mariadb declares VOLUME /var/lib/mysql, and the runner's service
     // teardown is `docker rm --force` without -v: an unmounted datadir
