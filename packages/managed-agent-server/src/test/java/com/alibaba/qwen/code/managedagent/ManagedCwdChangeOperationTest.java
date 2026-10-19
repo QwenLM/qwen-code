@@ -1,21 +1,21 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
-import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -109,7 +109,7 @@ class ManagedCwdChangeOperationTest {
                 .isEqualTo(operation.operationId());
         assertThatThrownBy(() -> begin(fixture, sessionId, "key-1",
                 "digest-2", "services/b", 1))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus())
                             .isEqualTo(HttpStatus.CONFLICT);
                     assertThat(error.getCode())
@@ -150,7 +150,7 @@ class ManagedCwdChangeOperationTest {
         fixture.insertRuntimeOwner(TENANT, sessionId, state);
         assertThatThrownBy(() -> fixture.tx(() -> begin(fixture, sessionId,
                 "key", "digest", "services/b", 1)))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
@@ -269,7 +269,7 @@ class ManagedCwdChangeOperationTest {
         Fixture fixture = fixture(true);
         assertThatThrownBy(() -> begin(fixture, "missing", "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
         String legacyId = fixture.store.insertSessionCommand(TENANT,
@@ -277,7 +277,7 @@ class ManagedCwdChangeOperationTest {
                 null, List.of(), null).sessionId();
         assertThatThrownBy(() -> begin(fixture, legacyId, "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error,
                                 HttpStatus.BAD_REQUEST,
                                 "unsupported_feature"));
@@ -288,7 +288,7 @@ class ManagedCwdChangeOperationTest {
                 deletedId);
         assertThatThrownBy(() -> begin(fixture, deletedId, "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
         String archivedId = fixture.createBoundSession(TENANT, WS);
@@ -297,7 +297,7 @@ class ManagedCwdChangeOperationTest {
                         + " session_id = ?", TENANT, archivedId);
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_state_conflict"));
     }
@@ -308,14 +308,14 @@ class ManagedCwdChangeOperationTest {
         String gatedId = disabled.createBoundSession(TENANT, WS);
         assertThatThrownBy(() -> begin(disabled, gatedId, "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
         // The deployment gate opens only after the actor check: a stranger
         // must not read the flag from its refusal either.
         assertThatThrownBy(() -> begin(disabled, gatedId, "key", "digest",
                 "a", 1, "stranger", "digest-stranger"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
 
@@ -328,13 +328,13 @@ class ManagedCwdChangeOperationTest {
         // creator's grant set as before.
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "stranger", "digest-stranger"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
         fixture.grant(TENANT, WS, "colleague", "READER");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "colleague", "digest-colleague"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
         fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
@@ -353,7 +353,7 @@ class ManagedCwdChangeOperationTest {
         assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
                 "digest-2", "services/c", 1, "operator-colleague",
                 "digest-operator"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
         fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
@@ -365,7 +365,7 @@ class ManagedCwdChangeOperationTest {
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
     }
@@ -386,7 +386,7 @@ class ManagedCwdChangeOperationTest {
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "services/b", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
     }
@@ -418,7 +418,7 @@ class ManagedCwdChangeOperationTest {
         assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
                 "digest-2", "services/c", 1, "operator-colleague",
                 "digest-operator"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
     }
@@ -447,7 +447,7 @@ class ManagedCwdChangeOperationTest {
         assertThatThrownBy(() -> gated.beginCwdChangeOperation(TENANT,
                 sessionId, ACTOR, ACTOR_DIGEST, "key-2", "digest-2",
                 "services/b", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
     }
@@ -461,7 +461,7 @@ class ManagedCwdChangeOperationTest {
                         + " AND workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, drainedId, "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
         fixture.jdbc.update("UPDATE ma_workspace SET"
@@ -470,7 +470,7 @@ class ManagedCwdChangeOperationTest {
                 TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, drainedId, "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "workspace_unavailable"));
         fixture.jdbc.update("UPDATE ma_workspace SET"
@@ -478,7 +478,7 @@ class ManagedCwdChangeOperationTest {
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, drainedId, "key", "digest",
                 "a", 2))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "context_revision_conflict"));
     }
@@ -490,7 +490,7 @@ class ManagedCwdChangeOperationTest {
         fixture.insertTurn(sessionId, "turn-a", "ACCEPTED");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key-a",
                 "digest-a", "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
         fixture.jdbc.update("UPDATE ma_turn SET status ="
@@ -501,7 +501,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(first.replayed()).isFalse();
         assertThatThrownBy(() -> begin(fixture, sessionId, "key-b",
                 "digest-b", "b", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
 
@@ -514,7 +514,7 @@ class ManagedCwdChangeOperationTest {
                 ManagedSchemaKeys.key("rename"), TENANT, secondId);
         assertThatThrownBy(() -> begin(fixture, secondId, "key", "digest",
                 "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
     }
@@ -536,7 +536,7 @@ class ManagedCwdChangeOperationTest {
                             fixture, sessionId, key, "digest-" + key, "a",
                             1));
                     outcomes.add("admitted");
-                } catch (ApiException error) {
+                } catch (ManagedAgentException error) {
                     outcomes.add(error.getCode());
                 } catch (Exception error) {
                     outcomes.add(error.getClass().getSimpleName());
@@ -836,7 +836,7 @@ class ManagedCwdChangeOperationTest {
         assertThatThrownBy(() -> fixture.store.beginCwdChangeOperation(
                 "tenant-b", sessionId, ACTOR, ACTOR_DIGEST, "key",
                 "digest", "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
     }
@@ -854,25 +854,25 @@ class ManagedCwdChangeOperationTest {
                         + " session_id = ?", TENANT, archivedId);
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "stranger", "digest-stranger"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
         fixture.grant(TENANT, WS, "colleague", "READER");
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "colleague", "digest-colleague"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
         fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "operator-colleague", "digest-operator"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_state_conflict"));
         String activeId = fixture.createBoundSession(TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, activeId, "key", "digest",
                 "a", 7, "stranger", "digest-stranger"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
     }
@@ -887,7 +887,7 @@ class ManagedCwdChangeOperationTest {
         assertThatThrownBy(() -> fixture.store.beginWorkspaceLifecycle(TENANT,
                 sessionId, OperationKind.CLOSE, ACTOR, ACTOR_DIGEST, "close",
                 "close-digest", true))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_operation_active"));
     }
@@ -997,7 +997,7 @@ class ManagedCwdChangeOperationTest {
         assertThatThrownBy(() -> fixture.store.insertTurnCommand(TENANT,
                 "SUBMIT", "turn", "digest", sessionId, List.of(),
                 "payload"))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
         // A cancel is still admitted while the operation is open — it
@@ -1127,7 +1127,7 @@ class ManagedCwdChangeOperationTest {
         fixture.insertAction(isolated, "approval-iso", future);
         assertThatThrownBy(() -> begin(fixture, isolated, "key-iso",
                 "digest-iso", "services/b", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
         fixture.jdbc.update("DELETE FROM ma_session_record WHERE"
@@ -1137,7 +1137,7 @@ class ManagedCwdChangeOperationTest {
         fixture.insertAction(sessionId, "approval-1", future);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
                 "digest-2", "services/c", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
 
@@ -1326,7 +1326,7 @@ class ManagedCwdChangeOperationTest {
                 .isEqualTo("context_revision_conflict");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key",
                 "digest-other", "a", 1))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "idempotency_conflict"));
     }
@@ -1561,7 +1561,7 @@ class ManagedCwdChangeOperationTest {
 
     private static final String TENANT = "cwd-tenant";
 
-    private static void assertRefusal(ApiException error, HttpStatus status,
+    private static void assertRefusal(ManagedAgentException error, HttpStatus status,
             String code) {
         assertThat(error.getStatus()).isEqualTo(status);
         assertThat(error.getCode()).isEqualTo(code);
@@ -1764,12 +1764,12 @@ class ManagedCwdChangeOperationTest {
             return new SessionLifecycleCoordinator(store, null, null,
                     warmer, new ChildResultRelayStore(jdbc),
                     new ObjectMapper(),
-                    new com.alibaba.qwen.code.managedagent.service.ChildLifecycleAdmissions(
+                    new com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions(
                             store,
-                            new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
+                            new com.alibaba.qwen.code.managedagent.model.RequestDigests(),
                             warmer),
                     org.mockito.Mockito.mock(
-                            com.alibaba.qwen.code.managedagent.service.ManagedAgentService.class),
+                            com.alibaba.qwen.code.managedagent.session.ManagedAgentService.class),
                     org.mockito.Mockito.mock(
                             org.springframework.beans.factory.ObjectProvider.class),
                     new AbstractExecutorService() {
