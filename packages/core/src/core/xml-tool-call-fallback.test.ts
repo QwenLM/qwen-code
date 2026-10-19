@@ -941,6 +941,17 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
   });
 
+  it('keeps a call that ends before an unclosed strict opener', () => {
+    // The unclosed opener leaves only what follows it ambiguous; a call that
+    // ends before the opener is unambiguous under every resolution.
+    const before = invoke('read_file', param('file_path', 'a.ts'));
+    const after = invoke('write_file', param('file_path', 'b.ts'));
+    const text = `${before}\n<parameter name="orphan">\n${after}`;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
+  });
+
   it('keeps a block that ends before the ambiguity when a mask extends', () => {
     // The refreshed masks must re-derive the ambiguity range pass 1 did;
     // reading that difference as an ownership disagreement dropped the intact

@@ -625,7 +625,13 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       block.parameterSpans.some(([start]) => start === unclosedStart),
     );
     if (!consumed) {
-      if (blocks.some((block) => unclosedStart < block.start)) return [];
+      // Only calls that reach past the opener fall inside the region whose
+      // ownership it disputes; a call that ends before it is unambiguous
+      // under every resolution.
+      const kept = blocks.filter((block) => block.end <= unclosedStart);
+      if (kept.length === 0) return [];
+      blocks.length = 0;
+      blocks.push(...kept);
       continue;
     }
     const flatRange = parameterRanges.find(
