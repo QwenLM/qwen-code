@@ -15846,6 +15846,16 @@ describe('Hosted Harness no-tool session', () => {
       // #13803: and, behind its own kind gate, its Workflow tool.
       'workflow',
     ]);
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === PROMPT_ID,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload['outcome']).toBe('completed');
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -28387,25 +28397,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
       vi.spyOn(
         LocalManagedSessionAuthority.prototype,
         'commitCheckpoint',
-      ).mockImplementation(function (
+      ).mockImplementation(async function (
         this: LocalManagedSessionAuthority,
-        command,
-        request,
-        actor,
+        ...args: Parameters<typeof commitOriginal>
       ) {
-        if (typeof command !== 'function') commits.push(command.commandId);
-        return commitOriginal.call(
-          this,
-          typeof command === 'function'
-            ? (state, coveredSequence) => {
-                const assigned = command(state, coveredSequence);
-                commits.push(assigned.commandId);
-                return assigned;
-              }
-            : command,
-          request,
-          actor,
-        );
+        const committed = await commitOriginal.apply(this, args);
+        // The command may be a deferred factory resolved inside the
+        // authority, so read the id from the committed receipt.
+        commits.push(String(committed.receipt?.commandId));
+        return committed;
       });
       const taken = await replacementHeaders(
         supertest(server).post(`/session/${SESSION_ID}/load`),

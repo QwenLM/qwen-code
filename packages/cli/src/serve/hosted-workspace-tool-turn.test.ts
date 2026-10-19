@@ -1778,13 +1778,14 @@ it('treats a null glob path as omitted and still dispatches the whole batch', as
 it('truncates an oversized glob result to a fitting prefix with a narrowing hint', async () => {
   turn = createSearchTurn();
   messageFitsInline.mockImplementation(
-    (type, messageParts) =>
+    (type, messageParts, model) =>
       Buffer.byteLength(
         JSON.stringify({
           uuid: randomUUID(),
           parentUuid: null,
           sessionId: session.authority.sessionHeader.sessionKey.sessionId,
           timestamp: new Date().toISOString(),
+          model,
           type,
           cwd: root,
           version: 'test',
@@ -8449,6 +8450,8 @@ it('probes every inconclusive background binding within one timeout window', asy
   const realClearTimeout = globalThis.clearTimeout;
   vi.useFakeTimers();
   let guard: ReturnType<typeof realSetTimeout> | undefined;
+  const abort = new AbortController();
+  let outcome: Promise<{ rejection: unknown }> | undefined;
   try {
     const template = backgroundCall().call;
     const backgroundCalls = [1, 2].map((index) => ({
@@ -8475,25 +8478,28 @@ it('probes every inconclusive background binding within one timeout window', asy
     const bothProbesStarted = new Promise<void>((resolve) => {
       resolveBothProbes = resolve;
     });
-    broker.backgroundProcessStatus.mockImplementation(
-      () =>
-        new Promise<undefined>((_resolve, reject) => {
-          if (broker.backgroundProcessStatus.mock.calls.length === 2)
-            resolveBothProbes();
-          setTimeout(
-            () => reject(new DOMException('timed out', 'TimeoutError')),
-            30_000,
-          );
-        }),
-    );
+    broker.backgroundProcessStatus.mockImplementation(() => {
+      abort.signal.throwIfAborted();
+      return new Promise<undefined>((_resolve, reject) => {
+        if (broker.backgroundProcessStatus.mock.calls.length === 2)
+          resolveBothProbes();
+        const timeout = setTimeout(
+          () => reject(new DOMException('timed out', 'TimeoutError')),
+          30_000,
+        );
+        abort.signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timeout);
+            reject(abort.signal.reason);
+          },
+          { once: true },
+        );
+      });
+    });
     let completed = false;
-    const outcome = turn
-      .execute(
-        backgroundCalls,
-        backgroundParts,
-        'model',
-        new AbortController().signal,
-      )
+    outcome = turn
+      .execute(backgroundCalls, backgroundParts, 'model', abort.signal)
       .then(
         () => ({ rejection: undefined }),
         (rejection: unknown) => ({ rejection }),
@@ -8533,6 +8539,8 @@ it('probes every inconclusive background binding within one timeout window', asy
     ).toHaveLength(0);
   } finally {
     if (guard !== undefined) realClearTimeout(guard);
+    abort.abort();
+    await outcome;
     vi.useRealTimers();
     turn = createTurn();
   }

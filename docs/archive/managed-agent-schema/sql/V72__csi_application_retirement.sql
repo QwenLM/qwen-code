@@ -1,0 +1,10 @@
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN progress_format VARCHAR(64);
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN progress_version BIGINT;
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN progress_stage VARCHAR(16);
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN settlement_deadline_ms BIGINT;
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN frozen_request_bytes LONGBLOB;
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN frozen_request_sha256 CHAR(64);
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN cut_bytes LONGBLOB;
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN cut_sha256 CHAR(64);
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN finalize_receipt_bytes LONGBLOB;
+ALTER TABLE managed_workspace_csi_retirement ADD COLUMN finalize_receipt_sha256 CHAR(64);

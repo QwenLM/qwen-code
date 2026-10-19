@@ -20,12 +20,12 @@ import java.util.UUID;
 
 /** Current original evidence, never a reusable execution capability. */
 public final class CsiNativeReadbackProtocol {
-    public static final int EXECUTION_RESULT_LIMIT = 1024 * 1024;
-    public static final int EXECUTION_RESPONSE_LIMIT = EXECUTION_RESULT_LIMIT + 16 * 1024;
     public static final String PATH = "/internal/runtime-broker/csi/v1/native:read";
     public static final String EXECUTE_PATH = ManagedCsiFilesProtocol.PREFIX + "/execute";
     public static final int REQUEST_LIMIT = 16 * 1024;
     public static final int RESPONSE_LIMIT = 8 * 1024 * 1024;
+    public static final int EXECUTION_RESULT_LIMIT = 1024 * 1024;
+    public static final int EXECUTION_RESPONSE_LIMIT = EXECUTION_RESULT_LIMIT + 16 * 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> REQUEST = Set.of("protocolVersion", "requestId", "action", "identity",
             "context", "installedContext", "subject");
@@ -96,7 +96,8 @@ public final class CsiNativeReadbackProtocol {
     public static Map<String, Object> bindRequest(Map<String, Object> boot, RuntimeProvisionRequest original,
             ContextBinding binding, String requestId) {
         ManagedCsiFilesProtocol.validateBoot(boot);
-        require(Long.valueOf(5).equals(BrokerValues.exactLong(boot.get("version"))));
+        require(Long.valueOf(5).equals(BrokerValues.exactLong(boot.get("version")))
+                || Long.valueOf(6).equals(BrokerValues.exactLong(boot.get("version"))));
         String owner = original.getIsolationKey();
         var value = new LinkedHashMap<String, Object>();
         value.put("protocolVersion", 1);

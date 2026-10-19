@@ -124,6 +124,7 @@ class Issue13181QueryBudgetTest {
         List<Long> itemReads = new ArrayList<>();
         List<Long> partReads = new ArrayList<>();
         List<Long> snapshotWrites = new ArrayList<>();
+        List<Long> csiProbes = new ArrayList<>();
         List<Long> totals = new ArrayList<>();
         for (int batch = 0; batch < batches; batch++) {
             fixture.ledger.reset();
@@ -137,6 +138,7 @@ class Issue13181QueryBudgetTest {
             partReads.add(fixture.ledger.count(
                     "select parts_json, body_resource_key from ma_message"));
             snapshotWrites.add(fixture.ledger.count("insert into ma_snapshot"));
+            csiProbes.add(fixture.ledger.count("select csi_guard from ma_session"));
             totals.add(fixture.ledger.total());
         }
         System.out.println("[issue-13181] materializeNextBatch per batch:"
@@ -161,9 +163,12 @@ class Issue13181QueryBudgetTest {
                 .containsExactly(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L);
         // Hot path 1 is bounded the same way hot path 3 is: the whole
         // batch's statement count is pinned, so any added per-row read
-        // shows here.
+        // shows here. Snapshot publication and close add two private probes
+        // in each writing batch; the read view only validates its existing
+        // lease, while admission reads the pin in its already locked root.
+        assertThat(csiProbes).containsExactly(3L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 3L);
         assertThat(totals)
-                .containsExactly(60L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 43L);
+                .containsExactly(68L, 36L, 36L, 36L, 36L, 36L, 36L, 36L, 51L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
@@ -344,8 +349,9 @@ class Issue13181QueryBudgetTest {
                 .isZero();
         // The empty tick — the scheduler's hottest path — is pinned whole:
         // the event read, the session lock, the progress lock, and the
-        // snapshot read.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // snapshot read, plus one current CSI exclusion probe.
+        assertThat(fixture.ledger.count("select csi_guard from ma_session")).isEqualTo(1);
+        assertThat(fixture.ledger.total()).isEqualTo(5);
         // The not-aged exit must leave the deferral marker untouched —
         // clearing or re-stamping it would stop the aged reselection from
         // ever converging the snapshot.
@@ -1325,10 +1331,11 @@ class Issue13181QueryBudgetTest {
         // (claim's authorize, the retention put, the verify-open read
         // lease, install's authorize, and each authorization's final writer
         // lease recheck), so the zero above cannot pass
-        // vacuously on a broken store.
+        // vacuously on a broken store. The private generic-retention fence
+        // adds one journal-head lock inside the retention path (7 total).
         assertThat(fixture.ledger.count(
                 "from ma_session_head", "for update"))
-                .isEqualTo(6);
+                .isEqualTo(7);
     }
 
     @Test

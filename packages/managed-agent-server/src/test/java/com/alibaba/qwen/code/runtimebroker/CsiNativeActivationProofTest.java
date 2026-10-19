@@ -141,7 +141,7 @@ class CsiNativeActivationProofTest {
 
     @Test
     void acceptsUnmodifiedNativeProducerBytesAndRenewalWithChangedLease() {
-        assertEquals("330caa04e1ed716cd590b066d5501b0480d29279419d93c3bc9e051014a3a032",
+        assertEquals("6e576ea3a0b44449a5679a6fb22be154f6ea3116f6ee8de1c49b9db90e1c8889",
                 CsiNativeActivationProof.sha256(fixtureBytes()));
         var genesis = genesis();
         var installTransaction = transaction(1, genesis.lastRecordUuid());
@@ -165,7 +165,7 @@ class CsiNativeActivationProofTest {
     }
 
     @Test
-    void acceptsExpiredSuccessorActivationAndFencesTheOriginalSegment() throws Exception {
+    void successorAdvancesInstalledEpochAcrossSkippedWriterClaimsAndFencesRenewal() throws Exception {
         var genesis = genesis();
         var originalInstall = transaction(1, genesis.lastRecordUuid());
         var previous = activation(originalInstall, request(1), genesis, null, resources);
@@ -188,19 +188,23 @@ class CsiNativeActivationProofTest {
         metadata.put("writerId", successor).put("writerGeneration", 3).put("activationEpoch", 2)
                 .put("firstSequence", 2).put("commandId", activationId + ":active");
         var parsed = new CsiNativeActivationProof.Transaction(List.of(event), originalInstall.lastRecordUuid());
-        var successorMetadata = digestForEvents(metadata, parsed.events());
-        var installed = CsiNativeActivationProof.activation(parsed, successorMetadata,
+        var accepted = CsiNativeActivationProof.activation(parsed, digestForEvents(metadata, parsed.events()),
                 original, successor, genesis.definitionDigest(), previous, ignored -> bytes);
-        assertEquals(2, installed.epoch());
-        assertEquals(3, installed.writerGeneration());
-        assertEquals(successor, installed.workerId());
-        ObjectNode oldGeneration = successorMetadata.deepCopy();
-        oldGeneration.put("writerGeneration", previous.writerGeneration());
-        rejected(() -> CsiNativeActivationProof.activation(parsed, oldGeneration,
-                original, successor, genesis.definitionDigest(), previous, ignored -> bytes));
-        ObjectNode early = event.deepCopy().put("occurredAt", previous.expiresAt() - 1);
-        var earlyTransaction = new CsiNativeActivationProof.Transaction(List.of(early), originalInstall.lastRecordUuid());
-        var earlyMetadata = digestForEvents(successorMetadata, earlyTransaction.events());
+        assertEquals(2, accepted.epoch());
+        assertEquals(3, accepted.writerGeneration());
+        assertEquals(0, accepted.renewalSequence());
+        assertEquals(successor, accepted.workerId());
+        for (String field : List.of("writerGeneration", "activationEpoch")) {
+            ObjectNode changed = metadata.deepCopy();
+            changed.put(field, 1);
+            JsonNode changedMetadata = digestForEvents(changed, parsed.events());
+            rejected(() -> CsiNativeActivationProof.activation(parsed, changedMetadata,
+                    original, successor, genesis.definitionDigest(), previous, ignored -> bytes));
+        }
+        ObjectNode early = event.deepCopy();
+        early.put("occurredAt", previous.expiresAt() - 1);
+        var earlyTransaction = new CsiNativeActivationProof.Transaction(List.of(early), parsed.lastRecordUuid());
+        var earlyMetadata = digestForEvents(metadata, earlyTransaction.events());
         rejected(() -> CsiNativeActivationProof.activation(earlyTransaction,
                 earlyMetadata, original, successor,
                 genesis.definitionDigest(), previous, ignored -> bytes));
@@ -212,7 +216,7 @@ class CsiNativeActivationProofTest {
         byte[] skippedBytes = JSON.writeValueAsBytes(skippedBody);
         ((ObjectNode) skippedEpoch.path("payload").path("installRef"))
                 .put("byteLength", skippedBytes.length).put("digest", CsiNativeActivationProof.sha256(skippedBytes));
-        ObjectNode skippedMetadata = successorMetadata.deepCopy();
+        ObjectNode skippedMetadata = metadata.deepCopy();
         skippedMetadata.put("activationEpoch", 3);
         var skipped = new CsiNativeActivationProof.Transaction(List.of(skippedEpoch), originalInstall.lastRecordUuid());
         var skippedDigest = digestForEvents(skippedMetadata, skipped.events());
@@ -220,7 +224,7 @@ class CsiNativeActivationProofTest {
                 original, successor, genesis.definitionDigest(), previous, ignored -> skippedBytes));
         var renewal = transaction(2, originalInstall.lastRecordUuid());
         assertEquals(1, activation(renewal, request(2), genesis, previous, resources).epoch());
-        rejected(() -> activation(renewal, request(2), genesis, installed, resources));
+        rejected(() -> activation(renewal, request(2), genesis, accepted, resources));
     }
 
     @Test

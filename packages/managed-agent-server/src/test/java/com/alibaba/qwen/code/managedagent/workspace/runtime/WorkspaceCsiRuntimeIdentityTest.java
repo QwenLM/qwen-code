@@ -1,9 +1,19 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeAccess;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeConstructionFixture;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiFilesProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -13,13 +23,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeClient;
-import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,6 +40,8 @@ import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -51,9 +63,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class WorkspaceCsiRuntimeIdentityTest {
@@ -99,13 +114,24 @@ class WorkspaceCsiRuntimeIdentityTest {
             RuntimeProvisionSeed seed = call.getArgument(2);
             Map<String, Object> tuple = call.getArgument(3);
             Map<String, Object> pod = call.getArgument(4);
-            var boot = ManagedCsiProtocol.boot(requested, seed, tuple);
-            var response = Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL,
+            var boot = WorkspaceCsiRuntimeIdentity.boot(requested, seed, tuple);
+            var response = new LinkedHashMap<String, Object>(Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL,
                     "context", WorkspaceCsiRuntimeIdentity.context(boot), "storage", tuple, "pod", pod,
                     "mount", Map.of("mountId", "9", "device", "259:1", "source", "/dev/nvme1n1", "diskSerial", "serial",
-                            "rootDevice", "66305", "rootInode", "2"));
+                            "rootDevice", "66305", "rootInode", "2")));
+            if (ManagedCsiFilesProtocol.selects(requested)) {
+                response.put("protocolVersion", 2);
+                response.put("managedCsi", ManagedCsiFilesProtocol.PROTOCOL);
+                response.put("identity", ManagedCsiFilesProtocol.identity(requested));
+            }
             afterAttestation.run();
             return CompletableFuture.completedFuture(response);
+        });
+        when(transport.attestCsiFiles(any(), any(), any(), any(), any())).thenAnswer(call -> {
+            Map<String, Object> boot = call.getArgument(3);
+            ManagedCsiFilesProtocol.validateBoot(boot);
+            return transport.attestCsi(call.getArgument(0), call.getArgument(1), call.getArgument(2),
+                    WorkspaceCsiRuntimeIdentity.map(boot.get("storage")), call.getArgument(4));
         });
     }
 
@@ -146,6 +172,472 @@ class WorkspaceCsiRuntimeIdentityTest {
             join(restarted.release(reloaded.getRequest(), lease));
             assertThat(api.creates).isEqualTo(2);
         }
+    }
+
+    @Test
+    void privateConstructionPersistsHandle2AndRestoresOnlyItsOriginalBoot4Objects() {
+        privateRequest();
+        RuntimeResourceHandle handle;
+        RuntimeLease lease;
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(handle.getVersion()).isEqualTo(2);
+            assertThat(handle.getValue().get("profileIdentity")).isEqualTo(ManagedCsiFilesProtocol.identity(original.getRequest()));
+            assertThat(provider.supportsStartupRecovery(handle)).isTrue();
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+            WorkspaceCsiRuntimeIdentity.verify(original);
+            var boot = WorkspaceCsiRuntimeIdentity.boot(original);
+            ManagedCsiFilesProtocol.validateBoot(boot);
+            assertThat(boot.get("version")).isEqualTo(4);
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.fileHistoryBoot(original))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            assertThat(nested(api.objects.get("secrets"), "data").get("boot.json"))
+                    .isEqualTo(Base64.getEncoder().encodeToString(WorkspaceCsiRuntimeIdentity.bytes(boot)));
+            assertThat(handle.getValue().get("bootDigest")).isEqualTo(WorkspaceCsiRuntimeIdentity.digest(boot));
+            assertThat(new String(WorkspaceCsiRuntimeIdentity.bytes(handle.getValue()), StandardCharsets.UTF_8))
+                    .doesNotContain(original.getProvisionSeed().getToken());
+        }
+        var reloaded = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])).findById(original.getBindingId());
+        WorkspaceCsiRuntimeIdentity.verify(reloaded);
+        try (var restarted = provider()) {
+            assertThat(join(restarted.ensureResource(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle())))
+                    .isEqualTo(handle);
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle(), lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.READY);
+            assertThat(api.creates).isEqualTo(2);
+            nested(api.objects.get("secrets"), "data").put("boot.json", "e30=");
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle(), lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"3,5", "4,6"})
+    void privateAuthorityRestartRetainsOriginalBootDespiteChangedConfiguration(int handleVersion, int bootVersion) {
+        privateRequest();
+        var authority = ManagedCsiFilesProtocol.authority("https://original-broker.example");
+        RuntimeResourceHandle handle;
+        RuntimeLease lease;
+        Map<String, Object> boot;
+        try (var provider = authorityProvider(authority)) {
+            provider.reserveResource(original);
+            handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(handle.getVersion()).isEqualTo(4);
+            assertThat(handle.getValue().get("finalization")).isEqualTo(ManagedCsiFilesProtocol.FINALIZATION_FORMAT);
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            if (handleVersion == 3) {
+                var legacy = copy(handle.getValue());
+                legacy.remove("finalization");
+                legacy.put("bootDigest", WorkspaceCsiRuntimeIdentity.digest(ManagedCsiFilesProtocol.boot(original.getRequest(),
+                        original.getProvisionSeed(), WorkspaceCsiRuntimeIdentity.map(legacy.get("storage")), authority)));
+                legacy.remove("identity");
+                legacy.put("identity", WorkspaceCsiRuntimeIdentity.digest(legacy));
+                handle = new RuntimeResourceHandle(handle.getKind(), handleVersion, legacy);
+                nested(api.objects.get("secrets"), "data").put("boot.json", Base64.getEncoder().encodeToString(
+                        WorkspaceCsiRuntimeIdentity.bytes(WorkspaceCsiRuntimeIdentity.boot(original.getRequest(), original.getProvisionSeed(), handle))));
+                // Seed a pre-existing handle3; production CAS must never downgrade handle4.
+                assertThat(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source).update("UPDATE ma_runtime_binding SET resource_handle_version = ?,"
+                        + " resource_handle_json = ? WHERE binding_id = ?", handleVersion,
+                        com.alibaba.fastjson2.JSON.toJSONString(handle.getValue(), com.alibaba.fastjson2.JSONWriter.Feature.WriteNulls),
+                        original.getBindingId())).isEqualTo(1);
+                original = bindings.findById(original.getBindingId());
+            }
+            assertThat(handle.getVersion()).isEqualTo(handleVersion);
+            assertThat(handle.getValue().get("authority")).isEqualTo(authority);
+            assertThat(provider.supportsStartupRecovery(handle)).isTrue();
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+            boot = WorkspaceCsiRuntimeIdentity.boot(original);
+            assertThat(boot.get("version")).isEqualTo(bootVersion);
+            assertThat(WorkspaceCsiRuntimeIdentity.fileHistoryBoot(original)).isEqualTo(boot);
+            assertThat(boot.get("authority")).isEqualTo(authority);
+            assertThat(api.objects.get("secrets").get("immutable")).isEqualTo(true);
+            assertThat(nested(api.objects.get("secrets"), "data").get("boot.json"))
+                    .isEqualTo(Base64.getEncoder().encodeToString(WorkspaceCsiRuntimeIdentity.bytes(boot)));
+            assertThat(handle.getValue().get("bootDigest")).isEqualTo(WorkspaceCsiRuntimeIdentity.digest(boot));
+            assertThat(new String(WorkspaceCsiRuntimeIdentity.bytes(handle.getValue()), StandardCharsets.UTF_8))
+                    .doesNotContain(original.getProvisionSeed().getToken());
+        }
+        var reloaded = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])).findById(original.getBindingId());
+        WorkspaceCsiRuntimeIdentity.verify(reloaded);
+        try (var restarted = authorityProvider(ManagedCsiFilesProtocol.authority("https://replacement-broker.example"))) {
+            assertThat(join(restarted.ensureResource(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle())))
+                    .isEqualTo(handle);
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), handle, lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.READY);
+            assertThat(api.creates).isEqualTo(2);
+            assertThat(WorkspaceCsiRuntimeIdentity.boot(reloaded)).isEqualTo(boot);
+            assertThat(WorkspaceCsiRuntimeIdentity.fileHistoryBoot(reloaded)).isEqualTo(boot);
+            var changed = copy(handle.getValue());
+            changed.put("authority", ManagedCsiFilesProtocol.authority("https://replacement-broker.example"));
+            changed.remove("identity");
+            changed.put("identity", WorkspaceCsiRuntimeIdentity.digest(changed));
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(reloaded.getRequest(), reloaded.getProvisionSeed(),
+                    new RuntimeResourceHandle("kubernetes-workspace", handleVersion, changed))).isInstanceOf(RuntimeBrokerException.class);
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(reloaded.getRequest(), reloaded.getProvisionSeed(),
+                    new RuntimeResourceHandle("kubernetes-workspace", 2, reloaded.getResourceHandle().getValue()))).isInstanceOf(RuntimeBrokerException.class);
+            nested(api.objects.get("secrets"), "data").put("boot.json", Base64.getEncoder().encodeToString(
+                    WorkspaceCsiRuntimeIdentity.bytes(ManagedCsiFilesProtocol.boot(reloaded.getRequest(), reloaded.getProvisionSeed(),
+                            WorkspaceCsiRuntimeIdentity.map(boot.get("storage")), ManagedCsiFilesProtocol.authority("https://replacement-broker.example")))));
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), handle, lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void privateHandleCannotDowngradeOrChangeItsSavedProfileEvenWithARecomputedDigest() {
+        privateRequest();
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(original.getRequest(), original.getProvisionSeed(),
+                    new RuntimeResourceHandle("kubernetes-workspace", 1, handle.getValue())))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            for (Consumer<Map<String, Object>> change : List.<Consumer<Map<String, Object>>>of(
+                    value -> nested(value, "profileIdentity").put("sessionId", UUID.randomUUID().toString()),
+                    value -> nested(value, "profileIdentity").put("profile", "foreign-profile"),
+                    value -> nested(value, "profileIdentity").put("extra", true),
+                    value -> value.remove("profileIdentity"),
+                    value -> value.put("bootDigest", "f".repeat(64)))) {
+                var value = copy(handle.getValue());
+                change.accept(value);
+                value.remove("identity");
+                value.put("identity", WorkspaceCsiRuntimeIdentity.digest(value));
+                assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(original.getRequest(), original.getProvisionSeed(),
+                        new RuntimeResourceHandle("kubernetes-workspace", 2, value))).isInstanceOf(RuntimeBrokerException.class);
+            }
+            var foreign = CsiFilesRetirementProfile.request(new ContextBinding("tenant", "workspace", 1, "storage", ".",
+                    CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1), "/workspace", UUID.randomUUID().toString());
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(foreign, original.getProvisionSeed(), handle))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void privateConstructionRejectsForeignContextAndLegacyCsiReceipts() {
+        privateRequest();
+        doReturn(CompletableFuture.completedFuture(new RuntimeAttestation(
+                "foreign", original.getProvisionSeed().getGatewayIncarnation(), original.getProvisionSeed().getLeaseId(),
+                original.getProvisionSeed().getEpoch(), original.getRequest().getScope(), original.getProvisionSeed().getProvisionRequestId(), "storage")))
+                .when(transport).attest(any(), any(), any());
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+        }
+        setUp();
+        privateRequest();
+        doReturn(CompletableFuture.completedFuture(Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL)))
+                .when(transport).attestCsi(any(), any(), any(), any(), any());
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+        }
+    }
+
+    private void privateRequest() {
+        var request = WorkspaceCsiRuntimeConstructionFixture.create(source, registration);
+        var created = bindings.findOrCreate(request);
+        original = bindings.claimOperation(created.getBindingId(), "owner", Duration.ofMinutes(5));
+    }
+
+    @Test
+    void evidencePodToleratesOnlyTheIsolatedNodeAndStandardNoExecuteDefaults() throws ReflectiveOperationException {
+        privateRequest();
+        var selectedRuntime = new java.util.concurrent.atomic.AtomicReference<Object>();
+        api.changeCreatedPod = pod -> {
+            var spec = nested(pod, "spec");
+            assertThat(spec.get("schedulingGates")).isEqualTo(List.of(Map.of("name", "qwen-code.io/k2-source-ready")));
+            assertThat(spec.get("serviceAccountName")).isEqualTo("qwen-k2-worker");
+            selectedRuntime.set(spec.get("runtimeClassName"));
+            assertThat(nested(spec, "securityContext").get("appArmorProfile"))
+                    .isEqualTo(Map.of("type", "Localhost", "localhostProfile", "qwen-k2-worker-v1"));
+            spec.put("serviceAccount", "qwen-k2-worker");
+            nested(pod, "metadata").put("annotations", Map.of("container.apparmor.security.beta.kubernetes.io/runtime", "localhost/qwen-k2-worker-v1"));
+            assertThat(spec.get("tolerations")).isEqualTo(List.of(
+                    Map.of("key", "qwen-code.io/k2-evidence", "operator", "Equal", "value", "isolated", "effect", "NoSchedule"),
+                    Map.of("key", "node.kubernetes.io/not-ready", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300),
+                    Map.of("key", "node.kubernetes.io/unreachable", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300)));
+        };
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            assertThat(join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null))).isNotNull();
+            assertThat(selectedRuntime.get()).isEqualTo("qwen-k2-runc-v1");
+            assertThat(nested(api.objects.get("pods"), "spec")).doesNotContainKey("schedulingGates");
+            assertThat(nested(api.objects.get("pods"), "spec").get("runtimeClassName")).isEqualTo("qwen-k2-runc-v1");
+            assertThat(attestations).hasValue(2);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"missing-account", "foreign-account", "foreign-alias", "missing-profile", "unconfined", "foreign-profile", "extra-profile-field", "container-override", "legacy-unconfined", "legacy-foreign", "static-source", "image-pull", "missing-runtime", "foreign-runtime", "invalid-runtime"})
+    void evidencePodRefusesChangedAccountOrConfinement(String mutation) throws ReflectiveOperationException {
+        privateRequest();
+        api.changeCreatedPod = pod -> {
+            var spec = nested(pod, "spec");
+            var security = nested(spec, "securityContext");
+            switch (mutation) {
+                case "missing-account" -> spec.remove("serviceAccountName");
+                case "foreign-account" -> spec.put("serviceAccountName", "default");
+                case "foreign-alias" -> spec.put("serviceAccount", "default");
+                case "missing-profile" -> security.remove("appArmorProfile");
+                case "unconfined" -> security.put("appArmorProfile", Map.of("type", "Unconfined"));
+                case "foreign-profile" -> security.put("appArmorProfile", Map.of("type", "Localhost", "localhostProfile", "foreign"));
+                case "extra-profile-field" -> security.put("appArmorProfile", Map.of("type", "Localhost", "localhostProfile", "qwen-k2-worker-v1", "extra", true));
+                case "container-override" -> nested((Map<String, Object>) ((List<?>) spec.get("containers")).getFirst(), "securityContext")
+                        .put("appArmorProfile", Map.of("type", "Unconfined"));
+                case "legacy-unconfined" -> nested(pod, "metadata").put("annotations", Map.of("container.apparmor.security.beta.kubernetes.io/runtime", "unconfined"));
+                case "legacy-foreign" -> nested(pod, "metadata").put("annotations", Map.of("container.apparmor.security.beta.kubernetes.io/runtime", "localhost/foreign"));
+                case "static-source" -> nested(pod, "metadata").put("annotations", Map.of("kubernetes.io/config.source", "file"));
+                case "image-pull" -> spec.put("imagePullSecrets", List.of(Map.of("name", "foreign")));
+                case "missing-runtime" -> spec.remove("runtimeClassName");
+                case "foreign-runtime" -> spec.put("runtimeClassName", "default");
+                case "invalid-runtime" -> spec.put("runtimeClassName", List.of("qwen-k2-runc-v1"));
+                default -> throw new AssertionError(mutation);
+            }
+        };
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+            assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+        }
+    }
+
+    @Test
+    void ordinaryCsiPodRejectsInjectedEvidenceRuntimeClass() {
+        api.changeCreatedPod = pod -> nested(pod, "spec").put("runtimeClassName", "qwen-k2-runc-v1");
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"missing", "changed"})
+    void evidencePodRejectsChangedRuntimeClassOnRetainedObservation(String mutation) throws ReflectiveOperationException {
+        privateRequest();
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            api.observePod = pod -> {
+                if (mutation.equals("missing")) {
+                    nested(pod, "spec").remove("runtimeClassName");
+                } else {
+                    nested(pod, "spec").put("runtimeClassName", "default");
+                }
+            };
+            assertThat(join(provider.reconcile(original.getRequest(), original.getProvisionSeed(), handle, null)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
+            assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"missing", "wildcard", "extra", "duplicate", "value", "seconds"})
+    void evidencePodRefusesAlteredOrAdditionalTolerations(String mutation) throws ReflectiveOperationException {
+        privateRequest();
+        api.changeCreatedPod = pod -> {
+            var spec = nested(pod, "spec");
+            var tolerations = new java.util.ArrayList<Object>((List<?>) spec.get("tolerations"));
+            switch (mutation) {
+                case "missing" -> tolerations.removeFirst();
+                case "wildcard" -> tolerations.set(0, Map.of("operator", "Exists"));
+                case "extra" -> tolerations.add(Map.of("key", "foreign", "operator", "Exists", "effect", "NoSchedule"));
+                case "duplicate" -> tolerations.add(tolerations.getFirst());
+                case "value" -> tolerations.set(0, Map.of("key", "qwen-code.io/k2-evidence", "operator", "Equal", "value", "foreign", "effect", "NoSchedule"));
+                case "seconds" -> tolerations.set(1, Map.of("key", "node.kubernetes.io/not-ready", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 301));
+                default -> throw new AssertionError(mutation);
+            }
+            spec.put("tolerations", tolerations);
+        };
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+            assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+        }
+    }
+
+    @Test
+    void ordinaryPodKeepsItsExistingInjectedNoExecuteTolerations() {
+        api.changeCreatedPod = pod -> nested(pod, "spec").put("tolerations", List.of(
+                Map.of("key", "node.kubernetes.io/not-ready", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300),
+                Map.of("key", "node.kubernetes.io/unreachable", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300)));
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            assertThat(join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null))).isNotNull();
+            assertThat((List<?>) nested(api.objects.get("pods"), "spec").get("tolerations")).hasSize(2);
+            assertThat(nested(api.objects.get("pods"), "spec")).doesNotContainKey("serviceAccountName");
+            assertThat(nested(nested(api.objects.get("pods"), "spec"), "securityContext")).doesNotContainKey("appArmorProfile");
+        }
+    }
+
+    @Test
+    void privateOriginalAcquireInstallsContextOutsideSqlAndRetainsItsReservation() {
+        RuntimeSession session = acquiringPrivateSession();
+        var reserved = storage.inspect(registration);
+        var runtimeSessions = new JdbcRuntimeSessionRepository(source);
+        var before = runtimeSessions.findById(session.getScope(), session.getRuntimeSessionId());
+        when(transport.installContext(any(), any(), any(), any())).thenAnswer(call -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            RuntimeBindingRecord runtime = call.getArgument(0);
+            RuntimeSessionRecord holder = call.getArgument(1);
+            ContextBinding context = call.getArgument(3);
+            assertThat(runtime.getBindingId()).isEqualTo(original.getBindingId());
+            assertThat(holder.getRuntimeSessionId()).isEqualTo(session.getHarnessSessionId());
+            assertThat(call.<String>getArgument(2)).isEqualTo(UUID.nameUUIDFromBytes(
+                    session.getRuntimeSessionId().getBytes(StandardCharsets.UTF_8)).toString());
+            assertThat(context.getContextConfigRef()).isEqualTo(CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+            assertThat(context.getContextRevision()).isEqualTo(1);
+            return CompletableFuture.completedFuture(Map.of());
+        });
+        var access = privateAccess();
+        assertThat(join(access.resolve(session.getHarnessSessionId()))).isEqualTo(session.getScope());
+        join(access.acquire(original.getLease(), session));
+        join(access.acquire(original.getLease(), session));
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+        assertThat(runtimeSessions.findById(session.getScope(), session.getRuntimeSessionId()).getState())
+                .isEqualTo(before.getState());
+        assertThat(runtimeSessions.findById(session.getScope(), session.getRuntimeSessionId()).getVersion())
+                .isEqualTo(before.getVersion());
+    }
+
+    @Test
+    void privateAcquireRefusesSealBeforeDispatchAndLateSuccessAfterSeal() {
+        RuntimeSession session = acquiringPrivateSession();
+        var response = new CompletableFuture<Map<String, Object>>();
+        when(transport.installContext(any(), any(), any(), any())).thenReturn(response);
+        var access = privateAccess();
+        var pending = access.acquire(original.getLease(), session);
+        assertThat(pending.toCompletableFuture()).isNotDone();
+        var retirement = storage.beginRetirement(registration, bindings, original,
+                storage.inspect(registration), UUID.randomUUID().toString());
+        response.complete(Map.of());
+        refused(pending);
+        assertThat(storage.inspect(registration).phase()).isEqualTo("DRAINING");
+        assertThat(storage.inspectRetirement(registration, bindings,
+                bindings.findById(original.getBindingId()))).isEqualTo(retirement);
+        var runtime = new JdbcRuntimeSessionRepository(source).findById(session.getScope(), session.getRuntimeSessionId());
+        assertThat(runtime.getState()).isEqualTo(RuntimeSessionRecord.State.ACQUIRING);
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        verify(transport).installContext(any(), any(), any(), any());
+    }
+
+    @Test
+    void privateAcquireRefusesChangedVersionAndRetainsUnknownInstallation() {
+        RuntimeSession session = acquiringPrivateSession();
+        var response = new CompletableFuture<Map<String, Object>>();
+        when(transport.installContext(any(), any(), any(), any())).thenReturn(response);
+        var reserved = storage.inspect(registration);
+        var pending = privateAccess().acquire(original.getLease(), session);
+        original = bindings.compareAndSet(original, original.withLastHealthAt(Instant.now(), Instant.now()));
+        response.complete(Map.of());
+        refused(pending);
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+        when(transport.installContext(any(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("owned unknown response")));
+        assertThatThrownBy(() -> join(privateAccess().acquire(original.getLease(), session)))
+                .hasCauseInstanceOf(IllegalStateException.class);
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+    }
+
+    @Test
+    void privateReadbackAndAcquireRefuseForeignIdentityPinReservationAndCallerTransaction() {
+        RuntimeSession session = acquiringPrivateSession();
+        var access = privateAccess();
+        refused(access.resolve(UUID.randomUUID().toString()));
+        var caller = new TransactionTemplate(new DataSourceTransactionManager(source));
+        caller.executeWithoutResult(status -> refused(access.resolve(session.getHarnessSessionId())));
+        for (var invalid : List.of(new RuntimeSession(session.getHarnessSessionId(), UUID.randomUUID().toString(),
+                "bootstrap", session.getScope()), new RuntimeSession(session.getHarnessSessionId(),
+                        session.getRuntimeSessionId(), "continuation", session.getScope()))) {
+            assertThatThrownBy(() -> access.acquire(original.getLease(), invalid)).isInstanceOf(RuntimeBrokerException.class);
+        }
+        var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        jdbc.update("UPDATE ma_session SET runtime_request_key = ? WHERE session_id = ?",
+                "f".repeat(64), session.getHarnessSessionId());
+        assertThatThrownBy(() -> join(access.resolve(session.getHarnessSessionId()))).hasCauseInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("UPDATE ma_session SET runtime_request_key = ? WHERE session_id = ?",
+                original.getRequest().requestKey(), session.getHarnessSessionId());
+        jdbc.update("UPDATE ma_storage_owner SET csi_registration_revision = 2");
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("UPDATE ma_storage_owner SET csi_registration_revision = 1");
+        jdbc.update("UPDATE ma_session SET context_revision = 2 WHERE session_id = ?", session.getHarnessSessionId());
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        verify(transport, never()).installContext(any(), any(), any(), any());
+    }
+
+    @Test
+    void privateAcquireRefusesAnotherRuntimeHolderAndForeignLeaseBeforeRpc() {
+        RuntimeSession session = acquiringPrivateSession();
+        var access = privateAccess();
+        var lease = original.getLease();
+        var foreign = new RuntimeLease(lease.getRuntimeInstanceId(), lease.getEndpoint(), lease.getToken(),
+                UUID.randomUUID().toString(), lease.getEpoch());
+        assertThatThrownBy(() -> access.acquire(foreign, session)).isInstanceOf(RuntimeBrokerException.class);
+        var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        jdbc.update("INSERT INTO ma_runtime_session (runtime_session_id, scope_key, tenant_id, workspace_id,"
+                + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
+                + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at)"
+                + " SELECT ?, scope_key, tenant_id, workspace_id, workspace_generation, canonical_cwd,"
+                + " capability_digest, isolation_class, harness_session_id, turn_kind, binding_id,"
+                + " runtime_generation, session_state, record_version, last_active_at FROM ma_runtime_session"
+                + " WHERE runtime_session_id = ?", UUID.randomUUID().toString(), session.getRuntimeSessionId());
+        var reserved = storage.inspect(registration);
+        assertThatThrownBy(() -> access.acquire(lease, session)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session", Integer.class)).isEqualTo(2);
+        verify(transport, never()).installContext(any(), any(), any(), any());
+    }
+
+    @Test
+    void privateContextAdmissionDoesNotAuthorizeToolsOrOrdinaryRelease() {
+        RuntimeSession session = acquiringPrivateSession();
+        var access = privateAccess();
+        refused(access.control(original.getLease(), session, Map.of("kind", "file-history")));
+        refused(access.execute(original.getLease(), session, Map.of("toolName", "write_file")));
+        refused(access.cancel(original.getLease(), session, Map.of()));
+        assertThatThrownBy(() -> join(access.release(original.getLease(), session))).hasCauseInstanceOf(RuntimeBrokerException.class)
+                .satisfies(error -> assertThat(((RuntimeBrokerException) error.getCause()).getCode()).isEqualTo("csi_finalize_required"));
+        assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+    }
+
+    private RuntimeSession acquiringPrivateSession() {
+        privateRequest();
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            var lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+        }
+        String id = original.getRequest().getIsolationKey();
+        var session = new RuntimeSession(id, id, "bootstrap", original.getRequest().getScope());
+        bindings.admitSession(new JdbcRuntimeSessionRepository(source), new RuntimeSessionRecord(session,
+                original.getBindingId(), original.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        return session;
+    }
+
+    private WorkspaceCsiRuntimeAccess privateAccess() {
+        var properties = new ManagedAgentProperties();
+        properties.setAgentRevision("construction-fixture/1");
+        return new WorkspaceCsiRuntimeAccess(new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source),
+                new ObjectMapper(), properties, registration, original.getRequest().getIsolationKey(),
+                original.getRequest().requestKey(), bindings, new JdbcRuntimeSessionRepository(source), transport);
     }
 
     @Test
@@ -559,6 +1051,32 @@ class WorkspaceCsiRuntimeIdentityTest {
 
     private WorkspaceCsiRuntimeProvisioner provider() {
         return provider(Duration.ofSeconds(5), List.of());
+    }
+
+    private WorkspaceCsiRuntimeProvisioner evidenceProvider() throws ReflectiveOperationException {
+        var evidence = mock(WorkspaceCsiNodeEvidence.class);
+        when(evidence.affinity()).thenReturn(Map.of("nodeAffinity", Map.of("requiredDuringSchedulingIgnoredDuringExecution", Map.of("nodeSelectorTerms",
+                List.of(Map.of("matchFields", List.of(Map.of("key", "metadata.name", "operator", "In", "values", List.of("node")))))))));
+        when(evidence.bindAndOpen(any(), any(), any(), any())).thenAnswer(call -> {
+            Map<String, Object> pod = call.getArgument(2);
+            nested(pod, "spec").remove("schedulingGates");
+            return pod;
+        });
+        when(evidence.publication(any(), any(), any(), any())).thenReturn(true);
+        var constructor = WorkspaceCsiRuntimeProvisioner.class.getDeclaredConstructor(WorkspaceCsiReservationStore.class,
+                JdbcRuntimeBindingRepository.class, WorkspaceCsiRegistration.class, KubernetesRuntimeClient.class,
+                WorkspaceCsiResourceGuard.class, String.class, List.class, Duration.class, List.class,
+                RuntimeTransport.class, Map.class, WorkspaceCsiNodeEvidence.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(storage, bindings, registration, api,
+                new WorkspaceCsiResourceGuard(api, "cluster", registration, protection), IMAGE, COMMAND,
+                Duration.ofSeconds(5), List.of(), transport, null, evidence);
+    }
+
+    private WorkspaceCsiRuntimeProvisioner authorityProvider(Map<String, Object> authority) {
+        return new WorkspaceCsiRuntimeProvisioner(storage, bindings, registration, api,
+                new WorkspaceCsiResourceGuard(api, "cluster", registration, protection), IMAGE, COMMAND,
+                Duration.ofSeconds(5), List.of(), transport, authority);
     }
 
     private WorkspaceCsiRuntimeProvisioner provider(Duration timeout, List<WorkspaceCsiRuntimeProvisioner.WorkerArtifact> artifacts) {

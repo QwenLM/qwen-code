@@ -21,7 +21,10 @@
     "epoch": 1,
     "installDurationMs": 60000,
     "renewDurationMs": 90000,
-    "expiresMinusOccurredPlusDurationMs": [-1, -1]
+    "expiresMinusOccurredPlusDurationMs": [
+      -1,
+      -1
+    ]
   },
   "requests": [
     {

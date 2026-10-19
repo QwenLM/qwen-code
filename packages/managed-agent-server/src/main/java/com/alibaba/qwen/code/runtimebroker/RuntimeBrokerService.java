@@ -1152,6 +1152,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<Object> csiFileHistory(String harnessSessionId,
             String runtimeSessionId, Map<String, Object> operation) {
+        boolean snapshot = "snapshot".equals(operation.get("action"));
         return requireSession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
             if (!JdbcCsiFilesRetirementGuard.isProfile(context.session().getScope())) {
                 throw conflict("runtime_control_invalid", "CSI history requires the original private Runtime");
@@ -1169,12 +1170,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         || record.getRuntimeGeneration() != context.binding().getGeneration()
                         || parent.getGeneration() != context.binding().getGeneration()
                         || !parent.hasSameLease(context.lease())
-                        || parent.getState() != RuntimeBindingRecord.State.READY || parent.isDrainRequested()
-                        || record.getState() != RuntimeSessionRecord.State.READY) {
+                        || parent.getState() != RuntimeBindingRecord.State.READY
+                                && parent.getState() != RuntimeBindingRecord.State.DRAINING
+                        || record.getState() != RuntimeSessionRecord.State.READY
+                                && (!snapshot || record.getState() != RuntimeSessionRecord.State.RELEASING)) {
                     throw conflict("csi_original_runtime_unavailable", "Original CSI history owner is unavailable");
                 }
-                requireReadySessionRecord(context);
-                bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessSessionId, null);
+                if (!snapshot) {
+                    requireReadySessionRecord(context);
+                    bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessSessionId, null);
+                }
                 context.beginControl();
             } finally {
                 context.unlock();

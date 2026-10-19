@@ -22,6 +22,7 @@ import org.springframework.mock.http.MockHttpInputMessage;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.validation.FieldError;
 import org.springframework.validation.ObjectError;
@@ -31,6 +32,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.ServletRequestBindingException;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.ArrayList;
@@ -39,11 +42,54 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class ApiExceptionHandlerTest {
     private static final String SECRET = "sk_live_PRIVATE_BODY_VALUE";
     private static final String CONTRACT =
             "com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract";
+
+    @Test
+    void preservesBrokerRefusalStatusCodeAndRetryabilityThroughAdvice() throws Exception {
+        for (int statusCode : List.of(409, 499, 503)) {
+            boolean retryable = statusCode == 503;
+            var mvc = MockMvcBuilders.standaloneSetup(new RefusalController(
+                    new RuntimeBrokerException(statusCode, "csi_original_activation_unavailable", "unavailable", retryable)))
+                    .setControllerAdvice(new ApiExceptionHandler()).addFilters(new RequestIdFilter()).build();
+            mvc.perform(get("/broker-refusal").accept(MediaType.TEXT_EVENT_STREAM)
+                    .header(RequestIdFilter.HEADER, "csi-proof-test"))
+                    .andExpect(status().is(statusCode))
+                    .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                    .andExpect(jsonPath("$.error.code").value("csi_original_activation_unavailable"))
+                    .andExpect(jsonPath("$.error.message").value("unavailable"))
+                    .andExpect(jsonPath("$.error.retryable").value(retryable))
+                    .andExpect(jsonPath("$.error.request_id").value("csi-proof-test"));
+        }
+    }
+
+    @Test
+    void unrelatedExceptionsRetainTheirGenericInternalEnvelope() throws Exception {
+        var mvc = MockMvcBuilders.standaloneSetup(new RefusalController(new IllegalStateException("private diagnosis")))
+                .setControllerAdvice(new ApiExceptionHandler()).addFilters(new RequestIdFilter()).build();
+        mvc.perform(get("/broker-refusal"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error.code").value("internal_error"))
+                .andExpect(jsonPath("$.error.message").value("The Managed Agent request failed."))
+                .andExpect(jsonPath("$.error.retryable").doesNotExist());
+    }
+
+    @Test
+    void leavesAStartedBrokerStreamAlone() {
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        response.setCommitted(true);
+        assertThat(new ApiExceptionHandler().broker(new RuntimeBrokerException(
+                409, "csi_original_activation_unavailable", "unavailable", false),
+                new MockHttpServletRequest(), response)).isNull();
+        assertThat(response.getContentAsByteArray()).isEmpty();
+    }
 
     @Test
     void reportsStorageAccessDeniedAsDefiniteRejectionWithoutProviderDetails() {
@@ -75,10 +121,24 @@ class ApiExceptionHandlerTest {
         assertThat(new ApiExceptionHandler().api(new ManagedAgentException(
                 HttpStatus.NOT_FOUND, "session_not_found", "gone"),
                 new MockHttpServletRequest(), response)).isNull();
-        assertThat(new ApiExceptionHandler().runtime(new RuntimeBrokerException(
+        assertThat(new ApiExceptionHandler().broker(new RuntimeBrokerException(
                 409, "workspace_unavailable", "Maintenance", false),
                 new MockHttpServletRequest(), response)).isNull();
         assertThat(response.getContentAsByteArray()).isEmpty();
+    }
+
+    @RestController
+    static final class RefusalController {
+        private final RuntimeException refusal;
+
+        RefusalController(RuntimeException refusal) {
+            this.refusal = refusal;
+        }
+
+        @GetMapping("/broker-refusal")
+        public Object refusal() {
+            throw refusal;
+        }
     }
 
     @Test

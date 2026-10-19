@@ -234,7 +234,7 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(33);
+        assertThat(rows).hasSize(35);
         return rows;
     }
 
@@ -284,12 +284,18 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(authorityRows()).isEqualTo(before);
         retire();
         before = authorityRows();
-        assertThatThrownBy(() -> commit(5)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(commit(5).replayed()).isTrue();
         assertThat(authorityRows()).isEqualTo(before);
         var second = JSON.treeToValue(nativeFixture.path("commits").get(7).path("request"),
                 ManagedSessionStoreModels.CommitTransactionRequest.class);
         rejected(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, second)),
                 "runtime_admission_closed");
+        assertThat(authorityRows()).isEqualTo(before);
+        jdbc.update("UPDATE ma_operation SET progress_stage = 'FROZEN', progress_version = 2"
+                + " WHERE operation_kind = 'CSI_RETIREMENT'");
+        before = authorityRows();
+        assertThatThrownBy(() -> commit(5)).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                error -> assertThat(error.getCode()).isEqualTo("csi_application_continuation_unavailable"));
         assertThat(authorityRows()).isEqualTo(before);
     }
 

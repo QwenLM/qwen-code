@@ -118,12 +118,8 @@ class ManagedTurnQueryTest {
     }
 
     /**
-     * The latest-environment read compares (session_id, turn_id) rows. H2
-     * types row-comparison parameters as VARCHAR, and when a new session or
-     * a SET lands between binding and execution it recompiles the command
-     * with the bound values; string-bound identities then fail as VARBINARY
-     * rows compared against VARCHAR ones. A fresh session opened right
-     * before execution forces that recompile here.
+     * Opening a fresh H2 session between binding and execution forces the
+     * latest-environment query to recompile with its bound identity bytes.
      */
     @Test
     void latestEnvironmentReadSurvivesARecompileBeforeExecution() throws Exception {
@@ -138,7 +134,7 @@ class ManagedTurnQueryTest {
         var latest = store.findLatestTurns(tenant, List.of(sessionId));
         assertThat(latest).containsKey(sessionId);
         var freshSession = new FreshSessionBeforeExecute(
-                jdbc.getDataSource(), "environment.turn_id) IN (");
+                jdbc.getDataSource(), "environment.session_id = ? AND environment.turn_id = ?");
         var recompiling = new ManagedAgentStore(
                 new ManagedSchemaJdbcTemplate(freshSession),
                 objectMapper, Clock.systemUTC(), ignored -> {}, registry, new ManagedAgentProperties());
@@ -194,6 +190,34 @@ class ManagedTurnQueryTest {
                         }
                     });
         }
+    }
+
+    @Test
+    void batchedEnvironmentEventsKeepEachSessionPairedWithItsRequestedTurn() throws Exception {
+        String tenant = tenant();
+        String first = emptySession(tenant);
+        String second = emptySession(tenant);
+        for (String session : List.of(first, second)) {
+            turn(tenant, session, "turn_a", "COMPLETED", 1_000, 3_000L, null);
+            turn(tenant, session, "turn_b", "RUNNING", 2_000, null, null);
+        }
+        store.appendPublicEventIfAbsent(tenant, first, "turn_a",
+                "environment.ready", Map.of(), false, "first:wanted");
+        store.appendPublicEventIfAbsent(tenant, second, "turn_b",
+                "environment.provisioning", Map.of(), false, "second:wanted");
+        store.appendPublicEventIfAbsent(tenant, first, "turn_b",
+                "environment.failed", Map.of(), false, "first:other-turn");
+        store.appendPublicEventIfAbsent(tenant, second, "turn_a",
+                "environment.failed", Map.of(), false, "second:other-turn");
+
+        var events = store.findLatestEnvironmentEvents(tenant, Map.of(
+                first, store.findTurnSummary(tenant, first, "turn_a").orElseThrow(),
+                second, store.findTurnSummary(tenant, second, "turn_b").orElseThrow()));
+        assertThat(events).containsOnlyKeys(first, second);
+        assertThat(events.get(first).turnId()).isEqualTo("turn_a");
+        assertThat(events.get(first).type()).isEqualTo("environment.ready");
+        assertThat(events.get(second).turnId()).isEqualTo("turn_b");
+        assertThat(events.get(second).type()).isEqualTo("environment.provisioning");
     }
 
     @Test

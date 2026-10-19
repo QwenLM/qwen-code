@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
-/** Pure conversion coverage; this test does not exercise SQL admission. */
+/** Pure conversion coverage; original SQL admission is verified separately. */
 class CsiNativeToolResultProofTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 

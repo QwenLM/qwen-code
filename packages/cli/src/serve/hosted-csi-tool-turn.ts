@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import type { HostedToolTurn } from './hosted-harness-turn.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
@@ -12,6 +13,7 @@ import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/c
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { requireClosedHostedCsiHistory } from './hosted-csi-cold-recovery.js';
 import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
@@ -37,7 +39,6 @@ import {
   convertHostedCsiToolResult,
   publishHostedCsiReceipt,
 } from './hosted-csi-tool-evidence.js';
-import { requireClosedHostedCsiHistory } from './hosted-csi-cold-recovery.js';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -52,7 +53,7 @@ export type HostedCsiTurnCommit = (
   identity?: Pick<ChatRecord, 'uuid' | 'timestamp'>,
 ) => Promise<string>;
 
-export class HostedCsiToolTurn {
+export class HostedCsiToolTurn implements HostedToolTurn {
   private readonly advertised = new Map<string, Buffer>();
 
   constructor(
@@ -579,4 +580,5 @@ export class HostedCsiToolTurn {
   async finish(): Promise<void> {
     await this.harness.settleConsumedRuntimeContinuation();
   }
+  async close(): Promise<void> {}
 }

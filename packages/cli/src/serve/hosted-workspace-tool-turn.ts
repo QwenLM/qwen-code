@@ -51,6 +51,7 @@ import {
   convertToFunctionResponse,
   convertToFunctionErrorResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { convertManagedRuntimeToolResult } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-tool-response.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   managedToolDigest,
@@ -585,6 +586,24 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
     },
   },
 ];
+
+export function hostedWorkspaceDeclarations(
+  tools: readonly FunctionDeclaration[],
+  mcp: boolean,
+): FunctionDeclaration[] {
+  return tools.map((tool) =>
+    ['write_file', 'edit'].includes(tool.name ?? '')
+      ? {
+          ...tool,
+          description:
+            tool.description +
+            (mcp
+              ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+              : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+        }
+      : tool,
+  );
+}
 
 export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_FILE_TOOLS,
@@ -1855,17 +1874,20 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     this.advertised = [
-      ...(this.publication || this.shell
-        ? search
-          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
-          : HOSTED_WORKSPACE_SHELL_TOOLS
-        : search
-          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
-          : HOSTED_WORKSPACE_FILE_TOOLS
-      )
-        .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
-        .map((tool) => {
-          if (this.foregroundOnly && tool.name === 'run_shell_command') {
+      ...hostedWorkspaceDeclarations(
+        (this.publication || this.shell
+          ? search
+            ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
+            : HOSTED_WORKSPACE_SHELL_TOOLS
+          : search
+            ? HOSTED_WORKSPACE_FILE_TOOLS_V2
+            : HOSTED_WORKSPACE_FILE_TOOLS
+        )
+          .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
+          .map((tool) => {
+            if (!this.foregroundOnly || tool.name !== 'run_shell_command') {
+              return tool;
+            }
             const schema = structuredClone(tool.parametersJsonSchema) as {
               properties?: Record<string, unknown>;
             };
@@ -1876,9 +1898,9 @@ export class HostedWorkspaceToolTurn {
                 'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms.',
               parametersJsonSchema: schema,
             };
-          }
-          return hostedWorkspaceDeclarations([tool], Boolean(this.mcp))[0];
-        }),
+          }),
+        Boolean(this.mcp),
+      ),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
@@ -4773,49 +4795,12 @@ export class HostedWorkspaceToolTurn {
           await this.broker.acknowledge(executionCallId, receipt);
           throw new Error('Complete Shell output was not admitted.');
         }
-        const responseParts = result.responseParts as Part[];
-        if (
-          responseParts.some(
-            (part) =>
-              !part ||
-              typeof part !== 'object' ||
-              (typeof part.text !== 'string' &&
-                !part.inlineData &&
-                !part.fileData),
-          )
-        )
-          throw new Error('Runtime returned an unsupported tool result.');
-        const modelParts = shellResult?.capture?.previewTruncated
-          ? [
-              {
-                text: `Shell execution: ${shellResult.executionStatus}. Output preview is truncated. Complete stdout and stderr are retained in the Session result.`,
-              },
-              ...responseParts,
-            ]
-          : responseParts;
-        let converted =
-          result.executionStatus === 'success'
-            ? convertToFunctionResponse(
-                request.call.name,
-                request.call.callId,
-                modelParts,
-              )
-            : convertToFunctionErrorResponse(
-                request.call.name,
-                request.call.callId,
-                modelParts,
-                result.error?.message ??
-                  `Runtime tool ${result.executionStatus}.`,
-              );
-        const response = converted[0]?.functionResponse;
-        if (!response || converted.length !== 1)
-          throw new Error('Runtime result cannot be represented durably.');
-        response.response = {
-          ...response.response,
-          executionStatus: result.executionStatus,
-          ...(result.error ? { runtimeError: result.error } : {}),
-          ...(shellResult ? { capture: shellResult.capture } : {}),
-        };
+        let converted = convertManagedRuntimeToolResult(
+          request.call.name,
+          request.call.callId,
+          result,
+          shellResult?.capture,
+        );
         let outcome = Buffer.from(
           JSON.stringify({ executionCallId, ...converted[0] }),
         );
@@ -7808,22 +7793,4 @@ export function truncateHostedGlobResponse(
     lines.pop();
   }
   return undefined;
-}
-
-export function hostedWorkspaceDeclarations(
-  tools: readonly FunctionDeclaration[],
-  mcp: boolean,
-): FunctionDeclaration[] {
-  return tools.map((tool) =>
-    ['write_file', 'edit'].includes(tool.name ?? '')
-      ? {
-          ...tool,
-          description:
-            tool.description +
-            (mcp
-              ? ' This MCP profile provides no file backups or undo for Write/Edit.'
-              : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
-        }
-      : tool,
-  );
 }

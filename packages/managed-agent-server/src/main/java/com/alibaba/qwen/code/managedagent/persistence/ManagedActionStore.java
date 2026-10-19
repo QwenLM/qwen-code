@@ -730,11 +730,17 @@ public class ManagedActionStore {
 
     public List<OperationTarget> deliverable(long now) {
         return jdbc.query(
-                "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'ACTION_RESPONSE' AND ((delivery_state = 'PENDING' AND available_at <= ?) OR (delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + ")) AND state IN ('PENDING', 'RUNNING') ORDER BY available_at LIMIT 50",
+                "SELECT o.tenant_id, o.session_id, o.operation_id FROM ma_operation o WHERE"
+                        + " operation_kind = 'ACTION_RESPONSE' AND ((delivery_state = 'PENDING' AND"
+                        + " available_at <= ?) OR (delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + ")) AND state IN ('PENDING', 'RUNNING')"
+                        + " AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = o.tenant_id"
+                        + " AND s.session_id = o.session_id AND s.csi_guard = TRUE)"
+                        + " ORDER BY available_at LIMIT 50",
                 (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)),
                 now);
     }
 
+    @Transactional
     public void settleEndedResponses(long now) {
         List<OperationTarget> ended = jdbc.query(
                         "SELECT o.tenant_id, o.session_id, o.operation_id FROM ma_operation o JOIN"
@@ -742,9 +748,12 @@ public class ManagedActionStore {
                             + " a.session_scope_key = o.scope_key AND a.tenant_id = o.tenant_id AND"
                             + " a.session_id = o.session_id AND a.action_id = o.action_id WHERE"
                             + " o.operation_kind = 'ACTION_RESPONSE' AND o.delivery_state IN"
-                            + " ('PENDING', 'LEASED') AND a.state <> 'requested' LIMIT 50",
+                            + " ('PENDING', 'LEASED') AND a.state <> 'requested'"
+                            + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = o.tenant_id"
+                            + " AND s.session_id = o.session_id AND s.csi_guard = FALSE) LIMIT 50",
                 (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)));
         for (OperationTarget target : ended) {
+            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, target.tenantId(), target.sessionId());
             Response response = response(target.tenantId(), target.sessionId(), target.operationId());
             Action action = find(target.tenantId(), target.sessionId(), response.actionId()).orElseThrow();
             boolean matched = "decided".equals(action.state())

@@ -1694,7 +1694,7 @@ class SessionLifecycleCoordinatorTest {
                         + " record_digest, gmt_create) VALUES ('tenant',"
                         + " 'workspace', ?, 1, ?, 'tx', 'op', 'command', ?,"
                         + " 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?,"
-                        + " 1)",
+                        + " " + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW + ")",
                 world.child, "e".repeat(64), "c".repeat(64), "t".repeat(64),
                 journal, journal.length, "d".repeat(64));
     }

@@ -451,9 +451,78 @@ class ToolPublicationStoreTest {
         return outcome;
     }
 
+    @ParameterizedTest
+    @CsvSource({"csi-files-retirement/1,resource", "full,resource",
+            "csi-files-retirement/1,segment", "full,segment",
+            "csi-files-retirement/1,prefix", "full,prefix",
+            "csi-files-retirement/1,seal", "full,seal",
+            "csi-files-retirement/1,finish", "full,finish",
+            "csi-files-retirement/1,dispatch", "full,dispatch"})
+    void privateHistoricalPublicationRefusesLegacyProduction(String profile, String operation) {
+        reserve();
+        // Unsupported saved legacy history is not native writer authority.
+        jdbc.update("UPDATE ma_session SET tool_profile = ?, runtime_request_key = ? WHERE tenant_id = ? AND session_id = ?",
+                profile, "full".equals(profile) ? "a".repeat(64) : null,
+                "tenant-1".getBytes(StandardCharsets.UTF_8), "session-1".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("DELETE FROM ma_tenant_guard WHERE tenant_key = ? AND guard_domain = 'output_publication'",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant-1"));
+        var before = producerTables();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("Unexpected object write"); }
+
+            @Override
+            public InputStream open(String key) { throw new AssertionError("Unexpected object read"); }
+
+            @Override
+            public void validateConfiguration() { }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
+        JsonNode key = binding.get("sessionKey");
+        byte[] bytes = "original".getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> {
+            switch (operation) {
+                case "resource" -> data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-resource", "content:original", "managed-tool-result-content", bytes);
+                case "segment" -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-segment", "stdout", 0, bytes, digest("original"));
+                case "prefix" -> data.prefix(key, "pub-1", PUBLICATION_TOKEN, "private-prefix", "stdout");
+                case "seal" -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-seal", "stdout", 0, 0, digest(""));
+                case "finish" -> data.finish(key, "pub-1", PUBLICATION_TOKEN,
+                        "private-finish", blockedTerminal().toString().getBytes(StandardCharsets.UTF_8));
+                case "dispatch" -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
+                        "pub-1", PUBLICATION_TOKEN);
+                default -> throw new AssertionError("Unexpected test operation");
+            }
+        }).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+            assertThat(error.getStatus()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
+            assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable");
+        });
+        assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "full"})
+    void producerExclusionUsesStoredTargetBeforeBindingScope(String profile) {
+        reserve();
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                        + " runtime_request_key, gmt_create, gmt_modified) VALUES ('tenant-1', 'private-target',"
+                        + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
+        jdbc.update("UPDATE ma_output_capture SET session_id = 'private-target' WHERE publication_id = X'7075622d31'");
+        jdbc.update("DELETE FROM ma_tenant_guard WHERE tenant_key = ? AND guard_domain = 'output_publication'",
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key("tenant-1"));
+        var before = producerTables();
+        assertThatThrownBy(() -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN)).isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+        assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
+    }
+
     private Map<String, List<Map<String, Object>>> producerTables() {
         var result = new java.util.TreeMap<String, List<Map<String, Object>>>();
-        for (String table : List.of("ma_tenant_guard", "ma_session_head",
+        for (String table : List.of("ma_tenant_guard", "ma_session", "ma_session_head",
                 "ma_output_capture", "ma_resource", "ma_operation",
                 "ma_resource_ref")) {
             result.put(table, jdbc.queryForList("SELECT * FROM " + table));
@@ -665,16 +734,23 @@ class ToolPublicationStoreTest {
                     : first.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null));
             try {
                 assertThat(written.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                jdbc.update(
-                        "UPDATE ma_operation SET deadline = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_id = X'6f726967696e616c'");
-                var originalDeadline = jdbc.queryForObject(
-                                "SELECT deadline FROM ma_operation WHERE operation_kind IN"
-                                        + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
-                                        + " operation_id = X'6f726967696e616c'", java.sql.Timestamp.class);
-                var before = jdbc.queryForMap(
-                                "SELECT capture_object_key AS object_key, resource_id, byte_length,"
-                                    + " sha256, operation_id FROM ma_resource WHERE publication_id"
-                                    + " = X'7075622d31'");
+                String outputKind = terminal ? "OUTPUT_FINISH" : "OUTPUT_UPLOAD";
+                var originalOutput = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = ? AND operation_id = ?",
+                        outputKind, "original".getBytes(StandardCharsets.UTF_8));
+                String outputKey = (String) originalOutput.get("operation_key");
+                var originalPut = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'OBJECT_PUT'");
+                assertThat(originalPut.get("state")).isEqualTo("IN_FLIGHT");
+                assertThat(originalPut.get("operation_key")).isEqualTo(
+                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.operationKey(
+                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind.OBJECT_PUT,
+                                (String) originalPut.get("scope_key"), (String) originalPut.get("target_key"),
+                                (String) originalPut.get("operation_id")));
+                jdbc.update("UPDATE ma_operation SET deadline = (" + ManagedSchemaTime.SQL_NOW + " + -1000)"
+                        + " WHERE operation_key = ? AND operation_kind = ?", outputKey, outputKind);
+                var originalDeadline = jdbc.queryForObject("SELECT deadline FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
+                        + " AND operation_id = X'6f726967696e616c'", java.sql.Timestamp.class);
+                var before = jdbc.queryForMap("SELECT capture_object_key AS object_key, resource_id, byte_length, sha256, operation_id"
+                        + " FROM ma_resource WHERE publication_id = X'7075622d31'");
                 assertThat(replacement.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original")
                         .path("state").asText()).isEqualTo("EXPIRED");
                 assertThatThrownBy(() -> {
@@ -686,9 +762,15 @@ class ToolPublicationStoreTest {
                 }).isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_publication_operation_expired"));
                 var recoveryStarted = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class);
+                var capacityBeforeRecovery = jdbc.queryForMap("SELECT capture_held_bytes,producer_held_bytes,admission_held_bytes,"
+                        + "capture_used_bytes,producer_used_bytes,admission_used_bytes FROM ma_output_capture WHERE publication_id = ?",
+                        "pub-1".getBytes(StandardCharsets.UTF_8));
                 assertThat(replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original")
                         .path("state").asText()).isEqualTo("RETRYABLE");
-                var recoveryFinished = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, java.sql.Timestamp.class);
+                assertThat(jdbc.queryForMap("SELECT capture_held_bytes,producer_held_bytes,admission_held_bytes,"
+                        + "capture_used_bytes,producer_used_bytes,admission_used_bytes FROM ma_output_capture WHERE publication_id = ?",
+                        "pub-1".getBytes(StandardCharsets.UTF_8))).isEqualTo(capacityBeforeRecovery);
+                var recoveryFinished = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class);
                 var recoveryDeadline = jdbc.queryForObject(
                                 "SELECT recovery_deadline FROM ma_operation WHERE operation_kind IN"
                                         + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
@@ -730,9 +812,30 @@ class ToolPublicationStoreTest {
                                         "SELECT state FROM ma_operation WHERE operation_kind ="
                                                 + " 'OBJECT_PUT'",
                         String.class)).isEqualTo("RETURNED");
+                var recoveredPut = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ? AND operation_kind = 'OBJECT_PUT'",
+                        originalPut.get("operation_key"));
+                for (String field : List.of("operation_key", "operation_id", "operation_kind", "scope_key", "session_scope_key",
+                        "tenant_id", "workspace_id", "session_id", "publication_id", "target_key", "request_json", "request_digest",
+                        "phase", "claim_generation", "gmt_create")) {
+                    assertThat(recoveredPut.get(field)).as(field).isEqualTo(originalPut.get(field));
+                }
+                JsonNode proof = JSON.readTree((String) recoveredPut.get("result_json"));
+                assertThat(proof).isEqualTo(JSON.createObjectNode().put("version", 1).put("proof", "original_object")
+                        .put("objectKey", before.get("object_key").toString()).put("byteLength", bytes.length)
+                        .put("sha256", ToolPublicationContract.sha256(bytes)));
+                var outputBeforeLateReply = jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ?", outputKey);
+                var captureBeforeLateReply = jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = ?",
+                        "pub-1".getBytes(StandardCharsets.UTF_8));
                 release.countDown();
                 assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
-                        .hasCauseInstanceOf(ManagedAgentException.class);
+                        .hasCauseInstanceOf(IllegalArgumentException.class).hasRootCauseMessage("PUT attempt conflicts");
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ?", originalPut.get("operation_key")))
+                        .usingRecursiveComparison().isEqualTo(recoveredPut);
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_operation WHERE operation_key = ?", outputKey))
+                        .usingRecursiveComparison().isEqualTo(outputBeforeLateReply);
+                assertThat(jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = ?", "pub-1".getBytes(StandardCharsets.UTF_8)))
+                        .usingRecursiveComparison().isEqualTo(captureBeforeLateReply);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'OBJECT_PUT'", Long.class)).isEqualTo(1);
                 JsonNode receipt = terminal
                         ? replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
                         : replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
@@ -2361,6 +2464,59 @@ class ToolPublicationStoreTest {
         assertThat(((Number) expired.get("capture_held_bytes")).longValue()).isZero();
         assertThat(((Number) expired.get("producer_held_bytes")).longValue()).isZero();
         assertThat(((Number) expired.get("admission_held_bytes")).longValue()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "full"})
+    void ordinaryReserveExpiresOrdinaryHistoryAndPreservesAnotherPrivateSession(String profile) {
+        ObjectNode second = addSecondExecution();
+        reserve();
+        seedPrivateExpiredPublication(profile);
+        jdbc.update("UPDATE ma_output_capture SET expires_at = 1 WHERE publication_id = X'7075622d31'");
+        var privateBefore = jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = X'707269766174652d7075626c69636174696f6e'");
+        store = newStore(2 * ALLOCATION, 2);
+        ObjectNode next = request("reserve");
+        next.set("binding", second);
+        assertThat(store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText()).isEqualTo("OPEN");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_output_capture WHERE publication_id = X'7075622d31'", String.class))
+                .isEqualTo("FENCED");
+        assertThat(jdbc.queryForObject("SELECT capture_held_bytes + producer_held_bytes + admission_held_bytes"
+                + " FROM ma_output_capture WHERE publication_id = X'7075622d31'", Long.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_output_capture WHERE publication_id = X'707269766174652d7075626c69636174696f6e'"))
+                .usingRecursiveComparison().isEqualTo(privateBefore);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bytes", "captures"})
+    void expiredPrivateHeldCapacityAndCaptureSlotsRemainCharged(String capacity) {
+        ObjectNode second = addSecondExecution();
+        reserve();
+        seedPrivateExpiredPublication("full");
+        jdbc.update("UPDATE ma_output_capture SET expires_at = 1 WHERE publication_id = X'7075622d31'");
+        var before = jdbc.queryForList("SELECT * FROM ma_output_capture ORDER BY publication_id");
+        store = newStore("bytes".equals(capacity) ? ALLOCATION : 3 * ALLOCATION,
+                "captures".equals(capacity) ? 1 : 4);
+        ObjectNode next = request("reserve");
+        next.set("binding", second);
+        assertRefused(() -> store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN), false,
+                "bytes".equals(capacity) ? "tenant_bytes" : "active_captures");
+        assertThat(jdbc.queryForList("SELECT * FROM ma_output_capture ORDER BY publication_id"))
+                .usingRecursiveComparison().isEqualTo(before);
+    }
+
+    private void seedPrivateExpiredPublication(String profile) {
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                        + " runtime_request_key, gmt_create, gmt_modified) VALUES ('tenant-1', 'private-session',"
+                        + " 'qwen-code', 'ACTIVE', ?, ?, 0, 0)", profile, "full".equals(profile) ? "a".repeat(64) : null);
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                        + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                        + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
+                        + " producer_held_bytes, admission_held_bytes, write_evidence)"
+                        + " SELECT ?, tenant_key, tenant_id, workspace_id, 'private-session', 'private-publication',"
+                        + " ?, 'private-capture', binding_json, binding_digest, token_hash, 'OPEN', 1, capture_bytes,"
+                        + " producer_bytes, admission_bytes, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
+                        + " write_evidence FROM ma_output_capture WHERE publication_id = X'7075622d31'",
+                digest("private-scope"), digest("private-execution"));
     }
 
     @Test

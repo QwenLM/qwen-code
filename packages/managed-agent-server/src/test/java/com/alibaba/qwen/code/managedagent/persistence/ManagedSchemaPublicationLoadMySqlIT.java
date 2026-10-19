@@ -42,6 +42,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
         public <T> List<T> query(String sql, RowMapper<T> mapper, Object... arguments) {
             if (sql.startsWith("SELECT scope_key, tenant_id, session_id FROM ma_operation")
                     || sql.startsWith("SELECT scope_key, publication_id, tenant_id, session_id FROM ma_operation")
+                    || sql.startsWith("SELECT o.scope_key, o.publication_id, o.tenant_id, o.session_id FROM ma_operation o")
                     || sql.startsWith("SELECT c.scope_key, c.publication_id, c.tenant_id")
                     || sql.startsWith("SELECT resource_key, byte_length,")) {
                 queries.add(new Query(sql, arguments.clone()));
@@ -81,7 +82,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 });
                 insertOperation(jdbc, operationKey, scope, operationId, "CAPTURE_GC", HEALTHY,
                         ManagedSchemaKeys.key(publication), "PENDING", 0);
-                jdbc.update("UPDATE ma_operation SET session_scope_key = ?, publication_id = ? WHERE operation_key = ?",
+                jdbc.update("UPDATE ma_operation SET workspace_id = 'workspace', session_scope_key = ?, publication_id = ? WHERE operation_key = ?",
                         sessionScope, publication, operationKey);
                 ToolPublicationObjectStore unusedObjects = new ToolPublicationObjectStore() {
                     @Override public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("No object write is expected"); }

@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -15,8 +18,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -42,6 +43,25 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class WorkspaceRuntimeTransportTest {
+    @Test
+    void directPrivateCsiControlRefusesBeforeDelegateOrContextLookup() throws Exception {
+        var fixture = fixture();
+        var original = fixture.session().getScope();
+        var scope = new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                original.getCanonicalCwd(), CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        var session = new RuntimeSession(fixture.session().getHarnessSessionId(), fixture.session().getRuntimeSessionId(),
+                "bootstrap", scope);
+        for (Map<String, Object> operation : java.util.List.<Map<String, Object>>of(
+                Map.of("kind", "raw-file-history", "action", "prepare", "promptId", "file-turn", "paths", java.util.List.of("file.txt")),
+                Map.of("kind", "raw-file-history", "action", "rewind", "promptId", "file-turn"))) {
+            assertThatThrownBy(() -> fixture.transport().control(fixture.lease(), session,
+                    operation))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("csi_control_not_qualified"));
+        }
+        verifyNoInteractions(fixture.http(), fixture.ownership(), fixture.resolver(), fixture.bindings(), fixture.sessions());
+    }
+
     @Test
     void invalidRemoteCwdIsRejectedBeforeClaimingStorageOrInstallingContext() throws Exception {
         var fixture = sshAcquisitionFixture();

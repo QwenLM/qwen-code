@@ -37,6 +37,7 @@ import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -87,6 +88,27 @@ class ResidentWorkspacesTest {
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES ('tenant', 'workspace', ?, 'OWNER')", ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
+    }
+
+    @Test
+    void creationUsesOneAdmissionTimeWhilePinningApprovalMode() {
+        long admittedAt = 1234;
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setApprovalMode("default");
+        properties.getRuntimeBroker().setResidentWorkspaces(List.of(mapping));
+        store = new ManagedAgentStore(jdbc, new ObjectMapper(),
+                Clock.fixed(Instant.ofEpochMilli(admittedAt), ZoneOffset.UTC), mock(CommittedEventPublisher.class),
+                new ManagedWorkspaceRegistry(jdbc), properties);
+        var first = create("fixed-clock");
+        var row = jdbc.queryForMap("SELECT gmt_create, gmt_modified, approval_mode FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", "tenant", first.sessionId());
+        assertThat(row.get("gmt_create")).isEqualTo(admittedAt);
+        assertThat(row.get("gmt_modified")).isEqualTo(admittedAt);
+        assertThat(row.get("approval_mode")).isEqualTo("default");
+        assertThat(jdbc.queryForObject("SELECT gmt_create FROM ma_public_event WHERE tenant_id = ?"
+                + " AND session_id = ? AND event_type = 'session.created'", Long.class,
+                "tenant", first.sessionId())).isEqualTo(admittedAt);
     }
 
     @Test

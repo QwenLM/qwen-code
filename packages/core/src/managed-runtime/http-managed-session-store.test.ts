@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
+import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { ManagedHookActivationController } from './managed-hook-activation.js';
 import {
   ManagedSessionMessageProjection,
@@ -280,6 +281,102 @@ describe('HTTP Managed Session store', () => {
     );
   });
 
+  it('associates only finite private history invocation refs and the original prepared intent', async () => {
+    const server = new FakeManagedSessionStore();
+    const open = await createSessionOpener(server);
+    const session = await open('harness-a', TOKEN_A);
+    try {
+      const commit = async (
+        commandId: string,
+        content: Record<string, unknown>,
+      ) =>
+        session.authority.commitDomainRecord(
+          {
+            operation: 'commitFileHistory',
+            commandId,
+            sessionKey: SESSION_KEY,
+            contentDigest: createHash('sha256')
+              .update(JSON.stringify(content))
+              .digest('hex'),
+          },
+          {
+            domain: 'file_history',
+            content: {
+              ...content,
+              record: {
+                uuid: randomUUID(),
+                parentUuid: null,
+                sessionId: SESSION_KEY.sessionId,
+                timestamp: new Date().toISOString(),
+                type: 'system',
+                subtype: 'file_history_snapshot',
+                cwd: '/workspace',
+                version: 'test',
+              },
+            },
+          },
+          { class: 'trusted_entry' },
+        );
+      const initial = await commit('history-bind', {
+        schemaVersion: 2,
+        profile: 'csi-files-retirement/1',
+        preparation: null,
+      });
+      const inputRef = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{}'),
+      );
+      const toolDefinitionRef = await session.resources.publish(
+        'managed-tool-definition',
+        Buffer.from('{}'),
+      );
+      const invocations = [{ inputRef, toolDefinitionRef }];
+      const intent = await commit('history-intent', {
+        schemaVersion: 2,
+        profile: 'csi-files-retirement/1',
+        preparation: { stage: 'intent', invocations },
+      });
+      const ids = () =>
+        (server.commits.at(-1)!['resources'] as ManagedSessionDurableRef[])
+          .map((ref) => ref.resourceId)
+          .sort();
+      expect(ids()).toEqual(
+        [
+          intent.recordRef.resourceId,
+          inputRef.resourceId,
+          toolDefinitionRef.resourceId,
+        ].sort(),
+      );
+      expect(ids()).not.toContain(initial.recordRef.resourceId);
+      const prepared = await commit('history-prepared', {
+        schemaVersion: 2,
+        profile: 'csi-files-retirement/1',
+        preparation: {
+          stage: 'prepared',
+          invocations,
+          intentRef: intent.recordRef,
+        },
+      });
+      expect(ids()).toEqual(
+        [
+          prepared.recordRef.resourceId,
+          intent.recordRef.resourceId,
+          inputRef.resourceId,
+          toolDefinitionRef.resourceId,
+        ].sort(),
+      );
+      expect(ids()).not.toContain(initial.recordRef.resourceId);
+      const legacy = await commit('history-legacy', {
+        schemaVersion: 1,
+        state: {},
+      });
+      expect(ids()).toContain(legacy.recordRef.resourceId);
+      expect(ids()).not.toContain(prepared.recordRef.resourceId);
+    } finally {
+      await session.close();
+    }
+  });
+
   async function bootStoresAndSession(
     server: FakeManagedSessionStore,
     requestTimeoutMs?: number,
@@ -328,6 +425,804 @@ describe('HTTP Managed Session store', () => {
     });
     return { stores, session };
   }
+
+  async function bootOriginalCsiAuthority(
+    server: FakeManagedSessionStore,
+    fetchFn = server.fetch,
+  ) {
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      leaseDurationMs: 1000,
+      fetchFn,
+    });
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-definition',
+      Buffer.from(
+        JSON.stringify({
+          engine: 'managed',
+          sessionId: SESSION_KEY.sessionId,
+          toolProfile: 'csi-files-retirement/1',
+        }),
+      ),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-root',
+      Buffer.from('{"cwd":"/workspace"}'),
+    );
+    const authority = await LocalManagedSessionAuthority.open({
+      journal,
+      resources: stores.resourceStore,
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'hosted-harness/1',
+      create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
+    });
+    await authority.installActivation({
+      activationId: randomUUID(),
+      workerId: 'harness-a',
+      leaseDurationMs: 60_000,
+    });
+    return { stores, authority, journal };
+  }
+
+  async function bootOriginalCsiUnknownAppendFixture() {
+    const server = new FakeManagedSessionStore();
+    const transport: {
+      afterAcquire?: (response: Response) => Promise<Response>;
+      afterRenew?: (response: Response) => Promise<Response>;
+    } = {};
+    const observed = { returnedLeaseUntil: 0, backendLeaseUntil: 0 };
+    let initialAcquire = true;
+    let failMessage = false;
+    let firstMessage!: () => void;
+    const firstMessageEntered = new Promise<void>((resolve) => {
+      firstMessage = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const url = requestUrl(input);
+      if (
+        /\/transactions:commit(?:-v2)?$/.test(url) &&
+        JSON.parse(String(init?.body)).operation === 'message.commit' &&
+        failMessage
+      ) {
+        firstMessage();
+        return jsonResponse(
+          { error: { code: 'store_unavailable', message: 'ack unknown' } },
+          503,
+        );
+      }
+      const response = await server.fetch(input, init);
+      const acquire = url.endsWith('/writers:acquire');
+      const renew = url.endsWith('/writers:renew');
+      if (!acquire && !renew) return response;
+      const body = (await response.json()) as Record<string, unknown>;
+      observed.backendLeaseUntil = Number(body['leaseUntil']);
+      // Same declared short-wire-grant fixture as the existing main lease tests.
+      // The real Fake backend still derives its generation/lease from Date.now.
+      if (acquire && initialAcquire) {
+        initialAcquire = false;
+        body['leaseUntil'] = Date.now() + 1000;
+      }
+      let returned = jsonResponse(body);
+      if (acquire && transport.afterAcquire)
+        returned = await transport.afterAcquire(returned);
+      if (renew && transport.afterRenew)
+        returned = await transport.afterRenew(returned);
+      observed.returnedLeaseUntil = Number(body['leaseUntil']);
+      return returned;
+    });
+    const boot = await bootOriginalCsiAuthority(server, fetchFn);
+    const appendUnknown = async () => {
+      const contentRef = await boot.stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      const activation = boot.authority.currentActivation;
+      if (!activation) throw new Error('Fixture has no public activation.');
+      failMessage = true;
+      const outcome = boot.authority
+        .appendExecutionEvent(
+          {
+            operation: 'message.commit',
+            commandId: 'm-1',
+            sessionKey: SESSION_KEY,
+            contentDigest: 'e'.repeat(64),
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: 'message:m-1',
+            sessionKey: SESSION_KEY,
+            kind: 'message.committed',
+            occurredAt: 1,
+            subject: {
+              type: 'activation',
+              scopeId: activation.activationId,
+              activationId: activation.activationId,
+              epoch: activation.epoch,
+            },
+            payload: {
+              messageId: 'm-1',
+              role: 'user',
+              contentRef,
+              parentMessageId: null,
+            },
+          }),
+          { class: 'harness', activation },
+        )
+        .then(
+          () => undefined,
+          (cause: unknown) => cause,
+        );
+      await firstMessageEntered;
+      // The actual non-renew append has two250ms outer backoffs. No sleep,
+      // private pending flag or timer/config override substitutes for that path.
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await outcome).toBeInstanceOf(ManagedSessionAppendUnsettledError);
+      expect(
+        server.commits.filter((body) => body['operation'] === 'message.commit'),
+      ).toHaveLength(0);
+    };
+    const acquireRequests = () =>
+      fetchFn.mock.calls.filter(([input]) =>
+        requestUrl(input).endsWith('/writers:acquire'),
+      ).length;
+    return {
+      ...boot,
+      server,
+      fetchFn,
+      transport,
+      observed,
+      appendUnknown,
+      acquireRequests,
+    };
+  }
+
+  it('refuses public pending-append settlement after the original writer joined', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const fixture = await bootOriginalCsiUnknownAppendFixture();
+    try {
+      await fixture.appendUnknown();
+      await fixture.stores.csiRetirement.joinWriter();
+      const acquires = fixture.acquireRequests();
+      const commits = structuredClone(fixture.server.storedTransactions);
+      // Expiry comes from an actual observed grant and the actual fake clock.
+      vi.setSystemTime(fixture.observed.returnedLeaseUntil + 1);
+      await expect(fixture.journal.settleAppend!()).rejects.toThrow(
+        'original CSI writer admission is closed.',
+      );
+      expect(fixture.acquireRequests()).toBe(acquires);
+      expect(fixture.server.storedTransactions).toEqual(commits);
+      expect(fixture.server.sealCount).toBe(0);
+    } finally {
+      await fixture.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('joins an issued acquisition before checking the original writer generation', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    let enterAcquire!: () => void;
+    let releaseAcquire!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enterAcquire = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
+    const fixture = await bootOriginalCsiUnknownAppendFixture();
+    let settling: Promise<unknown> | undefined;
+    let joining: Promise<unknown> | undefined;
+    let acquiredGrant: unknown;
+    try {
+      await fixture.appendUnknown();
+      vi.setSystemTime(fixture.observed.backendLeaseUntil + 1);
+      fixture.transport.afterAcquire = async (response) => {
+        acquiredGrant = await response.clone().json();
+        enterAcquire();
+        await gate;
+        return response;
+      };
+      settling = fixture.journal.settleAppend!().catch(
+        (cause: unknown) => cause,
+      );
+      await entered;
+      expect(acquiredGrant).toMatchObject({ writerGeneration: 2 });
+      let joined = false;
+      joining = fixture.stores.csiRetirement.joinWriter().then(
+        () => {
+          joined = true;
+          return undefined;
+        },
+        (cause: unknown) => {
+          joined = true;
+          return cause;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(joined).toBe(false);
+      releaseAcquire();
+      expect(await joining).toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining(
+            'original CSI writer cannot prepare retirement.',
+          ),
+        }),
+      );
+      await settling;
+      expect(fixture.acquireRequests()).toBe(2);
+      expect(fixture.server.sealCount).toBe(0);
+    } finally {
+      releaseAcquire();
+      await Promise.allSettled(
+        [settling, joining].filter((value) => value !== undefined),
+      );
+      await fixture.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not issue a late acquisition when a waiting settlement loses admission to join', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    let enterRenew!: () => void;
+    let releaseRenew!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enterRenew = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseRenew = resolve;
+    });
+    const fixture = await bootOriginalCsiUnknownAppendFixture();
+    let settling: Promise<unknown> | undefined;
+    let joining: Promise<void> | undefined;
+    let renewedGrant: unknown;
+    fixture.transport.afterRenew = async (response) => {
+      renewedGrant = await response.clone().json();
+      enterRenew();
+      await gate;
+      return response;
+    };
+    try {
+      await fixture.appendUnknown();
+      await entered;
+      expect(renewedGrant).toMatchObject({ writerGeneration: 1 });
+      vi.setSystemTime(fixture.observed.returnedLeaseUntil + 1);
+      expect(fixture.observed.backendLeaseUntil).toBeGreaterThan(Date.now());
+      // Real settlement registers its await-renew continuation before join.
+      settling = fixture.journal.settleAppend!().then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const acquires = fixture.acquireRequests();
+      joining = fixture.stores.csiRetirement.joinWriter();
+      releaseRenew();
+      await joining;
+      expect(await settling).toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining(
+            'original CSI writer admission is closed.',
+          ),
+        }),
+      );
+      expect(fixture.acquireRequests()).toBe(acquires);
+      expect(fixture.server.sealCount).toBe(0);
+    } finally {
+      releaseRenew();
+      await Promise.allSettled(
+        [settling, joining].filter((value) => value !== undefined),
+      );
+      await fixture.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses original release preparation while a valid append remains unsettled', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const fixture = await bootOriginalCsiUnknownAppendFixture();
+    const publish = vi.spyOn(fixture.stores.resourceStore, 'publish');
+    try {
+      await fixture.appendUnknown();
+      const publications = publish.mock.calls.length;
+      const commits = structuredClone(fixture.server.storedTransactions);
+      const committedSequence = fixture.authority.committedSequence;
+      const requests = fixture.fetchFn.mock.calls.length;
+      await expect(
+        fixture.authority.prepareOriginalCsiRelease(),
+      ).rejects.toThrow('original CSI activation cannot prepare retirement.');
+      expect(publish).toHaveBeenCalledTimes(publications);
+      expect(fixture.fetchFn).toHaveBeenCalledTimes(requests);
+      expect(fixture.server.storedTransactions).toEqual(commits);
+      expect(fixture.authority.committedSequence).toBe(committedSequence);
+      expect(fixture.server.sealCount).toBe(0);
+    } finally {
+      publish.mockRestore();
+      await fixture.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('joins the queued original renewal and stages one exact release without HTTP or append', async () => {
+    const server = new FakeManagedSessionStore();
+    let enterRenewal!: () => void;
+    let finishRenewal!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enterRenewal = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (
+        requestUrl(input).endsWith('/transactions:commit') &&
+        JSON.parse(String(init?.body)).operation === 'renewActivation'
+      ) {
+        enterRenewal();
+        await gate;
+      }
+      return response;
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      const renewal = authority.renewActivation({ leaseDurationMs: 90_000 });
+      await entered;
+      const preparation = authority.prepareOriginalCsiRelease();
+      await expect(
+        authority.renewActivation({ leaseDurationMs: 60_000 }),
+      ).rejects.toThrow('admission is closed');
+      finishRenewal();
+      const renewed = await renewal;
+      const records = await preparation;
+      await stores.csiRetirement.joinWriter();
+      const count = fetchFn.mock.calls.length;
+      const commits = server.commits.length;
+      const prepared = await stores.csiRetirement.prepare(records);
+      expect(await authority.prepareOriginalCsiRelease()).toBe(records);
+      expect(await stores.csiRetirement.prepare(records)).toEqual(prepared);
+      expect(fetchFn).toHaveBeenCalledTimes(count);
+      expect(server.commits).toHaveLength(commits);
+      expect(authority.currentActivation).toEqual(renewed);
+      const bytes = Buffer.from(prepared.commitBodyBase64, 'base64');
+      expect(prepared.preparedCommitSha256).toBe(
+        createHash('sha256').update(bytes).digest('hex'),
+      );
+      const body = JSON.parse(bytes.toString('utf8'));
+      const lines = Buffer.from(body.recordBytesBase64, 'base64')
+        .toString('utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(body).toMatchObject({
+        operation: 'releaseActivation',
+        writerGeneration: 1,
+        activationEpoch: 1,
+        expectedCommittedSequence: authority.committedSequence,
+        latestCheckpointResourceId: null,
+        recordCount: 2,
+        eventCount: 1,
+      });
+      expect(lines[0].managedSession.payload.expiresAt).toBe(
+        renewed!.expiresAt,
+      );
+      expect(lines[1].parentUuid).toBe(lines[0].uuid);
+      expect(body.resources).toHaveLength(1);
+      const boundary = JSON.parse(
+        Buffer.from(body.resources[0].bytesBase64, 'base64').toString('utf8'),
+      );
+      expect(boundary).toMatchObject({
+        committedSequence: authority.committedSequence,
+        lastRecordUuid: lines[0].parentUuid,
+      });
+      await expect(stores.assertWritable()).rejects.toThrow(
+        'writer renewal is closed',
+      );
+      await expect(authority.close()).rejects.toThrow(
+        'owns the final boundary',
+      );
+      await expect(stores.close()).rejects.toThrow('owns the final boundary');
+      expect(server.sealCount).toBe(0);
+    } finally {
+      finishRenewal();
+      await stores.stopLocal();
+    }
+  });
+
+  it('joins the actual writer renewal successfully without disabling its grant or rescheduling', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    let finishRenewal!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (requestUrl(input).endsWith('/writers:renew')) await gate;
+      return response;
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      let joined = false;
+      const pending = stores.csiRetirement.joinWriter().then(() => {
+        joined = true;
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(joined).toBe(false);
+      finishRenewal();
+      await pending;
+      const records = await authority.prepareOriginalCsiRelease();
+      await expect(
+        stores.csiRetirement.prepare(records),
+      ).resolves.toHaveProperty('commitBodyBase64');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toHaveLength(1);
+      expect(server.sealCount).toBe(0);
+    } finally {
+      finishRenewal();
+      await stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains a failed scheduled writer renewal after its promise leaves the active slot', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>((input, init) =>
+      requestUrl(input).endsWith('/writers:renew')
+        ? Promise.resolve(jsonResponse({ code: 'renewal_refused' }, 409))
+        : server.fetch(input, init),
+    );
+    const { stores } = await bootOriginalCsiAuthority(server, fetchFn);
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(stores.csiRetirement.joinWriter()).rejects.toBeInstanceOf(
+        ManagedSessionStoreHttpError,
+      );
+      expect(server.sealCount).toBe(0);
+    } finally {
+      await stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a saved cut through read-only status without acquiring or preparing a writer', async () => {
+    const retirementId = randomUUID();
+    const status = {
+      format: 'qwen-csi-application-retirement/1',
+      retirementId,
+      stage: 'CUT',
+      progressVersion: 3,
+      frozenRequestSha256: 'a'.repeat(64),
+      cutSha256: 'b'.repeat(64),
+      finalizeReceiptSha256: null,
+    };
+    const fetchFn = vi.fn<typeof fetch>(async (input) =>
+      jsonResponse(
+        requestUrl(input).includes('/csi-retirement:finalize')
+          ? {
+              ...status,
+              stage: 'DRAINED',
+              progressVersion: 4,
+              finalizeReceiptSha256: 'c'.repeat(64),
+            }
+          : status,
+      ),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await expect(
+        stores.csiRetirement.complete(retirementId),
+      ).resolves.toMatchObject({ stage: 'DRAINED' });
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+      expect(
+        fetchFn.mock.calls.map(([input]) =>
+          new URL(requestUrl(input)).pathname.split('/').at(-1),
+        ),
+      ).toEqual(['csi-retirement', 'csi-retirement:finalize']);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it.each([
+    ['FROZEN', 'CUT', 'frozenRequestSha256'],
+    ['FROZEN', 'DRAINED', 'frozenRequestSha256'],
+    ['CUT', 'DRAINED', 'frozenRequestSha256'],
+    ['CUT', 'DRAINED', 'cutSha256'],
+  ])(
+    'refuses %s → %s when the saved %s changes',
+    async (initialStage, nextStage, changedField) => {
+      const retirementId = randomUUID();
+      const initial = {
+        format: 'qwen-csi-application-retirement/1',
+        retirementId,
+        stage: initialStage,
+        progressVersion: initialStage === 'FROZEN' ? 2 : 3,
+        frozenRequestSha256: 'a'.repeat(64),
+        cutSha256: initialStage === 'FROZEN' ? null : 'b'.repeat(64),
+        finalizeReceiptSha256: null,
+      };
+      const next = {
+        ...initial,
+        stage: nextStage,
+        progressVersion: nextStage === 'CUT' ? 3 : 4,
+        cutSha256: 'b'.repeat(64),
+        finalizeReceiptSha256: nextStage === 'DRAINED' ? 'c'.repeat(64) : null,
+        [changedField]: 'd'.repeat(64),
+      };
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        jsonResponse(
+          init?.method === 'GET'
+            ? initial
+            : requestUrl(input).includes('/csi-retirement:cut')
+              ? next
+              : {
+                  ...next,
+                  stage: 'DRAINED',
+                  progressVersion: 4,
+                  finalizeReceiptSha256: 'c'.repeat(64),
+                },
+        ),
+      );
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        await expect(
+          stores.csiRetirement.complete(retirementId),
+        ).rejects.toThrow('status changed its saved progress');
+        expect(fetchFn).toHaveBeenCalledTimes(2);
+        expect(fetchFn.mock.calls.map(([, init]) => init?.method)).toEqual([
+          'GET',
+          'POST',
+        ]);
+        expect(requestUrl(fetchFn.mock.calls[1]![0])).toContain(
+          initialStage === 'FROZEN'
+            ? '/csi-retirement:cut'
+            : '/csi-retirement:finalize',
+        );
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
+
+  it.each(['frozenRequestSha256', 'cutSha256'])(
+    'refuses a final %s change after a matching cut response',
+    async (changedField) => {
+      const retirementId = randomUUID();
+      const frozen = {
+        format: 'qwen-csi-application-retirement/1',
+        retirementId,
+        stage: 'FROZEN',
+        progressVersion: 2,
+        frozenRequestSha256: 'a'.repeat(64),
+        cutSha256: null,
+        finalizeReceiptSha256: null,
+      };
+      const cut = {
+        ...frozen,
+        stage: 'CUT',
+        progressVersion: 3,
+        cutSha256: 'b'.repeat(64),
+      };
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        jsonResponse(
+          init?.method === 'GET'
+            ? frozen
+            : requestUrl(input).includes('/csi-retirement:cut')
+              ? cut
+              : {
+                  ...cut,
+                  stage: 'DRAINED',
+                  progressVersion: 4,
+                  finalizeReceiptSha256: 'c'.repeat(64),
+                  [changedField]: 'd'.repeat(64),
+                },
+        ),
+      );
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        await expect(
+          stores.csiRetirement.complete(retirementId),
+        ).rejects.toThrow('status changed its saved progress');
+        expect(fetchFn).toHaveBeenCalledTimes(3);
+        expect(
+          JSON.parse(String(fetchFn.mock.calls[1]![1]?.body)),
+        ).toMatchObject({
+          frozenRequestSha256: 'a'.repeat(64),
+        });
+        expect(
+          JSON.parse(String(fetchFn.mock.calls[2]![1]?.body)),
+        ).toMatchObject({
+          cutSha256: 'b'.repeat(64),
+        });
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
+
+  it.each([
+    { stages: ['FROZEN', 'CUT', 'DRAINED'] },
+    { stages: ['FROZEN', 'DRAINED'] },
+    { stages: ['DRAINED'] },
+  ])(
+    'completes matching $stages without acquiring a writer',
+    async ({ stages }) => {
+      const retirementId = randomUUID();
+      let index = 0;
+      const fetchFn = vi.fn<typeof fetch>(async () => {
+        const stage = stages[index++];
+        return jsonResponse({
+          format: 'qwen-csi-application-retirement/1',
+          retirementId,
+          stage,
+          progressVersion:
+            ['SETTLING', 'FROZEN', 'CUT', 'DRAINED'].indexOf(stage!) + 1,
+          frozenRequestSha256: 'a'.repeat(64),
+          cutSha256: stage === 'FROZEN' ? null : 'b'.repeat(64),
+          finalizeReceiptSha256: stage === 'DRAINED' ? 'c'.repeat(64) : null,
+        });
+      });
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        await expect(
+          stores.csiRetirement.complete(retirementId),
+        ).resolves.toEqual({
+          format: 'qwen-csi-application-retirement/1',
+          retirementId,
+          stage: 'DRAINED',
+          progressVersion: 4,
+          frozenRequestSha256: 'a'.repeat(64),
+          cutSha256: 'b'.repeat(64),
+          finalizeReceiptSha256: 'c'.repeat(64),
+        });
+        expect(fetchFn).toHaveBeenCalledTimes(stages.length);
+        expect(
+          fetchFn.mock.calls.map(([input]) =>
+            new URL(requestUrl(input)).pathname.split('/').at(-1),
+          ),
+        ).toEqual(
+          stages.length === 3
+            ? [
+                'csi-retirement',
+                'csi-retirement:cut',
+                'csi-retirement:finalize',
+              ]
+            : stages.length === 2
+              ? ['csi-retirement', 'csi-retirement:cut']
+              : ['csi-retirement'],
+        );
+        expect(fetchFn.mock.calls[0]![1]?.method).toBe('GET');
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
+
+  it('refuses backwards progress before another retirement command', async () => {
+    const retirementId = randomUUID();
+    const frozen = {
+      format: 'qwen-csi-application-retirement/1',
+      retirementId,
+      stage: 'FROZEN',
+      progressVersion: 2,
+      frozenRequestSha256: 'a'.repeat(64),
+      cutSha256: null,
+      finalizeReceiptSha256: null,
+    };
+    const fetchFn = vi.fn<typeof fetch>(async (_input, init) =>
+      jsonResponse(
+        init?.method === 'GET'
+          ? frozen
+          : {
+              ...frozen,
+              stage: 'SETTLING',
+              progressVersion: 1,
+              frozenRequestSha256: null,
+            },
+      ),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await expect(stores.csiRetirement.complete(retirementId)).rejects.toThrow(
+        'status changed its saved progress',
+      );
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it.each([
+    ['SETTLING', 2],
+    ['FROZEN', 1],
+    ['CUT', 4],
+    ['DRAINED', 3],
+  ])(
+    'refuses %s status at progress version %s before advancing',
+    async (stage, progressVersion) => {
+      const retirementId = randomUUID();
+      const fetchFn = vi.fn<typeof fetch>(async () =>
+        jsonResponse({
+          format: 'qwen-csi-application-retirement/1',
+          retirementId,
+          stage,
+          progressVersion,
+          frozenRequestSha256: stage === 'SETTLING' ? null : 'a'.repeat(64),
+          cutSha256: ['CUT', 'DRAINED'].includes(stage) ? 'b'.repeat(64) : null,
+          finalizeReceiptSha256: stage === 'DRAINED' ? 'c'.repeat(64) : null,
+        }),
+      );
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        await expect(
+          stores.csiRetirement.complete(retirementId),
+        ).rejects.toThrow('progress is incomplete');
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(fetchFn.mock.calls[0][1]?.method).toBe('GET');
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
 
   it.each([undefined, 1, 2])(
     'requires Store acknowledgement before a bounded retraction (version=%s)',

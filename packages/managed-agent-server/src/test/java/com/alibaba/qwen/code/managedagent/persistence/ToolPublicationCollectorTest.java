@@ -119,16 +119,12 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         seedCaptureGc(scope, "pub-1", session);
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
         var evaluations = new java.util.concurrent.atomic.AtomicInteger();
-        var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
-            @Override public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
-                var rows = super.query(sql, mapper, args);
-                if (sql.contains(" FROM ma_output_capture WHERE scope_key = ?")
-                        && !rows.isEmpty() && rows.getFirst() instanceof java.util.Map<?, ?> row && "RETIRING".equals(row.get("retention_state"))) {
-                    evaluations.incrementAndGet();
-                }
-                return rows;
-            }
-        };
+        var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource());
+        retention = org.mockito.Mockito.spy(new ToolPublicationRetentionStore(template, manager));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            evaluations.incrementAndGet();
+            return invocation.callRealMethod();
+        }).when(retention).candidate(org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.any(Duration.class));
         var objects = new DeletingObjects();
         var gc = collector(template, objects, true);
         long before = ToolPublicationRetentionStore.now(jdbc);
@@ -765,5 +761,154 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(held()).isEqualTo(3000);
         assertThat(jdbc.queryForObject("SELECT failure_code FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
                 String.class, scope)).isEqualTo("legacy_write_evidence_missing");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "full"})
+    void privateBacklogIsFrozenBeforePagingAndDoesNotStarveOrdinaryCollection(String profile) {
+        String privateSession = "private-session";
+        insertPrivateSession(privateSession, profile);
+        for (int index = 0; index < 40; index++) {
+            String publication = "private-" + index;
+            String privateScope = addPublication(publication, privateSession);
+            jdbc.update("UPDATE ma_output_capture SET retention_state = ? WHERE scope_key = ? AND publication_id = ?",
+                    index % 2 == 0 ? "RETIRING" : "DELETING", privateScope, publication);
+            String id = "capture-gc-" + ManagedSchemaKeys.key(privateScope, publication);
+            String operationKey = addOperation(OperationKind.CAPTURE_GC, privateScope, publication, privateSession, id, "PENDING");
+            jdbc.update("UPDATE ma_operation SET claim_owner = 'old-owner', available_at = 0 WHERE operation_key = ?", operationKey);
+            addCaptureObject(privateScope, publication, privateSession, "one", publication,
+                    "private/" + publication, null, "VERIFIED");
+        }
+        var before = jdbc.queryForList("SELECT * FROM ma_output_capture WHERE session_id = ? ORDER BY publication_id",
+                privateSession);
+        addObject("one", "ordinary/one", null);
+        retire();
+        String id = "capture-gc-" + ManagedSchemaKeys.key(scope, "pub-1");
+        String operationKey = addOperation(OperationKind.CAPTURE_GC, scope, "pub-1", session, id, "PENDING");
+        jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_key = ?", operationKey);
+        var objects = new DeletingObjects();
+        assertThat(collector(objects).runOnce()).isTrue();
+        assertThat(objects.deleted).containsExactly("ordinary/one");
+        assertThat(jdbc.queryForList("SELECT * FROM ma_output_capture WHERE session_id = ? ORDER BY publication_id",
+                privateSession)).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"renew", "defer", "confirm"})
+    void existingPrivateClaimsRefuseEveryMutationUsingTheStoredTarget(String stage) throws Exception {
+        insertPrivateSession(session, "full");
+        exerciseRefusedClaim(stage, "forged-tenant", "forged-session");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"renew", "defer", "confirm"})
+    void ordinaryClaimTupleMismatchRefusesWithoutWriting(String stage) throws Exception {
+        exerciseRefusedClaim(stage, tenant, "wrong-session");
+    }
+
+    private void exerciseRefusedClaim(String stage, String claimedTenant, String claimedSession) throws Exception {
+        addObject("one", "exact/one", new byte[] {9});
+        var objects = new DeletingObjects();
+        var gc = collector(objects);
+        var ownerField = ToolPublicationCollector.class.getDeclaredField("owner");
+        ownerField.setAccessible(true);
+        jdbc.update("UPDATE ma_output_capture SET retention_state = 'DELETING' WHERE scope_key = ?", scope);
+        String id = "capture-gc-" + ManagedSchemaKeys.key(scope, "pub-1");
+        String operationKey = addOperation(OperationKind.CAPTURE_GC, scope, "pub-1", session, id, "LEASED");
+        jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_generation = 3, claim_until = ? WHERE operation_key = ?",
+                ownerField.get(gc), ToolPublicationRetentionStore.now(jdbc) + 60000, operationKey);
+        var before = jdbc.queryForList("SELECT * FROM ma_output_capture WHERE scope_key = ?", scope);
+        var objectBefore = jdbc.queryForList("SELECT * FROM ma_resource WHERE scope_key = ?", scope);
+        var workBefore = jdbc.queryForList("SELECT * FROM ma_operation WHERE operation_key = ?", operationKey);
+        var claimType = Class.forName(ToolPublicationCollector.class.getName() + "$Claim");
+        var constructor = claimType.getDeclaredConstructor(String.class, String.class, String.class, String.class,
+                long.class, String.class);
+        constructor.setAccessible(true);
+        var claim = constructor.newInstance(scope, "pub-1", claimedTenant, claimedSession, 3L, "");
+        if ("confirm".equals(stage)) {
+            var method = ToolPublicationCollector.class.getDeclaredMethod(stage, claimType, List.class,
+                    org.springframework.transaction.TransactionStatus.class);
+            method.setAccessible(true);
+            Object confirmed = tx.execute(status -> {
+                try {
+                    return method.invoke(gc, claim, List.of(), status);
+                }
+                catch (ReflectiveOperationException error) {
+                    throw new IllegalStateException(error);
+                }
+            });
+            assertThat(confirmed).isEqualTo(false);
+        } else {
+            var method = ToolPublicationCollector.class.getDeclaredMethod(stage, claimType);
+            method.setAccessible(true);
+            assertThat(method.invoke(gc, claim)).isEqualTo("renew".equals(stage) ? false : null);
+        }
+        assertThat(jdbc.queryForList("SELECT * FROM ma_output_capture WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_resource WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(objectBefore);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_operation WHERE operation_key = ?", operationKey)).usingRecursiveComparison().isEqualTo(workBefore);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tenant_guard WHERE guard_domain = 'output_publication'", Long.class)).isZero();
+        assertThat(objects.deleted).isEmpty();
+    }
+
+    @Test
+    void enabledCollectionRefusesAmbientTransactionAndBoundConnectionBeforeClaim() {
+        addObject("one", "exact/one", null);
+        retire();
+        var before = jdbc.queryForList("SELECT * FROM ma_output_capture WHERE scope_key = ?", scope);
+        var objects = new DeletingObjects();
+        var gc = collector(objects);
+        tx.executeWithoutResult(status -> {
+            assertThatThrownBy(gc::runOnce).isInstanceOf(IllegalStateException.class).hasMessageContaining("fresh");
+            assertThat(collector(jdbc, objects, false).runOnce()).isFalse();
+        });
+        var holder = new org.springframework.jdbc.datasource.ConnectionHolder(
+                org.springframework.jdbc.datasource.DataSourceUtils.getConnection(jdbc.getDataSource()));
+        TransactionSynchronizationManager.bindResource(jdbc.getDataSource(), holder);
+        try {
+            assertThatThrownBy(gc::runOnce).isInstanceOf(IllegalStateException.class).hasMessageContaining("fresh");
+        } finally {
+            TransactionSynchronizationManager.unbindResource(jdbc.getDataSource());
+            org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(holder.getConnection(), jdbc.getDataSource());
+        }
+        assertThat(objects.deleted).isEmpty();
+        assertThat(jdbc.queryForList("SELECT * FROM ma_output_capture WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(before);
+    }
+
+    private void insertPrivateSession(String sessionId, String profile) {
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, tool_profile,"
+                        + " runtime_request_key, gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', ?, ?, 0, 0)"
+                        + " ON DUPLICATE KEY UPDATE tool_profile = VALUES(tool_profile), runtime_request_key = VALUES(runtime_request_key)",
+                tenant, sessionId, profile, "full".equals(profile) ? "a".repeat(64) : null);
+    }
+
+    @Test
+    void privateTargetDiscoveredByAnOldPageRefusesClaimAndRollsBackTenantUpsert() {
+        jdbc.update("UPDATE ma_output_capture SET retention_state = 'RETIRING' WHERE scope_key = ?", scope);
+        seedCaptureGc(scope, "pub-1", session);
+        var injected = new java.util.concurrent.atomic.AtomicInteger();
+        var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+            @Override public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
+                var rows = super.query(sql, mapper, args);
+                if (sql.startsWith("SELECT o.scope_key")) {
+                    injected.incrementAndGet();
+                    insertPrivateSession(session, "csi-files-retirement/1");
+                }
+                return rows;
+            }
+        };
+        var before = jdbc.queryForList("SELECT * FROM ma_output_capture WHERE scope_key = ?", scope);
+        var operationsBefore = jdbc.queryForList("SELECT * FROM ma_operation WHERE scope_key = ?", scope);
+        var objects = new DeletingObjects();
+        assertThat(collector(template, objects, true).runOnce()).isFalse();
+        assertThat(injected.get()).isEqualTo(1);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_output_capture WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_operation WHERE scope_key = ?", scope))
+                .usingRecursiveComparison().isEqualTo(operationsBefore);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tenant_guard", Long.class)).isZero();
+        assertThat(objects.deleted).isEmpty();
     }
 }

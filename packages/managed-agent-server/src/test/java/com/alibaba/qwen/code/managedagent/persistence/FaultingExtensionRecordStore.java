@@ -33,12 +33,12 @@ public class FaultingExtensionRecordStore
     }
 
     @Override
-    ApplyResult applyNative(String tenantId, String workspaceId,
+    ApplyResult applyNativeCsi(String tenantId, String workspaceId,
             String sessionId, long firstSequence, int eventCount,
             byte[] recordBytes, Function<String, StoredResource> resources,
             long committedAt) {
         gate.inspect(recordBytes, resources);
-        return super.applyNative(tenantId, workspaceId, sessionId,
+        return super.applyNativeCsi(tenantId, workspaceId, sessionId,
                 firstSequence, eventCount, recordBytes, resources,
                 committedAt);
     }

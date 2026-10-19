@@ -1,0 +1,339 @@
+{
+  "format": "qwen-k2-cold-bootstrap/1",
+  "entryKind": "initramfs-tools-run-init-first-systemd",
+  "architecture": "amd64",
+  "kernel": {
+    "path": "/boot/vmlinuz-6.8.0-139-generic",
+    "bytes": 15059336,
+    "sha256": "0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918"
+  },
+  "baseInitrd": {
+    "path": "/boot/initrd.img-6.8.0-139-generic",
+    "bytes": 62554950,
+    "sha256": "898d873471a90fb4ce6cfb1c6161a9a67a44ba8a467a63ce651972910d58cf65"
+  },
+  "initrdInputs": {
+    "/init": {
+      "actualPath": "/init",
+      "bytes": 7682,
+      "sha256": "26f5f5a706dd766158c01c7a9f4c75814a77519e9a4f7489a3cf8cf6312e8aef",
+      "links": {}
+    },
+    "/lib64/ld-linux-x86-64.so.2": {
+      "actualPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "bytes": 236616,
+      "sha256": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+      "links": {
+        "/lib64": "usr/lib64",
+        "/usr/lib64/ld-linux-x86-64.so.2": "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+      }
+    },
+    "/scripts/functions": {
+      "actualPath": "/scripts/functions",
+      "bytes": 22861,
+      "sha256": "6358cb0bc4784bb8dc13d5c9beaf65d5e88f51c9a459daeed0f1311bfc07aa96",
+      "links": {}
+    },
+    "/scripts/init-bottom/ORDER": {
+      "actualPath": "/scripts/init-bottom/ORDER",
+      "bytes": 500,
+      "sha256": "afb94df5585327f96a117f7b3a16413b02210d315785d4f9b1d7d7e06e90f37d",
+      "links": {}
+    },
+    "/scripts/init-bottom/udev": {
+      "actualPath": "/scripts/init-bottom/udev",
+      "bytes": 611,
+      "sha256": "ef4a20c970512185e6372566e48fc4b6755f9098c841efe5ce6f1f22827f2326",
+      "links": {}
+    },
+    "/scripts/init-top/ORDER": {
+      "actualPath": "/scripts/init-top/ORDER",
+      "bytes": 489,
+      "sha256": "ff8debf00a4aa65ac5d7d73c2d951cc7d2983623163ed99d20fb3a655513249b",
+      "links": {}
+    },
+    "/scripts/init-top/udev": {
+      "actualPath": "/scripts/init-top/udev",
+      "bytes": 572,
+      "sha256": "5893d2c4c9426b2d6166586cb5bd1852be8fa22ba2984b9e1b2ca15f8b9cca5f",
+      "links": {}
+    },
+    "/scripts/local-bottom/ORDER": {
+      "actualPath": "/scripts/local-bottom/ORDER",
+      "bytes": 413,
+      "sha256": "e52732862c538b3ab1fd47b6c0b4bd84d7b3713dc56538571f89bb6f3464e0c1",
+      "links": {}
+    },
+    "/usr/bin/busybox": {
+      "actualPath": "/usr/bin/busybox",
+      "bytes": 330000,
+      "sha256": "836e212c2f9cbcc71abaa15fb6d5f6db8cab23fe25b2f58051c80c6bdee35cd5",
+      "links": {}
+    },
+    "/usr/bin/env": {
+      "actualPath": "/usr/bin/env",
+      "bytes": 330000,
+      "sha256": "836e212c2f9cbcc71abaa15fb6d5f6db8cab23fe25b2f58051c80c6bdee35cd5",
+      "links": {}
+    },
+    "/usr/bin/run-init": {
+      "actualPath": "/usr/bin/run-init",
+      "bytes": 330000,
+      "sha256": "836e212c2f9cbcc71abaa15fb6d5f6db8cab23fe25b2f58051c80c6bdee35cd5",
+      "links": {}
+    },
+    "/usr/bin/switch_root": {
+      "actualPath": "/usr/bin/switch_root",
+      "bytes": 330000,
+      "sha256": "836e212c2f9cbcc71abaa15fb6d5f6db8cab23fe25b2f58051c80c6bdee35cd5",
+      "links": {}
+    },
+    "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2": {
+      "actualPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "bytes": 236616,
+      "sha256": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+      "links": {}
+    },
+    "/usr/lib/x86_64-linux-gnu/libc.so.6": {
+      "actualPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+      "bytes": 2129424,
+      "sha256": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+      "links": {}
+    },
+    "/usr/lib64/ld-linux-x86-64.so.2": {
+      "actualPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "bytes": 236616,
+      "sha256": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+      "links": {
+        "/usr/lib64/ld-linux-x86-64.so.2": "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+      }
+    }
+  },
+  "coldInit": {
+    "path": "/opt/qwen-k2/bin/k2-cold-init",
+    "bytes": 0,
+    "sha256": ""
+  },
+  "systemd": {
+    "path": "/usr/lib/systemd/systemd",
+    "bytes": 100816,
+    "sha256": "b472aadf808bef87c0eb203056a77cb64bd268b71b756306013a53de68a94173",
+    "label": ""
+  },
+  "systemdDependencies": [
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libacl.so.1.1.2302",
+      "bytes": 38984,
+      "sha256": "1f5247285409ec89990e9fe384d78dfb2ae6ec8e210a2657073babc8d6b7e54f",
+      "lookupPath": "/lib/x86_64-linux-gnu/libacl.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libapparmor.so.1.17.2",
+      "bytes": 84864,
+      "sha256": "458c492fee00047f9f7680a1148eacba9a357f89d19da6d1f7ad662f63f6b00c",
+      "lookupPath": "/lib/x86_64-linux-gnu/libapparmor.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libaudit.so.1.0.0",
+      "bytes": 133200,
+      "sha256": "8a4ca5eda7607f2e65da7cb32a780cc0dcfbf202037482ef4261a3c1ec339083",
+      "lookupPath": "/lib/x86_64-linux-gnu/libaudit.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libblkid.so.1.1.0",
+      "bytes": 236592,
+      "sha256": "9c3860ffab5422410ff9e073d3e82267f00bc68ff1248cbb191640ee2ff045bc",
+      "lookupPath": "/lib/x86_64-linux-gnu/libblkid.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+      "bytes": 2129424,
+      "sha256": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+      "lookupPath": "/lib/x86_64-linux-gnu/libc.so.6"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libcap-ng.so.0.0.0",
+      "bytes": 26848,
+      "sha256": "25349c22956c7af94f46e728d7e4c1eba57d0e4a0517f72781fb495d541eeef3",
+      "lookupPath": "/lib/x86_64-linux-gnu/libcap-ng.so.0"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libcap.so.2.66",
+      "bytes": 51536,
+      "sha256": "6ac6abc86ac891c6e13486470e26f1d939f47fda9e6b5d5508a7f5ec881adc84",
+      "lookupPath": "/lib/x86_64-linux-gnu/libcap.so.2"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libcrypt.so.1.1.0",
+      "bytes": 198664,
+      "sha256": "1502636e3be8232c9cf801dfb533694aea985d449904f3e1295db26d7b348946",
+      "lookupPath": "/lib/x86_64-linux-gnu/libcrypt.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+      "bytes": 5309400,
+      "sha256": "6a66c3ba6b3749aacc9497973fff00f6ba61c703ba7015d0d7ab3fd9510974b6",
+      "lookupPath": "/lib/x86_64-linux-gnu/libcrypto.so.3"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libgcrypt.so.20.4.3",
+      "bytes": 1345072,
+      "sha256": "6ad6d7007ee1ad8319eb18ba9a512cf09dda49396a303774c68b47477020bad4",
+      "lookupPath": "/lib/x86_64-linux-gnu/libgcrypt.so.20"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libgpg-error.so.0.34.0",
+      "bytes": 149760,
+      "sha256": "6cb18a007bfcb623029f4528a36b46578fea7dc34c2b505b8e6e0d99e6348cd1",
+      "lookupPath": "/lib/x86_64-linux-gnu/libgpg-error.so.0"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libkmod.so.2.4.1",
+      "bytes": 112792,
+      "sha256": "6108903e15200313fd0bb71bb7e17d8fb8d01a01fa7f3dd1649d4f0c6187c8d3",
+      "lookupPath": "/lib/x86_64-linux-gnu/libkmod.so.2"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/liblz4.so.1.9.4",
+      "bytes": 137440,
+      "sha256": "40bffd0a098387368b16b992abd5f7cf43c0fa2f05cabe5a6d483719554adfda",
+      "lookupPath": "/lib/x86_64-linux-gnu/liblz4.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/liblzma.so.5.4.5",
+      "bytes": 202904,
+      "sha256": "696e868dd0700a19a6d65fc01608ec2d70d3cb91f65710e89180cd2e688f30cb",
+      "lookupPath": "/lib/x86_64-linux-gnu/liblzma.so.5"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+      "bytes": 952616,
+      "sha256": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0",
+      "lookupPath": "/lib/x86_64-linux-gnu/libm.so.6"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libmount.so.1.1.0",
+      "bytes": 309960,
+      "sha256": "7472255ae5799059b37ddd544788f5665dbd3e1cb78259f52180293039efc2a5",
+      "lookupPath": "/lib/x86_64-linux-gnu/libmount.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libpam.so.0.85.1",
+      "bytes": 67888,
+      "sha256": "9e1c85dcceeedd56568874afa04c52bbd051fb8bac52c3e1f5feeb1eed14238a",
+      "lookupPath": "/lib/x86_64-linux-gnu/libpam.so.0"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2",
+      "bytes": 625344,
+      "sha256": "e00576d71d81d3ba0cfa4903c835a44a8723aac96f72f79ff75200b4cff9071b",
+      "lookupPath": "/lib/x86_64-linux-gnu/libpcre2-8.so.0"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libseccomp.so.2.5.5",
+      "bytes": 125360,
+      "sha256": "b4d9140a7797ccf3ac14f5d9d579b64f157111662940cb8330c632b11a8cea8e",
+      "lookupPath": "/lib/x86_64-linux-gnu/libseccomp.so.2"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libselinux.so.1",
+      "bytes": 174472,
+      "sha256": "0ec0843463f90e227b0e138e1f379774f50b5514bd7f5dbd4c8a87aca0aa6670",
+      "lookupPath": "/lib/x86_64-linux-gnu/libselinux.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.5",
+      "bytes": 755864,
+      "sha256": "0a2128bc10841fb29e76d08d945864dfb0b6a66da5df6df5d8299197439e54bb",
+      "lookupPath": "/lib/x86_64-linux-gnu/libzstd.so.1"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "bytes": 236616,
+      "sha256": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+      "lookupPath": "/lib64/ld-linux-x86-64.so.2"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/systemd/libsystemd-core-255.so",
+      "bytes": 2144840,
+      "sha256": "8fbd0414497f255d82f533ab9cc352a70cb3984f6590b8ca739ed297944d45d6",
+      "lookupPath": "/usr/lib/x86_64-linux-gnu/systemd/libsystemd-core-255.so"
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-255.so",
+      "bytes": 3755032,
+      "sha256": "356f170e9e3a9dfb8026448b81d999863794e30f9c7136b4dfdd0b7abbf73116",
+      "lookupPath": "/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-255.so"
+    }
+  ],
+  "linkPlan": {},
+  "bootState": {
+    "kernelRelease": "6.8.0-139-generic",
+    "kernelConfiguration": {
+      "path": "/boot/config-6.8.0-139-generic",
+      "bytes": 287560,
+      "sha256": "a5debe1362156decce8c37181c3bbed212fb6b976a7bce481bb22cadb1dee48d"
+    },
+    "cmdline": "BOOT_IMAGE=/boot/vmlinuz-6.8.0-139-generic root=UUID=e7bc2351-b570-4581-b2d8-14e69f9c75d0 ro vga=792 console=tty0 console=ttyS0,115200n8 net.ifnames=0 noibrs nvme_core.io_timeout=4294967295 nvme_core.admin_timeout=4294967295 iommu=pt intel_idle.max_cstate=1 processor.max_cstate=1 crashkernel=0M-2G:0M,2G-256G:128M,256G-:256M crash_kexec_post_notifiers=1 panic=0 systemd.import_credentials=no\n",
+    "lsm": "lockdown,capability,landlock,yama,apparmor\n",
+    "helpers": {
+      "/proc/sys/kernel/modprobe": "\n",
+      "/proc/sys/kernel/hotplug": "\n",
+      "/sys/kernel/uevent_helper": "\n",
+      "/proc/sys/kernel/core_pattern": "core\n",
+      "/proc/sys/fs/suid_dumpable": "0\n"
+    },
+    "removedCapability": "CAP_SYS_MODULE",
+    "coreSoft": 0,
+    "coreHard": 0,
+    "scriptOutputs": {}
+  },
+  "rootfsPlan": {
+    "directories": [
+      "/etc/qwen-k2/cold-systemd",
+      "/etc/qwen-k2/cold-systemd/units"
+    ],
+    "target": {
+      "path": "/etc/qwen-k2/cold-systemd/units/qwen-k2-cold.target",
+      "bytes": 85,
+      "sha256": "37f7d64500e1fab843ab15d981f1550929e1d6ea69e93c8503f14d9f000c06b6"
+    },
+    "manager": {
+      "path": "/etc/systemd/system.conf",
+      "bytes": 51,
+      "sha256": "71d282b87f39bbe1d3a9b209df8f78f5d543883da3b43738721c5c4593523ad1"
+    },
+    "links": {
+      "/etc/qwen-k2/cold-systemd/units/default.target": "qwen-k2-cold.target",
+      "/etc/qwen-k2/cold-systemd/units/apparmor.service": "/dev/null"
+    },
+    "absent": [
+      "/etc/qwen-k2/cold-systemd/generators",
+      "/etc/qwen-k2/cold-systemd/environment-generators",
+      "/etc/initrd-release",
+      "/etc/ima/ima-policy",
+      "/etc/ld.so.preload",
+      "/etc/ld.so.cache",
+      "/usr/lib/x86_64-linux-gnu/glibc-hwcaps",
+      "/usr/lib/x86_64-linux-gnu/systemd/glibc-hwcaps",
+      "/sys/firmware/efi/efivars/SystemdOptions-8cf2644b-4b0b-428f-9387-6d876050dc67",
+      "/run/systemd/efivars/SystemdOptions-8cf2644b-4b0b-428f-9387-6d876050dc67"
+    ],
+    "empty": [
+      "/etc/systemd/system.conf.d",
+      "/run/systemd/system.conf.d",
+      "/usr/local/lib/systemd/system.conf.d",
+      "/usr/lib/systemd/system.conf.d"
+    ],
+    "argv": ["/sbin/init", "noibrs"],
+    "environment": [
+      "LANG=C",
+      "SYSTEMD_LOG_TARGET=console",
+      "SYSTEMD_LOG_LEVEL=info",
+      "SYSTEMD_UNIT_PATH=/etc/qwen-k2/cold-systemd/units",
+      "SYSTEMD_GENERATOR_PATH=/etc/qwen-k2/cold-systemd/generators",
+      "SYSTEMD_ENVIRONMENT_GENERATOR_PATH=/etc/qwen-k2/cold-systemd/environment-generators"
+    ]
+  },
+  "generators": {}
+}

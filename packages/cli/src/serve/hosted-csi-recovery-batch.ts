@@ -11,7 +11,7 @@ import type { HarnessToolItem } from '@qwen-code/qwen-code-core/managed-runtime/
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedSessionJsonValue } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import type { ManagedToolResultPayload as ManagedRuntimeInlineResult } from './managed-runtime-tool-executor.js';
+import type { ManagedRuntimeInlineResult } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-tool-response.js';
 import { parseManagedCsiFileJson } from './managed-csi-file-envelope.js';
 import {
   CSI_NATIVE_RESPONSE_LIMIT,

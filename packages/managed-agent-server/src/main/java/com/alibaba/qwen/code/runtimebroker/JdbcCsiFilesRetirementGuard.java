@@ -34,10 +34,48 @@ public final class JdbcCsiFilesRetirementGuard {
                 throw unavailable();
             }
         }
+
+        public void requireContinuation() {
+            if (state != RuntimeBindingRecord.State.READY
+                    && (state != RuntimeBindingRecord.State.DRAINING || !draining)) {
+                throw closed();
+            }
+        }
     }
 
     public static boolean isProfile(RuntimeScope scope) {
         return scope != null && CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest());
+    }
+
+    static Original readHistoricalBinding(Connection connection, RuntimeBindingRecord binding) throws SQLException {
+        if (connection == null || connection.getAutoCommit() || !connection.isReadOnly()
+                || connection.getTransactionIsolation() != Connection.TRANSACTION_REPEATABLE_READ
+                || binding == null || !isProfile(binding.getRequest().getScope())) {
+            throw unavailable();
+        }
+        try (var statement = statement(connection, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
+            try (var row = statement.executeQuery()) {
+                if (!row.next()) {
+                    throw unavailable();
+                }
+                var original = new Original(request(row), row.getString("binding_id"), row.getLong("runtime_generation"),
+                        RuntimeBindingRecord.State.valueOf(row.getString("binding_state")), row.getBoolean("drain_requested"),
+                        row.getLong("record_version"), row.getObject("first_activation_journal_revision", Long.class));
+                if (!binding.getBindingId().equals(original.bindingId()) || !binding.getRequest().equals(original.request())
+                        || binding.getGeneration() != original.generation() || binding.getState() != original.state()
+                        || binding.isDrainRequested() != original.draining() || binding.getVersion() != original.version()
+                        || original.generation() != 1 || !original.draining() || original.version() <= 0
+                        || original.state() != RuntimeBindingRecord.State.DRAINING && original.state() != RuntimeBindingRecord.State.RELEASED
+                        || !java.util.Objects.equals(original.firstActivationJournalRevision(), 2L)
+                        || !original.request().requestKey().equals(row.getString("request_key"))
+                        || !JdbcRepositorySupport.scopeKey(original.request().getScope()).equals(row.getString("scope_key"))
+                        || row.next()) {
+                    throw unavailable();
+                }
+                return original;
+            }
+        }
     }
 
     static boolean requireProvisionPin(Connection connection, RuntimeProvisionRequest request)
@@ -85,30 +123,19 @@ public final class JdbcCsiFilesRetirementGuard {
                 if (!row.next()) {
                     return null;
                 }
-                profile = CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(row, "capability_digest"));
+                profile = CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(row.getString("capability_digest"));
                 if (!profile && !"session".equals(row.getString("isolation_class"))) {
                     return null;
                 }
-                tenant =
-                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                .identity(row, "tenant_id");
-                session =
-                        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                .identity(row, "isolation_key");
+                tenant = row.getString("tenant_id");
+                session = row.getString("isolation_key");
                 if (tenant == null || session == null || row.next()) {
                     throw unavailable();
                 }
             }
         }
         if (!hasTable(connection, "ma_session")) {
-            if (profile || hasTable(connection, "ma_tenant_guard")
-                    || hasTable(connection, "ma_storage")
-                    || hasTable(connection, "ma_operation")) {
-                throw unavailable();
-            }
-            return null;
+            throw unavailable();
         }
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, 10);
         boolean retained = lockRetentionRoot(connection, tenant);
@@ -139,20 +166,13 @@ public final class JdbcCsiFilesRetirementGuard {
 
     private static boolean lockRetentionRoot(Connection connection, String tenantId) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                        "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
-                                + " 'output_publication' AND tenant_key = ? FOR UPDATE")) {
-            JdbcRepositorySupport.setStringParameter(
-                    statement,
-                    1,
-                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
-                            tenantId));
+                "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_key = ? AND guard_domain = 'output_publication' FOR UPDATE")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenantId));
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     return false;
                 }
-                if (!tenantId.equals(
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(row, "tenant_id")) || row.next()) {
+                if (!tenantId.equals(row.getString("tenant_id")) || row.next()) {
                     throw unavailable();
                 }
                 return true;
@@ -162,14 +182,9 @@ public final class JdbcCsiFilesRetirementGuard {
 
     private static void initializeRetentionRoot(Connection connection, String tenantId) throws SQLException {
         try (PreparedStatement statement = statement(connection,
-                        "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES"
-                            + " (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE tenant_key ="
-                            + " tenant_key")) {
-            JdbcRepositorySupport.setStringParameter(
-                    statement,
-                    1,
-                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
-                            tenantId));
+                "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
+                        + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+            statement.setString(1, com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(tenantId));
             JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
             statement.executeUpdate();
         }
@@ -239,7 +254,7 @@ public final class JdbcCsiFilesRetirementGuard {
 
     private static boolean readRuntimeRows(Connection connection, String tenantId, String sessionId,
             boolean locking, List<Slot> slots, List<Binding> bindings) throws SQLException {
-        List<String> references = new ArrayList<>();
+        List<Object> references = new ArrayList<>();
         StringBuilder sql = new StringBuilder(
                 "SELECT " + ManagedSchemaProjection.RUNTIME_BINDING.columns()
                         + " FROM ma_runtime_binding WHERE (tenant_id = ? AND isolation_key = ?)");
@@ -269,7 +284,7 @@ public final class JdbcCsiFilesRetirementGuard {
                     references.add(key);
                     if (activeBinding != null) {
                         sql.append(" OR binding_id = ?");
-                        references.add(activeBinding);
+                        references.add(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(activeBinding));
                     }
                 }
             }
@@ -281,7 +296,12 @@ public final class JdbcCsiFilesRetirementGuard {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             for (int index = 0; index < references.size(); index++) {
-                JdbcRepositorySupport.setStringParameter(statement, index + 3, references.get(index));
+                Object value = references.get(index);
+                if (value instanceof byte[] bytes) {
+                    statement.setBytes(index + 3, bytes);
+                } else {
+                    statement.setString(index + 3, (String) value);
+                }
             }
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
@@ -339,28 +359,27 @@ public final class JdbcCsiFilesRetirementGuard {
         return original;
     }
 
+    public static void requireReadCompletion(Connection connection, Original original) throws SQLException {
+        requireTransaction(connection);
+        original.requireContinuation();
+        JdbcCsiRetirementSeal.lock(connection, original);
+    }
+
     public static void requireSingleSession(Connection connection, Original original) throws SQLException {
         requireTransaction(connection);
         try (PreparedStatement statement = statement(connection,
-                        "SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns() + " FROM ma_runtime_session WHERE binding_id = ? OR (tenant_id = ? AND harness_session_id = ?) ORDER BY scope_key, runtime_session_id LIMIT 2 FOR UPDATE")) {
+                "SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns() + " FROM ma_runtime_session WHERE binding_id = ?"
+                        + " OR (tenant_id = ? AND harness_session_id = ?)"
+                        + " ORDER BY scope_key, runtime_session_id LIMIT 2 FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, original.bindingId());
-            JdbcRepositorySupport.setIdentity(
-                    statement, 2, original.request().getScope().getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getIsolationKey());
             try (ResultSet rows = statement.executeQuery()) {
                 if (rows.next()) {
-                    if (!original.bindingId().equals(
-                                            com.alibaba.qwen.code.runtimebroker.managedschema
-                                                    .ManagedSchemaRows.identity(rows, "binding_id"))
+                    if (!original.bindingId().equals(rows.getString("binding_id"))
                             || original.generation() != rows.getLong("runtime_generation")
-                            || !original.request().getIsolationKey().equals(
-                                            com.alibaba.qwen.code.runtimebroker.managedschema
-                                                    .ManagedSchemaRows.identity(
-                                                    rows, "runtime_session_id"))
-                            || !original.request().getIsolationKey().equals(
-                                            com.alibaba.qwen.code.runtimebroker.managedschema
-                                                    .ManagedSchemaRows.identity(
-                                                    rows, "harness_session_id"))
+                            || !original.request().getIsolationKey().equals(rows.getString("runtime_session_id"))
+                            || !original.request().getIsolationKey().equals(rows.getString("harness_session_id"))
                             || !"bootstrap".equals(rows.getString("turn_kind"))
                             || !original.request().getScope().equals(scope(rows))
                             || !JdbcRepositorySupport.scopeKey(original.request().getScope())
@@ -394,48 +413,31 @@ public final class JdbcCsiFilesRetirementGuard {
             }
         }
         try (PreparedStatement statement = statement(connection,
-                        "SELECT tenant_id, session_id, agent_id, tool_profile, runtime_request_key,"
-                            + " workspace_id, workspace_generation, workspace_storage_id,"
-                            + " cwd_relative, context_config_ref, context_revision,"
-                            + " workspace_config_ref, workspace_policy_ref FROM ma_session WHERE"
-                            + " tenant_id = ? AND session_id = ? FOR UPDATE")) {
+                "SELECT tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id,"
+                        + " workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
+                        + " context_revision, workspace_config_ref, workspace_policy_ref"
+                        + " FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
             JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return null;
                 }
-                if (!tenantId.equals(
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "tenant_id")) || !sessionId.equals(
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "session_id"))) {
+                if (!tenantId.equals(rows.getString("tenant_id")) || !sessionId.equals(rows.getString("session_id"))) {
                     throw unavailable();
                 }
                 String profile = rows.getString("tool_profile");
                 if (!CsiFilesRetirementProfile.PROFILE.equals(profile)) {
                     return new Pin(profile, rows.getString("runtime_request_key"), null, sessionId);
                 }
-                if (!"qwen-code".equals(
-                                        com.alibaba.qwen.code.runtimebroker.managedschema
-                                                .ManagedSchemaRows.identity(rows, "agent_id"))
-                        || !CsiFilesRetirementProfile.CONFIG_REF.equals(
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "workspace_config_ref"))
-                        || !CsiFilesRetirementProfile.POLICY_REF.equals(
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "workspace_policy_ref"))) {
+                if (!"qwen-code".equals(rows.getString("agent_id"))
+                        || !CsiFilesRetirementProfile.CONFIG_REF.equals(rows.getString("workspace_config_ref"))
+                        || !CsiFilesRetirementProfile.POLICY_REF.equals(rows.getString("workspace_policy_ref"))) {
                     throw unavailable();
                 }
-                ContextBinding context = new ContextBinding(tenantId,
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "workspace_id"),
-                        rows.getLong("workspace_generation"),
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "workspace_storage_id"),
-                        rows.getString("cwd_relative"),
-                                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows
-                                        .identity(rows, "context_config_ref"),
+                ContextBinding context = new ContextBinding(tenantId, rows.getString("workspace_id"),
+                        rows.getLong("workspace_generation"), rows.getString("workspace_storage_id"),
+                        rows.getString("cwd_relative"), rows.getString("context_config_ref"),
                         rows.getLong("context_revision"));
                 return new Pin(profile, rows.getString("runtime_request_key"), context, sessionId);
             }
@@ -452,24 +454,14 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     private static RuntimeProvisionRequest request(ResultSet row) throws SQLException {
-        return new RuntimeProvisionRequest(scope(row),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
-                        row, "isolation_key"),
-                row.getString("provisioner_kind"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
-                        row, "storage_id"));
+        return new RuntimeProvisionRequest(scope(row), row.getString("isolation_key"),
+                row.getString("provisioner_kind"), row.getString("storage_id"));
     }
 
     private static RuntimeScope scope(ResultSet row) throws SQLException {
-        return new RuntimeScope(
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
-                        row, "tenant_id"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
-                        row, "workspace_id"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
-                        row, "workspace_generation"), row.getString("canonical_cwd"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
-                        row, "capability_digest"), row.getString("isolation_class"));
+        return new RuntimeScope(row.getString("tenant_id"), row.getString("workspace_id"),
+                row.getString("workspace_generation"), row.getString("canonical_cwd"),
+                row.getString("capability_digest"), row.getString("isolation_class"));
     }
 
     private static PreparedStatement statement(Connection connection, String sql) throws SQLException {

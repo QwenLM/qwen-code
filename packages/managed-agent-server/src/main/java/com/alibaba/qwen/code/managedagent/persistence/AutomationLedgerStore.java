@@ -167,10 +167,8 @@ public class AutomationLedgerStore {
 
     public AutomationLedgerStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
-        this.commands =
-                new TransactionTemplate(
-                        new DataSourceTransactionManager(
-                                Objects.requireNonNull(jdbc.getDataSource())));
+        this.commands = new TransactionTemplate(new DataSourceTransactionManager(
+                Objects.requireNonNull(jdbc.getDataSource())));
         this.commands.setTimeout(10);
     }
 
@@ -712,13 +710,10 @@ public class AutomationLedgerStore {
      * different request under the same key conflict instead of repeating the side effect.
      */
     public boolean claimCommand(String sessionId, CommandRow command, long now) {
-        return Boolean.TRUE.equals(
-                commands.execute(
-                        status -> {
-                            ManagedLegacySessionGuard.requireLegacyMutation(
-                                    jdbc, command.tenantId(), sessionId);
-                            return insertCommand(command, now, "") == 1;
-                        }));
+        return Boolean.TRUE.equals(commands.execute(status -> {
+            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, command.tenantId(), sessionId);
+            return insertCommand(command, now, "") == 1;
+        }));
     }
 
     /**

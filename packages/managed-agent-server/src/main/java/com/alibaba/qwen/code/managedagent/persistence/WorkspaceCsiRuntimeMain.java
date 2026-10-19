@@ -1,15 +1,18 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiNodeEvidence;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiResourceGuard;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiNodeSourceClient;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
-import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.RuntimeBrokerHttpServer;
 import com.fasterxml.jackson.core.StreamReadFeature;
@@ -17,6 +20,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -68,12 +72,22 @@ public final class WorkspaceCsiRuntimeMain {
     }
 
     static void run(String[] args) throws Exception {
-        if (args.length == 3 && "text".equals(args[0])) {
+        if (args.length > 0 && "physical".equals(args[0])) {
+            WorkspaceCsiPhysicalMain.run(args);
+            return;
+        }
+        if (args.length == 2 && java.util.Set.of("source-status", "node-config").contains(args[0])) {
+            WorkspaceCsiNodeSourceMain.run(args);
+            return;
+        }
+        if (args.length == 3 && ("text".equals(args[0]) || "retire".equals(args[0]))) {
             WorkspaceCsiHostedMain.run(args);
             return;
         }
-        if (args.length != 3 || !"serve".equals(args[0])) {
-            throw new IllegalArgumentException("Usage: serve <reviewed-runtime-json> <port>");
+        boolean retained = args.length == 4 && "serve-retained".equals(args[0]);
+        boolean evidenceMode = args.length == 4 && "serve-evidence".equals(args[0]);
+        if (!retained && !evidenceMode && (args.length != 3 || !"serve".equals(args[0]))) {
+            throw new IllegalArgumentException("Usage: serve <reviewed-runtime-json> <port> | serve-evidence <reviewed-runtime-json> <port> <reviewed-node-json> | serve-retained <reviewed-runtime-json> <port> <retirement>");
         }
         int port = Integer.parseInt(args[2]);
         if (port < 1024 || port > 65535) {
@@ -92,27 +106,57 @@ public final class WorkspaceCsiRuntimeMain {
         var manager = new DataSourceTransactionManager(source);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision(required("K2_AGENT_REVISION"));
+        if (retained) {
+            properties.getSessionStore().setBindingKey(required("QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY"));
+        }
         var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var sessions = new JdbcRuntimeSessionRepository(source);
         var http = new HttpRuntimeTransport();
+        var nativeStore = new ManagedSessionStore(jdbc);
+        nativeStore.setCredentials(new WriterCredentialPolicy(properties));
+        nativeStore.setCsiBindings(bindings);
+        var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions);
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
                 request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http);
-        access.resolve(request.sessionId()).toCompletableFuture().join();
+        if (retained) {
+            var ids = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ?"
+                    + " AND operation_kind = 'CSI_RETIREMENT' AND tenant_id = ? AND operation_id = ?", String.class,
+                    WorkspaceOperations.key(WorkspaceOperations.Kind.CSI_RETIREMENT, request.registration().tenantId(), args[3]),
+                    request.registration().tenantId(), args[3]);
+            if (ids.size() != 1) {
+                throw new IllegalArgumentException("Original retirement is unavailable");
+            }
+            var original = bindings.findById(ids.getFirst());
+            requireSelected(request, original);
+            var state = application.status(request.registration().tenantId(), request.sessionId(),
+                    original.getRequest().getScope().getWorkspaceId(), args[3], new WriterCredentialPolicy(properties).issue(
+                            request.registration().tenantId(), original.getRequest().getScope().getWorkspaceId(), request.sessionId()));
+            if ("SETTLING".equals(state.stage())) {
+                throw new IllegalArgumentException("A saved frozen retirement is required");
+            }
+        } else {
+            access.resolve(request.sessionId()).toCompletableFuture().join();
+        }
         var api = new KubernetesHttpRuntimeClient(URI.create(required("K2_KUBERNETES_API_URL")),
                 Path.of(required("K2_KUBERNETES_TOKEN_FILE")), Path.of(required("K2_KUBERNETES_CA_FILE")));
         var guard = new WorkspaceCsiResourceGuard(api, required("K2_CLUSTER_DOMAIN"), request.registration(),
                 request.protection());
         var storage = new WorkspaceCsiReservationStore(jdbc, manager, json);
-        var provider = new WorkspaceCsiRuntimeProvisioner(storage, bindings, request.registration(), api,
-                guard, request.image(), request.command(), Duration.ofSeconds(30), request.artifacts(), authorityOrigin);
+        var evidence = evidenceMode ? nodeEvidence(Path.of(args[3]), json, jdbc, manager, bindings, request, api) : null;
+        var provider = evidence == null ? new WorkspaceCsiRuntimeProvisioner(storage, bindings, request.registration(), api,
+                guard, request.image(), request.command(), Duration.ofSeconds(30), request.artifacts(), authorityOrigin)
+                : new WorkspaceCsiRuntimeProvisioner(storage, bindings, request.registration(), api, guard, request.image(),
+                        request.command(), Duration.ofSeconds(30), request.artifacts(), authorityOrigin, evidence);
         try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
                 new JdbcToolExecutionRepository(source, bindings), UUID.randomUUID().toString(),
                 Duration.ofSeconds(30), Duration.ofSeconds(30));
                 var server = new RuntimeBrokerHttpServer(new InetSocketAddress(InetAddress.getLoopbackAddress(), port),
                         token, service, false, access::readNative)) {
             requireAuthorityOrigin(authorityOrigin, server.getBaseUri());
+            server.registerCsiApplicationAuthority(request.registration().tenantId(), request.sessionId(),
+                    (workerToken, body) -> application.workerAuthority(request.registration().tenantId(), request.sessionId(), workerToken, body));
             var stopped = new CountDownLatch(1);
             var shutdown = new Thread(() -> {
                 server.close();
@@ -126,6 +170,41 @@ public final class WorkspaceCsiRuntimeMain {
         }
     }
 
+    public record NodeRequest(WorkspaceCsiNodeSourceStore.Node node, String coordinatorPrincipal,
+            Path clientStore, Path passwordFile, Path caFile) { }
+
+    private static WorkspaceCsiNodeEvidence nodeEvidence(Path path, ObjectMapper json, JdbcTemplate jdbc,
+            DataSourceTransactionManager manager, JdbcRuntimeBindingRepository bindings, Request runtime,
+            com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeClient api) throws java.io.IOException {
+        byte[] bytes;
+        try (var input = Files.newInputStream(path)) {
+            bytes = input.readNBytes(WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT + 1);
+        }
+        if (bytes.length == 0 || bytes.length > WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT) {
+            throw new IllegalArgumentException("A bounded reviewed node source is required");
+        }
+        var request = json.readValue(bytes, NodeRequest.class);
+        if (request == null || request.node() == null) {
+            throw new IllegalArgumentException("A reviewed node source is required");
+        }
+        var source = new CsiNodeSourceClient(request.node().sourceOrigin(), request.node().sourcePrincipal(),
+                request.coordinatorPrincipal(), request.clientStore(), request.passwordFile(), request.caFile());
+        try {
+            var gateway = new CsiNodeSourceClient(request.node().gatewayOrigin(), request.node().gatewayPrincipal(),
+                    request.coordinatorPrincipal(), request.clientStore(), request.passwordFile(), request.caFile());
+            try {
+                return new WorkspaceCsiNodeEvidence(new WorkspaceCsiNodeSourceStore(jdbc, manager, bindings), request.node(),
+                        runtime.registration(), api, source, gateway, runtime.image());
+            } catch (RuntimeException failure) {
+                gateway.close();
+                throw failure;
+            }
+        } catch (RuntimeException failure) {
+            source.close();
+            throw failure;
+        }
+    }
+
     static void requireAuthorityOrigin(String origin, URI ownedServer) {
         ManagedCsiFilesProtocol.authority(origin);
         String host = ownedServer.getHost();
@@ -134,6 +213,16 @@ public final class WorkspaceCsiRuntimeMain {
         }
         if (origin.startsWith("http:") && !origin.equals(ownedServer.getScheme() + "://" + host + ":" + ownedServer.getPort())) {
             throw new IllegalArgumentException("Loopback CSI authority must name the owned Broker listener");
+        }
+    }
+
+    static void requireSelected(Request request, com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (binding == null || !request.runtimeRequestKey().equals(binding.getRequest().requestKey())
+                || !request.sessionId().equals(binding.getRequest().getIsolationKey())
+                || !request.registration().tenantId().equals(binding.getRequest().getScope().getTenantId())
+                || !request.registration().storageId().equals(binding.getRequest().getStorageId())
+                || !request.registration().mountRoot().equals(binding.getRequest().getScope().getCanonicalCwd())) {
+            throw new IllegalArgumentException("Reviewed original CSI Runtime is unavailable");
         }
     }
 

@@ -1910,18 +1910,21 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
       return runtime.control(this.runtimeSessionId, operation);
     },
   );
+  const abort = new AbortController();
+  const fired = hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    {},
+    abort.signal,
+  );
+  const finished = fired.catch(() => {});
   try {
-    const abort = new AbortController();
-    const fired = hooks.fire(
-      HookEventName.PreToolUse,
-      'call-1',
-      {},
-      abort.signal,
-    );
-    await vi.waitFor(() =>
-      expect(
-        requests.filter((request) => request.kind === 'hook-execute'),
-      ).toHaveLength(1),
+    await vi.waitFor(
+      () =>
+        expect(
+          requests.filter((request) => request.kind === 'hook-execute'),
+        ).toHaveLength(1),
+      { timeout: isSlowTestHost() ? 30_000 : 5_000 },
     );
     abort.abort();
     await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
@@ -1947,6 +1950,8 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
   } finally {
+    abort.abort();
+    await finished;
     await runtime.close();
   }
 });

@@ -154,6 +154,12 @@ import {
 } from './hosted-harness-model.js';
 import { hostedToolProgress } from './hosted-tool-progress.js';
 import {
+  HOSTED_TURN_DEADLINE,
+  settledTurnOutcome,
+  createHostedChatRecord as record,
+  unansweredPrompts,
+} from './hosted-harness-turn.js';
+import {
   HostedSkillCatalog,
   readHostedSkills,
 } from './hosted-skill-catalog.js';
@@ -341,15 +347,6 @@ const RESTORE_CONTAINER_KINDS = new Set([
 const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
 
 /**
- * The prompt deadline timer and the cancel route abort the same controller,
- * so the deadline aborts with a distinguishing reason; settlement reads it
- * back to keep an expiry from being recorded as a user cancellation.
- */
-const HOSTED_TURN_DEADLINE = new Error(
-  'The Hosted Harness Turn deadline expired.',
-);
-
-/**
  * One prompt-gate Hook reconcile pass gets the grace a single broker poll
  * gets: each status round-trip is itself bounded by the broker's fetch
  * timeout, and a stalled Runtime must not multiply that bound by every
@@ -368,20 +365,6 @@ const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
  * to fit in.
  */
 const HOSTED_WAKE_PASS_WAIT_MS = 10_000;
-
-/**
- * The terminal classification of a turn whose runner threw. A deadline
- * expiry is an attributable failure, never a cancellation.
- */
-function settledTurnOutcome(abort: AbortController): {
-  state: 'cancelled' | 'error';
-  stopReason: string;
-} {
-  if (!abort.signal.aborted) return { state: 'error', stopReason: 'error' };
-  return abort.signal.reason === HOSTED_TURN_DEADLINE
-    ? { state: 'error', stopReason: 'deadline_exceeded' }
-    : { state: 'cancelled', stopReason: 'cancelled' };
-}
 
 /**
  * The wedge family #13800 names: a turn that dies against its Session store
@@ -909,25 +892,6 @@ function identity(
     : undefined;
 }
 
-function record(
-  session: HostedSession,
-  sessionId: string,
-  type: ChatRecord['type'],
-  parentUuid: string | null,
-  fields: Partial<ChatRecord>,
-): ChatRecord {
-  return {
-    uuid: randomUUID(),
-    parentUuid,
-    sessionId,
-    timestamp: new Date().toISOString(),
-    type,
-    cwd: session.cwd,
-    version: 'hosted-harness/1',
-    ...fields,
-  };
-}
-
 /**
  * The child orchestration a Turn of this Session gets, the same for an
  * ordinary Turn and a recovered one: its funnel, its depth, whether the
@@ -971,35 +935,6 @@ function acceptedInputSequence(
       sequence = event.sequence;
   }
   return sequence;
-}
-
-/**
- * The prompts whose turns settled without an answer (`error` or
- * `cancelled`). Turn results are `turn.settled` journal events, not
- * projected messages, so they never reach any record-based exclusion in
- * the model runner: the history is filtered against the journal here —
- * what ended without an answer is over, and its instruction never merges
- * into a later turn the way a crashing text turn's naked user record
- * otherwise would (the no-toolProfile path's older design already did
- * this; tool-profile Sessions now follow it).
- */
-function unansweredPrompts(session: HostedSession): Set<string> {
-  const authority = session.managed.authority;
-  const prompts = new Set<string>();
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
-    if (
-      event.kind === 'turn.settled' &&
-      (event.payload['outcome'] === 'error' ||
-        event.payload['outcome'] === 'cancelled')
-    ) {
-      const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string') prompts.add(turnId);
-    }
-  }
-  return prompts;
 }
 
 /** Which input sources ride the wake pump — the one predicate the probe,

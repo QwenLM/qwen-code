@@ -5,7 +5,6 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -29,16 +28,20 @@ import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runt
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { runHostedCsiTextTurn } from './hosted-csi-text-turn.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+
+vi.mock('./hosted-harness-model.js', () => ({
+  runHostedHarnessTextTurn: vi.fn(),
+}));
+
+import { readFileSync } from 'node:fs';
 import {
   computeManagedContextDigest,
   type ManagedContextBinding,
 } from './managed-workspace-binding.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
-
-vi.mock('./hosted-harness-model.js', () => ({
-  runHostedHarnessTextTurn: vi.fn(),
-}));
+import { runHostedHarnessTurn } from './hosted-harness-turn.js';
+import * as hostedModel from './hosted-harness-model.js';
 
 let root: string;
 let managed: ManagedSession;
@@ -1304,6 +1307,186 @@ it('checks the full serialized history envelope before publishing it', async () 
   );
 });
 
+it.each([
+  'none',
+  'reason',
+  'id',
+  'parent',
+  'model',
+  'duplicate',
+  'missing',
+  'unknown',
+] as const)(
+  'repairs a durable receipt before the model gate without new execution or message identity (refusal: %s)',
+  async (refusalFault) => {
+    // Local native journal and mocked Broker results exercise repair only, not SQL takeover or model acceptance.
+    const initial: CsiFileHistoryObservation = {
+      state: { ownerSessionId: sessionId, snapshots: [], files: {} },
+      backupDirectory: {
+        volumeDevice: '1',
+        volumeInode: '2',
+        directoryDevice: '1',
+        directoryInode: '3',
+      },
+      retainedBackups: [],
+    };
+    await history.commitInitialHostedCsiHistory(managed, initial);
+    const text = 'Original exact prompt';
+    const contentRef = await managed.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text }])),
+    );
+    const admissionRef = await managed.resources.publish(
+      'managed-admission',
+      Buffer.from('{}'),
+    );
+    await managed.authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: promptId,
+        sessionKey: managed.authority.sessionHeader.sessionKey,
+        contentDigest: contentRef.digest,
+      },
+      {
+        inputId: promptId,
+        turnId: promptId,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    let parentUuid: string | null = null;
+    let results = 0;
+    commit.mockImplementation(
+      async (
+        type: 'assistant' | 'tool_result',
+        parts: Part[],
+        model: string,
+        identity?: { uuid: string; timestamp: string },
+      ) => {
+        if (type === 'tool_result' && identity && ++results === 2)
+          throw new Error('Original receipt answer lost');
+        const record: ChatRecord = {
+          ...managed.authority.recordEnvelope,
+          sessionId,
+          parentUuid,
+          uuid:
+            type === 'assistant' ? batchId : (identity?.uuid ?? randomUUID()),
+          timestamp: identity?.timestamp ?? new Date().toISOString(),
+          type,
+          daemonPromptId: promptId,
+          model,
+          message: { role: type === 'assistant' ? 'model' : 'user', parts },
+        };
+        await managed.sink.write(record);
+        parentUuid = record.uuid;
+        return record.uuid;
+      },
+    );
+    const { calls } = batch();
+    const reads = [
+      calls[0],
+      { ...calls[0], callId: 'refused', args: { file_path: '../outside' } },
+      { ...calls[0], callId: 'second', args: { file_path: 'other.txt' } },
+    ];
+    const parts: Part[] = reads.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    }));
+    await expect(
+      turn.execute(reads, parts, 'unit-model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      parseHarnessCheckpointV1((await managed.authority.readCheckpointState())!)
+        .continuation.phase,
+    ).toBe('await_runtime');
+    const activation = await managed.authority.installActivation({
+      activationId: randomUUID(),
+      workerId: randomUUID(),
+      leaseDurationMs: 60000,
+    });
+    const successor = {
+      ...managed,
+      activation,
+      sink: new ManagedSessionRecordSink(
+        managed.authority,
+        managed.resources,
+        () => ({ class: 'harness', activation }),
+      ),
+    };
+    const broker = { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' };
+    const sequence = managed.authority.committedSequence;
+    const originalRequests = paths.slice();
+    await expect(
+      recoverHostedCsiReceipts(successor, broker, promptId, 'Changed prompt'),
+    ).rejects.toThrow('prompt bytes differ');
+    expect(managed.authority.committedSequence).toBe(sequence);
+    if (refusalFault !== 'none') {
+      // The real producer saved this refusal; only this local read projection is fault-injected.
+      const observed = structuredClone(await successor.sink.project());
+      const index = observed.findIndex(
+        (record) =>
+          (record.message?.parts as Part[] | undefined)?.[0]?.functionResponse
+            ?.id === reads[1].callId,
+      );
+      expect(index).toBeGreaterThan(0);
+      const refused = observed[index];
+      if (refusalFault === 'reason') {
+        const parts = refused.message!.parts as Part[];
+        parts[0].functionResponse!.response!['error'] = 'Unrelated refusal';
+      } else if (refusalFault === 'id' || refusalFault === 'unknown') {
+        const parts = refused.message!.parts as Part[];
+        parts[0].functionResponse!.id =
+          refusalFault === 'id' ? reads[0].callId : 'unrelated-refusal';
+      } else if (refusalFault === 'parent') refused.parentUuid = randomUUID();
+      else if (refusalFault === 'model') refused.model = 'other-model';
+      else if (refusalFault === 'duplicate')
+        observed.splice(index + 1, 0, structuredClone(refused));
+      else observed.splice(index, 1);
+      vi.spyOn(successor.sink, 'project').mockResolvedValue(observed);
+      await expect(
+        recoverHostedCsiReceipts(successor, broker, promptId, text),
+      ).rejects.toThrow();
+      expect(managed.authority.committedSequence).toBe(sequence);
+      expect(paths).toEqual(originalRequests);
+      return;
+    }
+    const responses = await recoverHostedCsiReceipts(
+      successor,
+      broker,
+      promptId,
+      text,
+    );
+    expect(responses.parts.map((part) => part.functionResponse?.id)).toEqual([
+      reads[0].callId,
+      reads[1].callId,
+      reads[2].callId,
+    ]);
+    const checkpoint = parseHarnessCheckpointV1(
+      (await managed.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.continuation.phase).toBe('results_ready');
+    expect(
+      checkpoint.tools?.items.every(
+        (item) => item.state === 'settled' && !item.consumed,
+      ),
+    ).toBe(true);
+    expect(checkpoint.identity.activationId).not.toBe(activation.activationId);
+    const repaired = await successor.sink.project();
+    expect(
+      repaired.filter((record) => record.type === 'tool_result'),
+    ).toHaveLength(3);
+    const after = managed.authority.committedSequence;
+    expect(
+      await recoverHostedCsiReceipts(successor, broker, promptId, text),
+    ).toEqual(responses);
+    expect(managed.authority.committedSequence).toBe(after);
+    expect(await successor.sink.project()).toEqual(repaired);
+    expect(paths).toEqual(originalRequests);
+  },
+);
+
 async function missingReceiptFixture() {
   // Local journal and synthetic stored results only; actual SQL takeover is verified separately.
   const text = 'Original missing receipt prompt';
@@ -1575,19 +1758,28 @@ it('recovers complete final output without repair, another model request or a du
   expect(resumed.authority.committedSequence).toBe(sequence);
   expect(await resumed.sink.project()).toEqual(before);
   expect(paths).toEqual(pathsBefore);
-  const model = vi.mocked(runHostedHarnessTextTurn).mockClear();
-  const result = await runHostedCsiTextTurn(
-    {
-      managed: resumed,
-      cwd: root,
-      files: { broker, runtime: { bindingId, generation: '1' } },
-    },
+  const model = vi.spyOn(hostedModel, 'runHostedHarnessTextTurn');
+  const result = await runHostedHarnessTurn({
+    session: { managed: resumed, cwd: root, blocked: false },
+    sessionId,
+    cwd: root,
     promptId,
     text,
-    new AbortController(),
-    recovered.parts,
-    recovered.finalOutput,
-  );
+    abort: new AbortController(),
+    historyMode: 'settled',
+    resumeFromToolResults: recovered.parts,
+    recoveredFinalOutput: recovered.finalOutput,
+    createToolTurn: (harness, record, fits) =>
+      new HostedCsiToolTurn(
+        resumed,
+        broker,
+        { bindingId, generation: '1' },
+        promptId,
+        record,
+        harness,
+        fits,
+      ),
+  });
   expect(model).not.toHaveBeenCalled();
   expect(result.subtype).toBe('turn_result');
   expect(result.systemPayload).toMatchObject({ state: 'completed' });

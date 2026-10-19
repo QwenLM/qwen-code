@@ -1,13 +1,13 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -46,7 +46,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(warmer.supportsWorkspaceClose(workspace)).thenReturn(bindingSupport);
         var session = new SessionRecord("tenant", "session", "agent", "1", "title",
                 status, null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
-                csi ? CsiFilesRetirementProfile.PROFILE : WorkspaceToolProfiles.FILES);
+                csi ? CsiFilesRetirementProfile.PROFILE : WorkspaceExecutionProfile.PROFILE);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         when(store.listSessions("tenant", "actor", null, null, 10))
                 .thenReturn(new SessionPage(List.of(session), false));

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,6 +15,8 @@ import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -240,73 +243,70 @@ public final class ToolPublicationRetentionStore {
                 session);
     }
 
-    static Map<String, Object> lockGenericSession(
-            JdbcTemplate jdbc, String tenant, String session) {
+    private static void lockGenericParent(JdbcTemplate jdbc, String tenant, String session) {
+        ManagedSessionStore.lockBounded(() -> lockTenant(jdbc, tenant,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
+    }
+
+    static Map<String, Object> lockGenericSession(JdbcTemplate jdbc, String tenant, String session) {
         return lockSessionHead(jdbc, tenant, session, true);
     }
 
+    private record PublicationTarget(String scope, String publication, String tenant,
+            String workspace, String session) {}
+
+    private PublicationTarget publicationTarget(String scope, String publication) {
+        return publicationTarget(jdbc.query("SELECT scope_key, publication_id, tenant_id, workspace_id, session_id"
+                + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?",
+                (result, index) -> ManagedSchemaRows.read(result), scope, publication).getFirst());
+    }
+
+    private static PublicationTarget publicationTarget(Map<String, Object> row) {
+        return new PublicationTarget((String) row.get("scope_key"), (String) row.get("publication_id"),
+                (String) row.get("tenant_id"), (String) row.get("workspace_id"), (String) row.get("session_id"));
+    }
+
+    private Map<String, Object> lockPublication(PublicationTarget target) {
+        lockGenericSession(jdbc, target.tenant(), target.session());
+        var current = jdbc.query("SELECT scope_key, publication_id, tenant_id, workspace_id, session_id, retention_state"
+                + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
+                (result, index) -> ManagedSchemaRows.read(result), target.scope(), target.publication()).getFirst();
+        ToolPublicationContract.require(target.equals(publicationTarget(current)), "Publication scope conflicts");
+        return current;
+    }
+
     void lockRetainedPublication(String scope, String publication) {
-        var row =
-                jdbc.query(
-                                "SELECT tenant_id, session_id FROM ma_output_capture"
-                                        + " WHERE scope_key = ? AND publication_id = ?",
-                                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                                scope,
-                                publication)
-                        .getFirst();
-        lockGenericSession(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"));
-        String state =
-                jdbc.queryForObject(
-                        "SELECT retention_state FROM ma_output_capture"
-                                + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
-                        String.class,
-                        scope,
-                        publication);
-        ToolPublicationContract.require(
-                List.of("PINNED", "RETIRING").contains(state), "Publication is collected");
+        var current = lockPublication(publicationTarget(scope, publication));
+        ToolPublicationContract.require(List.of("PINNED", "RETIRING").contains(current.get("retention_state")),
+                "Publication is collected");
     }
 
     void quarantineResource(String scope, String resource, String objectKey) {
-        transactions.executeWithoutResult(
-                status -> {
-                    var row =
-                            jdbc.query(
-                                            "SELECT scope_key, publication_id, slot_key FROM"
-                                                + " ma_resource WHERE scope_key = ? AND resource_id"
-                                                + " = ? AND capture_object_key = ?",
-                                            (schemaRow, schemaIndex) ->
-                                                    ManagedSchemaRows.read(schemaRow),
-                                            scope,
-                                            resource,
-                                            objectKey)
-                                    .getFirst();
-                    String publication = (String) row.get("publication_id");
-                    lockRetainedPublication(scope, publication);
-                    jdbc.update(
-                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", quarantined = TRUE WHERE scope_key = ?"
-                                    + " AND publication_id = ?",
-                            scope,
-                            publication);
-                    jdbc.update(
-                            "UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE scope_key ="
-                                + " ? AND publication_id = ? AND slot_key = ? AND capture_state ="
-                                + " 'VERIFIED'",
-                            scope,
-                            publication,
-                            row.get("slot_key"));
-                });
+        transactions.executeWithoutResult(status -> {
+            var row = jdbc.query("SELECT scope_key, publication_id, slot_key FROM ma_resource"
+                    + " WHERE scope_key = ? AND resource_id = ? AND capture_object_key = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, resource, objectKey).getFirst();
+            String publication = (String) row.get("publication_id");
+            String slot = (String) row.get("slot_key");
+            lockRetainedPublication(scope, publication);
+            var current = jdbc.query("SELECT resource_id, capture_object_key FROM ma_resource"
+                    + " WHERE scope_key = ? AND publication_id = ? AND slot_key = ? FOR UPDATE",
+                    (result, index) -> ManagedSchemaRows.read(result), scope, publication, slot).getFirst();
+            ToolPublicationContract.require(resource.equals(current.get("resource_id"))
+                    && objectKey.equals(current.get("capture_object_key")), "Publication object conflicts");
+            jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", quarantined = TRUE WHERE scope_key = ? AND publication_id = ?",
+                    scope, publication);
+            jdbc.update("UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE scope_key = ?"
+                    + " AND publication_id = ? AND slot_key = ? AND capture_state = 'VERIFIED'", scope, publication, slot);
+        });
     }
 
     public ReadLease readPublication(String scope, String publication) {
-        var row =
-                jdbc.query(
-                                "SELECT tenant_id, session_id FROM ma_output_capture"
-                                        + " WHERE scope_key = ? AND publication_id = ?",
-                                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                                scope,
-                                publication)
-                        .getFirst();
-        return read((String) row.get("tenant_id"), (String) row.get("session_id"));
+        var target = publicationTarget(scope, publication);
+        return transactions.execute(status -> {
+            lockPublication(target);
+            return admitRead(target.tenant(), target.session());
+        });
     }
 
     public java.io.InputStream open(String scope, String publication, String objectKey,
@@ -368,28 +368,20 @@ public final class ToolPublicationRetentionStore {
     }
 
     public ReadLease read(String tenant, String session) {
-        return transactions.execute(
-                status -> {
-                    lockGenericSession(jdbc, tenant, session);
-                    requireLive(jdbc, tenant, session);
-                    long generation =
-                            jdbc.queryForObject(
-                                    "SELECT retirement_generation FROM ma_session"
-                                            + " WHERE tenant_id = ? AND session_id = ?",
-                                    Long.class,
-                                    tenant,
-                                    session);
-                    String id = UUID.randomUUID().toString();
-                    jdbc.update(
-                            "INSERT INTO ma_read_lease (lease_id, tenant_key, session_key,"
-                                    + " retirement_generation, expires_at) VALUES (?, ?, ?, ?, ?)",
-                            id,
-                            hash(tenant),
-                            hash(session),
-                            generation,
-                            Math.addExact(now(jdbc), READ_BUDGET_MILLIS));
-                    return new ReadLease(id, tenant, session, generation);
-                });
+        return transactions.execute(status -> {
+            lockGenericSession(jdbc, tenant, session);
+            return admitRead(tenant, session);
+        });
+    }
+
+    private ReadLease admitRead(String tenant, String session) {
+        requireLive(jdbc, tenant, session);
+        long generation = jdbc.queryForObject("SELECT retirement_generation FROM ma_session WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session);
+        String id = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_read_lease (lease_id, tenant_key, session_key,"
+                        + " retirement_generation, expires_at) VALUES (?, ?, ?, ?, ?)",
+                id, hash(tenant), hash(session), generation, Math.addExact(now(jdbc), READ_BUDGET_MILLIS));
+        return new ReadLease(id, tenant, session, generation);
     }
 
     public final class ReadLease implements AutoCloseable {
@@ -420,26 +412,25 @@ public final class ToolPublicationRetentionStore {
         }
 
         synchronized void checkReadView() {
-            check(false);
+            checkLease(false);
         }
 
         private void check(boolean renew) {
-            var rows =
-                    jdbc.query(
-                            "SELECT l.expires_at, l.retirement_generation, r.retirement_generation"
-                                + " AS generation, r.retired_at, CAST(UNIX_TIMESTAMP() AS"
-                                + " DECIMAL(20, 0)) * 1000 + EXTRACT(MICROSECOND FROM"
-                                + " CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM ma_read_lease l"
-                                + " LEFT JOIN ma_session r ON r.tenant_key = l.tenant_key AND"
-                                + " r.session_key = l.session_key AND r.tenant_id = ? AND"
-                                + " r.session_id = ? WHERE l.lease_id = ? AND l.tenant_key = ? AND"
-                                + " l.session_key = ?",
-                            (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                            tenant,
-                            session,
-                            id,
-                            hash(tenant),
-                            hash(session));
+            transactions.executeWithoutResult(status -> {
+                lockGenericParent(jdbc, tenant, session);
+                checkLease(renew);
+            });
+        }
+
+        private void checkLease(boolean renew) {
+            var rows = jdbc.query("SELECT l.expires_at, l.retirement_generation, r.retirement_generation AS generation,"
+                    + " r.retired_at, CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000"
+                    + " + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM"
+                    + " ma_read_lease l LEFT JOIN ma_session r"
+                    + " ON r.tenant_key = l.tenant_key AND r.session_key = l.session_key"
+                    + " AND r.tenant_id = ? AND r.session_id = ?"
+                    + " WHERE l.lease_id = ? AND l.tenant_key = ? AND l.session_key = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                    tenant, session, id, hash(tenant), hash(session));
             if (closed || rows.size() != 1 || rows.getFirst().get("retired_at") != null
                     || number(rows.getFirst(), "expires_at") <= number(rows.getFirst(), "db_now")
                     || rows.getFirst().get("generation") == null
@@ -452,11 +443,9 @@ public final class ToolPublicationRetentionStore {
                     && number(row, "expires_at") - number(row, "db_now")
                             <= READ_BUDGET_MILLIS * 3 / 4) {
                 Boolean renewed = transactions.execute(status -> {
-                    lockTenant(jdbc, tenant);
-                    var roots = jdbc.query(
-                                                    "SELECT retirement_generation, retired_at FROM"
-                                                            + " ma_session WHERE tenant_id = ? AND"
-                                                            + " session_id = ? FOR UPDATE",
+                    lockGenericParent(jdbc, tenant, session);
+                    var roots = jdbc.query("SELECT retirement_generation, retired_at FROM ma_session"
+                                    + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                             (result, index) -> ManagedSchemaRows.read(result), tenant, session);
                     if (roots.size() != 1 || roots.getFirst().get("retired_at") != null
                             || number(roots.getFirst(), "retirement_generation") != generation) {
@@ -487,12 +476,28 @@ public final class ToolPublicationRetentionStore {
             if (closed) {
                 return;
             }
-            closed = true;
-            jdbc.update("DELETE FROM ma_read_lease WHERE lease_id = ?", id);
+            transactions.executeWithoutResult(status -> {
+                lockGenericParent(jdbc, tenant, session);
+                var rows = jdbc.query("SELECT tenant_key, session_key FROM ma_read_lease"
+                        + " WHERE lease_id = ? FOR UPDATE", (result, index) -> ManagedSchemaRows.read(result), id);
+                ToolPublicationContract.require(rows.isEmpty()
+                        || hash(tenant).equals(rows.getFirst().get("tenant_key"))
+                            && hash(session).equals(rows.getFirst().get("session_key")), "Read lease scope conflicts");
+                jdbc.update("DELETE FROM ma_read_lease WHERE lease_id = ? AND tenant_key = ? AND session_key = ?",
+                        id, hash(tenant), hash(session));
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override public void afterCompletion(int completion) {
+                        if (completion != STATUS_COMMITTED) {
+                            closed = false;
+                        }
+                    }
+                });
+                closed = true;
+            });
         }
     }
 
-    private record PutAttempt(String key, String id, long generation, boolean reconcile) {}
+    private record PutAttempt(String key, String id, long generation, boolean reconcile, PublicationTarget target) {}
 
     public void put(JsonNode key, String scope, String publication, String objectKey,
             byte[] bytes, ToolPublicationObjectStore objects) {
@@ -506,86 +511,47 @@ public final class ToolPublicationRetentionStore {
                         .toString();
         String digest = ToolPublicationContract.sha256(request.getBytes(StandardCharsets.UTF_8));
         String target = ManagedSchemaKeys.key(objectKey);
-        PutAttempt attempt =
-                transactions.execute(
-                        status -> {
-                            String tenant = key.path("tenantId").asText();
-                            String session = key.path("sessionId").asText();
-                            lockGenericSession(jdbc, tenant, session);
-                            requireLive(jdbc, tenant, session);
-                            var rows =
-                                    jdbc.query(
-                                            "SELECT retention_state FROM ma_output_capture WHERE"
-                                                + " scope_key = ? AND publication_id = ? AND"
-                                                + " tenant_id = ? AND session_id = ? FOR UPDATE",
-                                            (row, index) -> row.getString(1),
-                                            scope,
-                                            publication,
-                                            tenant,
-                                            session);
-                            ToolPublicationContract.require(
-                                    rows.size() == 1 && "PINNED".equals(rows.getFirst()),
-                                    "Publication is retired");
-                            var previous =
-                                    jdbc.query(
-                                            "SELECT operation_key, operation_id, state,"
-                                                + " claim_generation, request_digest, request_json"
-                                                + " FROM ma_operation WHERE scope_key = ? AND"
-                                                + " publication_id = ? AND operation_kind ="
-                                                + " 'OBJECT_PUT' AND target_key = ? FOR UPDATE",
-                                            (row, index) -> ManagedSchemaRows.read(row),
-                                            scope,
-                                            publication,
-                                            target);
-                            ToolPublicationContract.require(
-                                    previous.size() <= 1, "Object write identity is ambiguous");
-                            if (!previous.isEmpty()) {
-                                var prior = previous.getFirst();
-                                ToolPublicationContract.require(
-                                        digest.equals(prior.get("request_digest"))
-                                                && request.equals(prior.get("request_json")),
-                                        "Object write content conflicts");
-                                String id = (String) prior.get("operation_id");
-                                String originalKey =
-                                        ManagedSchemaKeys.operationKey(
-                                                OperationKind.OBJECT_PUT, scope, target, id);
-                                ToolPublicationContract.require(
-                                        originalKey.equals(prior.get("operation_key")),
-                                        "Object write identity conflicts");
-                                if ("RETURNED".equals(prior.get("state"))) {
-                                    return null;
-                                }
-                                if (List.of("UNKNOWN", "IN_FLIGHT").contains(prior.get("state"))) {
-                                    return new PutAttempt(
-                                            originalKey,
-                                            id,
-                                            number(prior, "claim_generation"),
-                                            true);
-                                }
-                                throw unresolvedPut();
-                            }
-                            String id = UUID.randomUUID().toString();
-                            String originalKey =
-                                    ManagedSchemaKeys.operationKey(
-                                            OperationKind.OBJECT_PUT, scope, target, id);
-                            long time = now(jdbc);
-                            jdbc.update(
-                                    "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_key, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, ?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
-                                    originalKey,
-                                    ManagedSessionStore.sessionScopeKey(tenant, session),
-                                    scope,
-                                    id,
-                                    tenant,
-                                    session,
-                                    key.path("workspaceId").asText(),
-                                    target,
-                                    publication,
-                                    digest,
-                                    request,
-                                    time,
-                                    time);
-                            return new PutAttempt(originalKey, id, 1, false);
-                        });
+        PutAttempt attempt = transactions.execute(status -> {
+            String tenant = key.path("tenantId").asText();
+            String session = key.path("sessionId").asText();
+            var publicationTarget = publicationTarget(scope, publication);
+            var capture = lockPublication(publicationTarget);
+            ToolPublicationContract.require(tenant.equals(publicationTarget.tenant())
+                    && session.equals(publicationTarget.session())
+                    && key.path("workspaceId").asText().equals(publicationTarget.workspace()), "Publication scope conflicts");
+            requireLive(jdbc, tenant, session);
+            ToolPublicationContract.require("PINNED".equals(capture.get("retention_state")), "Publication is retired");
+            var previous = jdbc.query("SELECT operation_key, operation_id, state, claim_generation, request_digest, request_json"
+                            + " FROM ma_operation WHERE scope_key = ? AND publication_id = ?"
+                            + " AND operation_kind = 'OBJECT_PUT' AND target_key = ? FOR UPDATE",
+                    (row, index) -> ManagedSchemaRows.read(row), scope, publication, target);
+            ToolPublicationContract.require(previous.size() <= 1, "Object write identity is ambiguous");
+            if (!previous.isEmpty()) {
+                var prior = previous.getFirst();
+                ToolPublicationContract.require(digest.equals(prior.get("request_digest"))
+                        && request.equals(prior.get("request_json")), "Object write content conflicts");
+                String id = (String) prior.get("operation_id");
+                String originalKey = ManagedSchemaKeys.operationKey(OperationKind.OBJECT_PUT, scope, target, id);
+                ToolPublicationContract.require(originalKey.equals(prior.get("operation_key")), "Object write identity conflicts");
+                if ("RETURNED".equals(prior.get("state"))) {
+                    return null;
+                }
+                if (List.of("UNKNOWN", "IN_FLIGHT").contains(prior.get("state"))) {
+                    return new PutAttempt(originalKey, id, number(prior, "claim_generation"), true, publicationTarget);
+                }
+                throw unresolvedPut();
+            }
+            String id = UUID.randomUUID().toString();
+            String originalKey = ManagedSchemaKeys.operationKey(OperationKind.OBJECT_PUT, scope, target, id);
+            long time = now(jdbc);
+            jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
+                            + " tenant_id, session_id, workspace_id, target_kind, target_key, publication_id,"
+                            + " request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
+                    originalKey, ManagedSessionStore.sessionScopeKey(tenant, session), scope, id, tenant, session,
+                    key.path("workspaceId").asText(), target, publication, digest, request, time, time);
+            return new PutAttempt(originalKey, id, 1, false, publicationTarget);
+        });
         if (attempt == null) {
             return;
         }
@@ -609,9 +575,12 @@ public final class ToolPublicationRetentionStore {
                             .put("sha256", bodyDigest)
                             .toString();
             Boolean settled = transactions.execute(status -> {
-                lockRetainedPublication(scope, publication);
-                int changed = jdbc.update(
-                                                "UPDATE ma_operation SET state = 'RETURNED', result_json = ?, completed_at = ?, gmt_modified = ? WHERE operation_key = ? AND scope_key = ? AND publication_id = ? AND operation_kind = 'OBJECT_PUT' AND operation_id = ? AND target_key = ? AND request_digest = ? AND claim_generation = ? AND state IN ('UNKNOWN', 'IN_FLIGHT')",
+                var capture = lockPublication(attempt.target());
+                ToolPublicationContract.require(List.of("PINNED", "RETIRING").contains(capture.get("retention_state")), "Publication is collected");
+                int changed = jdbc.update("UPDATE ma_operation SET state = 'RETURNED', result_json = ?, completed_at = ?,"
+                                + " gmt_modified = ? WHERE operation_key = ? AND scope_key = ? AND publication_id = ?"
+                                + " AND operation_kind = 'OBJECT_PUT' AND operation_id = ? AND target_key = ?"
+                                + " AND request_digest = ? AND claim_generation = ? AND state IN ('UNKNOWN', 'IN_FLIGHT')",
                         proof, now(jdbc), now(jdbc), attempt.key(), scope, publication, attempt.id(), target,
                         digest, attempt.generation());
                 return changed == 1 || !jdbc.query(
@@ -631,19 +600,39 @@ public final class ToolPublicationRetentionStore {
         try {
             objects.putIfAbsent(objectKey, bytes);
         } catch (RuntimeException error) {
-            jdbc.update(
-                    "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'UNKNOWN' WHERE operation_key = ?"
-                            + " AND claim_generation = ? AND state = 'IN_FLIGHT'",
-                    attempt.key(),
-                    attempt.generation());
+            try {
+                completePut(attempt, objectKey, digest, request, false);
+            } catch (RuntimeException cleanup) {
+                error.addSuppressed(cleanup);
+            }
             throw error;
         }
-        jdbc.update(
-                "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'RETURNED', completed_at = ? WHERE operation_key ="
-                        + " ? AND state = 'IN_FLIGHT' AND claim_generation = ?",
-                now(jdbc),
-                attempt.key(),
-                attempt.generation());
+        completePut(attempt, objectKey, digest, request, true);
+    }
+
+    private void completePut(PutAttempt attempt, String objectKey, String digest, String request, boolean returned) {
+        transactions.executeWithoutResult(status -> {
+            lockPublication(attempt.target());
+            var rows = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_key = ?"
+                    + " AND operation_kind = 'OBJECT_PUT' FOR UPDATE", (row, index) -> ManagedSchemaRows.read(row), attempt.key());
+            ToolPublicationContract.require(rows.size() == 1, "PUT attempt is missing");
+            var current = rows.getFirst();
+            var target = attempt.target();
+            ToolPublicationContract.require(target.scope().equals(current.get("scope_key"))
+                    && target.publication().equals(current.get("publication_id"))
+                    && target.tenant().equals(current.get("tenant_id"))
+                    && target.workspace().equals(current.get("workspace_id"))
+                    && target.session().equals(current.get("session_id"))
+                    && attempt.id().equals(current.get("operation_id"))
+                    && ManagedSchemaKeys.key(objectKey).equals(current.get("target_key"))
+                    && digest.equals(current.get("request_digest")) && request.equals(current.get("request_json"))
+                    && number(current, "claim_generation") == attempt.generation()
+                    && "IN_FLIGHT".equals(current.get("state")), "PUT attempt conflicts");
+            int changed = jdbc.update("UPDATE ma_operation SET state = ?, completed_at = ?, gmt_modified = ?"
+                    + " WHERE operation_key = ? AND operation_kind = 'OBJECT_PUT' AND claim_generation = ? AND state = 'IN_FLIGHT'",
+                    returned ? "RETURNED" : "UNKNOWN", returned ? now(jdbc) : null, now(jdbc), attempt.key(), attempt.generation());
+            ToolPublicationContract.require(changed == 1, "PUT attempt did not complete");
+        });
     }
 
     private static ManagedAgentException unresolvedPut() {

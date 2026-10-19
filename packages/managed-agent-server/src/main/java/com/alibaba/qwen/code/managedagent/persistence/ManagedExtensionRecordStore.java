@@ -335,10 +335,12 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * Collects the parsed records in the same pass; the legacy cache still uses the last activation
-     * payload.
+     * Collects the parsed records in the same pass;
+     * the legacy cache still uses the last activation payload.
      */
-    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation, List<JsonNode> records) {}
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation,
+            List<JsonNode> records) {
+    }
 
     /**
      * Applies the Stage H revisions that one journal transaction carries. It runs inside the
@@ -352,49 +354,19 @@ public class ManagedExtensionRecordStore {
     ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources, long committedAt) {
-        return apply(
-                tenantId,
-                workspaceId,
-                sessionId,
-                firstSequence,
-                eventCount,
-                recordBytes,
-                resources,
-                committedAt,
-                null);
+        return apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, recordBytes, resources, committedAt, null);
     }
 
-    ApplyResult applyNative(
-            String tenantId,
-            String workspaceId,
-            String sessionId,
-            long firstSequence,
-            int eventCount,
-            byte[] recordBytes,
-            Function<String, StoredResource> resources,
-            long committedAt) {
-        return apply(
-                tenantId,
-                workspaceId,
-                sessionId,
-                firstSequence,
-                eventCount,
-                recordBytes,
-                resources,
-                committedAt,
+    ApplyResult applyNativeCsi(String tenantId, String workspaceId, String sessionId,
+            long firstSequence, int eventCount, byte[] recordBytes,
+            Function<String, StoredResource> resources, long committedAt) {
+        return apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, recordBytes, resources, committedAt,
                 CsiNativeActivationProof.records(recordBytes));
     }
 
-    private ApplyResult apply(
-            String tenantId,
-            String workspaceId,
-            String sessionId,
-            long firstSequence,
-            int eventCount,
-            byte[] recordBytes,
-            Function<String, StoredResource> resources,
-            long committedAt,
-            List<JsonNode> nativeRecords) {
+    private ApplyResult apply(String tenantId, String workspaceId, String sessionId,
+            long firstSequence, int eventCount, byte[] recordBytes,
+            Function<String, StoredResource> resources, long committedAt, List<JsonNode> nativeRecords) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
@@ -405,8 +377,7 @@ public class ManagedExtensionRecordStore {
         boolean managed = false;
         String lastSubtype = null;
         for (int index = 0; index < lines.length; index++) {
-            JsonNode record =
-                    nativeRecords == null ? parse(lines[index]) : nativeRecords.get(index);
+            JsonNode record = nativeRecords == null ? parse(lines[index]) : nativeRecords.get(index);
             if (record == null) {
                 throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                         ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
@@ -500,7 +471,8 @@ public class ManagedExtensionRecordStore {
         require(applied == 0 || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
-        return new ApplyResult(List.copyOf(receipts), lastActivation, List.copyOf(records));
+        return new ApplyResult(List.copyOf(receipts), lastActivation,
+                List.copyOf(records));
     }
 
     private void projectModelContext(String tenantId, String workspaceId,
@@ -515,7 +487,7 @@ public class ManagedExtensionRecordStore {
                 || ref.path("schemaVersion").longValue() != 1
                 || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?"
                         + " AND session_id = ? AND session_kind = 'PUBLIC' AND workspace_id = ?"
-                        + " AND workspace_storage_id IS NOT NULL", Integer.class,
+                        + " AND workspace_storage_id IS NOT NULL AND csi_guard = FALSE", Integer.class,
                         tenantId, sessionId, workspaceId) == 0) {
             return;
         }

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
@@ -69,6 +70,53 @@ class ManagedSessionStoreCredentialTest {
                             0, null, 1, "", "0".repeat(64), java.util.List.of()), authority);
             default -> throw new IllegalArgumentException(route);
         }
+    }
+
+    @Test
+    void historicalCredentialUsesOriginalPolicyAndRetainedHashWithoutSql() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.getDataSource()).thenReturn(new JdbcDataSource());
+        ManagedSessionStore store = new ManagedSessionStore(jdbc);
+        JournalEventTransport transport = mock(JournalEventTransport.class);
+        store.setJournalEventTransport(transport);
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setBindingKey(KEY);
+        WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);
+        store.setCredentials(policy);
+        reset(jdbc);
+        String token = policy.issue("tenant", "workspace", "session");
+        String hash = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
+                token.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        store.requireCsiHistoricalCredential("tenant", "workspace", "session", token, hash);
+        for (String wrong : new String[]{null, "0".repeat(64), hash.toUpperCase(java.util.Locale.ROOT)}) {
+            assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", token, wrong))
+                    .isInstanceOf(ManagedAgentException.class);
+        }
+        for (String foreign : new String[]{null, policy.issue("foreign", "workspace", "session"),
+                policy.issue("tenant", "other", "session"), policy.issue("tenant", "workspace", "other")}) {
+            assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", foreign, hash))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("writer_credential_invalid"));
+        }
+        verifyNoInteractions(jdbc, transport);
+    }
+
+    @Test
+    void unboundHistoricalCredentialStillUsesTheOriginalTokenGrammarAndHash() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.getDataSource()).thenReturn(new JdbcDataSource());
+        ManagedSessionStore store = new ManagedSessionStore(jdbc);
+        reset(jdbc);
+        String token = "a".repeat(32);
+        String hash = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
+                token.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        store.requireCsiHistoricalCredential("tenant", "workspace", "session", token, hash);
+        for (String malformed : new String[]{null, "a".repeat(31), "a".repeat(513), " ".repeat(32), "中".repeat(32)}) {
+            assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", malformed, hash))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("invalid_writer_token"));
+        }
+        assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", "b".repeat(32), hash))
+                .isInstanceOf(ManagedAgentException.class);
+        verifyNoInteractions(jdbc);
     }
 
     @Test
