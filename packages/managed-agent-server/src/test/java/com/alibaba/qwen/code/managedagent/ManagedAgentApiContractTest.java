@@ -263,6 +263,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
+                    entry(ApiModels.WebShellSkill.class, List.of("WebShellSkill")),
+                    entry(ApiModels.WebShellSessionSkills.class, List.of("WebShellSessionSkills")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
                     entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
@@ -1228,6 +1230,14 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/directories/query")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesQuery", 409,
+                post(WEB_SHELL + "/workspaces/files/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"directory\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesRead", 409,
+                post(WEB_SHELL + "/workspaces/files/read")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"path\":\"a.txt\",\"expectedScopeRevision\":\"old\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1281,6 +1291,12 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 200,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 401,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
         exchange(drift, "queryWebShellSessionModels", 401,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant),

@@ -111,10 +111,10 @@ describe('Managed composer input snapshots', () => {
     ).rejects.toThrow('not valid UTF-8');
     await expect(
       encodeManagedInput(
-        'x'.repeat(49000),
+        'x'.repeat(8 * 1024 * 1024 - 1000),
         [],
         [{ name: 'a.txt', media_type: 'text/plain', text: 'x'.repeat(1000) }],
       ),
-    ).rejects.toThrow('48 KiB');
+    ).rejects.toThrow('8 MiB');
   });
 });
