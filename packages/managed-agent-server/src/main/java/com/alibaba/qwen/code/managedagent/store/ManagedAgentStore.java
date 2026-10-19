@@ -4689,7 +4689,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return jdbc.query(
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING') AND error_code = '"
                         + AgentStateStore.RUNTIME_RECOVERY_BLOCKED
-                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
+                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),

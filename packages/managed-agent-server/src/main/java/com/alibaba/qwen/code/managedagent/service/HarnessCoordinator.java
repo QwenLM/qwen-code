@@ -245,7 +245,7 @@ public class HarnessCoordinator {
             dispatch(target.tenantId(), target.sessionId(), target.turnId());
         }
         for (DispatchTarget target : store.findRuntimeRecoveryParked(now, 50)) {
-            executor.submit(() -> recoverParkedRuntime(target));
+            executor.execute(() -> recoverParkedRuntime(target));
         }
     }
 
@@ -1313,21 +1313,23 @@ public class HarnessCoordinator {
     // The cached takeover snapshot is discarded first, so the load asks the
     // Broker instead of answering from the report the park was decided on.
     private void recoverParkedRuntime(DispatchTarget target) {
-        TurnRecord claimed = store.claimTurn(target.tenantId(),
-                target.sessionId(), target.turnId(), owner, leaseDuration)
-                .orElse(null);
-        if (claimed == null) {
-            return;
-        }
-        if ("CANCELLING".equals(claimed.status())) {
-            // A user cancel landed between the park scan and the claim. The
-            // normal sweep owns that lane; releasing the lease lets it drive
-            // the cancel instead of settling the Turn as FAILED here.
-            store.releaseTurnLease(claimed.tenantId(), claimed.sessionId(),
-                    claimed.turnId(), owner);
-            return;
-        }
+        TurnRecord claimed = null;
         try {
+            claimed = store.claimTurn(target.tenantId(),
+                    target.sessionId(), target.turnId(), owner, leaseDuration)
+                    .orElse(null);
+            if (claimed == null) {
+                return;
+            }
+            if ("CANCELLING".equals(claimed.status())) {
+                // A user cancel landed between the park scan and the claim.
+                // The normal sweep owns that lane; releasing the lease lets
+                // it drive the cancel instead of settling the Turn as FAILED
+                // here.
+                store.releaseTurnLease(claimed.tenantId(), claimed.sessionId(),
+                        claimed.turnId(), owner);
+                return;
+            }
             harness.discardManagedRecovery(claimed.tenantId(),
                     claimed.sessionId());
             fail(claimed, "managed_runtime_recovery_blocked",
@@ -1336,9 +1338,11 @@ public class HarnessCoordinator {
         } catch (RuntimeException error) {
             LOG.warn("Managed runtime recovery recheck failed tenant={}"
                             + " session={} turn={}",
-                    claimed.tenantId(), claimed.sessionId(),
-                    claimed.turnId(), error);
-            parkRuntimeRecovery(claimed);
+                    target.tenantId(), target.sessionId(), target.turnId(),
+                    error);
+            if (claimed != null && !"CANCELLING".equals(claimed.status())) {
+                parkRuntimeRecovery(claimed);
+            }
         }
     }
 

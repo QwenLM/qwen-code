@@ -2645,19 +2645,13 @@ class HarnessCoordinatorTest {
             coordinatorLog.detachAppender(logged);
             logged.stop();
         }
-        if (cancelling) {
-            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(), anyLong(), eq(true));
-            verify(store, never()).parkTurnForRuntimeRecovery(anyString(), anyString(),
-                    anyString(), anyString(), anyString(), anyLong());
-        } else {
-            // A deterministic takeover decline keeps its existing bounded
-            // retry; only the unknown gate parks (D7-2 decision 10).
-            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(), anyLong(), eq(true));
-            verify(store, never()).parkTurnForRuntimeRecovery(anyString(), anyString(),
-                    anyString(), anyString(), anyString(), anyLong());
-        }
+        // A deterministic takeover decline keeps its existing bounded
+        // retry; only the unknown gate parks (D7-2 decision 10). A
+        // CANCELLING Turn keeps that same bounded retry lane.
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), anyLong(), eq(true));
+        verify(store, never()).parkTurnForRuntimeRecovery(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString());
         verify(store, never()).failRecoveryBlockedTurn(anyString(), anyString(), anyString(),
