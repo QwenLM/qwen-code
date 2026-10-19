@@ -141,7 +141,8 @@ test('packages an independently verifiable reference distribution', async () => 
     );
     assert.match(launcher, /lib\/qwen-managed-agent-server-0\.4\.0-alpha\.jar/);
     assert.match(launcher, /config\/application\.yml/);
-    assert.match(launcher, /spring\.config\.additional-location/);
+    assert.match(launcher, /SPRING_CONFIG_ADDITIONAL_LOCATION/);
+    assert.doesNotMatch(launcher, /set --/);
     assert.equal(
       await readFile(
         path.join(bundle, 'config/application.example.yml'),
@@ -213,33 +214,50 @@ test('launchers load the distribution config only when it exists', async () => {
 
     await mkdir(fakeBin);
     const java = path.join(fakeBin, 'java');
-    await writeFile(java, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+    await writeFile(
+      java,
+      '#!/bin/sh\nprintf "ENV=%s\\n" "${SPRING_CONFIG_ADDITIONAL_LOCATION:-}"\n' +
+        'printf "ARG=%s\\n" "$@"\n',
+    );
     await chmod(java, 0o755);
     const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
     const launcherPath = path.join(bundle, 'bin/qwen-managed-agent-server');
-    const run = (overrides = {}) =>
-      execFileSync('sh', [launcherPath, '--spring.profiles.active=test'], {
+    const recoveryPath = path.join(
+      bundle,
+      'bin/qwen-managed-agent-operator-recovery',
+    );
+    const run = (script, args, overrides = {}) =>
+      execFileSync('sh', [script, ...args], {
         env: { ...env, ...overrides },
         encoding: 'utf8',
       });
 
-    assert.doesNotMatch(run(), /spring\.config\.additional-location/);
+    const withoutConfig = run(launcherPath, ['--spring.profiles.active=test']);
+    assert.ok(withoutConfig.includes('ENV=\n'));
+    assert.ok(withoutConfig.includes('ARG=--spring.profiles.active=test'));
+    assert.ok(
+      !withoutConfig.includes('ARG=--spring.config.additional-location'),
+    );
 
     const config = path.join(bundle, 'config/application.yml');
     await writeFile(config, 'qwen: {}\n');
-    const withConfig = run();
-    assert.ok(
-      withConfig.includes(`--spring.config.additional-location=file:${config}`),
-    );
-    assert.ok(
-      withConfig.indexOf('additional-location') <
-        withConfig.indexOf('--spring.profiles.active=test'),
-    );
+    const withConfig = run(launcherPath, ['--spring.profiles.active=test']);
+    assert.ok(withConfig.includes(`ENV=file:${config}`));
+    assert.ok(withConfig.includes('ARG=--spring.profiles.active=test'));
+    assert.ok(!withConfig.includes('ARG=--spring.config.additional-location'));
 
-    assert.doesNotMatch(
-      run({ SPRING_CONFIG_ADDITIONAL_LOCATION: '/tmp/operator.yml' }),
-      /spring\.config\.additional-location/,
-    );
+    const operator = run(launcherPath, [], {
+      SPRING_CONFIG_ADDITIONAL_LOCATION: '/tmp/operator.yml',
+    });
+    assert.ok(operator.includes('ENV=/tmp/operator.yml'));
+
+    const recovery = run(recoveryPath, ['inspect', 'binding-1', '7']);
+    assert.ok(recovery.includes(`ENV=file:${config}`));
+    assert.ok(recovery.includes('ARG=-jar'));
+    assert.ok(recovery.includes('ARG=inspect'));
+    assert.ok(recovery.includes('ARG=binding-1'));
+    assert.ok(recovery.includes('ARG=7'));
+    assert.ok(!recovery.includes('ARG=--spring.config.additional-location'));
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

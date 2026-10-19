@@ -8,9 +8,14 @@
 #   chmod 600 config/application.yml
 #
 # bin/qwen-managed-agent-server and bin/qwen-managed-agent-operator-recovery
-# pass --spring.config.additional-location=file:<distribution-root>/config/application.yml
-# when that file exists and SPRING_CONFIG_ADDITIONAL_LOCATION is unset.
-# Environment variables still take precedence over values set here.
+# export SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml
+# when that file exists and the variable is unset. No option is added to the
+# command's positional arguments.
+#
+# Mapped values can be overridden through their QWEN_MANAGED_AGENT_* variable.
+# A literal value written here replaces the mapped placeholder and therefore
+# wins over the corresponding variable; the placeholders below keep the
+# environment override for the active key pair.
 #
 # The Runtime credential key ring is the documented case: relaxed binding
 # normalises map keys supplied as environment variables, so a rotated key ID
@@ -21,7 +26,7 @@
 # qwen:
 #   managed-agent:
 #     runtime-broker:
-#       credential-key-id: reference-v2
-#       credential-key: <base64-encoded-32-byte-v2-key>
+#       credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:reference-v2}'
+#       credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:<base64-encoded-32-byte-v2-key>}'
 #       previous-credential-keys:
 #         '[reference-v1]': <base64-encoded-32-byte-v1-key>
