@@ -72,13 +72,32 @@ class ManagedInputAttachmentTest {
     }
 
     @Test
+    void admitsAScreenshotSizedImageAndPreservesItsBytesOnReplayAndProjection() {
+        byte[] bytes = new byte[5 * 1024 * 1024];
+        System.arraycopy(Base64.getDecoder().decode(PNG), 0, bytes, 0, 8);
+        String data = Base64.getEncoder().encodeToString(bytes);
+        var blocks = List.of(new InputBlock("input_text", "Review screenshot"),
+                new InputBlock("input_image", null, "image/png", data, null));
+        var admission = service.createSession("tenant", "large-image", "qwen-code", null, null, null, blocks);
+        var replay = service.createSession("tenant", "large-image", "qwen-code", null, null, null, blocks);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.turnId()).isEqualTo(admission.turnId());
+        assertThat(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input().get(1))
+                .isEqualTo(Map.of("type", "image", "data", data, "mimeType", "image/png"));
+        store.materializeNextBatch("tenant", admission.sessionId(), 100);
+        assertThat(service.listPublicItems("tenant", null, admission.sessionId(), 0, 100).data())
+                .singleElement().satisfies(item -> assertThat(item.attributes().get("inputAttachments"))
+                        .isEqualTo(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input()));
+    }
+
+    @Test
     void acceptsFileOnlyInputAndEnforcesTheWholeEncodedBudget() {
         var admitted = service.createSession("tenant", "file-only", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_file", "const x = 1;", "application/octet-stream", null, "script.ts")));
         assertThat(admitted.turnId()).isNotNull();
         assertThatThrownBy(() -> service.createSession("tenant", "too-large", "qwen-code", null, null, null,
-                List.of(new InputBlock("input_text", "界".repeat(17000)),
-                        new InputBlock("input_file", "small", "text/plain", null, "a.txt"))))
+                List.of(new InputBlock("input_file", "界".repeat(ManagedInputAttachments.MAX_INPUT_BYTES / 3),
+                        "text/plain", null, "a.txt"))))
                 .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("input_too_large"));
     }
 

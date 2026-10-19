@@ -526,11 +526,14 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
-  if (rawArgv.length === 1 && rawArgv[0] === 'managed-runtime-bootstrap') {
+  if (
+    rawArgv[0] === 'managed-runtime-bootstrap' &&
+    (rawArgv.length === 1 || (rawArgv.length === 2 && rawArgv[1] === '--help'))
+  ) {
     const { runManagedRuntimeBootstrap } = await import(
       './serve/managed-runtime-bootstrap.js'
     );
-    await runManagedRuntimeBootstrap();
+    await runManagedRuntimeBootstrap(rawArgv[1] === '--help');
     return;
   }
   if (

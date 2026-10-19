@@ -230,6 +230,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_file_upload', 'workspace_file_delete', 'workspace_directory_create', 'workspace_directory_delete',
  'session_approval_mode_control', 'workspace_tool_toggle',
  'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
+ 'workspace_session_refresh',
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
  'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
@@ -380,7 +381,7 @@ The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces
 
 `extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist changed targets in one generation, and return one `202` operation handle. A target does not need to be installed when setting `enabled` or `disabled`: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"` and writes V2 `defaultActivation`; the workspace route also accepts `"inherit"` and applies or clears exact overrides for the selected trusted runtime. `inherit` does not declare an unknown name, and an all-unknown clear reports `updated: false`.
 
-`extension_activation_explicit_refresh` means singular and batch activation operations finish after the durable policy commit without directly refreshing active sessions. Callers that need immediate application should wait for activation success and then submit either the synchronous primary-workspace `POST /workspace/extensions/refresh`, which returns refresh counts directly, or the selected workspace's asynchronous `POST /workspaces/:workspace/extensions/refresh`, which returns a separate operation handle. The two forms are not interchangeable: the asynchronous operation records the applied generation when its runtime reconciliation completes, while the synchronous route records nothing, so the generation reconciler still treats that workspace as pending and refreshes its sessions again on its next pass. Callers that can address a specific workspace should prefer the asynchronous form. A refresh failure does not roll back or downgrade the activation result. Daemons without this capability already include runtime refresh in activation, so compatibility clients must not submit a second refresh. The independent 30-second generation reconciler remains enabled and normally applies the committed policy by its next pass; failed reconciliation is retried by later passes.
+`extension_activation_explicit_refresh` means singular and batch activation operations finish after the durable policy commit without directly refreshing active sessions. Callers that need immediate application should wait for activation success and then submit either the synchronous primary-workspace `POST /workspace/extensions/refresh`, which returns refresh counts directly, or the selected workspace's asynchronous `POST /workspaces/:workspace/extensions/refresh`, which returns a separate operation handle. The two forms are not interchangeable: the asynchronous operation records the applied generation when its full runtime reconciliation completes, while the synchronous route records nothing, so the generation reconciler still treats that workspace as pending and refreshes its sessions again on its next pass. Callers that can address a specific workspace should prefer the asynchronous form. A refresh failure does not roll back or downgrade the activation result. Daemons without this capability already include runtime refresh in activation, so compatibility clients must not submit a second refresh. The independent 30-second generation reconciler remains enabled and normally applies the committed policy by its next pass; failed reconciliation is retried by later passes.
 
 ### Extension Management V2 wire contract
 
@@ -403,6 +404,20 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | `PUT /workspaces/:workspace/extensions/:extensionId/activation`    | `202` exact workspace-activation operation                                  |
 | `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
 | `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
+
+#### Explicit Extension refresh
+
+Capability tag: `workspace_session_refresh` for the optional session selection. Both `POST /workspace/extensions/refresh` (primary runtime) and `POST /workspaces/:workspace/extensions/refresh` (selected runtime) accept:
+
+```json
+{ "sessionIds": ["session-1", "session-2"] }
+```
+
+Omitting `sessionIds` preserves full runtime refresh. A supplied array is deduplicated in request order, and `[]` refreshes no sessions or bootstrap caches. IDs must be non-empty strings. Invalid request shapes return HTTP 400; unknown IDs, including sessions owned by another workspace, return HTTP 404 before work starts. Session ownership is checked only inside the resolved runtime, with no primary-runtime fallback. Existing authentication, strict mutation, workspace trust and client identity gates apply.
+
+The primary route still returns HTTP 200 with `{ refreshed, failed }`; the qualified route still returns HTTP 202 with an operation handle. Counts describe the selected sessions. A refresh with `sessionIds` does not advance the workspace-wide applied generation, even if the selection covers every current session. Automatic full reconciliation remains unchanged and may refresh other sessions later. Selection does not create session-scoped activation policy: shared runtime caches can change, and workspace events remain workspace-wide.
+
+Clients must preflight `workspace_session_refresh` before supplying the field, including an empty array; older daemons can silently ignore it. Existing calls without the field need no new capability check.
 
 #### Workspace resource state
 
@@ -3795,6 +3810,32 @@ Global installation and deletion use `POST /workspace/config/skills/install` and
 Config deletion returns `503 skills_config_unavailable` instead of a definitive not-found response when the daemon-local Skill inventory cannot be enumerated.
 
 The singular mutation owner rejects workspace scope with `400 workspace_scope_requires_qualified_workspace`; qualified mutations reject global scope with `400 global_scope_requires_singular_owner`. Qualified writes require a trusted workspace. A legacy injected bridge returns `501 workspace_runtime_not_supported` for qualified config writes that require runtime coordination. Unknown, removed, transitioning, and draining workspaces follow the standard qualified-workspace errors and never fall back to primary.
+
+#### `POST /workspace/skills/refresh`
+
+Capability tag: `workspace_session_refresh`. The workspace-qualified form is `POST /workspaces/:workspace/skills/refresh`. The singular route owns the primary runtime; the qualified route resolves the exact selected trusted runtime and never falls back to primary. Both use the strict mutation gate and existing client identity checks.
+
+Explicitly reload Skill settings and content for all live sessions, or only the supplied session IDs:
+
+```json
+{ "sessionIds": ["session-1", "session-2"] }
+```
+
+Omitting `sessionIds` refreshes all live sessions. IDs must be non-empty strings and are deduplicated in request order; `[]` returns zero counts without refreshing sessions or caches. Invalid request shapes return HTTP 400. Unknown IDs and IDs owned by another workspace return HTTP 404 before any refresh begins. Selected sessions are routed only to their owning execution-engine channels; unrelated channels receive no refresh command.
+
+Response (200):
+
+```json
+{
+  "sessionsRefreshed": 2,
+  "sessionsFailed": 0,
+  "configsRefreshed": 3,
+  "configsFailed": 0,
+  "reason": "all"
+}
+```
+
+Counts describe the selected sessions and the shared/session configurations refreshed for their owner channels. Selection controls immediate session refresh and command notifications; shared channel caches can change, and workspace events remain workspace-wide. The explicit request does not update the Skill coordinator's revision or readiness. Skill enable/disable, install/delete and automatic reconciliation retain their existing full-refresh behavior. This route does not add `refreshRuntime` or `sessionIds` to Skill toggle bodies.
 
 #### `POST /workspace/skills/:name/enable`
 
