@@ -109,6 +109,7 @@ import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
 import {
+  SESSION_ARCHIVE_BATCH_SIZE,
   SESSION_LIST_PAGE_SIZE,
   SESSION_LIVE_STATE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -199,7 +200,12 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { EXECUTION_APPROVAL_MODES, parsePlanCommand } from './utils/planMode';
+import {
+  nextApprovalMode,
+  parsePlanCommand,
+  type WebShellApprovalMode,
+} from './utils/planMode';
+import { useApprovalModes } from './hooks/useApprovalModes';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -353,6 +359,7 @@ import {
   navigateToDaemon,
 } from './config/daemon';
 import { Button } from './components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
 import { isDesktopShell } from './utils/externalOpen';
 import {
   isPluginShadowPanel,
@@ -559,7 +566,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MODES_CYCLE = EXECUTION_APPROVAL_MODES;
 const MAX_TOASTS = 4;
 const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -1459,6 +1465,8 @@ export interface WebShellProps {
    * needs them. Plan must be explicitly included.
    */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
+  allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -2847,6 +2855,20 @@ interface SideTaskCatalogState {
   loaded: boolean;
 }
 
+export function canArchiveSideTaskSummary(
+  session: Pick<
+    DaemonSessionSummary,
+    'activeWorkState' | 'hasActivePrompt' | 'hasRunningBackgroundTasks'
+  >,
+): boolean {
+  return (
+    !session.hasActivePrompt &&
+    !session.hasRunningBackgroundTasks &&
+    (session.activeWorkState === undefined ||
+      session.activeWorkState === 'idle')
+  );
+}
+
 // Merge a fresh side-task listing into the cached catalog. The listing is
 // authoritative: a cached item survives only while it is still listed or is a
 // locally created draft the daemon has not echoed back yet (optimisticIds).
@@ -3424,6 +3446,7 @@ export function App({
   filterArtifact,
   shellRef,
   composerToolbarActions,
+  allowedApprovalModes: allowedApprovalModesProp,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3467,6 +3490,18 @@ export function App({
   const navigation = useWebShellNavigation();
   const navigationRef = useRef(navigation);
   navigationRef.current = navigation;
+  const [managedHome, setManagedHome] = useState(
+    () =>
+      managedAgentProvider !== undefined &&
+      managedSelectionFromUrl(
+        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      ).open,
+  );
+  const managedMode = managedAgentProvider !== undefined && managedHome;
+  const managedModeRef = useRef(managedMode);
+  managedModeRef.current = managedMode;
+  const [managedNavigationTarget, setManagedNavigationTarget] =
+    useState<HTMLDivElement | null>(null);
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -3632,10 +3667,15 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      // [data-web-shell-dialog] joins this allowlist because DialogShell
+      // portals outside the drawer subtree but stacks above it — without the
+      // exemption, a dialog opened over the drawer loses all touch scrolling
+      // on a phone. The exemption covers DialogShell only, not other
+      // portaled overlays.
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
         )
       ) {
         return;
@@ -3702,8 +3742,10 @@ export function App({
     [],
   );
 
+  const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const customization = useMemo(
     () => ({
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -3738,6 +3780,7 @@ export function App({
       fileDropAction,
     }),
     [
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -5133,6 +5176,7 @@ export function App({
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
   const artifactPanelTriggerRef = useRef<HTMLElement | null>(null);
+  const focusComposerAfterArtifactPanelCloseRef = useRef(false);
   const rememberArtifactPanelTrigger = useCallback(() => {
     if (
       !artifactPanelOpenRef.current &&
@@ -5216,6 +5260,10 @@ export function App({
     DEFAULT_REVIEW_PANEL_WIDTH,
   );
   const [artifactPanelFullscreen, setArtifactPanelFullscreen] = useState(false);
+  useEffect(() => {
+    if (managedMode && artifactPanelFullscreen)
+      setArtifactPanelFullscreen(false);
+  }, [managedMode, artifactPanelFullscreen]);
   const artifactPanelFullscreenRef = useRef(false);
   artifactPanelFullscreenRef.current = artifactPanelFullscreen;
   // Exiting fullscreen swaps the same DOM node back to .artifactPanelDock,
@@ -5273,6 +5321,13 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const sideTaskRestoreAvailable =
+    sideTasksAvailable &&
+    connection.capabilities?.features.includes('session_archive') === true;
+  const sideTaskArchiveAvailable =
+    sideTaskRestoreAvailable &&
+    connection.capabilities?.features.includes('session_archive_idle_guard') ===
+      true;
   const filesAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('files') &&
@@ -5312,18 +5367,41 @@ export function App({
     items: [],
     loaded: false,
   });
+  const [archivedSideTaskCatalog, setArchivedSideTaskCatalog] =
+    useState<SideTaskCatalogState>({
+      items: [],
+      loaded: false,
+    });
+  const [sideTaskCatalogRefreshNonce, setSideTaskCatalogRefreshNonce] =
+    useState(0);
+  const refreshSideTaskCatalog = useCallback(() => {
+    setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+  }, []);
+  const sideTaskCatalogRequestGenerationRef = useRef(0);
+  const removedSideTaskSessionIdsRef = useRef(new Set<string>());
   useLayoutEffect(() => {
+    sideTaskCatalogRequestGenerationRef.current += 1;
+    removedSideTaskSessionIdsRef.current.clear();
     setSideTaskCatalog({ items: [], loaded: false });
+    setArchivedSideTaskCatalog({ items: [], loaded: false });
   }, [logicalSessionKey]);
   const optimisticSideTaskIdsRef = useRef(new Set<string>());
   const visibleSideTasks =
     sideTaskCatalog.parentSessionId === connection.sessionId
       ? sideTaskCatalog.items
       : [];
+  const visibleArchivedSideTasks =
+    archivedSideTaskCatalog.parentSessionId === connection.sessionId
+      ? archivedSideTaskCatalog.items
+      : [];
   const sideTasksLoading =
     visibleSideTasks.length === 0 &&
+    visibleArchivedSideTasks.length === 0 &&
     (sideTaskCatalog.parentSessionId !== connection.sessionId ||
-      !sideTaskCatalog.loaded);
+      !sideTaskCatalog.loaded ||
+      (sideTaskRestoreAvailable &&
+        (archivedSideTaskCatalog.parentSessionId !== connection.sessionId ||
+          !archivedSideTaskCatalog.loaded)));
   const nextSideTaskTabIdRef = useRef(0);
   const createSideTask = useCallback(
     (initialPrompt?: string) => {
@@ -5527,6 +5605,7 @@ export function App({
               title: sideTaskTab.title,
               workspaceCwd: sideTaskTab.workspaceCwd,
               updatedAt: new Date().toISOString(),
+              archivable: false,
             },
           ],
         };
@@ -5593,6 +5672,7 @@ export function App({
     (sideTask: SideTaskListItem) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId) return;
+      removedSideTaskSessionIdsRef.current.delete(sideTask.sessionId);
       const tab: ArtifactPanelTab = {
         id: `side-task:${sideTask.sessionId}`,
         kind: 'side_task',
@@ -5623,38 +5703,60 @@ export function App({
     const workspaceCwd = connection.workspaceCwd;
     if (!sideTasksAvailable || !parentSessionId || !workspaceCwd) {
       setSideTaskCatalog({ items: [], loaded: false });
+      setArchivedSideTaskCatalog({ items: [], loaded: false });
       return;
     }
     if (!artifactPanelOpen) return;
+    const requestGeneration = ++sideTaskCatalogRequestGenerationRef.current;
     setSideTaskCatalog((catalog) =>
       catalog.parentSessionId === parentSessionId
         ? { ...catalog, loaded: false }
         : { parentSessionId, items: [], loaded: false },
     );
+    setArchivedSideTaskCatalog((catalog) =>
+      catalog.parentSessionId === parentSessionId
+        ? { ...catalog, loaded: !sideTaskRestoreAvailable }
+        : {
+            parentSessionId,
+            items: [],
+            loaded: !sideTaskRestoreAvailable,
+          },
+    );
     let cancelled = false;
-    void loadSessionCatalogOnce(
-      workspace.client,
-      {
-        routeKind: 'legacy',
-        workspaceCwd,
-        options: {
-          pageSize: SESSION_LIST_PAGE_SIZE,
-          archiveState: 'active',
-          sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
-          sourceId: parentSessionId,
+    const requestIsCurrent = () =>
+      !cancelled &&
+      sideTaskCatalogRequestGenerationRef.current === requestGeneration;
+    const toSideTaskListItem = (
+      session: DaemonSessionSummary,
+    ): SideTaskListItem => ({
+      sessionId: session.sessionId,
+      title:
+        session.displayName?.trim() ||
+        `${t('sideTask.title')} ${session.sessionId.slice(0, 8)}`,
+      workspaceCwd: session.workspaceCwd || workspaceCwd,
+      updatedAt: session.updatedAt || session.createdAt,
+    });
+    const loadSideTasks = (archiveState: 'active' | 'archived') =>
+      loadSessionCatalogOnce(
+        workspace.client,
+        {
+          routeKind: 'legacy',
+          workspaceCwd,
+          options: {
+            pageSize: SESSION_LIST_PAGE_SIZE,
+            archiveState,
+            sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
+            sourceId: parentSessionId,
+          },
         },
-      },
-      { fresh: true },
-    )
+        { fresh: true },
+      );
+    void loadSideTasks('active')
       .then((page) => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         const listedItems = page.sessions.map((session) => ({
-          sessionId: session.sessionId,
-          title:
-            session.displayName?.trim() ||
-            `${t('sideTask.title')} ${session.sessionId.slice(0, 8)}`,
-          workspaceCwd: session.workspaceCwd || workspaceCwd,
-          updatedAt: session.updatedAt || session.createdAt,
+          ...toSideTaskListItem(session),
+          archivable: canArchiveSideTaskSummary(session),
         }));
         for (const item of listedItems) {
           optimisticSideTaskIdsRef.current.delete(item.sessionId);
@@ -5669,13 +5771,32 @@ export function App({
         );
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         setSideTaskCatalog((catalog) =>
           catalog.parentSessionId === parentSessionId
             ? { ...catalog, loaded: true }
             : catalog,
         );
       });
+    if (sideTaskRestoreAvailable) {
+      void loadSideTasks('archived')
+        .then((page) => {
+          if (!requestIsCurrent()) return;
+          setArchivedSideTaskCatalog({
+            parentSessionId,
+            loaded: true,
+            items: page.sessions.map(toSideTaskListItem),
+          });
+        })
+        .catch(() => {
+          if (!requestIsCurrent()) return;
+          setArchivedSideTaskCatalog((catalog) =>
+            catalog.parentSessionId === parentSessionId
+              ? { ...catalog, loaded: true }
+              : catalog,
+          );
+        });
+    }
     return () => {
       cancelled = true;
     };
@@ -5683,6 +5804,8 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
     artifactPanelOpen,
+    sideTaskCatalogRefreshNonce,
+    sideTaskRestoreAvailable,
     sideTasksAvailable,
     t,
     workspace.client,
@@ -7130,8 +7253,15 @@ export function App({
         ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
         ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
-      const mergedTabs = candidateTabs.filter(
-        (tab) =>
+      const mergedTabs = candidateTabs.filter((tab) => {
+        if (
+          tab.kind === 'side_task' &&
+          tab.sessionId &&
+          removedSideTaskSessionIdsRef.current.has(tab.sessionId)
+        ) {
+          return false;
+        }
+        return (
           // Once the split decision is final, drop stale pane-bound tabs before
           // they can be selected active and mount a foreign collection; while
           // the decision is pending, commit and let the settled sweep reclaim.
@@ -7142,8 +7272,9 @@ export function App({
             (mainViewRef.current !== 'split' ||
               tab.sessionId === undefined ||
               !splitSessionIdsRef.current.includes(tab.sessionId))
-          ),
-      );
+          )
+        );
+      });
       const reclaimEmptiedPanel =
         mergedTabs.length === 0 && candidateTabs.length > 0;
       const activeTabId = mergedTabs.some(
@@ -7753,6 +7884,82 @@ export function App({
     (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
     [closeArtifactPanelTabs],
   );
+  const removeSideTaskTabs = useCallback(
+    (sessionIds: ReadonlySet<string>) => {
+      for (const sessionId of sessionIds) {
+        removedSideTaskSessionIdsRef.current.add(sessionId);
+      }
+      const matches = (tab: { kind: string; sessionId?: string }) =>
+        tab.kind === 'side_task' &&
+        tab.sessionId !== undefined &&
+        sessionIds.has(tab.sessionId);
+      closeArtifactPanelTabs(
+        new Set(
+          artifactPanelTabsRef.current.filter(matches).map((tab) => tab.id),
+        ),
+      );
+      for (const [
+        sessionKey,
+        state,
+      ] of artifactPanelStateBySessionRef.current) {
+        const removedIds = new Set(
+          state.tabs.filter(matches).map((tab) => tab.id),
+        );
+        if (removedIds.size === 0) continue;
+        const tabs = state.tabs.filter((tab) => !removedIds.has(tab.id));
+        artifactPanelStateBySessionRef.current.set(sessionKey, {
+          ...state,
+          open: tabs.length > 0 && state.open,
+          tabs,
+          activeTabId:
+            state.activeTabId && removedIds.has(state.activeTabId)
+              ? (tabs[0]?.id ?? null)
+              : state.activeTabId,
+        });
+      }
+      for (const [
+        sessionKey,
+        tabs,
+      ] of artifactPanelDeferredPersistedTabsRef.current) {
+        const retained = tabs.filter((tab) => !matches(tab));
+        if (retained.length === tabs.length) continue;
+        if (retained.length === 0) {
+          artifactPanelDeferredPersistedTabsRef.current.delete(sessionKey);
+        } else {
+          artifactPanelDeferredPersistedTabsRef.current.set(
+            sessionKey,
+            retained,
+          );
+        }
+      }
+      let persistedChanged = false;
+      for (const [sessionKey, state] of Object.entries(
+        artifactPanelPersistedStatesRef.current,
+      )) {
+        const removedIds = new Set(
+          state.tabs.filter(matches).map((tab) => tab.id),
+        );
+        if (removedIds.size === 0) continue;
+        const tabs = state.tabs.filter((tab) => !removedIds.has(tab.id));
+        artifactPanelPersistedStatesRef.current[sessionKey] = {
+          open: tabs.length > 0 && state.open,
+          tabs,
+          activeTabId:
+            state.activeTabId && removedIds.has(state.activeTabId)
+              ? (tabs[0]?.id ?? null)
+              : state.activeTabId,
+        };
+        persistedChanged = true;
+      }
+      if (persistedChanged) {
+        writeStoredArtifactPanelStates(
+          RIGHT_PANEL_STATE_STORAGE_KEY,
+          artifactPanelPersistedStatesRef.current,
+        );
+      }
+    },
+    [closeArtifactPanelTabs],
+  );
   const closeUsageTabs = useCallback(
     (sessionIds?: readonly string[], paneOnly = false) => {
       const sessions = sessionIds ? new Set(sessionIds) : undefined;
@@ -7858,11 +8065,14 @@ export function App({
   // the panel auto-close, the panel focus-restore guard, and the ChatEditor
   // dialogOpen prop.
   const approvalOverlayActive =
-    pendingToolApproval !== null || pendingAskUserApproval !== null;
+    !managedMode &&
+    (pendingToolApproval !== null || pendingAskUserApproval !== null);
   const approvalOverlayActiveRef = useRef(approvalOverlayActive);
   approvalOverlayActiveRef.current =
     approvalOverlayActive ||
-    (canActOnPendingApproval && extractPendingPermission(blocks) !== null);
+    (!managedMode &&
+      canActOnPendingApproval &&
+      extractPendingPermission(blocks) !== null);
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -9223,6 +9433,9 @@ export function App({
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
+  useEffect(() => {
+    if (managedMode && showApprovalModeDialog) setShowApprovalModeDialog(false);
+  }, [managedMode, showApprovalModeDialog]);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
@@ -9614,24 +9827,39 @@ export function App({
     | 'agents'
     | 'channels'
     | 'live'
-    | 'managed'
     | 'workspaces'
     | null
-  >(() =>
-    initialConnectionsSettingsCategory
-      ? 'settings'
-      : managedAgentProvider && managedSelectionFromUrl().open
-        ? 'managed'
-        : null,
-  );
+  >(() => (initialConnectionsSettingsCategory ? 'settings' : null));
   const [managedSessionId, setManagedSessionId] = useState<string | undefined>(
     () => managedSelectionFromUrl().sessionId,
   );
+  const [managedHistoryRevision, setManagedHistoryRevision] = useState(
+    navigation?.historyRevision,
+  );
+  if (managedHistoryRevision !== navigation?.historyRevision) {
+    setManagedHistoryRevision(navigation?.historyRevision);
+    if (managedAgentProvider) {
+      const selection = managedSelectionFromUrl(
+        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      );
+      setManagedHome(selection.open);
+      setManagedSessionId(selection.sessionId);
+    }
+  }
   useEffect(() => {
-    saveManagedSelection(activePanel === 'managed', managedSessionId);
-  }, [activePanel, managedSessionId]);
+    if (managedAgentProvider)
+      saveManagedSelection(managedMode, managedSessionId);
+  }, [managedAgentProvider, managedMode, managedSessionId]);
   const chatActive =
-    !activePanel && mainView === 'chat' && !artifactPanelFullscreen;
+    !managedMode &&
+    !activePanel &&
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
+  const managedChatVisible =
+    managedMode &&
+    !activePanel &&
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
 
   const activePanelRef = useRef(activePanel);
@@ -9671,8 +9899,7 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory) &&
-      !(activePanel === 'managed' && externalManagedAgentAvailable)
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
     ) {
       setActivePanel(null);
     }
@@ -9739,7 +9966,6 @@ export function App({
         | 'agents'
         | 'channels'
         | 'live'
-        | 'managed'
         | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
@@ -10564,6 +10790,7 @@ export function App({
   // ToolApproval/AskUserQuestion (their keyboard handling is focus-scoped), so
   // the app no longer focuses the wrapper element directly.
   const toolApprovalOverlayVisible =
+    !managedMode &&
     pendingToolApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
@@ -10571,6 +10798,7 @@ export function App({
     mainView === 'chat' &&
     !artifactPanelFullscreen;
   const askUserOverlayVisible =
+    !managedMode &&
     pendingAskUserApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
@@ -11248,6 +11476,169 @@ export function App({
     },
     [pushToast, t],
   );
+  const archiveSideTasks = useCallback(
+    async (sideTasks: readonly SideTaskListItem[]) => {
+      if (!sideTaskArchiveAvailable) return;
+      const eligibleTasks = sideTasks.filter(
+        (sideTask) => sideTask.archivable === true,
+      );
+      if (eligibleTasks.length === 0) return;
+      // Archive through each task's owning workspace runtime: the unscoped
+      // route resolves ids against the legacy-primary catalog, where a
+      // secondary-Workspace task answers notFound without migrating.
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of eligibleTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
+      try {
+        const batches = [...idsByWorkspace.entries()].flatMap(([cwd, ids]) =>
+          Array.from(
+            { length: Math.ceil(ids.length / SESSION_ARCHIVE_BATCH_SIZE) },
+            (_, index) => ({
+              cwd,
+              ids: ids.slice(
+                index * SESSION_ARCHIVE_BATCH_SIZE,
+                (index + 1) * SESSION_ARCHIVE_BATCH_SIZE,
+              ),
+            }),
+          ),
+        );
+        const settledResults = await Promise.allSettled(
+          batches.map((batch) =>
+            batch.cwd === undefined
+              ? workspace.client.archiveSessionsData(batch.ids, {
+                  requireIdle: true,
+                })
+              : workspace.client
+                  .workspaceByCwd(batch.cwd)
+                  .archiveSessionsData(batch.ids, { requireIdle: true }),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
+        const archived = new Set([
+          ...results.flatMap((result) => result.archived),
+          ...results.flatMap((result) => result.alreadyArchived),
+        ]);
+        if (archived.size > 0) {
+          sideTaskCatalogRequestGenerationRef.current += 1;
+          for (const sessionId of archived) {
+            optimisticSideTaskIdsRef.current.delete(sessionId);
+          }
+          setSideTaskCatalog((catalog) => ({
+            ...catalog,
+            items: catalog.items.filter(
+              (sideTask) => !archived.has(sideTask.sessionId),
+            ),
+          }));
+          removeSideTaskTabs(archived);
+          setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+        }
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? batches[index]!.ids.map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.archiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
+        }
+      } catch (error) {
+        reportError(error, t('sidebar.archiveFailed'));
+      }
+    },
+    [
+      reportError,
+      removeSideTaskTabs,
+      sideTaskArchiveAvailable,
+      t,
+      workspace.client,
+    ],
+  );
+  const unarchiveSideTasks = useCallback(
+    async (sideTasks: readonly SideTaskListItem[]) => {
+      if (!sideTaskRestoreAvailable) return;
+      if (sideTasks.length === 0) return;
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of sideTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
+      try {
+        const groups = [...idsByWorkspace.entries()];
+        const settledResults = await Promise.allSettled(
+          groups.map(([cwd, ids]) =>
+            cwd === undefined
+              ? workspace.client.unarchiveSessionsData(ids)
+              : workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
+        const restored = new Set([
+          ...results.flatMap((result) => result.unarchived),
+          ...results.flatMap((result) => result.alreadyActive),
+        ]);
+        if (restored.size > 0) {
+          sideTaskCatalogRequestGenerationRef.current += 1;
+          setArchivedSideTaskCatalog((catalog) => ({
+            ...catalog,
+            items: catalog.items.filter(
+              (sideTask) => !restored.has(sideTask.sessionId),
+            ),
+          }));
+          setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+        }
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? groups[index]![1].map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.unarchiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
+        }
+      } catch (error) {
+        reportError(error, t('sidebar.unarchiveFailed'));
+      }
+    },
+    [reportError, sideTaskRestoreAvailable, t, workspace.client],
+  );
   const refuseModelSetup = useCallback(
     (text: string) => {
       if (
@@ -11893,9 +12284,10 @@ export function App({
   // Tasks page) or the fullscreen artifact panel — so keystrokes/Escape can't
   // reach the hidden composer underneath. The fullscreen gate also keeps the
   // btw capture-phase Escape handler from dismissing hidden content and
-  // swallowing the Escape that shrinks the panel.
+  // swallowing the Escape that shrinks the panel. Managed home also hides
+  // this daemon composer; its shortcuts must not reach the Local session.
   const interactionBlocked =
-    dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
+    managedMode || dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
   const mainVoiceTarget = useMemo(
     () =>
       workspaceContextActive
@@ -12781,6 +13173,14 @@ export function App({
     () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
     [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
+  const availableApprovalModes = useApprovalModes(
+    activeWorkspaceCwd,
+    allowedApprovalModes,
+  );
+  const showResponseTokensPerSecond =
+    workspaceSettings.find(
+      (setting) => setting.key === 'ui.showResponseTokensPerSecond',
+    )?.values.effective === true;
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -13504,6 +13904,7 @@ export function App({
 
   const setComposerMode = useCallback(
     async (modeId: string, planMode: boolean): Promise<boolean> => {
+      if (managedModeRef.current) return false;
       if (modeTransitionRef.current?.owner.isCurrent()) return false;
       if (sessionWriteBlocked) return false;
       if (!isDaemonApprovalMode(modeId) || modeId === 'plan') {
@@ -13533,6 +13934,7 @@ export function App({
         setPlanExecutionMode(executionModeRef.current);
         const approval = pendingApprovalRef.current;
         if (
+          !managedModeRef.current &&
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
@@ -13577,9 +13979,20 @@ export function App({
   );
   const handleSetMode = useCallback(
     (modeId: string) => {
+      if (
+        isDaemonApprovalMode(modeId) &&
+        modeId !== 'plan' &&
+        !availableApprovalModes.some((mode) => mode === modeId)
+      ) {
+        reportError(
+          new Error(`Approval mode not offered here: ${modeId}`),
+          t('local.approvalMode'),
+        );
+        return;
+      }
       void setComposerMode(modeId, currentModeRef.current === 'plan');
     },
-    [setComposerMode],
+    [availableApprovalModes, setComposerMode, reportError, t],
   );
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(
@@ -14157,13 +14570,9 @@ export function App({
   ]);
 
   const handleCycleMode = useCallback(() => {
-    // findIndex, not indexOf: narrowing currentMode to the tuple member type
-    // silently degrades when the SDK's declaration bundle leaves its
-    // permission-mode import dangling, and the build must survive both states.
-    const idx = MODES_CYCLE.findIndex((mode) => mode === executionMode);
-    const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
-    handleSetMode(next);
-  }, [executionMode, handleSetMode]);
+    const next = nextApprovalMode(availableApprovalModes, executionMode);
+    if (next) handleSetMode(next);
+  }, [availableApprovalModes, executionMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
   // indicator. Echoes the command when idle — that also makes the transcript
@@ -14453,6 +14862,7 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      setManagedHome(false);
       pendingManualTitleRef.current = opts?.carryManualTitle
         ? { displayName: opts.carryManualTitle }
         : undefined;
@@ -15497,6 +15907,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      setManagedHome(false);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
@@ -18842,7 +19253,7 @@ export function App({
     streamingState !== 'idle' || sessionHasActivePrompt;
   useEffect(() => {
     resetEscapeState();
-  }, [escStreamingBoundary, resetEscapeState]);
+  }, [escStreamingBoundary, managedMode, resetEscapeState]);
 
   useEffect(() => {
     // Arm a two-press action: the first Esc shows the affordance and starts a
@@ -19651,6 +20062,7 @@ export function App({
     [renderWelcomeFooter, welcomeHeaderProps],
   );
   const isChatEmptyState =
+    !managedMode &&
     !connection.sessionId &&
     displayMessages.length === 0 &&
     !showFloatingTodos &&
@@ -19914,11 +20326,13 @@ export function App({
   const environmentPanelFits =
     chatWidthMode !== 'wide' && environmentPanelCanDock;
   const environmentPanelVisible =
+    !managedMode &&
     environmentPanelOpen &&
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
   const workspaceGitStatusEnabled =
+    !managedMode &&
     !activePanel &&
     !artifactPanelFullscreen &&
     !showMissingSessionState &&
@@ -20427,6 +20841,7 @@ export function App({
             );
             if (!tag) return;
             if (useFloatingArtifactPanel) {
+              focusComposerAfterArtifactPanelCloseRef.current = true;
               closeArtifactPanel();
             } else {
               setArtifactPanelFullscreen(false);
@@ -20451,9 +20866,15 @@ export function App({
     items: isChatEmptyState ? emptyStateRightPanelItems : rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,
+    archivedSideTasks: visibleArchivedSideTasks,
     sideTasksLoading,
     onCreateSideTask: createEmptySideTask,
     onOpenSideTask: openSideTask,
+    onArchiveSideTasks: sideTaskArchiveAvailable ? archiveSideTasks : undefined,
+    onUnarchiveSideTasks: sideTaskRestoreAvailable
+      ? unarchiveSideTasks
+      : undefined,
+    onSideTaskMenuOpen: refreshSideTaskCatalog,
     onCreateSideTaskSession: createSideTaskSession,
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,
@@ -20622,7 +21043,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showApprovalModeDialog && (
+          {!managedMode && showApprovalModeDialog && (
             <DialogShell
               title={t('mode.select')}
               size="sm"
@@ -20630,6 +21051,7 @@ export function App({
             >
               <ApprovalModeDialog
                 currentMode={executionMode}
+                availableModes={availableApprovalModes}
                 sessionWorkflowEnabled={sessionWorkflowEnabled}
                 onSelect={(modeId) => {
                   handleSetMode(modeId);
@@ -21108,7 +21530,8 @@ export function App({
                     managedAgentProvider
                       ? () => {
                           closeMobileDrawer();
-                          openPanel('managed');
+                          setManagedHome(true);
+                          returnToChat();
                         }
                       : undefined
                   }
@@ -21155,13 +21578,45 @@ export function App({
                   // in the composer's workspace picker instead. From a Live
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
-                  onNewSession={(workspaceCwd) =>
-                    createNewSession(
+                  onNewSession={(workspaceCwd) => {
+                    if (managedMode) {
+                      setManagedSessionId(undefined);
+                      closeMobileDrawer();
+                      returnToChat();
+                      return true;
+                    }
+                    return createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
                         : { kind: 'inherit', leaveLive: true },
-                    )
+                    );
+                  }}
+                  sessionContent={
+                    managedMode ? (
+                      <div ref={setManagedNavigationTarget} />
+                    ) : undefined
                   }
+                  sessionHeader={managedAgentProvider ? (
+                    <Tabs
+                      className="px-2 pb-2"
+                      value={managedMode ? 'managed' : 'local'}
+                      onValueChange={(value) =>
+                        setManagedHome(value === 'managed')
+                      }
+                    >
+                      <TabsList
+                        aria-label={t('managed.executionMode')}
+                        className="w-full"
+                      >
+                        <TabsTrigger value="local" className="flex-1">
+                          {t('managed.localMode')}
+                        </TabsTrigger>
+                        <TabsTrigger value="managed" className="flex-1">
+                          {t('managed.managedMode')}
+                        </TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+                  ) : undefined}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
@@ -21309,7 +21764,37 @@ export function App({
                 .join(' ')}
               aria-hidden={artifactPanelFullscreen || undefined}
             >
+              {managedMode &&
+                !activePanel &&
+                mainView === 'chat' &&
+                sidebarOptions.enabled &&
+                sidebarOptions.showCompactToggle && (
+                    <button
+                      type="button"
+                      className={styles.hamburgerButton}
+                      style={{ margin: '8px 20px' }}
+                      aria-label={t('sidebar.toggleMenu')}
+                      aria-expanded={mobileDrawerOpen}
+                      onClick={() => {
+                        setForceMobileDrawer(false);
+                        setMobileDrawerOpen((open) => !open);
+                      }}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 6h18M3 12h18M3 18h18" />
+                      </svg>
+                    </button>
+              )}
               {chatHeaderEnabled &&
+                !managedMode &&
                 (!isChatEmptyState || emptyStateChatHeader) &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
@@ -21413,6 +21898,11 @@ export function App({
                           (Boolean(activeWorkspaceCwd) &&
                             emptyStateRightPanelItems.length > 0))
                       }
+                      onOpenFiles={
+                        mainView === 'chat' && filesAvailable
+                          ? openFilesPanel
+                          : undefined
+                      }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
                           !environmentPanelVisible,
@@ -21488,6 +21978,7 @@ export function App({
                 .join(' ')}
             >
               {sidebarOptions.enabled &&
+                !managedMode &&
                 sidebarOptions.showCompactToggle &&
                 (!chatHeaderEnabled ||
                   (isChatEmptyState && !emptyStateChatHeader)) &&
@@ -21519,10 +22010,7 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable ||
-                  activePanel === 'status' ||
-                  (activePanel === 'managed' &&
-                    externalManagedAgentAvailable)) && (
+                (projectFeaturesAvailable || activePanel === 'status') && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -21546,8 +22034,6 @@ export function App({
                               ? t('sidebar.channelSettings')
                             : activePanel === 'live'
                               ? t('sidebar.liveSettings')
-                            : activePanel === 'managed'
-                              ? t('managed.title')
                               : activePanel === 'workspaces'
                                 ? t('workspacesOverview.title')
                               : t('sessionsOverview.title')
@@ -21637,13 +22123,11 @@ export function App({
                         ? t('settings.title')
                         : activePanel === 'status'
                           ? t('daemon.title')
-                          : activePanel === 'managed'
-                            ? t('managed.title')
                             : t('sessionsOverview.title')}
                     </div>
                     </div>
                   )}
-                  <div className={`${styles.panelBody} ${activePanel === 'managed' ? styles.managedPanelBody : ''}`} key={activePanel}>
+                  <div className={styles.panelBody} key={activePanel}>
                     <ShadowDomBoundary
                       enabled={
                         shadowDomOptions.plugins &&
@@ -21764,16 +22248,6 @@ export function App({
                       <SkillsManagerPage
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
-                      />
-                    ) : activePanel === 'managed' ? (
-                      <ManagedSessionsPage
-                        key={
-                          managedAgentProvider?.storageKey ?? workspace.baseUrl
-                        }
-                        sessionId={managedSessionId}
-                        onSelectSession={setManagedSessionId}
-                        workspaceCwd={lockedWorkspaceCwd}
-                        managedAgentProvider={managedAgentProvider}
                       />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
@@ -22205,6 +22679,7 @@ export function App({
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
+                        showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
@@ -22251,6 +22726,35 @@ export function App({
                   </WebShellCustomizationProvider>
                 </div>
               )}
+              {managedAgentProvider && (
+                <div
+                  className={`${styles.managedHome} ${managedChatVisible ? '' : styles.chatViewHidden}`}
+                  aria-hidden={!managedChatVisible || undefined}
+                  data-testid="managed-home"
+                >
+                  <WebShellCustomizationProvider value={customization}>
+                    <ManagedSessionsPage
+                      key={managedAgentProvider.storageKey}
+                      sessionId={managedSessionId}
+                      onSelectSession={(id) => {
+                        setManagedSessionId(id);
+                        if (managedModeRef.current) {
+                          closeMobileDrawer();
+                          returnToChat();
+                        }
+                      }}
+                      workspaceCwd={lockedWorkspaceCwd}
+                      managedAgentProvider={managedAgentProvider}
+                      interactive={managedChatVisible}
+                      navigationTarget={
+                        sidebarOptions.enabled
+                          ? managedNavigationTarget
+                          : undefined
+                      }
+                    />
+                  </WebShellCustomizationProvider>
+                </div>
+              )}
               <div
                 className={[
                   styles.chatViewWrap,
@@ -22264,7 +22768,7 @@ export function App({
                   // App.module.css that keeps this wrap relative so the
                   // absolutely-positioned bottom panels keep their anchor.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
-                  activePanel ||
+                  managedMode || activePanel ||
                   mainView !== 'chat' ||
                   artifactPanelFullscreen
                     ? styles.chatViewHidden
@@ -22279,7 +22783,7 @@ export function App({
                 // reach the outer composer/toolbar behind the covering surface.
                 // State is preserved (the node stays mounted).
                 aria-hidden={
-                  activePanel ||
+                  managedMode || activePanel ||
                   mainView !== 'chat' ||
                   artifactPanelFullscreen
                     ? true
@@ -22816,6 +23320,7 @@ export function App({
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
+                              showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
                               startedAt={
                                 failedPromptRetry?.startedAt ??
                                 activeTurnStartedAt
@@ -23069,6 +23574,7 @@ export function App({
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={executionMode}
+                          availableModes={availableApprovalModes}
                           modeControlsDisabled={modeControlsBusy}
                           planMode={currentMode === 'plan'}
                           onTogglePlan={handleTogglePlan}
@@ -23276,7 +23782,7 @@ export function App({
                               goalSnapshot={goalSnapshot}
                               activeGoal={activeGoal}
                               tasks={footerTasks}
-                              availableModes={MODES_CYCLE}
+                              availableModes={availableApprovalModes}
                               availableModels={(connection.models ?? [])
                                 .filter(isVisibleComposerModel)
                                 .map((m) => ({
@@ -23304,7 +23810,7 @@ export function App({
                             goalSnapshot={goalSnapshot}
                             activeGoal={activeGoal}
                             tasks={footerTasks}
-                            availableModes={MODES_CYCLE}
+                            availableModes={availableApprovalModes}
                             availableModels={(connection.models ?? [])
                               .filter(isVisibleComposerModel)
                               .map((m) => ({
@@ -23476,7 +23982,7 @@ export function App({
                 onDismiss={dismissEnvironmentPanel}
               />
             )}
-            {artifactPanelOpen && useFloatingArtifactPanel && (
+            {!managedMode && artifactPanelOpen && useFloatingArtifactPanel && (
               <Drawer
                 open
                 autoFocus={floatingArtifactDrawerAutoFocus}
@@ -23512,6 +24018,12 @@ export function App({
                   onCloseAutoFocus={(event) => {
                     const trigger = artifactPanelTriggerRef.current;
                     artifactPanelTriggerRef.current = null;
+                    if (focusComposerAfterArtifactPanelCloseRef.current) {
+                      focusComposerAfterArtifactPanelCloseRef.current = false;
+                      event.preventDefault();
+                      editorRef.current?.focus();
+                      return;
+                    }
                     if (!trigger?.isConnected) return;
                     event.preventDefault();
                     trigger.focus();
@@ -23577,7 +24089,7 @@ export function App({
                 panel stays mounted across the mode change. While fullscreen
                 it is the modal surface: dialog role/name plus Tab containment
                 (what the floating variant gets from vaul's Radix dialog). */}
-            {artifactPanelOpen &&
+            {!managedMode && artifactPanelOpen &&
               !useFloatingArtifactPanel &&
               artifactPanelSlotEl &&
               createPortal(

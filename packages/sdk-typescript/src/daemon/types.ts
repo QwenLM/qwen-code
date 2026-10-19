@@ -3191,6 +3191,7 @@ export interface DaemonSessionContextStatus {
       | 'interrupted_turn'
       | 'degraded_history';
     canContinue: boolean;
+    cancellationConfirmationId?: string;
   };
 }
 
@@ -3987,6 +3988,14 @@ export interface DaemonSkillToggleResult {
   activation: DaemonSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
+}
+
+export interface DaemonSkillRefreshResult {
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  configsRefreshed: number;
+  configsFailed: number;
+  reason: 'all';
 }
 
 /** Per-target error codes returned by older daemon versions. */
@@ -5232,7 +5241,7 @@ export interface DaemonAuthProviderCatalog {
   workspaceCwd: string;
   providers: DaemonAuthProviderDescriptor[];
   groups: Array<{
-    id: 'alibaba' | 'third-party' | 'custom';
+    id: 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
     label: string;
     description: string;
     providerIds: string[];

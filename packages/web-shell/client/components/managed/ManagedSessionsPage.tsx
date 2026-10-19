@@ -6,11 +6,13 @@ import {
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
 import { ChatEditor } from '../ChatEditor';
 import { WelcomeHeader } from '../WelcomeHeader';
+import { ChatContextHeader } from '../ChatContextHeader';
 import type {
   EditorHandle,
   ComposerSubmitCommit,
@@ -27,9 +29,14 @@ import {
   getManagedClientId,
   managedRequestId,
 } from './managed-session-storage';
+import { useManagedFileReferences } from './use-managed-file-references';
+import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
+import { useManagedModelChange } from './use-managed-model-change';
+import { useManagedApprovalChange } from './use-managed-approval-change';
+import { useManagedSkills } from './use-managed-skills';
 import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
@@ -42,7 +49,14 @@ import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
+  ManagedInputBlock,
 } from './managed-agent-provider';
+import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
+import {
+  encodeManagedInput,
+  isManagedInput,
+  restoreManagedAttachments,
+} from './managed-input';
 
 interface PendingPrompt {
   idempotencyKey: string;
@@ -50,6 +64,7 @@ interface PendingPrompt {
   draftText?: string;
   sessionId?: string;
   cwd?: string;
+  input?: ManagedInputBlock[];
 }
 
 function readPending(key: string): PendingPrompt | undefined {
@@ -59,7 +74,8 @@ function readPending(key: string): PendingPrompt | undefined {
     const pending = value as Record<string, unknown>;
     if (
       typeof pending['idempotencyKey'] !== 'string' ||
-      typeof pending['text'] !== 'string'
+      typeof pending['text'] !== 'string' ||
+      (pending['input'] !== undefined && !isManagedInput(pending['input']))
     )
       return undefined;
     if (
@@ -80,12 +96,16 @@ function readPending(key: string): PendingPrompt | undefined {
   }
 }
 
-function persistPending(key: string, value: PendingPrompt | undefined): void {
+function persistPending(
+  key: string,
+  value: PendingPrompt | undefined,
+): boolean {
   try {
     if (value) sessionStorage.setItem(key, JSON.stringify(value));
     else sessionStorage.removeItem(key);
+    return true;
   } catch {
-    // The in-memory attempt still preserves retries when storage is disabled.
+    return false;
   }
 }
 
@@ -94,11 +114,16 @@ export function ManagedSessionsPage({
   onSelectSession,
   workspaceCwd,
   managedAgentProvider,
+  navigationTarget,
+  interactive = true,
 }: {
   sessionId?: string;
   onSelectSession: (sessionId: string | undefined) => void;
   workspaceCwd?: string;
   managedAgentProvider?: ManagedAgentProvider;
+  /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
+  navigationTarget?: HTMLElement | null;
+  interactive?: boolean;
 }) {
   const { t } = useI18n();
   if (managedAgentProvider) {
@@ -110,6 +135,8 @@ export function ManagedSessionsPage({
         workspaceCwd={workspaceCwd}
         provider={managedAgentProvider}
         cancellationEnabled={managedAgentProvider.canCancel}
+        navigationTarget={navigationTarget}
+        interactive={interactive}
       />
     );
   }
@@ -122,19 +149,36 @@ function ManagedSessionsContent({
   workspaceCwd,
   provider,
   cancellationEnabled,
+  navigationTarget,
+  interactive,
 }: {
   sessionId?: string;
   onSelectSession: (sessionId: string | undefined) => void;
   workspaceCwd?: string;
   provider: ManagedAgentProvider;
   cancellationEnabled: boolean;
+  navigationTarget?: HTMLElement | null;
+  interactive: boolean;
 }) {
   const { t } = useI18n();
+  const home = navigationTarget !== undefined;
+  const ContextContainer = home ? 'details' : 'div';
   const clientId = useMemo(
     () => getManagedClientId(provider.storageKey),
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const fileReferences = useManagedFileReferences(
+    provider,
+    clientId,
+    detail.summary &&
+      detail.summary.sessionId === sessionId &&
+      detail.summary.capabilities.inputAttachments
+      ? detail.summary.workspace
+      : undefined,
+    sessionId,
+  );
+  const skills = useManagedSkills(provider, clientId, sessionId);
   const pageRef = useRef<HTMLDivElement>(null);
   const taskTriggerRef = useRef<HTMLButtonElement>(null);
   const [wideTasks, setWideTasks] = useState(false);
@@ -199,6 +243,7 @@ function ManagedSessionsContent({
     readPending(pendingKey),
   );
   const pendingRef = useRef(pending);
+  const encoding = useRef(false);
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
   );
@@ -242,6 +287,22 @@ function ManagedSessionsContent({
     detail.summary,
     detail.refreshSummary,
   );
+  const modelChange = useManagedModelChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
+    interactive,
+  );
+  const approvalChange = useManagedApprovalChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
+    interactive,
+  );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
   // no `alert` node and no operable option left, so this line is the only place
@@ -271,6 +332,7 @@ function ManagedSessionsContent({
   // unknown, or an admitted Turn gating sends for its whole life — the latch
   // stays armed and retries when the summary changes.
   useEffect(() => {
+    if (!interactive) return;
     const armed = focusComposer.current;
     if (!armed || pending) return;
     if (armed.sessionId !== sessionId) {
@@ -294,7 +356,7 @@ function ManagedSessionsContent({
     sessionsNavRef.current?.focus();
     // detail.summary is the re-arm trigger: a poll or clean pass lifts the
     // disablement by delivering a new summary without touching the record.
-  }, [pending, sessionId, detail.summary]);
+  }, [pending, sessionId, detail.summary, interactive]);
 
   // Depend on the value the request actually sends: a provider that drops
   // workspaceCwd must not refetch (and lose paged rows) on folder change.
@@ -369,27 +431,70 @@ function ManagedSessionsContent({
     }
   }
 
-  async function submit(submittedText = text, commit?: ComposerSubmitCommit) {
+  async function submit(
+    submittedText = text,
+    commit?: ComposerSubmitCommit,
+    images?: PromptImage[],
+    files?: PromptFile[],
+    metadata?: ComposerSubmitMetadata,
+  ) {
     const abort = lifetime.current;
-    if (!abort || abort.signal.aborted || busy || cwd.isBlocked()) return;
+    if (
+      !abort ||
+      abort.signal.aborted ||
+      busy ||
+      encoding.current ||
+      cwd.isBlocked() ||
+      modelChange.isBlocked() ||
+      approvalChange.isBlocked()
+    )
+      return;
     setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
       if (
-        !submittedText.trim() ||
+        (!submittedText.trim() && !images?.length && !files?.length) ||
         (sessionId && !detail.summary?.capabilities.canSend)
       )
         return;
+      let input: ManagedInputBlock[];
+      encoding.current = true;
+      setBusy(true);
+      try {
+        const prepared = await fileReferences.prepareInput(
+          submittedText,
+          files,
+          metadata,
+        );
+        input = await encodeManagedInput(prepared.text, images, prepared.files);
+        fileReferences.assertCurrent();
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : String(failure));
+        return;
+      } finally {
+        encoding.current = false;
+        setBusy(false);
+      }
+      if (abort.signal.aborted || selection.current !== sessionId) return;
       attempt = {
         idempotencyKey: managedRequestId(),
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
         cwd: workspaceCwd,
+        ...(input.some(
+          (block) =>
+            block.type === 'input_file' || block.type === 'input_image',
+        )
+          ? { input }
+          : {}),
       };
+      if (!persistPending(pendingKey, attempt)) {
+        setError(t('managed.workspaceStorageUnavailable'));
+        return;
+      }
       pendingRef.current = attempt;
       setPending(attempt);
-      persistPending(pendingKey, attempt);
       composerCommit.current = commit;
     }
     setBusy(true);
@@ -404,12 +509,16 @@ function ManagedSessionsContent({
       const admission = attempt.sessionId
         ? await provider.submitPrompt(
             attempt.sessionId,
-            { text: attempt.text },
+            {
+              text: attempt.text,
+              ...(attempt.input ? { input: attempt.input } : {}),
+            },
             opts,
           )
         : await provider.createSession(
             {
               text: attempt.text,
+              ...(attempt.input ? { input: attempt.input } : {}),
               workspaceCwd: provider.acceptsWorkspaceCwd
                 ? attempt.cwd
                 : undefined,
@@ -436,7 +545,7 @@ function ManagedSessionsContent({
         editor &&
         [attempt.draftText, attempt.text].includes(editor.getText())
       ) {
-        editor.clearText();
+        editor.clear();
         setText('');
       }
       if (selection.current === selectedAtSubmit) {
@@ -450,6 +559,8 @@ function ManagedSessionsContent({
         setPending(undefined);
         persistPending(pendingKey, undefined);
         if (selection.current === selectedAtSubmit) setText(attempt.text);
+        if (selection.current === selectedAtSubmit)
+          restoreManagedAttachments(composerRef.current, attempt.input);
       }
       if (selection.current === selectedAtSubmit)
         setError(failure instanceof Error ? failure.message : String(failure));
@@ -458,8 +569,8 @@ function ManagedSessionsContent({
     }
   }
 
-  async function cancel() {
-    const summary = detail.summary;
+  const summary = detail.summary;
+  const cancel = useCallback(async () => {
     const abort = lifetime.current;
     if (
       !summary?.capabilities.canCancel ||
@@ -479,19 +590,72 @@ function ManagedSessionsContent({
         signal: abort.signal,
       });
       if (!abort.signal.aborted && selection.current === summary.sessionId)
-        detail.reload();
+        reloadSession();
     } catch (failure) {
       if (!abort.signal.aborted && selection.current === summary.sessionId)
         setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       if (!abort.signal.aborted) setBusy(false);
     }
-  }
+  }, [summary, reloadSession, cancellationEnabled, busy, provider, clientId]);
 
-  const summary = detail.summary;
+  const currentSummary = summary?.sessionId === sessionId ? summary : undefined;
+  const modelContext = currentSummary?.modelContext;
+  const selectedModel = currentSummary?.modelSelection?.modelId;
+  const displayedModel =
+    selectedModel ?? modelContext?.modelId ?? currentSummary?.agentId ?? '';
+  const contextUsageKnown =
+    (!selectedModel || modelContext?.modelId === selectedModel) &&
+    modelContext?.inputTokens !== undefined &&
+    Number.isSafeInteger(modelContext.inputTokens) &&
+    modelContext.inputTokens >= 0 &&
+    modelContext.contextWindowSize !== undefined &&
+    Number.isSafeInteger(modelContext.contextWindowSize) &&
+    modelContext.contextWindowSize > 0;
   const active =
     summary &&
     !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
+  useEffect(() => {
+    if (
+      !home ||
+      !interactive ||
+      pendingApproval ||
+      busy ||
+      !cancellationEnabled ||
+      !summary?.capabilities.canCancel ||
+      !summary.activeTurnId
+    )
+      return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.keyCode === 229
+      )
+        return;
+      const target = event.target;
+      if (
+        !(target instanceof Node) ||
+        (target !== document.body && !pageRef.current?.contains(target)) ||
+        (target instanceof Element &&
+          target.closest('[role="dialog"], [role="alertdialog"]'))
+      )
+        return;
+      event.preventDefault();
+      void cancel();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    home,
+    interactive,
+    pendingApproval,
+    busy,
+    cancellationEnabled,
+    summary,
+    cancel,
+  ]);
   // Cancel authority differs from submit authority: the creator may stop a
   // running bound Turn after the Workspace stops admitting new work, so the
   // control is not tied to the composer and the server's 409 is the gate.
@@ -508,29 +672,96 @@ function ManagedSessionsContent({
         {t('managed.cancel')}
       </Button>
     ) : null;
+  const navigation = (
+    <nav
+      ref={sessionsNavRef}
+      tabIndex={-1}
+      aria-label={t('managed.sessions')}
+      className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? 'p-2' : 'max-h-48 md:max-h-none'}`}
+    >
+      {home && (
+        <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
+          <span>{t('managed.sessions')}</span>
+          <Button variant="ghost" size="sm" onClick={refresh}>
+            {t('managed.refresh')}
+          </Button>
+        </div>
+      )}
+      {sessions.map((session) => {
+        const current =
+          summary?.sessionId === session.sessionId ? summary : session;
+        return (
+          <Button
+            key={session.sessionId}
+            variant={sessionId === session.sessionId ? 'secondary' : 'ghost'}
+            className="h-auto shrink-0 justify-start py-2 text-left"
+            aria-current={sessionId === session.sessionId ? 'page' : undefined}
+            onClick={() => {
+              onSelectSession(session.sessionId);
+              setText('');
+              setError(undefined);
+            }}
+          >
+            <span className="min-w-0">
+              <span className="block truncate">
+                {session.title || session.sessionId}
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {t(`managed.phase.${current.phase}`)}
+              </span>
+            </span>
+          </Button>
+        );
+      })}
+      {!sessions.length && !listLoading && (
+        <p className="p-2 text-sm text-muted-foreground">
+          {t('managed.empty')}
+        </p>
+      )}
+      {listLoading && (
+        <p role="status" className="p-2 text-sm">
+          {t('managed.loading')}
+        </p>
+      )}
+      {nextCursor && (
+        <Button
+          variant="ghost"
+          disabled={listLoading}
+          onClick={() => void loadMore()}
+        >
+          {t('managed.more')}
+        </Button>
+      )}
+    </nav>
+  );
   return (
-    <div ref={pageRef} className="flex h-full min-h-0 flex-col gap-3">
+    <div
+      ref={pageRef}
+      className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
+    >
       {/* The uncertain-request row unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
-      <div className="flex items-center justify-between gap-2">
-        <Button
-          variant="outline"
-          onClick={() => {
-            onSelectSession(undefined);
-            setText('');
-            setError(undefined);
-          }}
-          disabled={busy}
-        >
-          {t('managed.new')}
-        </Button>
-        <Button variant="ghost" onClick={refresh}>
-          {t('managed.refresh')}
-        </Button>
-      </div>
+      {!home && (
+        <div className="flex items-center justify-between gap-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              onSelectSession(undefined);
+              setText('');
+              setError(undefined);
+            }}
+            disabled={busy}
+          >
+            {t('managed.new')}
+          </Button>
+          <Button variant="ghost" onClick={refresh}>
+            {t('managed.refresh')}
+          </Button>
+        </div>
+      )}
       {/* One server condition can surface through both channels; announce
           each distinct message once, keyed by the message so a standing
           alert keeps its node when a duplicate of it stops rendering. */}
@@ -546,74 +777,64 @@ function ManagedSessionsContent({
         </p>
       ))}
       <div
-        className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]"
+        className={`grid min-h-0 flex-1 gap-4 ${home ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]'}`}
         style={
           taskPanelOpen && wideTasks
-            ? { gridTemplateColumns: 'minmax(180px,240px) minmax(0,1fr) 360px' }
+            ? {
+                gridTemplateColumns: home
+                  ? 'minmax(0,1fr) 360px'
+                  : 'minmax(180px,240px) minmax(0,1fr) 360px',
+              }
             : undefined
         }
       >
-        <nav
-          ref={sessionsNavRef}
-          tabIndex={-1}
-          aria-label={t('managed.sessions')}
-          className="flex max-h-48 flex-col gap-1 overflow-y-auto md:max-h-none"
-        >
-          {sessions.map((session) => {
-            const current =
-              summary?.sessionId === session.sessionId ? summary : session;
-            return (
-              <Button
-                key={session.sessionId}
-                variant={
-                  sessionId === session.sessionId ? 'secondary' : 'ghost'
-                }
-                className="h-auto shrink-0 justify-start py-2 text-left"
-                aria-current={
-                  sessionId === session.sessionId ? 'page' : undefined
-                }
-                onClick={() => {
-                  onSelectSession(session.sessionId);
-                  setText('');
-                  setError(undefined);
-                }}
-              >
-                <span className="min-w-0">
-                  <span className="block truncate">
-                    {session.title || session.sessionId}
-                  </span>
-                  <span className="block text-xs text-muted-foreground">
-                    {t(`managed.phase.${current.phase}`)}
-                  </span>
-                </span>
-              </Button>
-            );
-          })}
-          {!sessions.length && !listLoading && (
-            <p className="p-2 text-sm text-muted-foreground">
-              {t('managed.empty')}
-            </p>
-          )}
-          {listLoading && (
-            <p role="status" className="p-2 text-sm">
-              {t('managed.loading')}
-            </p>
-          )}
-          {nextCursor && (
-            <Button
-              variant="ghost"
-              disabled={listLoading}
-              onClick={() => void loadMore()}
-            >
-              {t('managed.more')}
-            </Button>
-          )}
-        </nav>
+        {home
+          ? navigationTarget
+            ? createPortal(navigation, navigationTarget)
+            : null
+          : navigation}
         <section
-          className={`${shellStyles.chatPane} gap-3`}
+          className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
+          data-managed-home={home || undefined}
           aria-label={t('managed.conversation')}
         >
-          {summary && (
+          {summary && home && (
+            <div className="shrink-0">
+              <ChatContextHeader
+                content={
+                  summary.title === summary.sessionId
+                    ? summary.sessionId.slice(0, 8)
+                    : summary.title
+                }
+                workspaceName={summary.workspace?.workspaceId}
+                workspacePath={summary.workspaceCwd}
+                location={
+                  <Badge variant="secondary">
+                    {t(`managed.phase.${summary.phase}`)}
+                  </Badge>
+                }
+                environmentOpen={taskPanelOpen}
+                environmentAvailable={Boolean(
+                  provider.tasks &&
+                    (summary.capabilities.tasks ||
+                      taskCancel.pendingTaskIds.length),
+                )}
+                onToggleEnvironment={() =>
+                  setTaskPanelSession(taskPanelOpen ? undefined : sessionId)
+                }
+                rightPanelOpen={Boolean(outputTarget)}
+                rightPanelAvailable={Boolean(
+                  summary.capabilities.artifacts && provider.toolResults,
+                )}
+                onToggleRightPanel={() =>
+                  setOutputTarget(
+                    outputTarget ? undefined : { sessionId: summary.sessionId },
+                  )
+                }
+              />
+            </div>
+          )}
+          {summary && !home && (
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium">{summary.title}</span>
               {provider.tasks &&
@@ -649,12 +870,9 @@ function ManagedSessionsContent({
                   {t(`managed.runtime.${summary.runtimeState}`)}
                 </span>
               )}
-              {summary.agentId && (
+              {displayedModel && (
                 <span className="text-muted-foreground" data-managed-model>
-                  {t('managed.modelPreset')}:{' '}
-                  {provider.workspaceBinding?.modelPresets?.find(
-                    (item) => item.agentId === summary.agentId,
-                  )?.label ?? summary.agentId}
+                  {t('managed.modelPreset')}: {displayedModel}
                 </span>
               )}
               {summary.capabilities.artifacts && provider.toolResults && (
@@ -670,11 +888,32 @@ function ManagedSessionsContent({
               )}
             </div>
           )}
+          {home &&
+            Object.entries(taskCancel.states).map(([taskId, state]) => (
+              <span key={taskId} role="status">
+                {t(taskCancelMessage(state))}
+              </span>
+            ))}
           {summary?.workspace && (
-            <div
-              className="rounded-md border px-3 py-2 text-sm"
+            <ContextContainer
+              className={
+                home
+                  ? shellStyles.managedContext
+                  : 'rounded-md border px-3 py-2 text-sm'
+              }
               data-managed-workspace-binding
             >
+              {home && (
+                <summary className="cursor-pointer text-muted-foreground">
+                  {summary.workspace.workspaceId} ·{' '}
+                  {summary.workspace.cwdRelative}
+                  {displayedModel && (
+                    <span data-managed-model> · {displayedModel}</span>
+                  )}
+                  {' · '}
+                  {t(`managed.runtime.${summary.runtimeState}`)}
+                </summary>
+              )}
               <p>
                 {t('managed.workspaceBound')}: {summary.workspace.workspaceId}
               </p>
@@ -682,36 +921,42 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
-              <ManagedSessionCwdControl
-                key={`${provider.storageKey}:${summary.sessionId}`}
-                summary={summary}
-                supported={Boolean(provider.cwdChange)}
-                cwd={cwd}
-                disabledReason={
-                  active ||
-                  pendingApproval ||
-                  busy ||
-                  pending?.sessionId === sessionId
-                    ? t('managed.cwd.busy')
-                    : undefined
-                }
-                onSubmit={(path, revision) => {
-                  if (
-                    pendingRef.current?.sessionId === sessionId ||
-                    busy ||
+              {interactive && (
+                <ManagedSessionCwdControl
+                  key={`${provider.storageKey}:${summary.sessionId}`}
+                  summary={summary}
+                  supported={Boolean(provider.cwdChange)}
+                  cwd={cwd}
+                  disabledReason={
                     active ||
-                    pendingApproval
-                  )
-                    return Promise.resolve();
-                  return cwd.submit(path, revision);
-                }}
-              />
+                    pendingApproval ||
+                    busy ||
+                    modelChange.blocked ||
+                    approvalChange.blocked ||
+                    pending?.sessionId === sessionId
+                      ? t('managed.cwd.busy')
+                      : undefined
+                  }
+                  onSubmit={(path, revision) => {
+                    if (
+                      pendingRef.current?.sessionId === sessionId ||
+                      modelChange.isBlocked() ||
+                      approvalChange.isBlocked() ||
+                      busy ||
+                      active ||
+                      pendingApproval
+                    )
+                      return Promise.resolve();
+                    return cwd.submit(path, revision);
+                  }}
+                />
+              )}
               {!summary.capabilities.workspaceTurns && (
                 <p className="text-muted-foreground">
                   {t('managed.workspaceExecutionUnavailable')}
                 </p>
               )}
-            </div>
+            </ContextContainer>
           )}
           {summary?.failure && (
             <p className="text-sm text-destructive">
@@ -722,6 +967,7 @@ function ManagedSessionsContent({
             <WorkspaceBindingCreator
               provider={provider}
               clientId={clientId}
+              interactive={interactive}
               onCreated={(createdId) => {
                 setListRevision((current) => current + 1);
                 onSelectSession(createdId);
@@ -741,6 +987,7 @@ function ManagedSessionsContent({
                 sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
                 loadingTranscript={detail.loading}
                 isResponding={Boolean(active)}
+                activeTurnStartedAt={active ? summary?.admittedAt : undefined}
                 hasOlderHistory={Boolean(detail.olderCursor)}
                 loadingOlderHistory={detail.loadingOlder}
                 onLoadOlderHistory={detail.loadOlder}
@@ -751,7 +998,7 @@ function ManagedSessionsContent({
                     <WelcomeHeader
                       version=""
                       cwd={summary?.workspaceCwd ?? ''}
-                      currentModel={summary?.agentId ?? ''}
+                      currentModel={displayedModel}
                       currentMode=""
                     />
                   ) : undefined
@@ -790,6 +1037,10 @@ function ManagedSessionsContent({
                     if (pending.sessionId === sessionId) {
                       setText(pending.text);
                       composerRef.current?.setText(pending.text);
+                      restoreManagedAttachments(
+                        composerRef.current,
+                        pending.input,
+                      );
                     }
                     composerCommit.current = undefined;
                     setError(undefined);
@@ -808,9 +1059,18 @@ function ManagedSessionsContent({
             </div>
           )}
           {pendingApproval && (
-            <div className="shrink-0" data-testid="managed-approval">
+            <div
+              className={home ? shellStyles.footer : 'shrink-0'}
+              data-testid="managed-approval"
+            >
               <ToolApproval
                 request={pendingApproval}
+                planExecutionMode={
+                  approvals.action?.toolName === 'exit_plan_mode' &&
+                  approvals.action.turnId === detail.summary?.activeTurnId
+                    ? detail.summary?.approvalMode
+                    : undefined
+                }
                 variant="floating"
                 keyboardActive={false}
                 // Answering needs the Session's owner or a Workspace
@@ -897,19 +1157,24 @@ function ManagedSessionsContent({
               )}
             </div>
           )}
-          <ManagedSessionProgress
-            summary={summary}
-            submitting={
-              busy && Boolean(pending) && pending?.sessionId === sessionId
-            }
-            loading={detail.loading}
-          />
+          <div className={home ? shellStyles.footer : undefined}>
+            <ManagedSessionProgress
+              summary={summary}
+              submitting={
+                busy && Boolean(pending) && pending?.sessionId === sessionId
+              }
+              loading={detail.loading}
+            />
+          </div>
           {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <div
               ref={composerContainerRef}
               className={`${shellStyles.footer} flex flex-col gap-2`}
             >
+              {fileReferences.error && (
+                <p role="alert">{fileReferences.error}</p>
+              )}
               <ChatEditor
                 key={`${provider.storageKey}:${sessionId ?? 'new'}`}
                 ref={composerRef}
@@ -923,23 +1188,326 @@ function ManagedSessionsContent({
                 }
                 composerInputVersion={0}
                 onInputTextChange={setText}
-                onSubmit={(value, _images, _files, commit) => {
-                  void submit(value, commit);
+                onSubmit={(value, images, files, commit, metadata) => {
+                  void submit(value, commit, images, files, metadata);
                   return false;
                 }}
                 commands={[]}
+                skills={skills.skills}
+                onSkillsOpenChange={
+                  skills.supported ? skills.onOpenChange : undefined
+                }
+                skillsLoading={skills.loading}
+                skillsLoadError={skills.error}
+                skillsLoaded={skills.loaded}
                 workspaceFeaturesEnabled={false}
-                attachmentsEnabled={false}
-                visibleToolbarActions={[]}
+                fileReferenceActions={fileReferences.actions}
+                persistFileReferences
+                attachmentsEnabled={
+                  summary?.capabilities.inputAttachments === true
+                }
+                visibleToolbarActions={
+                  interactive
+                    ? [
+                        ...(summary?.capabilities.inputAttachments ||
+                        fileReferences.actions ||
+                        summary?.planModeSupported ||
+                        skills.supported
+                          ? ['addMenu' as const]
+                          : []),
+                        ...(summary?.planModeSupported || summary?.planMode
+                          ? ['plan' as const]
+                          : []),
+                        ...(summary?.approvalMode
+                          ? ['approvalMode' as const]
+                          : []),
+                        ...(displayedModel ? ['model' as const] : []),
+                        ...(sessionId ? ['contextUsage' as const] : []),
+                      ]
+                    : []
+                }
+                currentModel={displayedModel}
+                availableModels={
+                  modelChange.options?.supported
+                    ? modelChange.options.models.map((model) => ({
+                        id: model.modelId,
+                        label: model.label,
+                      }))
+                    : displayedModel
+                      ? [{ id: displayedModel, label: displayedModel }]
+                      : []
+                }
+                modelControlsDisabled={
+                  !interactive ||
+                  !modelChange.supported ||
+                  !modelChange.options?.supported ||
+                  modelChange.optionsLoading ||
+                  modelChange.busy ||
+                  approvalChange.busy ||
+                  modelChange.blocked ||
+                  approvalChange.blocked ||
+                  busy ||
+                  Boolean(active) ||
+                  Boolean(pendingApproval) ||
+                  Boolean(pending) ||
+                  cwd.blocked ||
+                  modelChange.options.modelSelection.revision !==
+                    (currentSummary?.modelSelection?.revision ?? 0)
+                }
+                onSelectModel={
+                  modelChange.supported
+                    ? (modelId) => {
+                        if (
+                          !interactive ||
+                          busy ||
+                          encoding.current ||
+                          pendingRef.current ||
+                          active ||
+                          pendingApproval ||
+                          cwd.isBlocked() ||
+                          approvalChange.isBlocked()
+                        )
+                          return;
+                        void modelChange.submit(modelId);
+                      }
+                    : undefined
+                }
+                tokenCount={contextUsageKnown ? modelContext!.inputTokens : 0}
+                contextWindow={
+                  contextUsageKnown ? modelContext!.contextWindowSize : 0
+                }
+                contextUsageKnown={contextUsageKnown}
+                contextUsageAlwaysVisible={Boolean(sessionId)}
+                currentMode={summary?.approvalMode ?? ''}
+                planMode={summary?.planMode === true}
+                onTogglePlan={
+                  summary?.planModeSupported && summary.approvalMode
+                    ? () => {
+                        if (
+                          !busy &&
+                          !encoding.current &&
+                          !active &&
+                          !pendingApproval &&
+                          !pendingRef.current &&
+                          !cwd.isBlocked() &&
+                          !modelChange.isBlocked()
+                        )
+                          void approvalChange.submit(
+                            summary.approvalMode!,
+                            !summary.planMode,
+                          );
+                      }
+                    : undefined
+                }
+                availableModes={
+                  approvalChange.options?.availableApprovalModes ??
+                  (summary?.approvalMode ? [summary.approvalMode] : [])
+                }
+                modeControlsDisabled={
+                  !interactive ||
+                  !approvalChange.supported ||
+                  !approvalChange.options?.supported ||
+                  approvalChange.optionsLoading ||
+                  approvalChange.busy ||
+                  approvalChange.blocked ||
+                  busy ||
+                  Boolean(active) ||
+                  Boolean(pendingApproval) ||
+                  Boolean(pending) ||
+                  cwd.blocked ||
+                  modelChange.blocked ||
+                  modelChange.busy ||
+                  approvalChange.options.approvalRevision !==
+                    (summary?.approvalRevision ?? 0)
+                }
+                onSelectMode={
+                  approvalChange.supported
+                    ? (mode) => {
+                        if (
+                          !interactive ||
+                          busy ||
+                          encoding.current ||
+                          pendingRef.current ||
+                          active ||
+                          pendingApproval ||
+                          cwd.isBlocked() ||
+                          modelChange.isBlocked()
+                        )
+                          return;
+                        if (
+                          mode === 'default' ||
+                          mode === 'auto-edit' ||
+                          mode === 'yolo'
+                        )
+                          void approvalChange.submit(mode);
+                      }
+                    : undefined
+                }
                 showChatWidthToggle={false}
-                isPreparing={busy || cwd.blocked}
+                isPreparing={
+                  busy ||
+                  fileReferences.busy ||
+                  cwd.blocked ||
+                  modelChange.busy ||
+                  approvalChange.busy
+                }
+                dialogOpen={!interactive}
+                isRunning={home && Boolean(active)}
+                onCancel={
+                  home &&
+                  cancellationEnabled &&
+                  summary?.capabilities.canCancel &&
+                  summary.activeTurnId
+                    ? () => void cancel()
+                    : undefined
+                }
                 disabled={
+                  !interactive ||
                   busy ||
                   Boolean(pending) ||
+                  modelChange.blocked ||
+                  approvalChange.blocked ||
                   Boolean(sessionId && !summary?.capabilities.canSend)
                 }
                 placeholderText={t('managed.prompt')}
               />
+              {interactive &&
+                (modelChange.supported || modelChange.blocked) && (
+                  <div
+                    className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+                    role="status"
+                  >
+                    <span>
+                      {t(
+                        modelChange.busy
+                          ? 'managed.model.changing'
+                          : modelChange.blocked
+                            ? 'managed.model.unconfirmed'
+                            : modelChange.optionsLoading
+                              ? 'managed.model.loading'
+                              : modelChange.optionsError
+                                ? 'managed.model.optionsError'
+                                : 'managed.model.nextTurn',
+                      )}
+                    </span>
+                    {modelChange.pending && (
+                      <span>{modelChange.pending.modelId}</span>
+                    )}
+                    {modelChange.blocked && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={modelChange.busy || !provider.modelChange}
+                        onClick={() => void modelChange.confirm()}
+                      >
+                        {t('managed.model.confirm')}
+                      </Button>
+                    )}
+                    {modelChange.optionsError && !modelChange.blocked && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={modelChange.reloadOptions}
+                      >
+                        {t('managed.model.reload')}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              {interactive &&
+                modelChange.errorCode &&
+                modelChange.errorCode !== 'unconfirmed' && (
+                  <p className="text-xs text-destructive" role="alert">
+                    {t(
+                      modelChange.errorCode === 'storage_unavailable'
+                        ? 'managed.model.storage'
+                        : modelChange.errorCode === 'model_selection_conflict'
+                          ? 'managed.model.conflict'
+                          : ['turn_active', 'session_context_busy'].includes(
+                                modelChange.errorCode,
+                              )
+                            ? 'managed.model.busy'
+                            : 'managed.model.failed',
+                    )}
+                  </p>
+                )}
+              {interactive &&
+                (approvalChange.supported || approvalChange.blocked) && (
+                  <div
+                    className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+                    role="status"
+                  >
+                    <span>
+                      {t(
+                        approvalChange.busy
+                          ? 'managed.approvalChange.changing'
+                          : approvalChange.blocked
+                            ? 'managed.approvalChange.unconfirmed'
+                            : approvalChange.optionsLoading
+                              ? 'managed.approvalChange.loading'
+                              : approvalChange.optionsError
+                                ? 'managed.approvalChange.optionsError'
+                                : 'managed.approvalChange.nextTurn',
+                      )}
+                    </span>
+                    {approvalChange.pending && (
+                      <span>{approvalChange.pending.approvalMode}</span>
+                    )}
+                    {approvalChange.blocked && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          approvalChange.busy || !provider.approvalChange
+                        }
+                        onClick={() => void approvalChange.confirm()}
+                      >
+                        {t('managed.approvalChange.confirm')}
+                      </Button>
+                    )}
+                    {approvalChange.optionsError && !approvalChange.blocked && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={approvalChange.reloadOptions}
+                      >
+                        {t('managed.approvalChange.reload')}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              {interactive &&
+                approvalChange.errorCode &&
+                approvalChange.errorCode !== 'unconfirmed' && (
+                  <p className="text-xs text-destructive" role="alert">
+                    {t(
+                      approvalChange.errorCode === 'storage_unavailable'
+                        ? 'managed.approvalChange.storage'
+                        : approvalChange.errorCode ===
+                            'approval_selection_conflict'
+                          ? 'managed.approvalChange.conflict'
+                          : ['turn_active', 'session_context_busy'].includes(
+                                approvalChange.errorCode,
+                              )
+                            ? 'managed.approvalChange.busy'
+                            : 'managed.approvalChange.failed',
+                    )}
+                  </p>
+                )}
+              {displayedModel && !modelChange.supported && (
+                <p className="text-xs text-muted-foreground">
+                  {t('managed.modelFixed')}
+                </p>
+              )}
+              {summary?.approvalMode && !approvalChange.supported && (
+                <p className="text-xs text-muted-foreground">
+                  {t('managed.approvalFixed')}
+                </p>
+              )}
               <div className="flex items-center justify-end gap-2">
                 {sessionId &&
                   !active &&
@@ -949,7 +1517,7 @@ function ManagedSessionsContent({
                       {t('managed.newRequired')}
                     </span>
                   )}
-                {cancelButton}
+                {(!home || Boolean(text.trim())) && cancelButton}
               </div>
             </div>
           ) : (
@@ -957,7 +1525,8 @@ function ManagedSessionsContent({
               <div className="flex shrink-0 justify-end">{cancelButton}</div>
             )
           )}
-          {outputTarget &&
+          {interactive &&
+            outputTarget &&
             outputTarget.sessionId === sessionId &&
             sessionId &&
             (!summary || summary.capabilities.artifacts) &&
@@ -972,7 +1541,7 @@ function ManagedSessionsContent({
               />
             )}
         </section>
-        {taskPanelOpen && sessionId && provider.tasks && (
+        {interactive && taskPanelOpen && sessionId && provider.tasks && (
           <ManagedTaskPanel
             key={`${provider.storageKey}:${sessionId}`}
             wide={wideTasks}

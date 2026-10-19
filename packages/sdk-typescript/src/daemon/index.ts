@@ -491,6 +491,7 @@ export type {
   DaemonSkillToggleMutation,
   DaemonSkillToggleMutationSkill,
   DaemonSkillToggleResult,
+  DaemonSkillRefreshResult,
   DaemonSkillScope,
   DaemonSkillInstallSource,
   DaemonSkillInstallRequest,
