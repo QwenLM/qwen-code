@@ -681,12 +681,13 @@ describe('Hosted real-process gates', () => {
   // adds 150s, so it becomes 6285s; the FG11c Harness-crash method (144.8s
   // measured, ~550s budgeted at 2x) becomes 6835s; the FG13d DELETE-drain
   // cell adds 150s, so it becomes 6985s; the FG11c Spring-crash class
-  // (262.0s measured, ~524s budgeted at 2x) becomes 7509s. The largest
+  // (262.0s measured, ~524s budgeted at 2x) becomes 7509s; the FG13a
+  // catalog lost-reply cell adds 150s, so it becomes 7659s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 7509;
+  const hostedForkHealthySeconds = 7659;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
