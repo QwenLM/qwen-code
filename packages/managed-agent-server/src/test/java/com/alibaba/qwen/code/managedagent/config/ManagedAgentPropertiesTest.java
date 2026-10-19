@@ -917,6 +917,30 @@ class ManagedAgentPropertiesTest {
                 .hasMessageContaining("local-process");
     }
 
+    @Test
+    void sessionCreateWarmDefaultsOffAndRequiresWorkspaceIsolationWithoutSshNodes() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().isSessionCreateWarm()).isFalse();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.getRuntimeBroker().setSessionCreateWarm(true);
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties session = new ManagedAgentProperties();
+        session.getRuntimeBroker().setSessionCreateWarm(true);
+        assertThatThrownBy(session::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
+
+        ManagedAgentProperties ssh = new ManagedAgentProperties();
+        ssh.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        ssh.getRuntimeBroker().setSessionCreateWarm(true);
+        ssh.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node("mac", "Mac", "test-host",
+                "/node", "/cli.js", "/state", List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThatThrownBy(ssh::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
+    }
+
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(ManagedAgentProperties.class)
     static class PropertiesConfiguration {

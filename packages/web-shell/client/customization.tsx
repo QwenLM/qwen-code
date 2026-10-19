@@ -1,3 +1,4 @@
+import type { WebShellApprovalMode } from './utils/planMode';
 import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
@@ -705,6 +706,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  allowedApprovalModes?: readonly WebShellApprovalMode[];
   filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
