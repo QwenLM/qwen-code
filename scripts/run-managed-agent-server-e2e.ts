@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer, type Server } from 'node:http';
+import { createServer, request as httpRequest, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { inspect } from 'node:util';
@@ -67,6 +67,17 @@ let freeze = false;
 let modelRoundFailover = false;
 let frozenControlPlane = false;
 let g3VerifyArgument: string | undefined;
+// Step 3 A5/A5a barriers and the A4/C4 lost-reply arms layer one fault point
+// on the Allow arm; every other mode answers a different question and would
+// make the same crash prove two things at once.
+const approvalFaults = [
+  'after-decision',
+  'after-prepare',
+  'decision-reply-lost',
+  'admission-reply-lost',
+] as const;
+type ApprovalFault = (typeof approvalFaults)[number];
+let g3FaultArgument: string | undefined;
 
 for (let index = 0; index < argumentsList.length; index += 1) {
   const argument = argumentsList[index];
@@ -99,9 +110,12 @@ for (let index = 0; index < argumentsList.length; index += 1) {
   } else if (argument === '--g3-verify' && value) {
     g3VerifyArgument = value;
     index += 1;
+  } else if (argument === '--g3-fault' && value) {
+    g3FaultArgument = value;
+    index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|decision-reply-lost|admission-reply-lost]',
     );
   }
 }
@@ -121,6 +135,19 @@ if (
 }
 const approvalRecovery =
   !!verificationMode && verificationMode !== 'continuation';
+const approvalFault = (g3FaultArgument ?? process.env['G3_FAULT']) as
+  | ApprovalFault
+  | undefined;
+if (approvalFault && !approvalFaults.includes(approvalFault)) {
+  throw new Error(
+    `--g3-fault (or G3_FAULT) must be ${approvalFaults.join(', ')}`,
+  );
+}
+if (approvalFault && verificationMode !== 'allow') {
+  throw new Error(
+    '--g3-fault requires --g3-verify allow: Deny, Cancel and expiry have no approved execution to crash into',
+  );
+}
 const verificationDirectory = path.resolve(
   root,
   process.env['G3_VERIFY_REPORT_DIR'] ??
@@ -671,6 +698,47 @@ async function startHeldExecutionStartProxy(
       });
     },
   };
+}
+
+// The control plane answers 202 only after the decision or admission is
+// committed, so dropping the reply here is a lost response, not a weaker
+// request: the server keeps the committed row, and the caller retries the
+// same Idempotency-Key and must land on that original command.
+function postAndDropReply(
+  url: string,
+  body: string,
+  headers: Record<string, string>,
+): Promise<void> {
+  const target = new URL(url);
+  return new Promise<void>((resolve, reject) => {
+    const request = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: 'POST',
+      headers: { ...headers, 'content-length': Buffer.byteLength(body) },
+    });
+    request.once('response', (response) => {
+      // Destroy the reply unread: the caller must behave as if the answer
+      // never arrived, while the committed row stays on the server. A
+      // non-202 answer means nothing was committed, so the loss would prove
+      // nothing about the retry.
+      if (response.statusCode !== 202) {
+        response.destroy();
+        reject(
+          new Error(
+            `Lost-reply probe expected 202 from ${target.pathname}, got ${response.statusCode}`,
+          ),
+        );
+        return;
+      }
+      response.once('error', () => {});
+      response.destroy();
+      resolve();
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
 }
 
 async function waitUntil(
@@ -2009,7 +2077,16 @@ try {
       replacementSpring = spring;
       replacementSpringUrl = springUrl;
       replacementHarnessPort = harnessPort;
-      replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+      // The partial-prepare barrier needs the approved execution's :start
+      // held before the Broker sees it, so the crash lands between the
+      // durable PREPARED row and the physical dispatch.
+      if (approvalFault === 'after-prepare') {
+        replacementBrokerProxy = await startHeldExecutionStartProxy(
+          `http://127.0.0.1:${brokerPort}`,
+        );
+      }
+      replacementBrokerUrl =
+        replacementBrokerProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`;
     } else {
       // Under --freeze the original Spring is dead, but the frozen Harness
       // still holds the session-store URL the original Spring handed it at
@@ -2173,7 +2250,7 @@ try {
       );
       return next;
     };
-    const replacementHarness = await startReplacementHarness(
+    let replacementHarness = await startReplacementHarness(
       'Replacement Hosted Harness',
     );
 
@@ -2205,28 +2282,41 @@ try {
       }
       let responseOperation: Record<string, unknown> | undefined;
       if (verificationMode === 'allow' || verificationMode === 'deny') {
-        const response = await fetch(
-          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}/responses`,
-          {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'idempotency-key': `g3-answer-${originalApprovalId}`,
-              ...tenantHeaders(tenant),
-            },
-            body: JSON.stringify({
-              kind: 'permission',
-              input_revision: 1,
-              policy_revision: originalApprovalOptions!.policyRevision,
-              option_id: verificationMode,
-            }),
-          },
-        );
+        const decisionUrl = `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}/responses`;
+        const decisionHeaders = {
+          'content-type': 'application/json',
+          'idempotency-key': `g3-answer-${originalApprovalId}`,
+          ...tenantHeaders(tenant),
+        };
+        const decisionBody = JSON.stringify({
+          kind: 'permission',
+          input_revision: 1,
+          policy_revision: originalApprovalOptions!.policyRevision,
+          option_id: verificationMode,
+        });
+        if (approvalFault === 'decision-reply-lost') {
+          await postAndDropReply(decisionUrl, decisionBody, decisionHeaders);
+        }
+        const response = await fetch(decisionUrl, {
+          method: 'POST',
+          headers: decisionHeaders,
+          body: decisionBody,
+        });
         if (response.status !== 202)
           throw new Error(
             `Original Action response returned ${response.status}: ${await response.text()}`,
           );
         responseOperation = await response.json();
+        if (approvalFault === 'decision-reply-lost') {
+          const operations = runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_operation WHERE ${sessionFilter} AND operation_kind='ACTION_RESPONSE'`,
+          );
+          if (operations !== '1')
+            throw new Error(
+              `Lost decision reply produced ${operations} ACTION_RESPONSE operations, not one`,
+            );
+        }
       } else if (verificationMode === 'cancel') {
         const response = await fetch(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
@@ -2247,6 +2337,93 @@ try {
           throw new Error(
             `Original Turn cancel returned ${response.status}: ${await response.text()}`,
           );
+      }
+      if (
+        approvalFault === 'after-decision' ||
+        approvalFault === 'after-prepare'
+      ) {
+        // A5/A5a: kill the generation that holds the committed decision (and,
+        // for after-prepare, the durable PREPARED execution) so the next
+        // generation must resume the stage instead of replaying the approval.
+        const crashedBootId = runMysql(
+          mysqlPort,
+          `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
+        );
+        if (approvalFault === 'after-prepare') {
+          await waitUntil(
+            'Approved execution prepared behind the held start',
+            () => {
+              const execution = runMysql(
+                mysqlPort,
+                'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
+              );
+              return (
+                execution === 'PREPARED\t0' &&
+                replacementBrokerProxy?.heldPath() !== undefined
+              );
+            },
+            120_000,
+            replacementHarness,
+          );
+        }
+        // after-decision needs no poll: the response is 202 only after the
+        // decision commits, and polling would race the Harness into a later
+        // barrier while still calling the arm "after decision".
+        const executionAtCrash = runMysql(
+          mysqlPort,
+          'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
+        );
+        saveEvidence('approval-crash-barrier.json', {
+          fault: approvalFault,
+          crashedHarnessBootId: crashedBootId,
+          executionAtCrash,
+          heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
+        });
+        await crashChild(
+          replacementHarness.child,
+          'Replacement Hosted Harness (fault barrier)',
+        );
+        if (replacementBrokerProxy) {
+          await replacementBrokerProxy.close();
+          replacementBrokerProxy = undefined;
+          replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+        }
+        // The crashed generation's disk is scrapped like every replaced
+        // Harness home; the fresh one must recover from MySQL alone.
+        rmSync(replacementHarnessHome, { recursive: true, force: true });
+        mkdirSync(path.join(replacementHarnessHome, '.qwen'), {
+          recursive: true,
+        });
+        writeFileSync(
+          path.join(replacementHarnessHome, '.qwen', 'settings.json'),
+          JSON.stringify({ ui: { enableFollowupSuggestions: false } }),
+          { mode: 0o600 },
+        );
+        await waitUntil(
+          'Post-fault writer lease expiry',
+          (remainingMs) =>
+            runMysql(
+              mysqlPort,
+              `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < (${databaseEpochMillisSql}), 1, 0) FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+              remainingMs,
+            ) === '1',
+          10_000,
+        );
+        replacementHarness = await startReplacementHarness(
+          'Post-fault recovery Harness',
+        );
+        await waitUntil(
+          'Post-fault recovery Harness adopted the Session',
+          () => {
+            const boot = runMysql(
+              mysqlPort,
+              `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
+            );
+            return boot.length > 0 && boot !== crashedBootId;
+          },
+          120_000,
+          replacementHarness,
+        );
       }
       const recovered = await waitForTerminal(
         replacementSpringUrl,
@@ -3462,26 +3639,29 @@ try {
         0,
         ...originalPage.data.map((event) => event.sequence),
       );
-      const relief = await fetch(
-        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
-        {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'idempotency-key': `g3-relief-${session.id}`,
-            ...tenantHeaders(tenant),
+      const reliefUrl = `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`;
+      const reliefHeaders = {
+        'content-type': 'application/json',
+        'idempotency-key': `g3-relief-${session.id}`,
+        ...tenantHeaders(tenant),
+      };
+      const reliefBody = JSON.stringify({
+        type: 'agent.session.input.message',
+        input: [
+          {
+            type: 'text',
+            text: `${reliefMarker}. Reply exactly ${reliefResponse}. Use no tools.`,
           },
-          body: JSON.stringify({
-            type: 'agent.session.input.message',
-            input: [
-              {
-                type: 'text',
-                text: `${reliefMarker}. Reply exactly ${reliefResponse}. Use no tools.`,
-              },
-            ],
-          }),
-        },
-      );
+        ],
+      });
+      if (approvalFault === 'admission-reply-lost') {
+        await postAndDropReply(reliefUrl, reliefBody, reliefHeaders);
+      }
+      const relief = await fetch(reliefUrl, {
+        method: 'POST',
+        headers: reliefHeaders,
+        body: reliefBody,
+      });
       if (relief.status !== 202)
         throw new Error(
           `Relief Turn admission returned ${relief.status}: ${await relief.text()}`,
@@ -3516,6 +3696,21 @@ try {
         throw new Error(
           `Relief Turn inference count differs: ${reliefRequests.length}`,
         );
+      if (approvalFault === 'admission-reply-lost') {
+        // C4: the retried Idempotency-Key must land on the original
+        // admission. A second Turn row would mean the lost reply was
+        // re-admitted instead of reconciled.
+        const turnRows = Number(
+          runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter}`,
+          ),
+        );
+        if (turnRows !== 2)
+          throw new Error(
+            `Lost admission reply produced ${turnRows} Turn rows, not two`,
+          );
+      }
       const finalTerminalCount = Number(
         runMysql(
           mysqlPort,
@@ -3573,6 +3768,7 @@ try {
         );
       const summary = {
         mode: verificationMode,
+        fault: approvalFault ?? null,
         sessionId: session.id,
         originalRuntimeSessionId,
         originalActionId: originalApprovalId,

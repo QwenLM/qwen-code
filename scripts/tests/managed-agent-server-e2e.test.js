@@ -5,6 +5,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createServer, request as httpRequest } from 'node:http';
 import {
   existsSync,
   mkdtempSync,
@@ -201,6 +202,122 @@ describe('managed-agent-server e2e runner', () => {
       await proxy.close();
     }
     expect(new Set(ports).size).toBe(9);
+  });
+
+  // #14481 step 2: a lost reply is a reply the server already committed and
+  // answered, so the helper must wait for `response` before destroying it.
+  // Destroying on `request` would send nothing and let every retry assertion
+  // pass on a request the control plane never saw.
+  it('drops a committed reply without skipping the request', async () => {
+    const { postAndDropReply } = load(
+      ['postAndDropReply'],
+      'postAndDropReply',
+      'httpRequest',
+    )(httpRequest);
+    let received = '';
+    const server = createServer((request, response) => {
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => {
+        received += chunk;
+      });
+      request.on('end', () => {
+        response.writeHead(202, { 'content-type': 'application/json' });
+        response.end('{"id":"operation-1"}');
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    try {
+      await postAndDropReply(
+        `http://127.0.0.1:${port}/v1/agents/sessions/s/events`,
+        '{"type":"x"}',
+        {
+          'content-type': 'application/json',
+          'idempotency-key': 'retry-key',
+        },
+      );
+      expect(received).toBe('{"type":"x"}');
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // A 4xx means the control plane committed nothing, so dropping that reply
+  // would let the retry assertions pass over a request the server rejected.
+  it('refuses to drop a reply the control plane did not accept', async () => {
+    const { postAndDropReply } = load(
+      ['postAndDropReply'],
+      'postAndDropReply',
+      'httpRequest',
+    )(httpRequest);
+    const server = createServer((request, response) => {
+      request.resume();
+      request.on('end', () => {
+        response.writeHead(409, { 'content-type': 'application/json' });
+        response.end('{"error":"turn_active"}');
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    try {
+      await expect(
+        postAndDropReply(
+          `http://127.0.0.1:${port}/v1/agents/sessions/s/events`,
+          '{"type":"x"}',
+          { 'content-type': 'application/json' },
+        ),
+      ).rejects.toThrow(/expected 202/);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('pins the #14481 approval fault arms to durable barriers', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const workflow = read('.github/workflows/sdk-java.yml');
+    const manifest = read('package.json');
+    const scripts = [
+      'test:e2e:managed-harness-restart-approval-after-decision',
+      'test:e2e:managed-harness-restart-approval-after-prepare',
+      'test:e2e:managed-harness-restart-approval-decision-reply-lost',
+      'test:e2e:managed-harness-restart-approval-admission-reply-lost',
+    ];
+    for (const script of scripts) {
+      expect(manifest, `${script} must be an npm script`).toContain(
+        `"${script}"`,
+      );
+      expect(workflow, `${script} must be a CI step`).toContain(script);
+    }
+    // Deny, Cancel and expiry have no approved execution, so layering a
+    // crash there would silently assert a weaker path.
+    expect(source).toMatch(
+      /if \(approvalFault && verificationMode !== 'allow'\)/,
+    );
+    // The lost decision must retry the same key and land on one operation.
+    expect(source).toContain("operation_kind='ACTION_RESPONSE'");
+    // The crash arms scrap the crashed home and require a third generation,
+    // rather than reusing the killed owner's disk.
+    const recovery = source.indexOf("'Post-fault recovery Harness'");
+    const scrap = source.indexOf(
+      'rmSync(replacementHarnessHome, { recursive: true, force: true })',
+    );
+    expect(recovery).toBeGreaterThan(-1);
+    expect(scrap).toBeGreaterThan(-1);
+    expect(
+      scrap,
+      'the crashed home must be scrapped before recovery',
+    ).toBeLessThan(recovery);
+    expect(source).toContain(
+      "await waitUntil(\n          'Post-fault recovery Harness adopted the Session'",
+    );
+    // The partial-prepare crash needs the held :start and a PREPARED row
+    // with no dispatch, or it degrades into the after-decision barrier.
+    expect(source).toContain("execution === 'PREPARED\\t0'");
+    expect(source).toContain(
+      'replacementBrokerProxy?.heldPath() !== undefined',
+    );
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
@@ -1132,10 +1249,11 @@ describe('managed-agent-server e2e runner', () => {
 
   // spawnSync blocks the event loop, so waitUntil's race cannot bound a
   // synchronous probe: the mysqladmin readiness probe carries its own
-  // timeout, and the lease polls (writer and dispatch lease expiry, and the
-  // model-round arm's second writer lease) derive each call's timeout from
-  // the remaining waitUntil budget rather than a site-local constant that
-  // can overshoot the declared budget several-fold.
+  // timeout, and the lease polls (writer and dispatch lease expiry, the
+  // model-round arm's second writer lease, and the approval fault arms'
+  // post-crash writer lease) derive each call's timeout from the remaining
+  // waitUntil budget rather than a site-local constant that can overshoot
+  // the declared budget several-fold.
   it('bounds every synchronous MySQL probe by the poll budget', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/spawnSync\(\s*mysqladmin,[\s\S]*?timeout: 10_000/);
@@ -1145,7 +1263,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(
       source.match(/\(remainingMs\) =>\s*runMysql\([\s\S]*?remainingMs,/g),
       'every lease poll must derive the probe timeout from the waitUntil budget',
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     // The frozen arm's snapshot fans one budget out over several
     // synchronous probes; each takes its share, not the whole budget.
     const fenced = source.slice(
