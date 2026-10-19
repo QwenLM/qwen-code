@@ -309,6 +309,12 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   const server = renderServerEnv(secrets, '/tmp/application.yml');
   assert.ok(server.includes(secrets.token));
   assert.ok(server.includes(secrets.digest));
+  assert.match(server, /^QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true$/m);
+  assert.match(
+    server,
+    /^QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=http:\/\/127\.0\.0\.1:8080$/m,
+  );
+  assert.match(server, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=\S+$/m);
   assert.match(
     renderApplicationYml(secrets),
     /credential-key-id: 'reference-test'/,
@@ -447,6 +453,32 @@ test('bootstrap rejects a configuration path it cannot quote', async () => {
   }
 });
 
+test('bootstrap rejects a configuration path the location list splits on', async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-bootstrap-comma-'),
+  );
+  try {
+    const script = fileURLToPath(
+      new URL(
+        '../../packages/managed-agent-server/distribution/bin/' +
+          'qwen-managed-agent-bootstrap.mjs',
+        import.meta.url,
+      ),
+    );
+    const directory = path.join(temporary, 'config,one');
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [script, '--directory', directory], {
+          stdio: 'pipe',
+        }),
+      (error) => error.status === 1,
+    );
+    await assert.rejects(readFile(path.join(directory, 'harness.env')));
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('bootstrap refuses to run while another bootstrap holds the lock', async () => {
   const temporary = await mkdtemp(
     path.join(os.tmpdir(), 'qwen-bootstrap-lock-'),
@@ -487,7 +519,10 @@ test('enables the Session Store wherever the env template enables the Harness', 
   );
   assert.match(template, /^QWEN_MANAGED_AGENT_HARNESS_ENABLED=true$/m);
   assert.match(template, /^QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true$/m);
-  assert.match(template, /^QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=\S+$/m);
+  assert.match(
+    template,
+    /^QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=http:\/\/127\.0\.0\.1:8080$/m,
+  );
   assert.match(template, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=\S+$/m);
 });
 
