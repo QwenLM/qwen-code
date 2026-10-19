@@ -278,13 +278,17 @@ public class ManagedToolResultProjector {
     }
 
     static String boundPreview(String text) {
+        return boundPreview(text, 8192, 200);
+    }
+
+    static String boundPreview(String text, int byteLimit, int lineLimit) {
         int bytes = 0;
         int lines = 1;
         int end = 0;
         while (end < text.length()) {
             int point = text.codePointAt(end);
             int count = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-            if (bytes + count > 8192 || point == '\n' && lines == 200) {
+            if (bytes + count > byteLimit || point == '\n' && lines == lineLimit) {
                 break;
             }
             bytes += count;
