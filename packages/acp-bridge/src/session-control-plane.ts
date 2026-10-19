@@ -4071,7 +4071,7 @@ export function createSessionControlPlane(
           kind: 'permissions',
           tightening: true,
           persistedByControl: true,
-          payload: {},
+          payload: { scope: params?.['scope'] },
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceReload:
         return {
@@ -10289,6 +10289,11 @@ export function createSessionControlPlane(
     BridgeSpawnRequest,
     { dispatched: boolean }
   >();
+  // Runtime-added MCP servers live only in the live child. Keep their names
+  // so a paired Bridge can tell that the Managed engine cannot reproduce this
+  // runtime's configuration.
+  const runtimeMcpServerNames = new Set<string>();
+  let runtimeMcpServerChannelId: string | undefined;
   const bridgeApi: AcpSessionBridge = {
     // Derived once from the frozen overrides and the configured channel
     // factory; immutable for the bridge's lifetime.
@@ -16227,6 +16232,20 @@ export function createSessionControlPlane(
       return queue;
     },
 
+    hasRuntimeMcpServers: () => {
+      // The servers live only in the child that recorded them. A replaced or
+      // retired channel no longer holds any, so a stale set must not keep
+      // every later session on Legacy.
+      if (
+        runtimeMcpServerNames.size > 0 &&
+        liveChannelInfo()?.id !== runtimeMcpServerChannelId
+      ) {
+        runtimeMcpServerNames.clear();
+        runtimeMcpServerChannelId = undefined;
+      }
+      return runtimeMcpServerNames.size > 0;
+    },
+
     async addRuntimeMcpServer(name, config, originatorClientId) {
       // Round-trip the runtime-add ext-method through the
       // live ACP child and broadcast an `mcp_server_added` event on
@@ -16268,6 +16287,13 @@ export function createSessionControlPlane(
         const addSkipped = (response as { skipped?: boolean }).skipped === true;
         if (!addSkipped) {
           const ok = response as AddOk;
+          // Names recorded on a replaced child are gone with it; do not let
+          // a later add on the new child inherit them.
+          if (runtimeMcpServerChannelId !== info.id) {
+            runtimeMcpServerNames.clear();
+            runtimeMcpServerChannelId = info.id;
+          }
+          runtimeMcpServerNames.add(ok.name);
           broadcastWorkspaceEvent({
             type: 'mcp_server_added',
             data: {
@@ -16319,6 +16345,10 @@ export function createSessionControlPlane(
           (response as { skipped?: boolean }).skipped === true;
         if (!removeSkipped) {
           const ok = response as RemoveOk;
+          runtimeMcpServerNames.delete(ok.name);
+          if (runtimeMcpServerNames.size === 0) {
+            runtimeMcpServerChannelId = undefined;
+          }
           broadcastWorkspaceEvent({
             type: 'mcp_server_removed',
             data: {

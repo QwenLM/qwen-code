@@ -174,6 +174,7 @@ export function useManagedSession(
         approvalMode: previous.approvalMode,
         approvalRevision: previous.approvalRevision,
         initialApprovalMode: previous.initialApprovalMode,
+        planMode: previous.planMode,
       };
     }
     summaryRef.current = next;
