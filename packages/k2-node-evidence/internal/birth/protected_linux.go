@@ -15,13 +15,16 @@ import (
 // ProtectedFile retains an installed configuration or PEM object; Close never
 // clears its immutable flag or removes a deployment-owned file.
 type ProtectedFile struct {
-	mu       sync.Mutex
-	path     string
-	file     *os.File
-	identity Object
-	limit    int64
-	parent   *ProtectedDirectory
-	name     string
+	mu                 sync.Mutex
+	path               string
+	file               *os.File
+	identity           Object
+	limit              int64
+	parent             *ProtectedDirectory
+	name               string
+	executable         bool
+	ancestors          []*os.File
+	ancestorIdentities []directoryIdentity
 }
 
 func OpenProtectedFile(path string) (*ProtectedFile, error) {
@@ -49,7 +52,7 @@ func (p *ProtectedFile) verify() error {
 	if p.file == nil {
 		return errors.New("original protected file is closed")
 	}
-	current, err := boundedObject(p.file, false, p.limit)
+	current, err := boundedObject(p.file, p.executable, p.limit)
 	if err != nil || current != p.identity {
 		return errors.New("original protected file changed")
 	}
@@ -63,10 +66,25 @@ func (p *ProtectedFile) verify() error {
 		return errors.New("original protected file name is unavailable")
 	}
 	f := os.NewFile(uintptr(fd), p.path)
-	named, readErr := boundedObject(f, false, p.limit)
+	named, readErr := boundedObject(f, p.executable, p.limit)
 	closeErr := f.Close()
 	if readErr != nil || closeErr != nil || named != p.identity {
 		return errors.New("original protected file name changed")
+	}
+	for i, ancestor := range p.ancestors {
+		held, err := ancestorObject(ancestor)
+		if err != nil || held != p.ancestorIdentities[i] {
+			return errors.New("original cold path ancestor changed")
+		}
+		named, err := directory(ancestor.Name(), false)
+		if err != nil {
+			return err
+		}
+		current, err := ancestorObject(named)
+		closeErr := named.Close()
+		if err != nil || closeErr != nil || current != held {
+			return errors.New("original cold path ancestor name changed")
+		}
 	}
 	return nil
 }
@@ -263,5 +281,9 @@ func (p *ProtectedFile) Close() error {
 	}
 	err := p.file.Close()
 	p.file = nil
+	for _, f := range p.ancestors {
+		err = errors.Join(err, f.Close())
+	}
+	p.ancestors = nil
 	return err
 }

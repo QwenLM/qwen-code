@@ -1,3 +1,4 @@
+import cold_boot
 import hashlib
 import importlib.util
 import json
@@ -42,13 +43,18 @@ class RenderProfilesTest(unittest.TestCase):
         self.prepare_candidate()
         hosts = {name: {"path": "/usr/bin/" + name, "sha256": str(index) * 64, "label": "host-" + name}
                  for index, name in enumerate(("runtime", "kubelet", "registrar", "plugin", "systemd"), 1)}
+        self.cold = self.root / "cold-bootstrap.json"
+        cold = cold_boot.loads((Path(__file__).parents[2] / "packages/k2-node-evidence/internal/artifactset/testdata/cold-bootstrap.fixture.json").read_bytes())
+        cold["generators"] = cold_boot.generators()
+        self.cold.write_bytes(cold_boot.encoded(cold))
+        hosts["systemd"] = {k: cold["systemd"][k] for k in ("path", "sha256", "label")}
         self.target = {
-            "format": "qwen-k2-profile-target/2", "architecture": "amd64", "hostExecutables": hosts,
+            "format": "qwen-k2-profile-target/3", "architecture": "amd64", "coldBootstrapSha256": digest(self.cold), "hostExecutables": hosts,
             "snapshotRoot": "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots",
             "podSlicePrefix": "/sys/fs/cgroup/kubepods.slice/kubepods-pod",
             "apparmorExportRoot": "/qwen-k2-disconnected/source/apparmorfs",
             "volumeSerialPath": "/sys/devices/pci0000:00/block/vdb/serial",
-            "systemBus": {"socket": "/run/dbus/system_bus_socket", "privateSocket": "/run/systemd/private", "label": "host-dbus"},
+            "systemBus": {"socket": "/run/dbus/system_bus_socket", "privateSocket": "/run/systemd/private", "label": "host-dbus", "executable": {"path": "/usr/bin/dbus-daemon", "sha256": "e" * 64}},
             "roleConfigPaths": {"source": "/etc/qwen-k2/actual-source.json", "gateway": "/etc/qwen-k2/actual-gateway.json"},
             "sandboxNetworkNamespaceSource": "/run/netns/cni-${SANDBOX_ID}",
             "rootfsMounts": {role: [{"type": "overlay", "source": "overlay", "options": ["rw", "lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs"]}] for role in ("worker", "sandbox")},
@@ -91,7 +97,7 @@ class RenderProfilesTest(unittest.TestCase):
         args = [self.candidate, digest(self.candidate / "artifact-manifest.json")]
         for name in ("target", "runtime", "source-config", "gateway-config"):
             args += [self.inputs[name], digest(self.inputs[name])]
-        POLICY.render(*args, self.worker, self.sandbox, self.host_policy, digest(self.host_policy / "host-policies.json"), self.output)
+        POLICY.render(*args, self.worker, self.sandbox, self.host_policy, digest(self.host_policy / "host-policies.json"), self.cold, self.output)
 
     def role(self, name):
         text = (self.output / "qwen-k2-profiles").read_text()
@@ -152,30 +158,27 @@ class RenderProfilesTest(unittest.TestCase):
         manifest = json.loads((self.output / "profile-candidate.json").read_bytes())
         self.assertTrue(any("not pathname peer enforcement" in item for item in manifest["boundaries"]))
 
-    def test_distinct_bus_label_cannot_create_implicit_exec_attachment(self):
-        self.target["systemBus"]["label"] = "/usr/bin/other-daemon"
-        self.refuses("distinct bus label cannot imply")
-        self.target["hostExecutables"]["systemd"]["label"] = "/usr/bin/explicit-host-label"
-        self.target["systemBus"]["label"] = "/usr/bin/explicit-host-label"
+    def test_bus_has_explicit_distinct_executable_and_six_host_profiles(self):
         self.render()
         text = (self.output / "qwen-k2-profiles").read_text()
-        self.assertEqual(1, text.count('profile "/usr/bin/explicit-host-label" "/usr/bin/systemd"'))
-        self.assertEqual(10, sum(line.startswith("profile ") for line in text.splitlines()))
+        self.assertIn('profile "host-dbus" "/usr/bin/dbus-daemon"', text)
+        self.assertEqual(11, sum(line.startswith("profile ") for line in text.splitlines()))
 
-    def test_bus_shared_host_label_requires_identical_complete_base(self):
+    def test_shared_bus_label_refuses_even_with_identical_complete_base(self):
         self.target["systemBus"]["label"] = self.target["hostExecutables"]["systemd"]["label"]
-        self.render()
-        text = (self.output / "qwen-k2-profiles").read_text()
-        self.assertEqual(10, sum(line.startswith("profile ") for line in text.splitlines()))
-        body = text.split('profile "host-systemd"', 1)[1]
-        self.assertIn('change_profile -> qwen-k2-source-v1,', body)
-        self.assertIn('dbus receive bus=system', body)
+        self.refuses("six distinct host labels")
 
-    def test_shared_label_with_different_base_refuses(self):
-        self.target["systemBus"]["label"] = self.target["hostExecutables"]["systemd"]["label"]
-        (self.host_policy / "host-system-bus.rules").write_bytes(b'  "/different-base" r,\n')
+    def test_systemd_helper_denials_survive_broad_host_allow(self):
+        (self.host_policy / "host-systemd.rules").write_bytes(b'  "/**" rw,\n  capability sys_resource,\n')
         self.write_host_manifest()
-        self.refuses("identical complete bases")
+        self.render()
+        body = (self.output / "qwen-k2-profiles").read_text().split('profile "host-systemd"', 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('"/**" rw,', body)
+        self.assertIn('deny capability sys_resource,', body)
+        for name in cold_boot.lane()["bootState"]["helpers"]:
+            self.assertIn('deny "' + name + '" w,', body)
+        for role in ("source", "gateway"):
+            self.assertIn("cold-bootstrap.json", self.role(role))
 
     def test_changed_or_missing_host_base_refuses_without_output(self):
         path = self.host_policy / "host-runtime.rules"
@@ -299,6 +302,10 @@ class RenderProfilesTest(unittest.TestCase):
                 self.target["hostExecutables"][peer]["path"] = path
                 self.refuses("host executable paths cannot alias role inputs")
                 self.target["hostExecutables"][peer]["path"] = original
+
+    def test_bus_executable_cannot_attach_to_a_private_role_input(self):
+        self.target["systemBus"]["executable"]["path"] = self.source["key"]
+        self.refuses("host executable paths cannot alias role inputs")
 
     def test_full_command_image_and_writable_image_overlap_refuse(self):
         self.runtime["command"] += ["extra"]
@@ -451,7 +458,7 @@ class RenderProfilesTest(unittest.TestCase):
 
     def test_real_cli_consumes_all_required_inputs(self):
         self.write_inputs()
-        argv = ["render-profiles.py", "--candidate", str(self.candidate), "--artifact-manifest-sha256", digest(self.candidate / "artifact-manifest.json")]
+        argv = ["render-profiles.py", "--candidate", str(self.candidate), "--artifact-manifest-sha256", digest(self.candidate / "artifact-manifest.json"), "--cold-bootstrap", str(self.cold)]
         for name, path in self.inputs.items():
             argv += ["--" + name, str(path), "--" + name + "-sha256", digest(path)]
         argv += ["--worker-layout", str(self.worker), "--sandbox-layout", str(self.sandbox), "--output", str(self.output)]

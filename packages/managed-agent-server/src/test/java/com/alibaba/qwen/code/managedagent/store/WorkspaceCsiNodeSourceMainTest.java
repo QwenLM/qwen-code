@@ -79,7 +79,7 @@ class WorkspaceCsiNodeSourceMainTest {
     @ValueSource(strings = {"installation.json", "profile-candidate.json", "profile-compile.json", "source-config.installed.json",
         "gateway-config.json", "shim.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service",
         "host-policies.json", "host-runtime.rules", "host-kubelet.rules", "host-registrar.rules", "host-plugin.rules",
-        "host-systemd.rules", "host-system-bus.rules"})
+        "host-systemd.rules", "host-system-bus.rules", "cold-bootstrap.json"})
     void independentlyChangedReviewedBytesCannotBeLearnedFromTheStream(String name) throws Exception {
         var files = files(CsiCreationContractFixture.bytes());
         var before = observed(files);
@@ -126,6 +126,72 @@ class WorkspaceCsiNodeSourceMainTest {
         }
         var pins = (ObjectNode) manifest.path("files");
         for (String name : List.of("host-policies.json", "host-runtime.rules", "profile-candidate.json", "profile-compile.json")) {
+            byte[] raw = Files.readAllBytes(root.resolve(name));
+            pins.putObject(name).put("bytes", raw.length).put("sha256", hash(raw));
+        }
+        Files.write(root.resolve("installation.json"), json.writeValueAsBytes(manifest));
+        assertThatThrownBy(() -> WorkspaceCsiInstalledBytes.read(root, source, shim)).isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    void independentColdLaneResourceMatchesTheReviewedGoLane() throws Exception {
+        try (var input = WorkspaceCsiInstalledBytes.class.getResourceAsStream("/k2-cold-lane.json")) {
+            assertThat(input).isNotNull();
+            assertThat(input.readAllBytes()).isEqualTo(Files.readAllBytes(
+                    Path.of("../k2-node-evidence/internal/artifactset/cold-lane.json")));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cold-version", "missing-field", "null-state", "null-rootfs", "null-core", "missing-core",
+        "extra-field", "helper", "core", "argv", "alias", "missing-script", "bad-generator", "target-version",
+        "target-cold", "systemd", "bus-executable", "shared-label", "unclean-script-path"})
+    void repairedOuterPinsCannotChangeTheColdLaneOrItsTarget(String fault) throws Exception {
+        var inputs = files(CsiCreationContractFixture.bytes());
+        Path root = inputs.deployment().installedArtifacts();
+        byte[] source = Files.readAllBytes(inputs.deployment().sourceConfiguration());
+        byte[] shim = Files.readAllBytes(inputs.deployment().shimConfiguration());
+        var cold = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("cold-bootstrap.json")));
+        var target = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("target.json")));
+        switch (fault) {
+            case "cold-version" -> cold.put("format", "qwen-k2-cold-bootstrap/0");
+            case "missing-field" -> cold.remove("kernel");
+            case "null-state" -> cold.putNull("bootState");
+            case "null-rootfs" -> cold.putNull("rootfsPlan");
+            case "null-core" -> ((ObjectNode) cold.path("bootState")).putNull("coreSoft");
+            case "missing-core" -> ((ObjectNode) cold.path("bootState")).remove("coreSoft");
+            case "extra-field" -> cold.put("qualified", true);
+            case "helper" -> ((ObjectNode) cold.path("bootState").path("helpers")).put("/proc/sys/kernel/modprobe", "/sbin/modprobe\n");
+            case "core" -> ((ObjectNode) cold.path("bootState")).put("coreHard", 1);
+            case "argv" -> ((ObjectNode) cold.path("rootfsPlan")).putArray("argv").add("/sbin/init").add("rescue");
+            case "alias" -> ((ObjectNode) cold.path("linkPlan")).put("/lib", "foreign");
+            case "unclean-script-path" -> ((ObjectNode) cold.path("bootState").path("scriptOutputs")).set("/scripts/./ORDER",
+                    cold.path("bootState").path("scriptOutputs").path("/init"));
+            case "missing-script" -> ((ObjectNode) cold.path("bootState").path("scriptOutputs")).remove("/init");
+            case "bad-generator" -> ((ObjectNode) cold.path("generators")).put("cold_boot.py", "not-a-digest");
+            case "target-version" -> target.put("format", "qwen-k2-profile-target/2");
+            case "systemd" -> ((ObjectNode) target.path("hostExecutables").path("systemd")).put("sha256", "0".repeat(64));
+            case "bus-executable" -> ((ObjectNode) target.path("systemBus")).remove("executable");
+            case "shared-label" -> ((ObjectNode) target.path("systemBus")).put("label",
+                    target.path("hostExecutables").path("systemd").path("label").textValue());
+        }
+        byte[] coldRaw = json.writeValueAsBytes(cold);
+        Files.write(root.resolve("cold-bootstrap.json"), coldRaw);
+        target.put("coldBootstrapSha256", fault.equals("target-cold") ? "0".repeat(64) : hash(coldRaw));
+        Files.write(root.resolve("target.json"), json.writeValueAsBytes(target));
+        var profile = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("profile-candidate.json")));
+        var profilePins = (ObjectNode) profile.path("files");
+        for (String name : List.of("cold-bootstrap.json", "target.json")) {
+            byte[] raw = Files.readAllBytes(root.resolve(name));
+            profilePins.putObject(name).put("bytes", raw.length).put("sha256", hash(raw));
+        }
+        Files.write(root.resolve("profile-candidate.json"), json.writeValueAsBytes(profile));
+        var compilation = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("profile-compile.json")));
+        compilation.put("profileCandidateSha256", hash(Files.readAllBytes(root.resolve("profile-candidate.json"))));
+        Files.write(root.resolve("profile-compile.json"), json.writeValueAsBytes(compilation));
+        var manifest = (ObjectNode) json.readTree(Files.readAllBytes(root.resolve("installation.json")));
+        var pins = (ObjectNode) manifest.path("files");
+        for (String name : List.of("cold-bootstrap.json", "target.json", "profile-candidate.json", "profile-compile.json")) {
             byte[] raw = Files.readAllBytes(root.resolve(name));
             pins.putObject(name).put("bytes", raw.length).put("sha256", hash(raw));
         }
@@ -203,6 +269,30 @@ class WorkspaceCsiNodeSourceMainTest {
         for (String name : List.of("features", "qwen-k2-profiles", "target.json", "runtime.json", "worker-catalog.json", "sandbox-catalog.json")) {
             files.put(name, ("explicit synthetic " + name).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
+        byte[] coldRaw = Files.readAllBytes(Path.of("../k2-node-evidence/internal/artifactset/testdata/cold-bootstrap.fixture.json"));
+        files.put("cold-bootstrap.json", coldRaw);
+        var cold = json.readTree(coldRaw);
+        var target = json.createObjectNode().put("format", "qwen-k2-profile-target/3").put("architecture", "amd64")
+                .put("coldBootstrapSha256", hash(coldRaw));
+        for (String name : List.of("snapshotRoot", "podSlicePrefix", "apparmorExportRoot", "volumeSerialPath",
+                "sandboxNetworkNamespaceSource", "oldRootPath")) {
+            target.put(name, "/explicit-synthetic-input");
+        }
+        target.putObject("roleConfigPaths");
+        target.putObject("rootfsMounts");
+        target.putArray("hugepageSizes");
+        var hostValues = target.putObject("hostExecutables");
+        for (String role : List.of("runtime", "kubelet", "registrar", "plugin", "systemd")) {
+            var host = hostValues.putObject(role);
+            for (String field : List.of("path", "sha256", "label")) {
+                host.put(field, role.equals("systemd") ? cold.path("systemd").path(field).textValue()
+                        : field.equals("sha256") ? "e".repeat(64) : field.equals("path") ? "/usr/bin/" + role : "host-" + role);
+            }
+        }
+        var bus = target.putObject("systemBus").put("socket", "/run/dbus/system_bus_socket")
+                .put("privateSocket", "/run/systemd/private").put("label", "host-bus");
+        bus.putObject("executable").put("path", "/usr/bin/dbus-daemon").put("sha256", "e".repeat(64));
+        files.put("target.json", json.writeValueAsBytes(target));
         files.put("creation-contract.json", Base64.getDecoder().decode(shimValue.path("creationContract").textValue()));
         var hostPolicies = json.createObjectNode().put("format", "qwen-k2-host-policies/1");
         var hostFiles = hostPolicies.putObject("files");
@@ -224,7 +314,7 @@ class WorkspaceCsiNodeSourceMainTest {
         artifacts.putObject("catalogues");
         artifacts.putObject("generators");
         files.put("artifact-manifest.json", json.writeValueAsBytes(artifacts));
-        var candidate = json.createObjectNode().put("format", "qwen-k2-profile-candidate/2")
+        var candidate = json.createObjectNode().put("format", "qwen-k2-profile-candidate/3")
                 .put("artifactManifestSha256", hash(files.get("artifact-manifest.json"))).put("shimConfigurationSha256", hash(shim));
         candidate.putObject("roleConfigPaths").put("source", "/etc/qwen-k2/source.json").put("gateway", "/etc/qwen-k2/gateway.json");
         candidate.putArray("boundaries").add("synthetic data only, no qualification");
@@ -233,7 +323,7 @@ class WorkspaceCsiNodeSourceMainTest {
         for (String name : List.of("source-config.json", "gateway-config.json", "target.json", "runtime.json", "creation-contract.json",
                 "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "qwen-k2-profiles", "host-policies.json",
                 "host-runtime.rules", "host-kubelet.rules", "host-registrar.rules", "host-plugin.rules",
-                "host-systemd.rules", "host-system-bus.rules")) {
+                "host-systemd.rules", "host-system-bus.rules", "cold-bootstrap.json")) {
             profileFiles.putObject(name).put("bytes", files.get(name).length).put("sha256", hash(files.get(name)));
         }
         files.put("profile-candidate.json", json.writeValueAsBytes(candidate));
@@ -244,7 +334,7 @@ class WorkspaceCsiNodeSourceMainTest {
                 .put("parserConfigurationSha256", "0".repeat(64)).put("generatorSha256", "0".repeat(64)).put("exitCode", 0)
                 .put("packedBytes", files.get("packed.bin").length).put("packedSha256", hash(files.get("packed.bin")));
         files.put("profile-compile.json", json.writeValueAsBytes(compilation));
-        var manifest = json.createObjectNode().put("format", "qwen-k2-installed-artifacts/2");
+        var manifest = json.createObjectNode().put("format", "qwen-k2-installed-artifacts/3");
         var pins = manifest.putObject("files");
         for (var entry : files.entrySet()) {
             pins.putObject(entry.getKey()).put("bytes", entry.getValue().length).put("sha256", hash(entry.getValue()));

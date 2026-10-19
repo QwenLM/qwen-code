@@ -116,7 +116,7 @@ processes、mounts、cgroups、临时路径和 VM 均已关闭。Runtime/CSI bac
 明示为协议夹具，LSM 为 unconfined；这些结果不资格化实际 ACK runtime/plugin/
 driver 接线、受限 LSM、admission、物理释放或卷复用，也不资格化改变后的当前 source unit 或 v2 reader。原 `openat2` 失败单独保留。
 
-当前 source 强制要求 `workerPolicySha256`，代表包含固定 worker/source/sandbox/shim/gateway profiles 的经审阅完整 packed bundle。v6 ARM 保存实际加载策略测量和原镜像，BIND 保存实际 admitted gated-spec digest/resourceVersion；启动和持续操作在测量缺失或变化时 fail closed。强制 source confinement、节点实际 enforce/lock、source 专用 disconnected exporter prefix 和完整 birth confinement 仍需具体 native 资格化及安装批准。代码只读策略，这些交付物不会设置节点级锁。
+当前 source 强制要求 `workerPolicySha256`，代表包含固定 worker/source/sandbox/shim/gateway profiles 的经审阅完整 packed bundle。v6 ARM 保存实际加载策略测量和原镜像，BIND 保存实际 admitted gated-spec digest/resourceVersion；启动和持续操作在测量缺失或变化时 fail closed。强制 source confinement、节点实际 enforce/lock、source 专用 disconnected exporter prefix 和完整 birth confinement 仍需具体 native 资格化及安装批准。source/gateway 角色只读策略；下文受独立守卫保护的 cold-init 入口执行初始 load/lock，本节角色打包不会调用它。
 
 ## 首次执行前 shim 候选
 
@@ -165,7 +165,47 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOTOOLCHAIN=local GOWORK=off \
 
 渲染 fragment 现于 `plugins."io.containerd.nri.v1.nri"` 显式设置 `disable=true`，上游默认启用。必须保留 NRI registration，禁用 registration 本身会使强制观察不可用。guard 与 Status/overlay 共用五秒期限，通过原连接，以标准 Empty options 和 BoolValue extra 读取持续持有的真实 NRI 对象。启用、stock、缺失、失败、格式错误、超限或丢失观察都永久拒绝；false 的 typed 空正文合法。这是采样状态，不代表 native daemon 验收、从出生禁用、全部线程隔离或连续排除。详见[有效 NRI 状态](../../docs/design/2026-10-18-k2-effective-nri-state.zh-CN.md)。
 
-安装前必须资格化实际 daemon 的 handler/bootstrap 兼容性、私有 ext4 消费输入挂载、immutable 安装文件及 ancestor、初始 namespaces、完整已加载并 locked 的 AppArmor bundle 和 actor/admission 边界。当前 service units 和历史 profiles 不继承本次改变后候选的资格。运行时目录必须允许正常 PID/log/rootfs/cleanup 写入，不能将整个消费 bundle 设为 immutable。用 exact reviewed source/shim 配置执行 `node-config`，生成 Java 必需的出生期待值；解析成功仍不代表安装资格或物理释放。详见[出生设计](../../docs/design/2026-10-16-k2-pre-exec-birth.zh-CN.md)。
+安装前必须资格化实际 daemon 的 handler/bootstrap 兼容性、私有 ext4 消费输入挂载、immutable 安装文件及 ancestor、初始 namespaces、完整已加载并 locked 的 AppArmor bundle 和 actor/admission 边界。当前 service units 和历史 profiles 不继承本次改变后候选的资格。运行时目录必须允许正常 PID/log/rootfs/cleanup 写入，不能将运行态 OCI bundle 及其运行时目录整体设为 immutable；已安装的 `/etc/qwen-k2/artifacts` 输入目录仍须保持 immutable 保护。用 exact reviewed source/shim 配置执行 `node-config`，生成 Java 必需的出生期待值；解析成功仍不代表安装资格或物理释放。详见[出生设计](../../docs/design/2026-10-16-k2-pre-exec-birth.zh-CN.md)。
+
+## 隔离的首个 systemd 冷启动候选
+
+[首个 systemd 设计](../../docs/design/2026-10-19-k2-first-systemd-cold-init.zh-CN.md) 为已观察的 Ubuntu 24.04 amd64 启动通道增加一个离线生产者。固定终点是空的 `qwen-k2-cold.target`，不启动 gateway、source、containerd、kubelet、bus 或 CSI 角色，不能作为可用 ACK 节点或完整 K2 生产者。离线候选可先于原生资格验证生成，每份候选及打包记录均明确写入 `nativeAcceptance: NOT_RUN`。
+
+在 `packages/k2-node-evidence` 中使用已审的锁定工具链构建静态入口：
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local GOWORK=off \
+  go build -mod=readonly -trimpath -buildvcs=false \
+  -o /absolute/output/k2-cold-init ./cmd/k2-cold-init
+```
+
+在仓库根目录提供真实原始 initrd、保留 15 个已声明 initrd 查找路径及别名的独立安全目录树，以及含原始内核/配置、systemd 和 24 个依赖查找路径的安全 rootfs 目录树。目录树必须保留实测实际路径及链接目标；渲染器不会沿绝对链接访问构建主机。字节缺失或变化均拒绝。它会独立解析完整原始 initrd，因此 15 项目录树不能替代或截断启动归档。
+
+```sh
+python3 deploy/k2-evidence/render-cold-boot.py \
+  --base-initrd /absolute/reviewed/initrd.img-6.8.0-139-generic \
+  --initrd-inputs /absolute/reviewed/initrd-lookups \
+  --cold-init /absolute/output/k2-cold-init \
+  --system-root /absolute/reviewed/rootfs-lookups \
+  --systemd-label REVIEWED_DISTINCT_SYSTEMD_LABEL \
+  --output /absolute/output/new-cold-candidate
+```
+
+产物包括封闭的 13 成员 `cold-bootstrap.json`、加固后的 initrd 入口、静态入口字节和两个固定 rootfs 输入。合同固定已观察的启动/内核输入、失败即停 shell 模板、实际 systemd/依赖字节、选定私有 unit 目录、不存在的 generator 路径、启动配置和六项环境变量。将其实际摘要作为 v3 target 的 `coldBootstrapSha256`，再执行下文完整 profile/artifact 图的渲染、显式编译和组装。Python、Go 和独立 Java 元数据读取器均强制消费 cold leaf。
+
+有了这份精确的 26 文件组装结果后，生成最终包，但不安装：
+
+```sh
+python3 deploy/k2-evidence/package-cold-initrd.py \
+  --base-initrd /absolute/reviewed/initrd.img-6.8.0-139-generic \
+  --candidate /absolute/output/new-cold-candidate \
+  --installation /absolute/output/new-installed-artifacts \
+  --output /absolute/output/new-cold-package
+```
+
+打包器根据固定原始归档与已审生成器重新构造加固脚本，重新检查所有已安装子项 pin，输出 `initrd.img`、`rootfs.tar`、`boot-command-line`、rootfs 前提和外置最终字节清单。它不选择启动项，也不修改节点。rootfs 部署仍须另行建立已有的 root 属主、单链接、immutable、只读 ext4 对象与祖先保护、精确私有树内容、启动输入不存在、console/描述符边界及获批启动来源。加载器在一次完整策略加载、节点级锁定和同线程 on-exec 到固定 systemd 路径前检查这些实际条件；这是特权生产行为，普通软件测试从不调用它。
+
+加载器使用非空 LF 字节关闭三项 helper 路径，写入固定的非管道 core pattern 与 `suid_dumpable=0`，分别独立读回，削减调用者五集合中的 `CAP_SYS_MODULE`，并将 core 软硬限制均设为零。生成的 enforce systemd 后缀拒绝随后写入这五项接口，并拒绝使用 `CAP_SYS_RESOURCE`。有界最终 FD 枚举仅允许精确 console 与明确分类、CLOEXEC 的运行时及保留只读描述符。这些检查不能证明此前排队的内核 helper 已结束。原生启动/终止跟踪、Ubuntu 补丁版 systemd/parser 行为和原始启动选择/安装权限仍是验收门槛。ARM64 构建与 fake-operation 测试不能资格化 amd64 启动通道。
 
 ## 离线五角色策略候选
 
@@ -183,6 +223,7 @@ python3 deploy/k2-evidence/render-profiles.py \
   --source-config-sha256 REVIEWED_SOURCE_CONFIG_SHA256 \
   --gateway-config /absolute/reviewed/gateway.json \
   --gateway-config-sha256 REVIEWED_GATEWAY_CONFIG_SHA256 \
+  --cold-bootstrap /absolute/output/new-cold-candidate/cold-bootstrap.json \
   --host-policy /absolute/reviewed/complete-host-bases \
   --host-policy-sha256 REVIEWED_HOST_POLICIES_MANIFEST_SHA256 \
   --worker-layout /absolute/reviewed/worker-oci \
@@ -190,16 +231,17 @@ python3 deploy/k2-evidence/render-profiles.py \
   --output /absolute/output/new-profile-candidate
 ```
 
-闭合的 `qwen-k2-profile-target/2` 对象要求以下字段。这些是已审部署输入，不是观察结果或安装证书。
+闭合的 `qwen-k2-profile-target/3` 对象要求以下字段。这些是已审部署输入，不是观察结果或安装证书。
 
 | 字段                            | 支持的输入                                                                                                                                               |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `format`、`architecture`        | 上述准确版本；`amd64` 或 `arm64`，与两镜像及三个宿主产物一致                                                                                             |
+| `format`、`architecture`        | 上述准确版本；首个 cold lane 只支持 `amd64`，与两镜像及三个宿主产物一致                                                                                  |
+| `coldBootstrapSha256`           | 必填生成的 `cold-bootstrap.json` SHA-256，与 target systemd 路径、摘要、标签一致                                                                         |
 | `hostExecutables`               | 准确的 `runtime`、`kubelet`、`registrar`、`plugin`、`systemd` 对象，各含 literal `path`、`sha256` 和不同的受限 `label`；四个 peer 摘要必须与服务配置一致 |
 | `snapshotRoot`                  | `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots`                                                                                   |
 | `podSlicePrefix`                | 实际 systemd kubepods Pod slice 前缀，可在 burstable 或 besteffort 层级                                                                                  |
 | `apparmorExportRoot`            | `/qwen-k2-disconnected/source` 下准确测量的 exporter 路径，只读叶子模式由生成器拥有                                                                      |
-| `systemBus`                     | 闭合的 `socket`、`privateSocket`、`label`；系统 bus socket、`/run/systemd/private` 和实际受限 bus label                                                  |
+| `systemBus`                     | 闭合的 `socket`、`privateSocket`、`label`、`executable`（`path`、`sha256`）；系统 bus socket、`/run/systemd/private` 和实际受限 bus label                |
 | `volumeSerialPath`              | 实际最终 `/sys/devices/.../serial` 对象                                                                                                                  |
 | `roleConfigPaths`               | `/etc/qwen-k2` 直接子文件中的准确 `source`、`gateway` JSON 部署路径，同样进入输出 unit                                                                   |
 | `sandboxNetworkNamespaceSource` | `/run/netns/` 下包含唯一 `${SANDBOX_ID}`（64位十六进制）或 `${NETWORK_NAMESPACE_ID}`（UUID）的组件模板，不接受调用者模式                                 |
@@ -209,9 +251,9 @@ python3 deploy/k2-evidence/render-profiles.py \
 
 两份服务配置必须准确包含 Go 入口消费的字段。配置及 TLS 路径留在 `/etc/qwen-k2` 直接子文件，声明的私钥路径不能与其他角色或公开输入别名。宿主程序路径不能进入角色文件、journal、socket、kubelet 数据、proc/sys/dev、临时或 worker 可写根，防止程序身份字段形成第二条密钥/数据读取路径；实际 inode/密钥字节隔离仍需安装资格化。journal 根及 runtime socket 固定；frontend/backend socket basename 可在既有私有目录内变化。gateway URL 必须指向实际 IP listener；DNS 及未指定监听地址不在此离线支持范围。完整已保存 Runtime command/image、worker mount root 必须与契约及镜像一致，可写根不能覆盖受保护目录或镜像文件。
 
-必填宿主目录含 `host-policies.json`（`qwen-k2-host-policies/1`），恰好包含 `format` 与 `files`；后者固定 `host-runtime.rules`、`host-kubelet.rules`、`host-registrar.rules`、`host-plugin.rules`、`host-systemd.rules`、`host-system-bus.rules` 的字节数和 SHA-256。每份是完整、独立已审、已展开的基础正文，至多 1 MiB，不能只提供少量 K2 权限。manifest 至多 64 KiB，需提供独立已审摘要。平面正文通道及代码拥有的配对新增规则见[完整宿主策略设计](../../docs/design/2026-10-18-k2-host-policy-set.zh-CN.md)。名字必须是根 namespace 内的字面标签，不含 `:`、`//` 或末尾斜杠。独立 bus 名字不能以 `/` 开头，避免形成隐式 executable attachment。bus 复用已显式 attachment 的宿主标签时，完整基础字节必须相同，该 profile 只输出一次。inert 测试夹具不提供可运行宿主基础策略。
+必填宿主目录含 `host-policies.json`（`qwen-k2-host-policies/1`），恰好包含 `format` 与 `files`；后者固定 `host-runtime.rules`、`host-kubelet.rules`、`host-registrar.rules`、`host-plugin.rules`、`host-systemd.rules`、`host-system-bus.rules` 的字节数和 SHA-256。每份是完整、独立已审、已展开的基础正文，至多 1 MiB，不能只提供少量 K2 权限。manifest 至多 64 KiB，需提供独立已审摘要。平面正文通道及代码拥有的配对新增规则见[完整宿主策略设计](../../docs/design/2026-10-18-k2-host-policy-set.zh-CN.md)。名字必须是根 namespace 内的字面标签，不含 `:`、`//` 或末尾斜杠。六个宿主标签必须不同；bus 取得自身明确的 executable attachment，拒绝复用其他宿主标签。systemd 后缀无条件拒绝五个固定 helper/core 接口的写入，并经 LSM 拒绝 CAP_SYS_RESOURCE 使用，即使提供的基础正文允许这些操作。inert 测试夹具不提供可运行宿主基础策略。
 
-输出包含单一 `qwen-k2-profiles` 源码、全部七个宿主输入叶子、两份调整后的 unit、原服务/目标/Runtime/契约字节，以及绑定所有输出和生成器的第2版 `profile-candidate.json`。生成器拥有 Qwen 权限、全部 header/attachment 和 K2 配对/转换规则；不接受 target 事实中的任意权限数组、调用者模式或环境 include。完整 mount data 保留在原契约，规则只生成 AppArmor 可表达的类型、flags、source 和 destination；首个支持范围拒绝未知挂载选项、idmapped mount、相对 bind source 和宽泛设备许可。
+输出包含单一 `qwen-k2-profiles` 源码、全部七个宿主输入叶子、两份调整后的 unit、原服务/目标/Runtime/契约字节，必填 cold 叶子，以及以准确16个子 pin 绑定输出和生成器的第3版 `profile-candidate.json`。生成器拥有 Qwen 权限、全部 header/attachment 和 K2 配对/转换规则；不接受 target 事实中的任意权限数组、调用者模式或环境 include。完整 mount data 保留在原契约，规则只生成 AppArmor 可表达的类型、flags、source 和 destination；首个支持范围拒绝未知挂载选项、idmapped mount、相对 bind source 和宽泛设备许可。
 
 挂载规则区分外层 snapshot 与内层 OCI mount，并拆分初挂、propagation、bind remount、切根后的只读 finalize 及 masked paths。只读 remount 仅覆盖支持的继承安全 flags 的有限组合。镜像父链接先解析，再生成 mount/boot 路径；新 mountpoint 的父目录可尚未存在于镜像，普通镜像目录解析仍要求父项存在，解析结果超出 literal path 子集则拒绝。规则不能证明 source 类型、继承的 VFS flags、namespace 归属或实际 disconnected 名字，仍需已审目标和原生验收。source 仍不能写 cgroup controller；shim 新增 root-controller/statistics 权限只读，正常状态临时文件限定在原 CID 状态目录。
 
@@ -221,7 +263,7 @@ pathname Unix socket 使用字面路径文件访问规则。Unix peer-label 规�
 
 ## 显式策略编译阶段
 
-`compile-profiles.py` 消费已审第2版 `profile-candidate.json` 及其中每份 pinned 文件。核对生成器的平铺、有序五个 Qwen profile 前缀，再从固定基础正文及 target/configuration 字节重建准确完整宿主后缀；不接受 ambient include、alias、ABI 选择或嵌套 profile。布局检查不是通用策略 parser 或权限审查。后续安装图为第2版，不转换旧候选或旧安装。提供准确目标 parser ELF 及目标 feature 字节：
+`compile-profiles.py` 消费已审第3版 `profile-candidate.json` 及其中每份 pinned 文件。核对生成器的平铺、有序五个 Qwen profile 前缀，再从固定基础正文及 target/configuration 字节重建准确完整宿主后缀；不接受 ambient include、alias、ABI 选择或嵌套 profile。布局检查不是通用策略 parser 或权限审查。后续安装图为第3版，不转换旧候选或旧安装。提供准确目标 parser ELF 及目标 feature 字节：
 
 ```sh
 python3 deploy/k2-evidence/compile-profiles.py \
@@ -250,9 +292,9 @@ k2-assemble-artifacts \
   --output /absolute/output/new-installed-artifacts
 ```
 
-此离线命令读取固定工件集，不打开配置引用的 TLS 或客户端凭据文件，不执行记录中的编译命令。在创建输出前核对原依赖摘要、成功编译记录、未变的已保存编译输入，以及 packed 长度和摘要。保留原策略候选及 source 配置，仅替换顶层 `workerPolicySha256` 的 JSON value token，派生 `source-config.installed.json`，其余所有原字节不变；gateway 配置保持逐字节相同。`installation.json` 绑定其余24份输出，包括全部七个宿主输入叶子和将原 `compile.json` 更名保存的 `profile-compile.json`。
+此离线命令读取固定工件集，不打开配置引用的 TLS 或客户端凭据文件，不执行记录中的编译命令。在创建输出前核对原依赖摘要、成功编译记录、未变的已保存编译输入，以及 packed 长度和摘要。保留原策略候选及 source 配置，仅替换顶层 `workerPolicySha256` 的 JSON value token，派生 `source-config.installed.json`，其余所有原字节不变；gateway 配置保持逐字节相同。`installation.json` 绑定其余25份输出，包括全部七个宿主输入叶子和将原 `compile.json` 更名保存的 `profile-compile.json`。
 
-获准安装时应将这25份文件置于固定 `/etc/qwen-k2/artifacts` 根。该目录与 `/etc/qwen-k2` 均须在支持的 ext4 上由 root 拥有、私有且不可变；文件须满足既有 root 所有、不可变、只读和单链接检查。派生 source 配置安装在原声明的 source 路径，未变 gateway 配置在声明的 gateway 路径，准确 shim 配置在 `/etc/qwen-k2/shim.json`，自身 unit 在固定 `/etc/systemd/system` 路径。TLS 凭据是另行安装的角色私有输入。组装器不执行这些安装动作。
+获准安装时应将这26份文件置于固定 `/etc/qwen-k2/artifacts` 根。该目录与 `/etc/qwen-k2` 均须在支持的 ext4 上由 root 拥有、私有且不可变；文件须满足既有 root 所有、不可变、只读和单链接检查。派生 source 配置安装在原声明的 source 路径，未变 gateway 配置在声明的 gateway 路径，准确 shim 配置在 `/etc/qwen-k2/shim.json`，自身 unit 在固定 `/etc/systemd/system` 路径。TLS 凭据是另行安装的角色私有输入。组装器不执行这些安装动作。
 
 两个真实服务入口持有工件目录及受保护祖先，经目录 FD 只打开固定子名字，禁止符号链接及跨 mount，并将自身配置/unit、shim 配置与快照比较。既有请求守卫持续复核原持有对象；source 还将 packed 摘要及长度与内核实际加载策略比较。gateway 不取得 source 专用策略 exporter 权限，两个角色都不打开另一角色的真实配置或私钥。目录清单与策略源码单独限制16 MiB，packed 策略8 MiB，完整快照64 MiB，既有出生/配置32 KiB上限不变。
 
@@ -260,6 +302,6 @@ gateway 现在返回第2版 runtime 身份，包含其实际匹配的自身配�
 
 清单只证明字节一致性，不认证 systemd 有效设置、加载策略语义、runtime handler 选择、actor 排除、CSI 独占或安装 provenance。目前验证使用明确合成的编译数据和可移植字节测试，以及仅编译的 Linux 输出；组装器 CLI、真实受保护对象行为和现场安装尚未验收。[source/7](../../docs/design/2026-10-17-k2-installed-byte-journal.zh-CN.md) 现将两份字节观察写入 SOURCE_START，ARM 保存原持有 frontend 身份；Java 核对必填的独立已审元数据期待值。source/6 和旧 Node 配置直接拒绝，不转换。这仅记录事实，不提供安装信任、物理释放权限或安全复用。
 
-`node-config` 的 deployment JSON 现须在 `nodeName`、`client`、`sourceConfiguration`、`shimConfiguration` 之外提供必填 `installedArtifacts`，指向独立已审25文件工件目录的绝对路径。使用准确派生 `source-config.installed.json` 及原 `shim.json`。Client 仍保留 source/coordinator 主体及外部 PKCS12/password/CA 路径，保存的 Node 配置仅含紧凑非秘密字节期待值，不持久保存工件目录，也不把引用凭据文件当作工件打开。Java 核对固定元数据、有界完整宿主基础字节及其 pin，真实 Go 服务持有完整工件图；这项操作员解析不代表安装资格。
+`node-config` 的 deployment JSON 现须在 `nodeName`、`client`、`sourceConfiguration`、`shimConfiguration` 之外提供必填 `installedArtifacts`，指向独立已审26文件工件目录的绝对路径。使用准确派生 `source-config.installed.json` 及原 `shim.json`。Client 仍保留 source/coordinator 主体及外部 PKCS12/password/CA 路径，保存的 Node 配置仅含紧凑非秘密字节期待值，不持久保存工件目录，也不把引用凭据文件当作工件打开。Java 核对固定元数据、有界完整宿主基础字节及其 pin，真实 Go 服务持有完整工件图；这项操作员解析不代表安装资格。
 
 两个服务还要求通过 `/run/systemd/private` 持有原 root PID-1 连接，其 executable 和 enforce label 必须匹配已审 `systemd` target，并持续持有其原 user/mount namespace。[有效服务身份检查](../../docs/design/2026-10-17-k2-effective-service-identity.zh-CN.md)在启动及既有操作边界读取固定自身 Unit/Service 属性：准确进程/command、无 drop-in 或待 reload 的 native unit、原 invocation/启动时间，以及部分权限属性。任何错误永久使该实例失效；客户端不重连、不管理服务。这些采样检查不代表全部有效设置或安装 provenance 已资格化。真实 systemd 属性兼容性、启动时序和已加载策略权限仍未验证。binary 与 profile generator 改变后需要重新形成工件 pins 并资格化。

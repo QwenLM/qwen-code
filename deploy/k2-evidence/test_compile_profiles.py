@@ -61,6 +61,20 @@ class CompileProfilesDataTest(unittest.TestCase):
             self.prepare()
         self.assertFalse(self.output.exists())
 
+    def test_repinned_target_cannot_change_the_cold_architecture(self):
+        path = self.candidate / "target.json"
+        value = json.loads(path.read_bytes())
+        value["architecture"] = "arm64"
+        path.chmod(0o600)
+        path.write_bytes(fixtures.POLICY.encoded(value))
+        manifest = json.loads(self.manifest.read_bytes())
+        manifest["files"][path.name] = {"bytes": path.stat().st_size, "sha256": fixtures.digest(path)}
+        self.manifest.chmod(0o600)
+        self.manifest.write_bytes(fixtures.POLICY.encoded(manifest))
+        with self.assertRaisesRegex(ValueError, "cold producer and target linkage differs"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+
     def test_candidate_path_injection_and_extra_fields_refuse(self):
         value = json.loads(self.manifest.read_bytes())
         pin = value["files"].pop("source-config.json")

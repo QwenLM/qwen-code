@@ -157,26 +157,21 @@ def host_profiles(facts, bases, source, gateway):
         additions["systemd"] += ["unix (accept,send,receive) type=stream peer=(label=qwen-k2-" + role + "-v1),", "signal (send) set=(term,int,kill) peer=qwen-k2-" + role + "-v1,", "change_profile -> qwen-k2-" + role + "-v1,"]
     additions["systemd"] += [file_literal(bus["privateSocket"]) + " rw,", "unix (accept,send,receive) type=stream peer=(label=qwen-k2-shim-v1),", 'dbus (send,receive) bus=system path="/org/freedesktop/systemd1{,/**}" interface="org.freedesktop.systemd1.{Manager,Unit,Scope}" peer=(label=qwen-k2-shim-v1),']
     additions["system-bus"] += [file_literal(bus["socket"]) + " rw,", "unix (accept,send,receive) type=stream peer=(label=qwen-k2-shim-v1),", 'dbus receive bus=system path=/org/freedesktop/DBus interface=org.freedesktop.DBus member="{Hello,AddMatch,RemoveMatch}" peer=(label=qwen-k2-shim-v1),']
-    groups = {}
-    for role in HOST_ROLES:
-        key = label(role)
-        if key in groups:
-            require(groups[key][0] == bases[role], "host roles sharing a label require identical complete bases")
-            groups[key][2].extend(additions[role])
-        else:
-            attachment = " " + file_literal(hosts[role]["path"]) if role != "system-bus" else ""
-            groups[key] = (bases[role], attachment, list(additions[role]))
+    additions["systemd"] += ['deny "' + p + '" w,' for p in ("/proc/sys/kernel/modprobe", "/proc/sys/kernel/hotplug", "/sys/kernel/uevent_helper", "/proc/sys/kernel/core_pattern", "/proc/sys/fs/suid_dumpable")]
+    additions["systemd"] += ["deny capability sys_resource,"]
     result = bytearray()
-    for name, (base, attachment, rules) in groups.items():
-        result += ("profile " + name + attachment + " flags=(enforce,mediate_deleted) {\n").encode()
-        result += base
-        result += ("\n".join("  " + rule for rule in sorted(set(rules))) + "\n}\n\n").encode()
+    for role in HOST_ROLES:
+        attachment = " " + file_literal(bus["executable"]["path"] if role == "system-bus" else hosts[role]["path"])
+        result += ("profile " + label(role) + attachment + " flags=(enforce,mediate_deleted) {\n").encode()
+        result += bases[role]
+        result += ("\n".join("  " + rule for rule in sorted(set(additions[role]))) + "\n}\n\n").encode()
     return bytes(result)
 
 
 def target(value):
-    fields = {"format", "architecture", "hostExecutables", "snapshotRoot", "podSlicePrefix", "apparmorExportRoot", "systemBus", "volumeSerialPath", "roleConfigPaths", "sandboxNetworkNamespaceSource", "rootfsMounts", "oldRootPath", "hugepageSizes"}
-    require(set(value) == fields and value["format"] == "qwen-k2-profile-target/2" and value["architecture"] in ("amd64", "arm64"), "complete closed profile target facts are required")
+    fields = {"format", "architecture", "coldBootstrapSha256", "hostExecutables", "snapshotRoot", "podSlicePrefix", "apparmorExportRoot", "systemBus", "volumeSerialPath", "roleConfigPaths", "sandboxNetworkNamespaceSource", "rootfsMounts", "oldRootPath", "hugepageSizes"}
+    require(set(value) == fields and value["format"] == "qwen-k2-profile-target/3" and value["architecture"] in ("amd64", "arm64"), "complete closed profile target facts are required")
+    IMAGE.digest("sha256:" + value["coldBootstrapSha256"])
     hosts = value["hostExecutables"]
     require(isinstance(hosts, dict) and set(hosts) == {"runtime", "kubelet", "registrar", "plugin", "systemd"}, "all host peer identities are required")
     labels = []
@@ -200,10 +195,13 @@ def target(value):
         require(re.fullmatch(r"/etc/qwen-k2/[A-Za-z0-9._-]+\.json", literal(path)), "role configurations require literal protected JSON paths")
     require(len(set(configs.values()) | {"/etc/qwen-k2/shim.json"}) == 3, "role configuration paths must be distinct")
     bus = value["systemBus"]
-    require(isinstance(bus, dict) and set(bus) == {"socket", "privateSocket", "label"}, "closed system bus facts are required")
+    require(isinstance(bus, dict) and set(bus) == {"socket", "privateSocket", "label", "executable"}, "closed system bus facts are required")
     require(bus["socket"] in ("/run/dbus/system_bus_socket", "/var/run/dbus/system_bus_socket") and bus["privateSocket"] == "/run/systemd/private", "fixed system bus sockets are required")
     require(host_label(bus["label"]), "a confined root bus label is required")
-    require(not bus["label"].startswith("/") or bus["label"] in labels, "a distinct bus label cannot imply an executable attachment")
+    require(bus["label"] not in labels, "six distinct host labels are required")
+    require(isinstance(bus["executable"], dict) and set(bus["executable"]) == {"path", "sha256"}, "literal bus executable identity is required")
+    literal(bus["executable"]["path"])
+    IMAGE.digest("sha256:" + bus["executable"]["sha256"])
     namespace = value["sandboxNetworkNamespaceSource"]
     require(isinstance(namespace, str) and re.fullmatch(r"/run/netns/[A-Za-z0-9._-]*\$\{(?:SANDBOX_ID|NETWORK_NAMESPACE_ID)\}[A-Za-z0-9._-]*", namespace), "the fixed identity network namespace template is required")
     require(under(literal(value["oldRootPath"]), "/qwen-k2-disconnected/shim") and value["oldRootPath"] != "/qwen-k2-disconnected/shim", "a specific old-root disconnected path is required")
@@ -235,7 +233,7 @@ def role_configs(facts, source, gateway, manifest):
     require(not paths["source"].intersection({gateway["key"], facts["roleConfigPaths"]["gateway"]}) and not paths["gateway"].intersection({source["key"], source["gatewayClientKey"], facts["roleConfigPaths"]["source"]}), "role files cannot cross private role boundaries")
     host = facts["hostExecutables"]
     protected = ("/etc/qwen-k2", "/var/lib/qwen-k2", "/run/qwen-k2", "/var/lib/kubelet", "/proc", "/sys", "/dev", "/tmp")
-    require(all(not under(item["path"], root) for item in host.values() for root in protected), "host executable paths cannot alias role inputs or protected roots")
+    require(all(not under(item["path"], root) for item in list(host.values()) + [facts["systemBus"]["executable"]] for root in protected), "host executable paths cannot alias role inputs or protected roots")
     for name, field in (("runtime", "runtimeDigest"), ("plugin", "pluginDigest"), ("kubelet", "kubeletDigest"), ("registrar", "registrarDigest")):
         require(source[field] == host[name]["sha256"], "source and host executable digests differ")
     require(gateway["runtimeDigest"] == source["runtimeDigest"], "gateway runtime digest differs")
@@ -393,7 +391,7 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
     entries = {role: [] for role in ROLES}
     for role in ("source", "gateway"):
         entries[role] = service + [file_literal(path) + " r," for path in role_files[role]] + ["signal (send,receive) peer=qwen-k2-" + role + "-v1,", "signal (receive) set=(term,int,kill) peer=" + peer("systemd") + ","]
-        artifact_names = "installation.json,artifact-manifest.json,shim.json,profile-candidate.json,profile-compile.json,source-config.json,source-config.installed.json,gateway-config.json,target.json,runtime.json,creation-contract.json,qwen-k2-node-source.service,qwen-k2-runtime-gateway.service,features,qwen-k2-profiles,worker-catalog.json,sandbox-catalog.json,packed.bin,host-policies.json," + ",".join(sorted(HOST_FILES))
+        artifact_names = "installation.json,artifact-manifest.json,shim.json,profile-candidate.json,profile-compile.json,source-config.json,source-config.installed.json,gateway-config.json,target.json,runtime.json,creation-contract.json,qwen-k2-node-source.service,qwen-k2-runtime-gateway.service,features,qwen-k2-profiles,worker-catalog.json,sandbox-catalog.json,packed.bin,cold-bootstrap.json,host-policies.json," + ",".join(sorted(HOST_FILES))
         entries[role] += ['"/etc/" r,', '"/etc/qwen-k2/{,artifacts/}" r,', '"/etc/qwen-k2/artifacts/{' + artifact_names + '}" r,']
         unit = "qwen-k2-node-source.service" if role == "source" else "qwen-k2-runtime-gateway.service"
         entries[role] += ['"/etc/systemd/system/' + unit + '" r,']
@@ -443,7 +441,7 @@ def profiles(facts, contract, catalogs, runtime, source, gateway, manifest):
     return raw
 
 
-def render(candidate, candidate_sha, target_file, target_sha, runtime_file, runtime_sha, source_file, source_sha, gateway_file, gateway_sha, worker_layout, sandbox_layout, host_policy, host_policy_sha, output):
+def render(candidate, candidate_sha, target_file, target_sha, runtime_file, runtime_sha, source_file, source_sha, gateway_file, gateway_sha, worker_layout, sandbox_layout, host_policy, host_policy_sha, cold_bootstrap, output):
     manifest_raw, manifest = read_json(candidate / "artifact-manifest.json", candidate_sha, 64 * 1024)
     require(set(manifest) == {"format", "artifacts", "creationContractSha256", "sandboxImageSha256", "workerImageSha256", "catalogues", "generators"} and manifest["format"] == "qwen-k2-pre-exec-artifacts/2", "exact version-2 artifacts are required")
     for role in ("source", "shim", "runc"):
@@ -476,11 +474,16 @@ def render(candidate, candidate_sha, target_file, target_sha, runtime_file, runt
     runtime_raw, runtime = read_json(runtime_file, runtime_sha, 64 * 1024)
     source_raw, source = read_json(source_file, source_sha, 32 * 1024)
     gateway_raw, gateway = read_json(gateway_file, gateway_sha, 32 * 1024)
+    import cold_boot
+    cold_raw = cold_boot.read(cold_bootstrap, 64 * 1024)
+    cold = cold_boot.validate(cold_raw)
+    require(cold["generators"] == cold_boot.generators(), "cold generator versions differ")
+    require(sha(cold_raw) == facts["coldBootstrapSha256"] and cold["architecture"] == facts["architecture"] and all(facts["hostExecutables"]["systemd"][k] == cold["systemd"][k] for k in ("path", "sha256", "label")), "cold producer and target linkage differ")
     require(facts["architecture"] == manifest["artifacts"]["source"]["architecture"], "target and host architecture differ")
     profile = profiles(facts, contract, catalogs, runtime, source, gateway, manifest)
     host_raw, host_manifest = read_json(host_policy / "host-policies.json", host_policy_sha, 64 * 1024)
     require(set(host_manifest.get("files", {})) == HOST_FILES, "the complete fixed host policy manifest is required")
-    files = {"host-policies.json": host_raw}
+    files = {"host-policies.json": host_raw, "cold-bootstrap.json": cold_raw}
     for name in sorted(HOST_FILES):
         with (host_policy / name).open("rb") as stream:
             files[name] = stream.read(1024 * 1024 + 1)
@@ -493,7 +496,7 @@ def render(candidate, candidate_sha, target_file, target_sha, runtime_file, runt
         old = ("ExecStart=/opt/qwen-k2/bin/k2-node-evidence " + role + " /etc/qwen-k2/" + role + ".json").encode()
         require(template.count(old) == 1, "the service template argv differs")
         files[template_name] = template.replace(old, ("ExecStart=/opt/qwen-k2/bin/k2-node-evidence " + role + " " + facts["roleConfigPaths"][role]).encode())
-    document = {"format": "qwen-k2-profile-candidate/2", "artifactManifestSha256": sha(manifest_raw), "shimConfigurationSha256": sha(shim_raw), "roleConfigPaths": facts["roleConfigPaths"], "boundaries": BOUNDARIES, "generators": {name: sha(Path(__file__).with_name(name).read_bytes()) for name in ("render-profiles.py", "render-pre-exec.py", "image-catalog.py")}, "files": {name: {"bytes": len(raw), "sha256": sha(raw)} for name, raw in files.items()}}
+    document = {"format": "qwen-k2-profile-candidate/3", "artifactManifestSha256": sha(manifest_raw), "shimConfigurationSha256": sha(shim_raw), "roleConfigPaths": facts["roleConfigPaths"], "boundaries": BOUNDARIES, "generators": {name: sha(Path(__file__).with_name(name).read_bytes()) for name in ("render-profiles.py", "render-pre-exec.py", "image-catalog.py")}, "files": {name: {"bytes": len(raw), "sha256": sha(raw)} for name, raw in files.items()}}
     files["profile-candidate.json"] = encoded(document)
     output.mkdir(mode=0o700, exist_ok=False)
     for name, raw in files.items():
@@ -511,11 +514,12 @@ def main():
         parser.add_argument("--" + name + "-sha256", required=True)
     for name in ("worker-layout", "sandbox-layout", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--cold-bootstrap", type=Path, required=True)
     parser.add_argument("--host-policy", type=Path, required=True)
     parser.add_argument("--host-policy-sha256", required=True)
     args = parser.parse_args()
     try:
-        render(args.candidate, args.artifact_manifest_sha256, args.target, args.target_sha256, args.runtime, args.runtime_sha256, args.source_config, args.source_config_sha256, args.gateway_config, args.gateway_config_sha256, args.worker_layout, args.sandbox_layout, args.host_policy, args.host_policy_sha256, args.output)
+        render(args.candidate, args.artifact_manifest_sha256, args.target, args.target_sha256, args.runtime, args.runtime_sha256, args.source_config, args.source_config_sha256, args.gateway_config, args.gateway_config_sha256, args.worker_layout, args.sandbox_layout, args.host_policy, args.host_policy_sha256, args.cold_bootstrap, args.output)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, EOFError, IMAGE.tarfile.TarError, IMAGE.struct.error) as failure:
         parser.exit(1, "Profile candidate rendering refused: " + str(failure) + "\n")
 

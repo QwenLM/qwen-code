@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.runtimebroker.CsiCreationContract;
 import com.alibaba.qwen.code.runtimebroker.CsiInstalledByteObservation;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.io.IOException;
@@ -24,7 +25,7 @@ final class WorkspaceCsiInstalledBytes {
             "target.json", "runtime.json", "creation-contract.json", "qwen-k2-node-source.service",
             "qwen-k2-runtime-gateway.service", "features", "qwen-k2-profiles", "worker-catalog.json",
             "sandbox-catalog.json", "packed.bin", "host-policies.json", "host-runtime.rules", "host-kubelet.rules",
-            "host-registrar.rules", "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules");
+            "host-registrar.rules", "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules", "cold-bootstrap.json");
     private static final Set<String> HOST_BASES = Set.of("host-runtime.rules", "host-kubelet.rules",
             "host-registrar.rules", "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules");
 
@@ -35,7 +36,7 @@ final class WorkspaceCsiInstalledBytes {
         byte[] manifestRaw = read(directory.resolve("installation.json"), 64 * 1024);
         JsonNode manifest = object(manifestRaw, 64 * 1024);
         closed(manifest, Set.of("format", "files"));
-        require("qwen-k2-installed-artifacts/2".equals(text(manifest, "format")));
+        require("qwen-k2-installed-artifacts/3".equals(text(manifest, "format")));
         JsonNode pins = manifest.path("files");
         closed(pins, FILES);
         long total = manifestRaw.length;
@@ -62,7 +63,7 @@ final class WorkspaceCsiInstalledBytes {
         JsonNode profile = object(profileRaw, 64 * 1024);
         closed(profile, Set.of("format", "artifactManifestSha256", "shimConfigurationSha256", "roleConfigPaths",
                 "boundaries", "generators", "files"));
-        require("qwen-k2-profile-candidate/2".equals(text(profile, "format"))
+        require("qwen-k2-profile-candidate/3".equals(text(profile, "format"))
                 && DigestUtils.sha256Hex(shim).equals(text(profile, "shimConfigurationSha256")));
         JsonNode paths = profile.path("roleConfigPaths");
         closed(paths, Set.of("source", "gateway"));
@@ -70,11 +71,12 @@ final class WorkspaceCsiInstalledBytes {
         Set<String> profileNames = Set.of("source-config.json", "gateway-config.json", "target.json", "runtime.json",
                 "creation-contract.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "qwen-k2-profiles",
                 "host-policies.json", "host-runtime.rules", "host-kubelet.rules", "host-registrar.rules",
-                "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules");
+                "host-plugin.rules", "host-systemd.rules", "host-system-bus.rules", "cold-bootstrap.json");
         closed(profileFiles, profileNames);
         for (String name : profileNames) {
             require(profileFiles.path(name).equals(pins.path(name)));
         }
+        cold(directory, pins, readCold(pinned(directory, pins, "cold-bootstrap.json", 64 * 1024)));
         JsonNode hostPolicies = object(pinned(directory, pins, "host-policies.json", 64 * 1024), 64 * 1024);
         closed(hostPolicies, Set.of("format", "files"));
         require("qwen-k2-host-policies/1".equals(text(hostPolicies, "format")));
@@ -128,6 +130,141 @@ final class WorkspaceCsiInstalledBytes {
                 pinned(directory, pins, "qwen-k2-runtime-gateway.service", 32 * 1024));
         return new WorkspaceCsiNodeSourceStore.InstalledBytes(sourceExpected, gatewayExpected,
                 text(sourceValue, "kubeletDigest"), text(sourceValue, "registrarDigest"));
+    }
+
+    private static JsonNode readCold(byte[] raw) throws IOException {
+        JsonNode value = object(raw, 64 * 1024);
+        closed(value, Set.of("format", "entryKind", "architecture", "kernel", "baseInitrd", "initrdInputs", "coldInit",
+                "systemd", "systemdDependencies", "linkPlan", "bootState", "rootfsPlan", "generators"));
+        require("qwen-k2-cold-bootstrap/1".equals(text(value, "format"))
+                && "initramfs-tools-run-init-first-systemd".equals(text(value, "entryKind"))
+                && "amd64".equals(text(value, "architecture")));
+        JsonNode loader = value.path("coldInit");
+        closed(loader, Set.of("path", "bytes", "sha256"));
+        require("/opt/qwen-k2/bin/k2-cold-init".equals(text(loader, "path"))
+                && positive(loader, "bytes", 128 * 1024 * 1024) >= 64
+                && text(loader, "sha256").matches("[0-9a-f]{64}"));
+        JsonNode systemd = value.path("systemd");
+        closed(systemd, Set.of("path", "bytes", "sha256", "label"));
+        String label = text(systemd, "label");
+        require(label.matches("[A-Za-z0-9/][A-Za-z0-9._/-]{0,252}") && !label.contains("//")
+                && !label.endsWith("/") && !label.equals("unconfined") && !label.startsWith("qwen-k2-"));
+        closed(value.path("generators"), Set.of("render-cold-boot.py", "package-cold-initrd.py", "cold_boot.py", "cold-lane.json"));
+        value.path("generators").elements().forEachRemaining(v -> require(v.isTextual() && v.textValue().matches("[0-9a-f]{64}")));
+        JsonNode scripts = value.path("bootState").path("scriptOutputs");
+        require(scripts.isObject() && scripts.size() >= 7 && scripts.size() <= 256);
+        Set<String> mandatory = Set.of("/init", "/scripts/functions", "/scripts/init-top/udev", "/scripts/init-bottom/udev",
+                "/scripts/init-top/ORDER", "/scripts/init-bottom/ORDER", "/scripts/local-bottom/ORDER");
+        for (String name : mandatory) {
+            require(scripts.has(name));
+        }
+        var names = scripts.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            require(coldPath(name) && (mandatory.contains(name) || name.matches("/scripts/[A-Za-z0-9._-]+/ORDER")));
+            closed(scripts.path(name), Set.of("bytes", "sha256"));
+            positive(scripts.path(name), "bytes", 1024 * 1024);
+            require(text(scripts.path(name), "sha256").matches("[0-9a-f]{64}"));
+        }
+        JsonNode links = value.path("linkPlan");
+        require(links.isObject() && links.size() <= 64);
+        names = links.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            require(coldPath(name) && (name.equals("/lib") || name.equals("/lib64")
+                    || name.startsWith("/usr/lib/") || name.startsWith("/usr/lib64/")));
+            String target = text(links, name);
+            require(target.length() <= 2048 && !target.contains("\0") && !target.contains("\r") && !target.contains("\n"));
+        }
+        require(value.path("systemdDependencies").isArray() && value.path("systemdDependencies").size() == 24);
+        for (JsonNode dependency : value.path("systemdDependencies")) {
+            require(resolveCold(text(dependency, "lookupPath"), links).equals(text(dependency, "path")));
+        }
+        ObjectNode normalized = value.deepCopy();
+        ((ObjectNode) normalized.path("coldInit")).put("bytes", 0).put("sha256", "");
+        ((ObjectNode) normalized.path("systemd")).put("label", "");
+        normalized.putObject("generators");
+        normalized.putObject("linkPlan");
+        ((ObjectNode) normalized.path("bootState")).putObject("scriptOutputs");
+        try (var input = WorkspaceCsiInstalledBytes.class.getResourceAsStream("/k2-cold-lane.json")) {
+            require(input != null && normalized.equals(object(input.readNBytes(64 * 1024 + 1), 64 * 1024)));
+        }
+        return value;
+    }
+
+    private static boolean coldPath(String name) {
+        return name.length() <= 2048 && name.startsWith("/") && !name.endsWith("/")
+                && !name.contains("//") && !name.contains("/./") && !name.contains("/../")
+                && !name.endsWith("/.") && !name.endsWith("/..")
+                && !name.contains("\0") && !name.contains("\r") && !name.contains("\n");
+    }
+
+    private static String resolveCold(String name, JsonNode links) {
+        require(coldPath(name));
+        for (int count = 0; count <= 40; count++) {
+            String[] parts = name.substring(1).split("/");
+            String prefix = "";
+            boolean changed = false;
+            for (int i = 0; i < parts.length; i++) {
+                prefix += "/" + parts[i];
+                if (!links.has(prefix)) {
+                    continue;
+                }
+                String target = text(links, prefix);
+                if (!target.startsWith("/")) {
+                    target = prefix.substring(0, prefix.lastIndexOf('/') + 1) + target;
+                }
+                for (int j = i + 1; j < parts.length; j++) {
+                    target += "/" + parts[j];
+                }
+                var normalized = new java.util.ArrayDeque<String>();
+                for (String part : target.split("/")) {
+                    if (part.equals("..")) {
+                        if (!normalized.isEmpty()) {
+                            normalized.removeLast();
+                        }
+                    } else if (!part.isEmpty() && !part.equals(".")) {
+                        normalized.addLast(part);
+                    }
+                }
+                name = "/" + String.join("/", normalized);
+                changed = true;
+                break;
+            }
+            if (!changed) {
+                return name;
+            }
+        }
+        throw new IllegalArgumentException("Invalid cold dependency alias cycle");
+    }
+
+    private static void cold(Path directory, JsonNode pins, JsonNode cold) throws IOException {
+        JsonNode target = object(pinned(directory, pins, "target.json", 32 * 1024), 32 * 1024);
+        closed(target, Set.of("format", "architecture", "coldBootstrapSha256", "hostExecutables", "snapshotRoot",
+                "podSlicePrefix", "apparmorExportRoot", "systemBus", "volumeSerialPath", "roleConfigPaths",
+                "sandboxNetworkNamespaceSource", "rootfsMounts", "oldRootPath", "hugepageSizes"));
+        require("qwen-k2-profile-target/3".equals(text(target, "format"))
+                && text(pins.path("cold-bootstrap.json"), "sha256").equals(text(target, "coldBootstrapSha256"))
+                && text(cold, "architecture").equals(text(target, "architecture")));
+        JsonNode systemd = cold.path("systemd");
+        closed(systemd, Set.of("path", "bytes", "sha256", "label"));
+        positive(systemd, "bytes", 128 * 1024 * 1024);
+        JsonNode hosts = target.path("hostExecutables");
+        closed(hosts, Set.of("runtime", "kubelet", "registrar", "plugin", "systemd"));
+        for (String field : Set.of("path", "sha256", "label")) {
+            require(text(systemd, field).equals(text(hosts.path("systemd"), field)));
+        }
+        JsonNode bus = target.path("systemBus");
+        closed(bus, Set.of("socket", "privateSocket", "label", "executable"));
+        closed(bus.path("executable"), Set.of("path", "sha256"));
+        require(text(bus.path("executable"), "path").startsWith("/")
+                && text(bus.path("executable"), "sha256").matches("[0-9a-f]{64}"));
+        var labels = new java.util.HashSet<String>();
+        for (JsonNode host : hosts) {
+            closed(host, Set.of("path", "sha256", "label"));
+            require(labels.add(text(host, "label")));
+        }
+        require(labels.add(text(bus, "label")) && !labels.contains("unconfined"));
     }
 
     private static CsiInstalledByteObservation observation(String role, String installation, String architecture,

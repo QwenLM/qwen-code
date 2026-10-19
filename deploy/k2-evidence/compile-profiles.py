@@ -16,7 +16,7 @@ ROLES = ("source", "gateway", "shim", "worker", "sandbox")
 spec = importlib.util.spec_from_file_location("k2_profiles", Path(__file__).with_name("render-profiles.py"))
 POLICY = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(POLICY)
-FILES = {"qwen-k2-profiles", "source-config.json", "gateway-config.json", "target.json", "runtime.json", "creation-contract.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "host-policies.json"} | POLICY.HOST_FILES
+FILES = {"qwen-k2-profiles", "source-config.json", "gateway-config.json", "target.json", "runtime.json", "creation-contract.json", "qwen-k2-node-source.service", "qwen-k2-runtime-gateway.service", "host-policies.json", "cold-bootstrap.json"} | POLICY.HOST_FILES
 
 
 def digest(raw):
@@ -84,7 +84,7 @@ def prepare(candidate, candidate_sha, parser, parser_sha, features, features_sha
     raw = read(candidate / "profile-candidate.json", candidate_sha, 64 * 1024)
     manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=closed, parse_constant=nonfinite)
     fields = {"format", "artifactManifestSha256", "shimConfigurationSha256", "roleConfigPaths", "boundaries", "generators", "files"}
-    if not isinstance(manifest, dict) or set(manifest) != fields or manifest["format"] != "qwen-k2-profile-candidate/2" or not isinstance(manifest["files"], dict) or set(manifest["files"]) != FILES:
+    if not isinstance(manifest, dict) or set(manifest) != fields or manifest["format"] != "qwen-k2-profile-candidate/3" or not isinstance(manifest["files"], dict) or set(manifest["files"]) != FILES:
         raise ValueError("the complete generated profile candidate is required")
     if manifest["generators"] != {name: digest(Path(__file__).with_name(name).read_bytes()) for name in ("render-profiles.py", "render-pre-exec.py", "image-catalog.py")}:
         raise ValueError("profile candidate generator versions differ")
@@ -96,7 +96,13 @@ def prepare(candidate, candidate_sha, parser, parser_sha, features, features_sha
         copied[name] = read(candidate / name, pin["sha256"], limit)
         if len(copied[name]) != pin["bytes"]:
             raise ValueError("profile candidate file length differs")
+    import cold_boot
+    cold = cold_boot.validate(copied["cold-bootstrap.json"])
+    if cold["generators"] != cold_boot.generators():
+        raise ValueError("cold generator versions differ")
     values = {name: json.loads(copied[name + ".json"].decode("utf-8"), object_pairs_hook=closed, parse_constant=nonfinite) for name in ("target", "source-config", "gateway-config")}
+    if values["target"]["architecture"] != cold["architecture"] or values["target"]["coldBootstrapSha256"] != digest(copied["cold-bootstrap.json"]) or any(values["target"]["hostExecutables"]["systemd"][k] != cold["systemd"][k] for k in ("path", "sha256", "label")):
+        raise ValueError("cold producer and target linkage differs")
     bases = POLICY.host_inputs(copied["host-policies.json"], copied)
     suffix = POLICY.host_profiles(values["target"], bases, values["source-config"], values["gateway-config"])
     profile = copied["qwen-k2-profiles"]
