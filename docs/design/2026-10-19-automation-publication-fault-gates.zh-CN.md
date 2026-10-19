@@ -20,7 +20,7 @@ FG11c 已交付；本设计是剩余部分。
 本门禁钉住的生产接缝：
 
 - `QwenHostedHarnessConnector.create` 在发布开启且会话 profile 为公开 Shell
-  或内部 team lead 时下发 `captureBytes`（`:1082`）。
+  或内部 team lead 时下发 `captureBytes`（`create` 构建器）。
 - `ToolPublicationRetentionStore` 通过
   `ToolPublicationObjectStore.putIfAbsent` 写入；写入抛错时把 `OBJECT_PUT`
   操作置为 `UNKNOWN`（`:630-641`）；对未决写入的后续尝试以

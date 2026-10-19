@@ -24,7 +24,7 @@ The production seams this gate pins:
 
 - `QwenHostedHarnessConnector.create` sets `captureBytes` when tool
   publication is on and the session profile is a public Shell or the internal
-  team lead (`:1082`).
+  team lead (the `create` builder).
 - `ToolPublicationRetentionStore` writes through
   `ToolPublicationObjectStore.putIfAbsent` and marks the `OBJECT_PUT`
   operation `UNKNOWN` when the write throws (`:630-641`); a later attempt on
