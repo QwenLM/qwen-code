@@ -9,6 +9,11 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
+    /** Reattaches a SQL-proven unowned Session without trusting the local attachment cache. */
+    default void recoverForWake(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("Hosted wake recovery is unavailable");
+    }
+
     default boolean supportsApprovalSelection() { return false; }
 
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }
@@ -83,6 +88,14 @@ public interface HarnessConnector extends AutoCloseable {
             String sessionId, String turnId, String dispatchOwner) {
         throw new UnsupportedOperationException(
                 "Managed Runtime recovery is unavailable");
+    }
+
+    /**
+     * Discards the takeover snapshot cached for a Session so the next
+     * recovery load re-reads the parked Runtime state instead of answering
+     * from a report already known to be stale.
+     */
+    default void discardManagedRecovery(String tenantId, String sessionId) {
     }
 
     Admission submit(String tenantId, String sessionId, String promptId,

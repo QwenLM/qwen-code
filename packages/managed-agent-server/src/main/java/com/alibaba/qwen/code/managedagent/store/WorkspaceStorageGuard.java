@@ -238,6 +238,12 @@ public class WorkspaceStorageGuard {
         return root(binding.getTenantId(), binding.getStorageId());
     }
 
+    Map<String, String> fileRoot(ContextBinding binding) {
+        Path path = verifiedRoot(binding);
+        Identity actual = identity(path);
+        return Map.of("root", path.toString(), "device", actual.device(), "inode", actual.inode());
+    }
+
     void registerCreated(String tenantId, String storageId, String operationId) {
         Path path = createdRoots.resolve(tenantId, storageId, true);
         if (path == null) {
