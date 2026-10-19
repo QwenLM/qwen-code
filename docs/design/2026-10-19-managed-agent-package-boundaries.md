@@ -58,6 +58,8 @@ Session, Workspace and publication persistence share package-private transaction
 
 Broker providers and transports use existing protocol validators and value operations. Expose only the existing members consumed across the new package boundaries. Keep local-process state and SQL implementation helpers package-private. Update tests to follow the package whose internals they exercise; avoid making production internals public solely for a test. Two test-only access fixtures forward existing Broker-core and HTTP-transport seams across packages without exposing those production internals.
 
+Broker-core repositories use `transport.ManagedHoldFamily` to classify stored dispatch modes. Its dispatch-mode lookup is public for that core consumer, and `ToolHoldRow` stays in the core with the inventory repositories. Rebase validation compiles the updated core and transport consumers together.
+
 Keep the server's Spring Boot application at its existing root and the maintenance configuration outside that root. Update imports, fully qualified names, launcher configuration, current documentation links and any source-file references together. Preserve resource paths, Maven test profiles, fault gates and the Broker's separate Checkstyle execution.
 
 ## Risks and validation
