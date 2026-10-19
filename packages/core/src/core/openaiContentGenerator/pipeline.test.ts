@@ -1834,9 +1834,17 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it.each(['samplingParams', 'extra_body'] as const)(
-      'keeps native DeepSeek %s reasoning projection with a profile',
-      async (source) => {
+    it.each(
+      [
+        'deepseek-v4-pro',
+        'deepseek-reasoner',
+        'deepseek-v4-flash-vision-exp',
+      ].flatMap((model) =>
+        ['samplingParams', 'extra_body'].map((source) => [model, source]),
+      ),
+    )(
+      'keeps native DeepSeek %s %s reasoning projection with a profile',
+      async (model, source) => {
         routeThrough(DeepSeekOpenAICompatibleProvider);
         const wire = await executeWithCapability(
           {
@@ -1846,12 +1854,36 @@ describe('ContentGenerationPipeline', () => {
           },
           {
             baseUrl: 'https://api.deepseek.com/v1',
-            [source]: { reasoning: { effort: 'max' } },
+            [source]: { reasoning: { effort: 'max', budget_tokens: 8192 } },
           },
+          model,
         );
-        expectFields(wire, { reasoning_effort: 'max', reasoning: undefined });
+        expectFields(wire, {
+          reasoning_effort: 'max',
+          reasoning: { budget_tokens: 8192 },
+        });
       },
     );
+
+    it('preserves another explicit profile for an unlisted official model', async () => {
+      routeThrough(DeepSeekOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        {
+          profile: 'openai-reasoning',
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+        },
+        {
+          baseUrl: 'https://api.deepseek.com/v1',
+          samplingParams: { reasoning: { effort: 'max' } },
+        },
+        'deepseek-reasoner',
+      );
+      expectFields(wire, {
+        reasoning: { effort: 'max' },
+        reasoning_effort: undefined,
+      });
+    });
 
     it.each([
       ['https://api.deepseek.com/v1', 'openai-effort', 'reasoning_content', ''],

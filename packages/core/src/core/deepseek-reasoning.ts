@@ -37,7 +37,9 @@ function getDeepSeekEndpoint(
     return 'official';
   if (
     hostname.endsWith('.maas.aliyuncs.com') ||
-    /(^|\.)dashscope(?:-intl|-us)?\.aliyuncs\.com$/.test(hostname)
+    /^(?:dashscope(?:-intl|-us)?|cn-hongkong\.dashscope)\.aliyuncs\.com$/.test(
+      hostname,
+    )
   )
     return 'maas';
   return undefined;
@@ -51,7 +53,9 @@ export function getBuiltinDeepSeekReasoning(
   if (
     config.authType !== AuthType.USE_OPENAI ||
     !endpoint ||
-    (!FLASH_MODELS.has(model) && !LEGACY_MODELS.has(model))
+    (!FLASH_MODELS.has(model) &&
+      !LEGACY_MODELS.has(model) &&
+      !(endpoint === 'official' && model === 'deepseek-v4-flash-vision-exp'))
   )
     return undefined;
   return {
@@ -83,6 +87,8 @@ export function normalizeDeepSeekReasoningEffort(
       ? 'low'
       : 'high';
   if (effort === 'medium') return 'high';
+  // MaaS does not specify xhigh; keep max for legacy models and follow the
+  // current official mapping for the newer Flash aliases.
   if (effort === 'xhigh')
     return (builtin && getDeepSeekEndpoint(baseUrl) === 'official') ||
       (FLASH_MODELS.has(model?.toLowerCase() ?? '') &&

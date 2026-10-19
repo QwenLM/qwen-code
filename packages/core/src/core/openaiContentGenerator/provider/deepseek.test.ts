@@ -10,6 +10,7 @@ import { DeepSeekOpenAICompatibleProvider } from './deepseek.js';
 import { determineProvider } from '../index.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { Config } from '../../../config/config.js';
+import { AuthType } from '../../../utils/auth-type.js';
 
 // Mock OpenAI client to avoid real network calls
 vi.mock('openai', () => ({
@@ -129,6 +130,39 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       );
 
       expect(result['reasoning_effort']).toBe('max');
+    });
+
+    it('uses the final wire model profile when extra_body overrides the model', () => {
+      mockCliConfig.getResolvedModelConfig = vi
+        .fn()
+        .mockImplementation((_authType: AuthType, model: string) => ({
+          capabilities: {
+            reasoning: {
+              profile:
+                model === 'company-alias'
+                  ? 'openai-reasoning'
+                  : 'deepseek-openai',
+              efforts: ['high', 'max'],
+              defaultEffort: 'high',
+            },
+          },
+        }));
+      const target = new DeepSeekOpenAICompatibleProvider(
+        withConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'deepseek-v4-pro',
+          extra_body: {
+            model: 'company-alias',
+            reasoning: { effort: 'max' },
+          },
+        }),
+        mockCliConfig,
+      );
+
+      const result = buildHi({}, { target });
+      expect(result['model']).toBe('company-alias');
+      expect(result['reasoning']).toEqual({ effort: 'max' });
+      expect(result['reasoning_effort']).toBeUndefined();
     });
 
     /** Builds a deepseek-chat request holding one user message. */

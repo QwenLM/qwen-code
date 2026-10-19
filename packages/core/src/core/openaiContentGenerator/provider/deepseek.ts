@@ -121,9 +121,10 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
 
-    const profile = this.getReasoningCapabilities(request.model)?.profile;
+    const profile = this.getReasoningCapabilities(baseRequest.model)?.profile;
     const reshaped =
-      !profile && isDeepSeekHostname(this.contentGeneratorConfig)
+      (!profile || profile === 'deepseek-openai') &&
+      isDeepSeekHostname(this.contentGeneratorConfig)
         ? applyDeepSeekReasoningEffort(
             baseRequest,
             this.contentGeneratorConfig.baseUrl,

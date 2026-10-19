@@ -37,6 +37,11 @@ describe('built-in DeepSeek reasoning', () => {
       'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
       'enable_thinking',
     ],
+    ['https://dashscope-us.aliyuncs.com/compatible-mode/v1', 'enable_thinking'],
+    [
+      'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
+      'enable_thinking',
+    ],
   ])('uses the Flash contract on %s', (baseUrl, disableField) => {
     expect(getBuiltinDeepSeekReasoning({ ...config, baseUrl })).toEqual({
       profile: 'deepseek-openai',
@@ -54,6 +59,9 @@ describe('built-in DeepSeek reasoning', () => {
     'https://maas.aliyuncs.com.evil.example/v1',
     'https://notmaas.aliyuncs.com/v1',
     'https://vllm.example.com/v1',
+    'https://coding.dashscope.aliyuncs.com/v1',
+    'https://coding-intl.dashscope.aliyuncs.com/v1',
+    'https://unknown.dashscope.aliyuncs.com/compatible-mode/v1',
   ])('does not infer a wire contract for %s', (baseUrl) => {
     expect(getBuiltinDeepSeekReasoning({ ...config, baseUrl })).toBeUndefined();
   });
@@ -64,6 +72,18 @@ describe('built-in DeepSeek reasoning', () => {
       expect(getBuiltinDeepSeekReasoning({ ...config, model })).toBeDefined();
     },
   );
+
+  it('recognizes the retired vision alias only on the official endpoint', () => {
+    const model = 'deepseek-v4-flash-vision-exp';
+    expect(getBuiltinDeepSeekReasoning({ ...config, model })).toMatchObject({
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    });
+    expect(
+      getBuiltinDeepSeekReasoning({ ...config, model, baseUrl: maas }),
+    ).toBeUndefined();
+  });
 
   it.each(['deepseek-r1', 'company-deepseek-v4.1-flash', 'qwen3.8-max'])(
     'does not infer a contract for unknown model %s',
@@ -101,6 +121,8 @@ describe('built-in DeepSeek reasoning', () => {
   it.each([
     [official, 'deepseek-flash', 'low', 'low'],
     [official, 'deepseek-v4-pro', 'xhigh', 'high'],
+    [official, 'deepseek-v4-flash-vision-exp', 'low', 'low'],
+    [official, 'deepseek-v4-flash-vision-exp', 'xhigh', 'high'],
     [maas, 'deepseek-v4.1-flash-1017', 'xhigh', 'high'],
     [maas, 'deepseek-v4-pro', 'low', 'high'],
     [maas, 'deepseek-v4-pro', 'xhigh', 'max'],
