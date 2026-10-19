@@ -53,7 +53,8 @@ ${QWEN_RUNTIME_DIR:-${QWEN_HOME:-~/.qwen}}/daemon/daemon-<port>.json
   "primaryWorkspace": "/repo/project",
   "startedAt": "2026-10-19T06:00:00.000Z",
   "auth": "none",
-  "logPath": "/home/user/.qwen/debug/daemon/daemon.log"
+  "logPath": "/home/user/.qwen/debug/daemon/daemon.log",
+  "pidNamespace": "pid:[4026531836]"
 }
 ```
 
@@ -63,6 +64,12 @@ ${QWEN_RUNTIME_DIR:-${QWEN_HOME:-~/.qwen}}/daemon/daemon-<port>.json
   daemon generated an ephemeral token. Neither field contains the token.
 - `logPath` is the active log file the daemon already writes. The stable
   `debug/daemon/daemon.log` path is the fallback for older records.
+- `pidNamespace` is the writer's PID namespace (`/proc/self/ns/pid`). A pid
+  only names a process inside its own namespace, so a reader outside it —
+  a container sharing the runtime directory, or another kernel — treats the
+  pid as unaddressable rather than as evidence of life or death, and never
+  signals it. The field is absent where the kernel has no PID namespaces,
+  and on v1 records written before it existed.
 - A wildcard bind (`0.0.0.0` / `[::]`) is recorded with a loopback `url` so a
   local client can probe it; `hostname` keeps the requested bind address.
 

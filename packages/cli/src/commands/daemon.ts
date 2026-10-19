@@ -10,6 +10,7 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { CommandModule, Argv } from 'yargs';
 import {
+  currentPidNamespace,
   isProcessAlive,
   readDaemonDiscoveries,
   removeDaemonDiscovery,
@@ -145,6 +146,20 @@ export function processCommand(pid: number): string | undefined {
   return result.stdout.trim() || undefined;
 }
 
+/**
+ * Windows has no graceful signal: `process.kill` there is TerminateProcess,
+ * which runs no handler and leaves the daemon's children orphaned. The tree is
+ * therefore killed as one unit, through the trusted OS-root `taskkill`.
+ */
+export function terminateTree(pid: number, force: boolean): void {
+  if (process.platform === 'win32') {
+    const taskkill = `${process.env['SystemRoot'] ?? 'C:\\Windows'}\\System32\\taskkill.exe`;
+    spawnSync(taskkill, ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    return;
+  }
+  process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
+}
+
 export function formatDaemonAge(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -159,20 +174,41 @@ function sanitize(value: string): string {
   return sanitizeTerminalText(value).replace(/[\t\n]/g, '');
 }
 
-async function probeHealth(
+/**
+ * Whether `record.pid` names the daemon in this process's PID namespace. A
+ * record written in another container (or on another kernel) shares only the
+ * number: the pid is neither evidence of life nor of death here, and it must
+ * never be signalled. A v1 record without the field keeps the pid check.
+ */
+export function pidResolvableHere(
+  record: DaemonDiscoveryRecord,
+  currentNamespace: string | undefined,
+): boolean {
+  if (record.pidNamespace === undefined) return true;
+  if (currentNamespace === undefined) return false;
+  return record.pidNamespace === currentNamespace;
+}
+
+export async function probeHealth(
   record: DaemonDiscoveryRecord,
 ): Promise<DaemonHealth> {
+  const pidResolvable = pidResolvableHere(record, currentPidNamespace());
   try {
     await fetch(new URL('/health', record.url), {
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       redirect: 'manual',
     });
     // Any HTTP answer — including 401 from --require-auth — proves the
-    // listener is alive. A private PID namespace may not expose the recorded
-    // pid, so the answer, not pid liveness, is the health proof.
-    return 'running';
+    // listener is alive. The recorded pid can only veto that where it is
+    // resolvable: inside one namespace another application may have taken a
+    // recycled port, while a foreign namespace simply cannot see the pid.
+    return pidResolvable && !isProcessAlive(record.pid) ? 'stale' : 'running';
   } catch {
-    return isProcessAlive(record.pid) ? 'unreachable' : 'stale';
+    // The same asymmetry guards the record: an addressable pid that is gone
+    // is stale, but a pid this namespace cannot resolve says nothing.
+    return pidResolvable && !isProcessAlive(record.pid)
+      ? 'stale'
+      : 'unreachable';
   }
 }
 
@@ -327,7 +363,10 @@ async function printTail(file: string, count: number): Promise<number> {
   }
 }
 
-async function followFile(file: string, startOffset: number): Promise<void> {
+export async function followFile(
+  file: string,
+  startOffset: number,
+): Promise<void> {
   let offset = startOffset;
   let handle: Awaited<ReturnType<typeof fsp.open>> | undefined;
   let inode: number | undefined;
@@ -459,6 +498,13 @@ async function handleStop(argv: StopArgs): Promise<void> {
       failed = true;
       continue;
     }
+    if (!pidResolvableHere(record, currentPidNamespace())) {
+      writeStderrLine(
+        `qwen daemon: refusing to signal pid ${record.pid}: the record was written in PID namespace ${record.pidNamespace}, which this process cannot address.`,
+      );
+      failed = true;
+      continue;
+    }
     const processStarted = processStartTime(record.pid);
     if (processStarted === undefined) {
       writeStderrLine(
@@ -494,7 +540,7 @@ async function handleStop(argv: StopArgs): Promise<void> {
       continue;
     }
     try {
-      process.kill(record.pid, 'SIGTERM');
+      terminateTree(record.pid, false);
     } catch (killError) {
       writeStderrLine(
         `qwen daemon: could not signal pid ${record.pid}: ${
@@ -508,13 +554,15 @@ async function handleStop(argv: StopArgs): Promise<void> {
     if (exited) {
       removeDaemonDiscovery(record.port, { expectedPid: record.pid });
       writeStdoutLine(
-        `qwen daemon: stopped port ${record.port} (pid ${record.pid}).`,
+        `qwen daemon: ${
+          process.platform === 'win32' ? 'hard-killed' : 'stopped'
+        } port ${record.port} (pid ${record.pid}).`,
       );
       continue;
     }
     if (argv.force === true) {
       try {
-        process.kill(record.pid, 'SIGKILL');
+        terminateTree(record.pid, true);
       } catch {
         // Reported below by the final liveness check.
       }

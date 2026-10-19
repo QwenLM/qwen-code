@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Argv } from 'yargs';
 
@@ -11,13 +14,29 @@ vi.mock('../ui/utils/textUtils.js', () => ({
   sanitizeTerminalText: (value: string) => value,
 }));
 
+// A record only names a process inside the namespace it was written in, so
+// the decision table is pinned against a fixed local namespace here.
+vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../serve/daemon-discovery.js')>();
+  return {
+    ...actual,
+    currentPidNamespace: () => 'pid:[1]',
+    isProcessAlive: () => false,
+  };
+});
+
 import {
   daemonCommand,
   formatDaemonAge,
+  followFile,
+  pidResolvableHere,
+  probeHealth,
   processStartMatchesRecord,
   processStartTime,
   selectDaemonEntries,
   tailLines,
+  terminateTree,
 } from './daemon.js';
 import type { DaemonDiscoveryEntry } from '../serve/daemon-discovery.js';
 
@@ -109,5 +128,123 @@ describe('qwen daemon command', () => {
     expect(tailLines('a\nb\nc\n', 2)).toEqual(['b', 'c']);
     expect(tailLines('a\nb\nc', 10)).toEqual(['a', 'b', 'c']);
     expect(tailLines('', 5)).toEqual([]);
+  });
+
+  it('resolves a pid only inside the namespace that wrote the record', () => {
+    const record = entry(4170).record;
+    expect(pidResolvableHere(record, 'pid:[1]')).toBe(true);
+    expect(
+      pidResolvableHere({ ...record, pidNamespace: 'pid:[1]' }, 'pid:[1]'),
+    ).toBe(true);
+    // A record from a container sharing the runtime dir names another process.
+    expect(
+      pidResolvableHere({ ...record, pidNamespace: 'pid:[2]' }, 'pid:[1]'),
+    ).toBe(false);
+    // The writing kernel is not this one, so its pid means nothing here.
+    expect(
+      pidResolvableHere({ ...record, pidNamespace: 'pid:[1]' }, undefined),
+    ).toBe(false);
+  });
+
+  it('does not read a foreign pid as death when the listener answers', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 200 })),
+    );
+    try {
+      // A private PID namespace hides the daemon's pid, which is not evidence
+      // that the daemon is gone: the answered listener is the proof.
+      await expect(
+        probeHealth({ ...entry(4170).record, pidNamespace: 'pid:[2]' }),
+      ).resolves.toBe('running');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('still calls a recycled port stale inside one namespace', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 200 })),
+    );
+    try {
+      // Another application may hold the port; inside the namespace the
+      // recorded pid is addressable, so its absence still vetoes the answer.
+      await expect(
+        probeHealth({ ...entry(4170).record, pidNamespace: 'pid:[1]' }),
+      ).resolves.toBe('stale');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps a foreign record when its listener does not answer', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      }),
+    );
+    try {
+      // Removing the record here would lose a daemon that is merely
+      // unreachable from this namespace.
+      await expect(
+        probeHealth({ ...entry(4170).record, pidNamespace: 'pid:[2]' }),
+      ).resolves.toBe('unreachable');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'sends SIGTERM to a POSIX daemon',
+    () => {
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      try {
+        terminateTree(999_998, false);
+        expect(kill).toHaveBeenCalledWith(999_998, 'SIGTERM');
+      } finally {
+        kill.mockRestore();
+      }
+    },
+  );
+
+  it('never signals on Windows, where the kill is unconditional', () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      // process.kill there is TerminateProcess: it runs no handler and leaves
+      // the daemon's children behind, so the tree goes through taskkill.
+      terminateTree(999_998, false);
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform);
+      kill.mockRestore();
+    }
+  });
+
+  it('ends a follow once the reader closed the pipe', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qws-follow-'));
+    const file = path.join(dir, 'daemon.log');
+    await fsp.writeFile(file, 'line one\n');
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => {
+      throw Object.assign(new Error('EPIPE'), { code: 'EPIPE' });
+    });
+    let settled = false;
+    try {
+      void followFile(file, 0).then(() => {
+        settled = true;
+      });
+      // A reader that exits (`| head`) closes the pipe; the follow must end
+      // instead of re-reading the same bytes forever.
+      await vi.waitFor(() => expect(settled).toBe(true), { timeout: 5_000 });
+    } finally {
+      write.mockRestore();
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
   });
 });

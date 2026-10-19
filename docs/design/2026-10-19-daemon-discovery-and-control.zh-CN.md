@@ -43,13 +43,15 @@ ${QWEN_RUNTIME_DIR:-${QWEN_HOME:-~/.qwen}}/daemon/daemon-<port>.json
   "primaryWorkspace": "/repo/project",
   "startedAt": "2026-10-19T06:00:00.000Z",
   "auth": "none",
-  "logPath": "/home/user/.qwen/debug/daemon/daemon.log"
+  "logPath": "/home/user/.qwen/debug/daemon/daemon.log",
+  "pidNamespace": "pid:[4026531836]"
 }
 ```
 
 - 目录以 `0700` 创建；记录在 POSIX 上以 `0600` 原子写入。
 - `auth` 取值 `none` 或 `bearer`；仅当 daemon 生成了临时 token 时才出现 `tokenGenerated`。两者都不包含 token 本身。
 - `logPath` 是 daemon 当前写入的活跃日志；旧记录缺失时回退到稳定的 `debug/daemon/daemon.log`。
+- `pidNamespace` 是写入方的 PID 命名空间（`/proc/self/ns/pid`）。pid 只在其所属命名空间内指代进程，因此空间外的读取方（共享 runtime 目录的容器，或另一台内核）把该 pid 视为不可寻址，既不当作存活证据也不当作已死证据，并且绝不向它发信号。内核没有 PID 命名空间时该字段缺失，早于该字段写入的 v1 记录同样缺失。
 - 通配绑定（`0.0.0.0` / `[::]`）的 `url` 改写为 loopback，便于本地客户端探测；`hostname` 保留实际请求的绑定地址。
 
 记录刻意不携带凭证。被 serve 的工作区可以通过 daemon 的文件路由暴露自身文件，因此落在工作区内的记录绝不能成为 token 存储。

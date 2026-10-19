@@ -298,6 +298,7 @@ import {
 } from './server/request-helpers.js';
 import {
   DAEMON_DISCOVERY_VERSION,
+  currentPidNamespace,
   daemonDiscoveryUrl,
   removeDaemonDiscovery,
   writeDaemonDiscovery,
@@ -10741,6 +10742,7 @@ async function runQwenServeImpl(
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),
           ...(discoveryLogPath ? { logPath: discoveryLogPath } : {}),
+          pidNamespace: currentPidNamespace(),
         });
         process.once('exit', removeDiscoveryRecord);
       } catch (err) {

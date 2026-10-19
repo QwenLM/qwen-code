@@ -37,6 +37,13 @@ export interface DaemonDiscoveryRecord {
   auth: DaemonDiscoveryAuth;
   tokenGenerated?: boolean;
   logPath?: string;
+  /**
+   * The writer's PID namespace (`pid:[4026531836]`). A reader outside it
+   * cannot resolve `pid`, so the number must not be read as proof of life
+   * or death, and must never be signalled. Absent on kernels without PID
+   * namespaces and on v1 records written before this field existed.
+   */
+  pidNamespace?: string;
 }
 
 export interface DaemonDiscoveryEntry {
@@ -113,8 +120,24 @@ function isValidRecord(value: unknown): value is DaemonDiscoveryRecord {
     (record['auth'] === 'none' || record['auth'] === 'bearer') &&
     (record['tokenGenerated'] === undefined ||
       typeof record['tokenGenerated'] === 'boolean') &&
-    (record['logPath'] === undefined || typeof record['logPath'] === 'string')
+    (record['logPath'] === undefined ||
+      typeof record['logPath'] === 'string') &&
+    (record['pidNamespace'] === undefined ||
+      typeof record['pidNamespace'] === 'string')
   );
+}
+
+/**
+ * This process's PID namespace identity, or undefined where the kernel has
+ * none. `pid` only names a process inside the namespace it was read in.
+ */
+export function currentPidNamespace(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    return fs.readlinkSync('/proc/self/ns/pid');
+  } catch {
+    return undefined;
+  }
 }
 
 /**
