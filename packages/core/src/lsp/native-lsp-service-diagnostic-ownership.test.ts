@@ -377,6 +377,8 @@ describe('diagnostic ownership from explicit declarations', () => {
   );
 
   it.each([
+    ['typescript', 'main.ts'],
+    ['typescript', 'main.tsx'],
     ['objective-c', 'main.h'],
     ['objectivec', 'main.h'],
     ['swift', 'main.h'],

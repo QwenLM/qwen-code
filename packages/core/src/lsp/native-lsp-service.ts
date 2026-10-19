@@ -190,14 +190,14 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
 /**
  * Diagnostics-local aliases and additional served extensions. Kept OUT of
  * LANGUAGE_ID_TO_EXTENSIONS, which also feeds the warmup-file chooser — these
- * rows exist only for ownership and veto decisions. A row must carry every
- * extension it serves because it shadows the other fallbacks below.
+ * rows exist only for ownership and veto decisions and are unioned with the
+ * base mapping below.
  */
 const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
-  typescript: ['ts', 'tsx', 'mts', 'cts'],
-  javascript: ['js', 'jsx', 'mjs', 'cjs'],
-  javascriptreact: ['js', 'jsx', 'mjs', 'cjs'],
-  python: ['py', 'pyi'],
+  typescript: ['mts', 'cts'],
+  javascript: ['mjs', 'cjs'],
+  javascriptreact: ['js', 'mjs', 'cjs'],
+  python: ['pyi'],
   c: ['c', 'h'],
   cpp: ['cpp', 'h', 'hpp', 'cc', 'cxx', 'cu'],
   rust: ['rs', 'rust'],
@@ -227,6 +227,18 @@ const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
   clojure: ['clj', 'cljs'],
   zig: ['zig'],
 };
+
+function diagnosticExtensionsForLanguageId(id: string): string[] | undefined {
+  const base = Object.hasOwn(LANGUAGE_ID_TO_EXTENSIONS, id)
+    ? LANGUAGE_ID_TO_EXTENSIONS[id]
+    : undefined;
+  const aliases = Object.hasOwn(DIAGNOSTIC_LANGUAGE_ALIASES, id)
+    ? DIAGNOSTIC_LANGUAGE_ALIASES[id]
+    : undefined;
+  return base === undefined && aliases === undefined
+    ? undefined
+    : [...(base ?? []), ...(aliases ?? [])];
+}
 
 /**
  * Extensions positively attributable to a language through the mapping above.
@@ -290,8 +302,7 @@ const JS_TS_FAMILY_LANGUAGE_IDS = [
   'javascriptreact',
 ];
 const JS_TS_FAMILY_EXTENSIONS = JS_TS_FAMILY_LANGUAGE_IDS.flatMap(
-  (id) =>
-    DIAGNOSTIC_LANGUAGE_ALIASES[id] ?? LANGUAGE_ID_TO_EXTENSIONS[id] ?? [],
+  (id) => diagnosticExtensionsForLanguageId(id) ?? [],
 );
 
 /**
@@ -913,11 +924,7 @@ export class NativeLspService {
         }
         continue;
       }
-      const mappedExtensions = Object.hasOwn(DIAGNOSTIC_LANGUAGE_ALIASES, id)
-        ? DIAGNOSTIC_LANGUAGE_ALIASES[id]
-        : Object.hasOwn(LANGUAGE_ID_TO_EXTENSIONS, id)
-          ? LANGUAGE_ID_TO_EXTENSIONS[id]
-          : undefined;
+      const mappedExtensions = diagnosticExtensionsForLanguageId(id);
       for (const ext of mappedExtensions ??
         (id.length > 0 &&
         !/\s/u.test(id) &&

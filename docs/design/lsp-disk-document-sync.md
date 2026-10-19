@@ -194,6 +194,15 @@ or explicit mapping, a server-name key remains unknown and keeps its
 conservative veto. Unknown extensions without an explicit mapping retain the
 fallback above. Workspace-symbol warmup selection is unchanged.
 
+Known limitation: ownership remains fail-closed when an attributable extension
+cannot be reached from a server's declared language ID through the built-in
+tables or an explicit mapping. A healthy server using an unlisted alias can
+therefore have an authoritative clean answer refused (for example, a `pyright`
+language ID serving `.pyi`). This change does not resolve that provenance gap or
+change the fail-closed behavior; choosing between carrying configuration
+provenance and relaxing the ownership requirement requires a separate
+maintainer decision.
+
 The consumers are diagnostic ownership accounting, failure and unsupported
 attribution, initial unavailable-server reporting, newly-ready selection, and
 the final unreachable-server veto. Attribution is evaluated against live
