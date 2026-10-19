@@ -708,6 +708,9 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
       );
       expect(s.run, s.name).toContain('flock --wait 5400 9');
+      // Main requires at least an hour per acquisition; 5400 s is 90 minutes.
+      expect(Number(s.run.match(/flock --wait (\d+) 9/)?.[1]), s.name)
+        .toBeGreaterThanOrEqual(50 * 60);
     }
     // The wait budget is read back from the workflow so the arithmetic below
     // cannot drift from it: the value pins above still force a deliberate
@@ -724,22 +727,20 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(new Set(waitSeconds).size, 'one wait budget per lock').toBe(1);
     const lockWait = waitSeconds[0];
     // The ceiling must absorb one full wait per acquisition — this job takes
-    // the lock once per Maven step — plus the ~14 minutes of measured Maven
-    // work plus the uncapped setup the wait does not cover. The 1200 s budget
-    // was sized on pool run 37743332082's 1193 s of waits against 818 s of
-    // holds, and main run 38258395829 exhausted it: the verify step starved a
-    // full 1200 s behind cross-run pool traffic and failed before Maven
-    // started (#13989). The 2400 s budget then lost to the same queue: the
-    // sibling test job holds the lock for the sdk-java suite plus the full
-    // managed-agent H2 suite, 925 s of Maven work per hold in job 117729316936
-    // (run 39145783034), so a queue of holds — not one hold — exhausted it
-    // (#14608). The wait is now about 5.8 such holds; the 15-minute setup term
-    // covers the job's uncapped steps, which have no lock to bound them.
-    const mavenSetupSeconds = 15 * 60;
+    // the lock once per Maven step — plus the measured Maven work inside the
+    // lock plus the uncapped setup the wait does not cover. Run 39097018288
+    // held the host lock for 47m26s, and the sibling test job's fast-tier leg
+    // now also runs the full managed-agent H2 suite inside the lock: 925 s of
+    // Maven work per hold in job 117729316936 (run 39145783034), where the
+    // step waited 1515 s and held 925 s. Main run 39143975111 then starved on
+    // both attempts because the 40-minute budget lost to a queue of holds, not
+    // to one hold (#14608). The wait now covers about 5.8 such holds, 5400 s.
+    const measuredMavenSeconds = 50 * 60;
+    const mavenSetupSeconds = 30 * 60;
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
-      mavenSteps.length * lockWait + 14 * 60 + mavenSetupSeconds,
+      mavenSteps.length * lockWait + measuredMavenSeconds + mavenSetupSeconds,
     );
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus one measured hold (925 s of Maven work in job

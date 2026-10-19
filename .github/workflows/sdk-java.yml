@@ -436,10 +436,11 @@ jobs:
     # (#14608). That hold can only arrive cross-run, because this lane runs
     # only on the full tier and the full-H2 hold sits on the fast tier, so a
     # wait covers a queue of holds rather than one: 5400 s is about 5.8 of
-    # them. The ceiling is both waits plus the ~14 minutes of measured Maven
-    # work plus 15 minutes of uncapped setup, plus margin: 220. Hosted lanes
-    # never take the lock and inherit this ceiling as a bound, not a duration.
-    timeout-minutes: 220
+    # them. The ceiling is both waits plus the ~50 minutes of measured Maven
+    # work main's ceiling was sized on plus 30 minutes of uncapped setup and
+    # margin: 280. Hosted lanes never take the lock and inherit this ceiling
+    # as a bound, not a duration.
+    timeout-minutes: 280
     services:
       mariadb:
         image: 'mariadb:10.11.18'
