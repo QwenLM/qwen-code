@@ -107,15 +107,17 @@ are recorded here instead of being rediscovered:
   the case boots with `default`.
 - A definition whose tools name `hosted-workspace-shell/1` refuses `yolo` at
   admission ("Shell definitions must start with an asking policy", #13271).
-  The case stores the definition with `default` and selects `yolo` on the
-  Session afterwards through
-  `/api/agent/web-shell/v1/session-approval/change`.
-- A public Shell wake turn needs workspace-execution authority. The
-  non-durable broker answers the Harness with `409 workspace_unavailable`,
-  and the durable broker on an owner-private state directory still leaves the
-  turn in `WorkspaceExecutionStore.unavailable()`. The automation fixture has
-  no execution-grant or approval flow, so slice 1 has to add the one
-  `HostedPublicWorkspaceIT` drives before any fault arm can run.
+  The case stores it with `default` and answers the wake turn's Shell
+  permission action over
+  `/api/agent/web-shell/v1/actions/{query,respond}`.
+- A public Shell wake turn needs workspace-execution authority, and the
+  automation dispatch does not supply it. The non-durable broker answers the
+  Harness with `409 workspace_unavailable`; the durable broker on an
+  owner-private state directory still leaves the turn in
+  `WorkspaceExecutionStore.unavailable()`. Answering the Shell permission
+  action — the `actions/respond` flow `HostedPublicWorkspaceIT` drives — does
+  not mint it either. Slice 1 must first give the automation wake-turn
+  dispatch that authority; only then can a fault arm run.
 
 ## Limits
 

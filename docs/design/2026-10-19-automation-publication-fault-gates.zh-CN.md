@@ -93,14 +93,15 @@ bean。故障打在 `OSS` 客户端上，真实的 `AliyunToolPublicationObjectS
   用例因此以 `default` 启动。
 - 定义的工具指名 `hosted-workspace-shell/1` 时，准入拒绝 `yolo`
   （「Shell 定义必须以询问策略起步」，#13271）。用例以 `default` 存定义，
-  之后通过 `/api/agent/web-shell/v1/session-approval/change` 在会话上选择
-  `yolo`。
-- 公开 Shell 的 wake turn 需要 workspace 执行授权。非 durable broker 让
-  Harness 得到 `409 workspace_unavailable`；换成 durable broker 加
-  owner-private 状态目录后，turn 仍停在
-  `WorkspaceExecutionStore.unavailable()`。automation 夹具没有
-  execution-grant/approval 流程，第 1 片必须先补上
-  `HostedPublicWorkspaceIT` 驱动的那套，故障臂才有机会运行。
+  并通过 `/api/agent/web-shell/v1/actions/{query,respond}` 应答 wake turn 的
+  Shell 权限请求。
+- 公开 Shell 的 wake turn 需要 workspace 执行授权，而 automation 的派发
+  不提供它。非 durable broker 让 Harness 得到 `409 workspace_unavailable`；
+  换成 durable broker 加 owner-private 状态目录后，turn 仍停在
+  `WorkspaceExecutionStore.unavailable()`。应答 Shell 权限请求（即
+  `HostedPublicWorkspaceIT` 驱动的 `actions/respond` 流程）也不会生成该
+  授权。第 1 片必须先让 automation 的 wake-turn 派发带上授权，故障臂才有
+  机会运行。
 
 ## 边界
 
