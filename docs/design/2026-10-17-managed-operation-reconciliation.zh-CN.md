@@ -121,7 +121,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 
 停在 `await_runtime` 的 Turn，欠着已死 Harness 代际派发出去的那些 Runtime 执行。两个接管加载现在都向 Broker 询问原命令的证据，而不是读一个没人刷新的状态位；规则与决定 3 相同，只是作用在 Runtime 执行而不是 operation 行上。
 
-- **取消加载**对每个挂起的执行带 `?reconcile=true` 读取。已结算的答案变成 `known` 并带上观测到的结果。Runtime 仍无法证明的答案保持 `unknown`；租约不可用会让 binding 被作废，随后 LOST binding 的排空把记录围成 `abandoned`，报告把它保留为 known/`abandoned`。之后仍走协调器现有的"按 abandoned 取消"与未知路径，没有改动。
+- **取消加载**对每个挂起的执行带 `?reconcile=true` 读取。已结算的答案变成 `known` 并带上观测到的状态。Runtime 仍无法证明的答案保持 `unknown`；租约不可用会让 binding 被作废，记录在 LOST 排空拿到丢失证据、把它围成 `abandoned` 之前保持未知，报告则把围栏后的结果保留为 known/`abandoned`。之后仍走协调器现有的"按 abandoned 取消"与未知路径，没有改动。
 - **继续加载**在读到记录仍为 `UNKNOWN` 时只问一次：后续读取带 `?reconcile=true`。已结算的答案照旧按自己的 execution id 记入 journal；终态围栏报为 known/`abandoned`；仍无法证明的结果报 `unknown`。它不会为这个缺口去轮询 `waitForUnknown`，也绝不会再次派发该命令。
 - **什么不算答案。** 传输或协议故障仍让加载可重试地失败。Broker 自己表示"无法证明"的答案——记录仍为 UNKNOWN、`runtime_execution_evidence_unavailable`、`runtime_reconciliation_required`、`runtime_execution_reconcile_failed`，以及确定的 not-found——一律变成 `unknown`，既不当成瞬时故障，也不产生第二次副作用。
 - **仍留在 #14166 的部分。** 证据仍未知的 Turn 还没有被挂出调度扫描，对账器也还没有按周期重新驱动它。决定 9 只让读取去问证据，使协调器现有的路径看到真实结论。

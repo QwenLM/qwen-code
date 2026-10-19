@@ -519,8 +519,9 @@ export class HostedWorkspaceBroker {
         if (reconcileUnknownOnce && stillUnknown && !reconciledUnknown) {
           // The durable record is UNKNOWN: ask the original Runtime once for
           // the evidence that decides the command. A settled answer is the
-          // observation; anything else is an outcome the takeover must park,
-          // so it never waits on the gap or dispatches the command again.
+          // observation; anything else is an outcome the takeover reports as
+          // unknown, so it never waits on the gap or dispatches the command
+          // again.
           reconciledUnknown = true;
           try {
             response = await this.request(`${path}?reconcile=true`);
