@@ -1,0 +1,21 @@
+{
+  "name": "document-generation",
+  "displayName": { "en": "Word Documents", "zh": "Word 文档" },
+  "description": {
+    "en": "Generate downloadable Word documents locally",
+    "zh": "在本地生成可下载的 Word 文档"
+  },
+  "version": "0.25.2",
+  "mcpServers": {
+    "documents": {
+      "command": "node",
+      "args": [
+        "${extensionPath}${/}dist${/}server.js",
+        "--workspace",
+        "${workspacePath}"
+      ],
+      "cwd": "${workspacePath}",
+      "includeTools": ["generate_docx"]
+    }
+  }
+}
