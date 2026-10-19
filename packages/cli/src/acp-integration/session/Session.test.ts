@@ -3968,6 +3968,54 @@ describe('Session', () => {
   });
 
   describe('managed auto-memory', () => {
+    it('defers MCP reminders until a dangling tool call has been answered', async () => {
+      vi.mocked(mockChat.peekLastHistoryEntry).mockReturnValue({
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'pending-call', name: 'read_file', args: {} } },
+        ],
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'new prompt after cancellation' }],
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(mockLlmClient.drainPendingMcpReminders).not.toHaveBeenCalled();
+
+      vi.mocked(mockChat.peekLastHistoryEntry).mockReturnValue({
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'pending-call',
+              name: 'read_file',
+              response: { error: 'interrupted' },
+            },
+          },
+        ],
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'next fresh prompt' }],
+      });
+
+      expect(mockLlmClient.drainPendingMcpReminders).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.drainPendingMcpReminders.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(mockChat.sendMessageStream).mock.invocationCallOrder[0]!,
+      );
+    });
+
     it('recalls before the initial send and schedules background work after a successful turn', async () => {
       const memoryPrompt = '<system-reminder>remember this</system-reminder>';
       const finalHistory: Content[] = [
@@ -4082,6 +4130,11 @@ describe('Session', () => {
         llmContent: 'file contents',
         returnDisplay: 'file contents',
       });
+      execute.mockImplementationOnce(async () => {
+        expect(mockLlmClient.drainPendingMcpReminders).toHaveBeenCalledOnce();
+        mockLlmClient.drainPendingMcpReminders.mockClear();
+        return { llmContent: 'file contents', returnDisplay: 'file contents' };
+      });
       mockToolRegistry.getTool.mockReturnValue({
         name: 'read_file',
         kind: core.Kind.Read,
@@ -4123,6 +4176,7 @@ describe('Session', () => {
         .calls[1]?.[1] as { message: Part[] };
       const followUp = followUpRequest.message;
       expect(followUp[0]?.functionResponse).toBeDefined();
+      expect(mockLlmClient.drainPendingMcpReminders).not.toHaveBeenCalled();
       expect(textParts(followUp)).toEqual([memoryPrompt]);
       expect(
         mockLlmClient.consumeManagedAutoMemoryRecall,
@@ -4148,6 +4202,7 @@ describe('Session', () => {
       } as PromptRequest);
 
       expect(mockLlmClient.beginManagedAutoMemoryRecall).not.toHaveBeenCalled();
+      expect(mockLlmClient.drainPendingMcpReminders).not.toHaveBeenCalled();
       expect(
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).not.toHaveBeenCalled();
@@ -22494,6 +22549,7 @@ describe('Session', () => {
           sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
+          peekLastHistoryEntry: vi.fn().mockReturnValue(undefined),
           getHistoryShallow: vi.fn().mockReturnValue([]),
           getLastModelMessageText: vi.fn().mockReturnValue(''),
         } as unknown as LlmChat;
@@ -23632,6 +23688,7 @@ describe('Session', () => {
           sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
+          peekLastHistoryEntry: vi.fn().mockReturnValue(undefined),
           getHistoryShallow: vi.fn().mockReturnValue([]),
           getLastModelMessageText: vi.fn().mockReturnValue(''),
         } as unknown as LlmChat;

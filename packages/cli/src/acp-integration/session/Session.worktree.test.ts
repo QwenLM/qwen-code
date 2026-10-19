@@ -90,6 +90,7 @@ describe('Session.pendingWorktreeNotice', () => {
         ),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      peekLastHistoryEntry: vi.fn(() => mockChat.getHistory().at(-1)),
       getHistoryShallow: vi.fn(() => mockChat.getHistory()),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
