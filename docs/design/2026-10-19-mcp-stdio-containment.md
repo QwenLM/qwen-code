@@ -39,4 +39,5 @@ The issue allows a process-group fallback, and the process group fixes all four 
 - A descendant that calls `setsid` leaves the process group and survives; only a cgroup unit catches it.
 - The Broker's stopped-worker close still treats the absent worker PID as proof. The launcher bounds the orphan window to about 1.5 s, but the Broker receives no emptiness proof. A cgroup unit plus a durable proof is follow-up.
 - A process-group id can be reused in principle. The short reap window makes it unlikely, not impossible; a cgroup unit removes the race.
+- Each stdio connection keeps one small Node launcher resident for its lifetime. A bare launcher measured about 44 MB RSS; at the 16-connection limit that is roughly 700 MB per Runtime session before the servers' own memory. The Hosted memory budget must account for this second process; a lighter or shared supervisor is future work if the bound becomes tight.
 - The supervisor is POSIX-only. Windows keeps the prior direct spawn, so `npx`, `npm` and `.cmd` shims still resolve, but it gains no containment.

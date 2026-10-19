@@ -39,4 +39,5 @@ issue 允许进程组回退，且进程组修复了全部四类已复现泄漏�
 - 调用 `setsid` 的后代会离开进程组并存活；只有 cgroup 单元能抓住它。
 - Broker 的 stopped-worker close 仍把 worker PID 消失当作证明。launcher 把孤儿窗口压到约 1.5 s，但 Broker 拿不到空证明。cgroup 单元加可持久化证明属于后续。
 - 进程组 id 原则上可被复用。短回收窗口使其不常见，但并非不可能；cgroup 单元可消除该竞态。
+- 每个 stdio 连接在其生命周期内保留一个小型 Node launcher。裸 launcher 实测约 44 MB RSS；在 16 连接上限下，每个 Runtime session 约 700 MB（不含 server 自身内存）。Hosted 内存预算必须把这第二个进程算进去；若该上限变紧，更轻量或共享的 supervisor 属于后续工作。
 - supervisor 仅限 POSIX。Windows 保留之前的直接 spawn，`npx`、`npm` 与 `.cmd` shim 仍可解析，但不会获得收容。
