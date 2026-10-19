@@ -30267,6 +30267,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         persistedSpelling: storageSessionId,
       });
       innerConfig.getSessionId.mockReturnValue(storageSessionId);
+      const target = await fs.realpath(process.cwd());
+      innerConfig.getTargetDir.mockReturnValue(target);
       const { agent, agentPromise, extMethod } = await spawnAgent(
         'expected-capability',
       );
@@ -30278,7 +30280,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       );
 
       try {
-        const params = { cwd: '/tmp', sessionId, mcpServers: [] };
+        const params = { cwd: target, sessionId, mcpServers: [] };
         if (action === 'load') {
           await agent.loadSession(params);
         } else {
@@ -30291,7 +30293,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         expect(argv?.resume).toBe(storageSessionId);
 
         expect(vi.mocked(Session).mock.calls.at(-1)?.[0]).toBe(sessionId);
-        const target = await fs.realpath('/tmp');
         const provider = vi
           .mocked(loadCliConfig)
           .mock.calls.at(-1)?.[9]?.workflowAncestorTrustProvider;
