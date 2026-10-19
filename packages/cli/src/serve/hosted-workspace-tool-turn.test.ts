@@ -75,6 +75,7 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -187,6 +188,7 @@ function createTurn(
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
   skills?: HostedSkillCatalog,
+  planMode: 'none' | 'public' | 'member' = 'none',
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -206,7 +208,13 @@ function createTurn(
       },
       waiters,
     },
-    { hooks, skills },
+    {
+      hooks,
+      skills,
+      publicPlanMode: planMode === 'public',
+      memberPlanMode: planMode === 'member',
+      ...(planMode === 'public' ? { profile: 'hosted-workspace-files/1' } : {}),
+    },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -326,44 +334,55 @@ const publishedSkills = () =>
     },
   ]);
 
-it('loads a published static Skill durably without Runtime execution or approval', async () => {
-  const skills = publishedSkills();
-  turn = createTurn(false, { mode: 'default' }, undefined, skills);
-  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
-  const original: Part[] = [
-    { functionCall: { id: call.callId, name: call.name, args: call.args } },
-  ];
-  expect(await turn.declarations(new AbortController().signal)).toContainEqual(
-    skills.declaration(),
-  );
-  const responses = await turn.execute(
-    [call],
-    original,
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['output']).toBe(
-    skills.response(call.args),
-  );
-  const history = await session.sink.project();
-  expect(history.map((entry) => entry.type)).toEqual([
-    'assistant',
-    'tool_result',
-  ]);
-  expect(history[1].message?.parts).toEqual(responses);
-  expect(broker.acquire).not.toHaveBeenCalled();
-  expect(broker.prepare).not.toHaveBeenCalled();
-  expect(broker.execute).not.toHaveBeenCalled();
-  expect(
-    session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .some((event) => event.kind === 'action.changed'),
-  ).toBe(false);
-  await turn.finish();
-  const reloaded = createTurn(false, undefined, undefined, skills);
-  await reloaded.resumeCommittedResults(new AbortController().signal);
-  expect(broker.acquire).not.toHaveBeenCalled();
-});
+it.each(['none', 'public', 'member'] as const)(
+  'loads a published static Skill durably without Runtime execution or approval (Plan: %s)',
+  async (planMode) => {
+    if (planMode === 'public')
+      vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+    const skills = publishedSkills();
+    turn = createTurn(false, { mode: 'default' }, undefined, skills, planMode);
+    const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+    const original: Part[] = [
+      { functionCall: { id: call.callId, name: call.name, args: call.args } },
+    ];
+    expect(
+      await turn.declarations(new AbortController().signal),
+    ).toContainEqual(skills.declaration());
+    if (planMode === 'public')
+      expect(await turn.declarations(new AbortController().signal)).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'write_file' }),
+        ]),
+      );
+    const responses = await turn.execute(
+      [call],
+      original,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['output']).toBe(
+      skills.response(call.args),
+    );
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual(responses);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .some((event) => event.kind === 'action.changed'),
+    ).toBe(false);
+    await turn.finish();
+    const reloaded = createTurn(false, undefined, undefined, skills);
+    await reloaded.resumeCommittedResults(new AbortController().signal);
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
 
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
@@ -7076,6 +7095,9 @@ function retentionExhausted() {
 
 const CAPACITY_ANSWER =
   'This call was not started: Tool publication reservation refused at the active_captures limit. Retry after the running tools finish.';
+// #14518: a call that reserves nothing is told it can go without the rest.
+const BYSTANDER_ANSWER =
+  'This call was not started: another call in its batch was refused before any call ran (Tool publication reservation refused at the active_captures limit). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.';
 
 function brokerStatusThroughCancel(
   override?: (id: string, cancelled: boolean) => unknown,
@@ -7457,7 +7479,7 @@ it('waits for each cancelled execution to settle before answering', async () => 
     'model',
     new AbortController().signal,
   );
-  expect(answerText(responses)).toEqual([CAPACITY_ANSWER, CAPACITY_ANSWER]);
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER, BYSTANDER_ANSWER]);
   // Two reads before the cancels, then two after each.
   expect(broker.status).toHaveBeenCalledTimes(6);
 });
@@ -7672,10 +7694,14 @@ it('answers every call of a mixed batch and closes every reservation', async () 
   expect(answers[1]).toContain(
     'Runtime refused this execution reservation before dispatch',
   );
+  // Both Shells reserve, so fewer of them may fit; the Edit reserves
+  // nothing and can go without them.
+  const shellAnswer =
+    'This call was not started: Tool publication reservation refused at the active_captures limit. Retry after the running tools finish, or send fewer run_shell_command calls in one batch.';
   expect([answers[0], answers[2], answers[3]]).toEqual([
-    CAPACITY_ANSWER,
-    CAPACITY_ANSWER,
-    CAPACITY_ANSWER,
+    shellAnswer,
+    BYSTANDER_ANSWER,
+    shellAnswer,
   ]);
   expect(rig.closed).toEqual([
     rig.publications.get('shell-a'),
@@ -7688,6 +7714,163 @@ it('answers every call of a mixed batch and closes every reservation', async () 
   });
   expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
   expect(await runtimeItemStates()).toEqual(['settled', 'settled', 'settled']);
+});
+
+// #14518: the store says how many reservations of this size the Session
+// could ever hold at once, so a batch needing more is told to send fewer
+// calls instead of to wait.
+function limitRefusal(
+  limit: string,
+  admits: number | string,
+  status: 429 | 409 = 429,
+) {
+  return new ManagedSessionStoreHttpError(
+    status,
+    status === 429
+      ? 'managed_tool_publication_capacity_exhausted'
+      : 'managed_tool_publication_retention_exhausted',
+    `Tool publication reservation refused at the ${limit} limit`,
+    undefined,
+    { request_id: 'request-1', limit, admits },
+  );
+}
+
+function shellBatch(count: number) {
+  const shells = Array.from({ length: count }, (_, index) => ({
+    ...foregroundShell,
+    callId: `shell-${index}-call`,
+  }));
+  return {
+    shells,
+    parts: shells.map(
+      (call): Part => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      }),
+    ),
+    ids: shells.map((_, index) => `shell-${index}`),
+  };
+}
+
+it.each(['active_captures', 'tenant_bytes', 'session_bytes'])(
+  'tells a batch of more Shells than its Session could ever hold at the %s limit to send fewer, without retrying',
+  async (limit) => {
+    const batch = shellBatch(3);
+    const cause = limitRefusal(limit, 2);
+    // The last of the three reservations is the one the limit refuses.
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: (id) => (id === 'shell-2' ? cause : undefined),
+      executionCallIds: batch.ids,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel();
+    const responses = await turn.execute(
+      batch.shells,
+      batch.parts,
+      'model',
+      new AbortController().signal,
+    );
+
+    expect(answerText(responses)).toEqual(
+      Array(3).fill(
+        `This call was not started: Tool publication reservation refused at the ${limit} limit. This batch has 3 run_shell_command calls, but this Session can run at most 2 of them at a time, so retrying the same batch will not succeed. Send at most 2 of them in one batch.`,
+      ),
+    );
+    // Waiting cannot make the batch fit, so its refusal is not retried.
+    expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(3);
+    expect(rig.closed).toEqual(batch.ids.map((id) => rig.publications.get(id)));
+    expect(await runtimeItemStates()).toEqual([
+      'settled',
+      'settled',
+      'settled',
+    ]);
+  },
+);
+
+it('does not retry the first reservation of a batch its Session could never hold', async () => {
+  const batch = shellBatch(3);
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) =>
+      id === 'shell-0' ? limitRefusal('session_bytes', 2) : undefined,
+    executionCallIds: batch.ids,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    batch.shells,
+    batch.parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual(
+    Array(3).fill(
+      'This call was not started: Tool publication reservation refused at the session_bytes limit. This batch has 3 run_shell_command calls, but this Session can run at most 2 of them at a time, so retrying the same batch will not succeed. Send at most 2 of them in one batch.',
+    ),
+  );
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
+});
+
+it.each([
+  ['admits the whole batch at once', limitRefusal('active_captures', 2)],
+  ['does not say', capacityExhausted()],
+  ['says it as text', limitRefusal('active_captures', '1')],
+  ['says a fraction', limitRefusal('tenant_bytes', 1.5)],
+  // A 429 always admits one; a smaller count is not acted on.
+  ['admits none', limitRefusal('session_bytes', 0)],
+])(
+  'retries a batch whose refusal %s and says fewer calls may fit sooner',
+  async (_label, cause) => {
+    const batch = shellBatch(2);
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: (id) => (id === 'shell-1' ? cause : undefined),
+      executionCallIds: batch.ids,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel();
+    const responses = await turn.execute(
+      batch.shells,
+      batch.parts,
+      'model',
+      new AbortController().signal,
+    );
+
+    expect(answerText(responses)).toEqual(
+      Array(2).fill(
+        `This call was not started: ${cause.message}. Retry after the running tools finish, or send fewer run_shell_command calls in one batch.`,
+      ),
+    );
+    // One grant, then the refused reservation's three attempts.
+    expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(4);
+  },
+);
+
+it('keeps the retention answer for a batch its Session could never hold, and frees the call that reserves nothing', async () => {
+  const batch = shellBatch(3);
+  const all = [...batch.shells, calls[0]];
+  // Another Session's used bytes fill the tenant: the Session could hold
+  // two later, but none fits now, so the retention answer wins.
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: () => limitRefusal('tenant_bytes', 2, 409),
+    executionCallIds: batch.ids,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    all,
+    all.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([
+    ...Array(3).fill(
+      'This call was not started: Tool publication reservation refused at the tenant_bytes limit. Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.',
+    ),
+    'This call was not started: another call in its batch was refused before any call ran (Tool publication reservation refused at the tenant_bytes limit). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.',
+  ]);
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
 });
 
 it('probes every inconclusive background binding within one timeout window', async () => {
