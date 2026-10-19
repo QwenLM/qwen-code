@@ -128,6 +128,38 @@ export function safeBody(req: Request): Record<string, unknown> {
   return out;
 }
 
+export function parseRefreshSessionIds(
+  body: unknown,
+  res: Response,
+  bridge: Pick<AcpSessionBridge, 'getSessionSummary'>,
+): { sessionIds?: string[] } | undefined {
+  if (body === undefined) return {};
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    res.status(400).json({
+      error: 'request body must be a JSON object',
+      code: 'invalid_request_body',
+    });
+    return undefined;
+  }
+  const sessionIds = (body as Record<string, unknown>)['sessionIds'];
+  if (sessionIds === undefined) return {};
+  if (
+    !Array.isArray(sessionIds) ||
+    !sessionIds.every(
+      (id): id is string => typeof id === 'string' && id.trim().length > 0,
+    )
+  ) {
+    res.status(400).json({
+      error: '`sessionIds` must be an array of non-blank strings',
+      code: 'invalid_session_ids',
+    });
+    return undefined;
+  }
+  const selected = [...new Set(sessionIds.map(normalizeSessionIdForLookup))];
+  for (const sessionId of selected) bridge.getSessionSummary(sessionId);
+  return { sessionIds: selected };
+}
+
 export function parseOptionalWorkspaceCwd(
   body: Record<string, unknown>,
   boundWorkspace: string,

@@ -478,46 +478,25 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('vaul');
   });
 
-  it('keeps the transcript entry a fraction of the interactive entry', () => {
-    // The daemon hook runtime is NOT absent from this entry — MessageList
-    // renders McpStatusMessage, TasksStatusMessage and the artifact turn
-    // outputs, and those call the strict useDaemonActions /
-    // useDaemonWorkspace hooks, so the provider guards ship. Asserting their
-    // absence would assert something this entry does not deliver (see the
-    // docblock in client/transcript.ts and #11100).
-    //
-    // What the entry does deliver is a bounded payload, so bound it. The JS
-    // remainder measured 1,298,657 UTF-16 code units on main at fa4a4c92 and
-    // 1,300,341 here after adding author attribution for multi-agent
-    // transcripts. O3 result summaries bring it to 1,306,052, and
-    // session-agent replies (status, steps, token usage, squad labels) to
-    // 1,315,297 at e951f96; that rendering is intentional transcript UI.
-    // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
-    // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
-    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The W2
-    // managed cwd slice (#13760) adds its strings to the shared i18n table
-    // every entry ships — no interactive cwd code enters this graph — and
-    // measured 1,323,120 before main's host-status copy. After rebasing onto
-    // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
-    // main's i18n table yields an identical JS remainder. The selection-copy
-    // menu strings (#13833) land in that same shared table — the menu itself
-    // stays stubbed out of this entry — and measure 1,325,251. The
-    // action-reminder help copy (#13832) entered that same table only after
-    // the 1,325,251 measurement was taken, so the entry was already past the
-    // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
-    // Managed task panel's copy (#13936) stays stubbed out of this entry.
-    // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
-    // preview puts its ten excel.* strings into that same shared table in
-    // both locales; its parser, worker and markup stay inside the lazily
-    // imported SpreadsheetPreview chunk, so only the copy enters this graph.
-    // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
-    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
-    // Re-measure and lower it if the entry gets leaner.
-    const js = readTranscriptBundle().replace(
-      /^const __qwenWebShellCss=[^\n]*\n/,
-      '',
-    );
-    expect(js.length).toBeLessThan(1_331_500);
+  it('keeps Managed tool-detail transport out of the transcript entry', () => {
+    expect(readPackageJavascript()).toContain('/tool-details/get');
+    expect(readTranscriptBundle()).not.toContain('/tool-details/get');
+  });
+
+  it('keeps workspace mutations out of the read-only transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const method of [
+      'writeWorkspaceFile',
+      'createWorkspaceDirectory',
+      'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
+      'uploadWorkspaceFile',
+    ]) {
+      expect(packaged).toContain(method);
+      expect(transcript).not.toContain(method);
+    }
+    expect(transcript).toContain('dirList');
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
@@ -537,6 +516,10 @@ describe('build artifact — transcript entry (#11031)', () => {
       'files.sourceTooLarge',
     ] as const)
       expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -592,6 +575,11 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js.includes('managed.tasks.')).toBe(false);
+  });
+
+  it('keeps remote Workspace registration copy in the interactive entry', () => {
+    expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
+    expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
   });
 
   it('carries no settings strings and looks none up', () => {

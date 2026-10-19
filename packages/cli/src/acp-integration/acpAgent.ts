@@ -250,6 +250,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  getOperatorTrustSettings,
   loadSettings,
   reloadEnvironment,
   SettingScope,
@@ -387,6 +388,7 @@ import {
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
 import {
+  createLocalWorkflowAncestorTrustProvider,
   isWorkspaceTrusted,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
@@ -4002,6 +4004,11 @@ class QwenAgent implements Agent {
   >();
   private managedShuttingDown = false;
   /**
+   * A workspace change is being applied. New prompts wait for it, so no turn
+   * is admitted under the revision the change replaces.
+   */
+  private workspaceChangeInFlight = 0;
+  /**
    * The reasons this Managed engine admits no new work: one per Runtime
    * worker stop nobody could prove, lifted by the same reason once the
    * group's death is proven.
@@ -4450,7 +4457,14 @@ class QwenAgent implements Agent {
           undefined,
           undefined,
           undefined,
-          undefined,
+          this.expectedPrivateParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : undefined,
           buildEnabledSkillNamesProvider(settings),
         ),
       );
@@ -7034,6 +7048,13 @@ class QwenAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    if (this.workspaceChangeInFlight > 0) {
+      throw new RequestError(
+        -32000,
+        'A workspace change is being applied; retry the prompt.',
+        { errorKind: 'workspace_change_in_progress' },
+      );
+    }
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -7488,6 +7509,7 @@ class QwenAgent implements Agent {
     after: PermissionRuleSet,
     settingScope: SettingScope,
     settingsCwd: string,
+    strict = false,
   ): void {
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
@@ -7532,6 +7554,7 @@ class QwenAgent implements Agent {
               error instanceof Error ? error.message : String(error)
             }`,
           );
+          if (strict) throw error;
         }
       }
     }
@@ -9017,16 +9040,16 @@ class QwenAgent implements Agent {
     );
   }
 
-  private buildSessionContextStatus(
+  private async buildSessionContextStatus(
     sessionId: string,
-  ): ServeSessionContextStatus {
+  ): Promise<ServeSessionContextStatus> {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
-      recovery: session.getRecoveryStatus(),
+      recovery: await session.getRecoveryStatusForClient(),
       state: {
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
@@ -9106,7 +9129,15 @@ class QwenAgent implements Agent {
       await session.buildAvailableCommandsSnapshot();
     const workflowsEnabled = this.canUseWorkflowControls(config);
     const savedWorkflows = workflowsEnabled
-      ? (await listSavedWorkflows(config)).map(({ name, source }) => ({
+      ? (
+          await listSavedWorkflows(config).catch((error: unknown) => {
+            debugLogger.warn(
+              'Saved workflow discovery failed while listing session commands:',
+              error,
+            );
+            return [];
+          })
+        ).map(({ name, source }) => ({
           name,
           source,
         }))
@@ -9201,16 +9232,14 @@ class QwenAgent implements Agent {
       workflow,
     });
     if (!this.canUseWorkflowControls(config)) return envelope(null);
-    const entry = (await listSavedWorkflows(config)).find(
-      (candidate) => candidate.name === name,
-    );
-    if (!entry) return envelope(null);
-    let script: string;
+    let resolved: Awaited<ReturnType<typeof resolveSavedWorkflowScript>>;
     try {
-      script = (await resolveSavedWorkflowScript(name, config)).script;
+      resolved = await resolveSavedWorkflowScript(name, config);
     } catch {
       return envelope(null);
     }
+    if (!resolved.source) return envelope(null);
+    const { script } = resolved;
     let meta: ServeSessionSavedWorkflowDetail['meta'] = null;
     let metaError: string | undefined;
     try {
@@ -9221,9 +9250,9 @@ class QwenAgent implements Agent {
     return envelope({
       v: STATUS_SCHEMA_VERSION,
       sessionId,
-      name: entry.name,
-      source: entry.source,
-      scriptPath: entry.scriptPath,
+      name: resolved.name,
+      source: resolved.source,
+      scriptPath: resolved.scriptPath,
       script,
       meta,
       ...(metaError !== undefined ? { metaError } : {}),
@@ -10064,10 +10093,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        return this.buildSessionContextStatus(sessionId) as unknown as Record<
-          string,
-          unknown
-        >;
+        return (await this.buildSessionContextStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionContextUsage: {
         const sessionId = params['sessionId'];
@@ -10615,6 +10643,112 @@ class QwenAgent implements Agent {
         return this.buildWorkspaceExtensionsStatus(
           this.config,
         ) as unknown as Record<string, unknown>;
+      case SERVE_CONTROL_EXT_METHODS.workspaceChange: {
+        const revision = params['revision'];
+        const kind = params['kind'];
+        if (
+          params['v'] !== 1 ||
+          typeof revision !== 'number' ||
+          !Number.isSafeInteger(revision) ||
+          typeof kind !== 'string'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid workspace change',
+          );
+        }
+        const changeCwd =
+          typeof params['cwd'] === 'string' ? params['cwd'] : cwd;
+        this.workspaceChangeInFlight += 1;
+        try {
+          // A tightening change asks a turn that cannot be revalidated to
+          // cancel, so the idle-only reload paths below reach it.
+          if (params['tightening'] === true) {
+            await Promise.allSettled(
+              [...this.sessions.values()]
+                .filter((session) => !session.isIdle())
+                .map((session) => session.cancelPendingPrompt()),
+            );
+          }
+          switch (kind) {
+            case 'permissions': {
+              // The live manager holds the scopes' rules merged, without
+              // provenance, so diff the effective set: a rule another scope
+              // still provides must never be removed. The workspace filter
+              // stays on the apply.
+              const before = readPermissionRuleSet(this.settings.merged);
+              if (
+                !this.settings.reloadScopesFromDiskAtomically([
+                  SettingScope.User,
+                  SettingScope.Workspace,
+                ])
+              ) {
+                throw new Error(
+                  'The permission rules could not be reloaded for a workspace change.',
+                );
+              }
+              const scope =
+                params['scope'] === 'user'
+                  ? SettingScope.User
+                  : SettingScope.Workspace;
+              this.syncLivePermissionManagers(
+                before,
+                readPermissionRuleSet(this.settings.merged),
+                scope,
+                changeCwd,
+                true,
+              );
+              break;
+            }
+            case 'settings': {
+              const reloaded = await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceReload,
+                { cwd: changeCwd },
+              );
+              // A tightening change that skipped a live session has not
+              // reached it: acknowledge nothing, so the Bridge keeps the
+              // channel quarantined instead of lifting the fence.
+              const skipped = reloaded['sessionsSkipped'];
+              if (
+                params['tightening'] === true &&
+                Array.isArray(skipped) &&
+                skipped.length > 0
+              ) {
+                throw new Error(
+                  `The settings change did not reach ${skipped.length} live session(s).`,
+                );
+              }
+              break;
+            }
+            case 'sessionWorkflow':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                { cwd: changeCwd, enabled: params['enabled'] === true },
+              );
+              break;
+            case 'modelProviders':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+                { cwd: changeCwd },
+              );
+              break;
+            case 'skills':
+              await this.extMethodInternal(
+                SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+                { cwd: changeCwd, reason: params['reason'] ?? 'all' },
+              );
+              break;
+            default:
+              throw RequestError.invalidParams(
+                undefined,
+                `Unknown workspace change kind: ${String(kind)}`,
+              );
+          }
+          return { v: 1, revision, acknowledged: true };
+        } finally {
+          this.workspaceChangeInFlight -= 1;
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
           available:
@@ -13393,9 +13527,15 @@ class QwenAgent implements Agent {
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
             async () => {
-              const savedWorkflow = (await listSavedWorkflows(config)).find(
-                (entry) => entry.name === taskId,
-              );
+              const savedWorkflow = (
+                await listSavedWorkflows(config).catch((error: unknown) => {
+                  debugLogger.warn(
+                    'Saved workflow discovery failed while starting a saved workflow:',
+                    error,
+                  );
+                  return [];
+                })
+              ).find((entry) => entry.name === taskId);
               if (!savedWorkflow) return { changed: false };
               const workflowTool = config
                 .getToolRegistry()
@@ -13743,7 +13883,11 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const result = await session.continueLastTurn();
+        const result = await session.continueLastTurn(
+          typeof params['confirmCancellation'] === 'string'
+            ? params['confirmCancellation']
+            : undefined,
+        );
         debugLogger.info(
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
         );
@@ -15103,6 +15247,19 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
         const rawReason = params['reason'];
+        const rawSessionIds = params['sessionIds'];
+        if (
+          rawSessionIds !== undefined &&
+          (!Array.isArray(rawSessionIds) ||
+            !rawSessionIds.every(
+              (id) => typeof id === 'string' && id.trim().length > 0,
+            ))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'sessionIds must be an array of non-empty strings',
+          );
+        }
         if (
           rawReason !== undefined &&
           rawReason !== 'settings' &&
@@ -15115,12 +15272,29 @@ class QwenAgent implements Agent {
           );
         }
         const reason = rawReason ?? 'all';
+        const selectedSessions =
+          rawSessionIds === undefined
+            ? undefined
+            : [
+                ...new Set(
+                  (rawSessionIds as string[]).map(normalizeSessionIdForLookup),
+                ),
+              ].map((id) => this.sessionOrThrow(id));
+        if (selectedSessions?.length === 0) {
+          return {
+            sessionsRefreshed: 0,
+            sessionsFailed: 0,
+            configsRefreshed: 0,
+            configsFailed: 0,
+            reason,
+          };
+        }
         const refreshSettings = reason !== 'content';
         const refreshContent = reason !== 'settings';
         if (refreshSettings) {
           this.settings.reloadScopeFromDisk(SettingScope.Workspace);
         }
-        const sessions = this.getActiveSessions();
+        const sessions = selectedSessions ?? this.getActiveSessions();
         const settingsReloadResults = refreshSettings
           ? await Promise.allSettled(
               sessions.map((session) =>
@@ -15488,6 +15662,12 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
+    const workflowAncestorTrustProvider =
+      this.expectedPrivateParentCapability === undefined
+        ? createLocalWorkflowAncestorTrustProvider(
+            getOperatorTrustSettings(settings),
+          )
+        : undefined;
     const config = await loadCliConfig(
       mergedSettings,
       argvForSession,
@@ -15521,8 +15701,12 @@ class QwenAgent implements Agent {
         restoreOptions ||
         provisionalWorkspace ||
         agentHostReadOnly ||
-        executionEngine
+        executionEngine ||
+        workflowAncestorTrustProvider
         ? {
+            ...(workflowAncestorTrustProvider
+              ? { workflowAncestorTrustProvider }
+              : {}),
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),

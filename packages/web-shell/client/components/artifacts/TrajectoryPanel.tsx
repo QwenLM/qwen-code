@@ -50,6 +50,9 @@ import {
 import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
 import { TrajectoryOverview } from './TrajectoryOverview';
 import { TrajectoryInspector } from './TrajectoryInspector';
+import { TrajectoryExecutions } from './TrajectoryExecutions';
+import { projectTrajectoryExecutions } from '../../trajectory/project-trajectory-executions';
+import { trajectoryLoaderIdentity } from '../../trajectory/transcriptPageLoader';
 import styles from './TrajectoryPanel.module.css';
 import {
   buildTrajectoryLayout,
@@ -322,6 +325,21 @@ export function TrajectoryPanel({
   historyGapRevision = 0,
 }: TrajectoryPanelProps) {
   const { t } = useI18n();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const committedLoaderRef = useRef(loadPage);
+  useLayoutEffect(() => {
+    committedLoaderRef.current = loadPage;
+  }, [loadPage]);
+  const focusRecentExecutions = useCallback(() => {
+    if (committedLoaderRef.current !== loadPage) return;
+    const section = panelRef.current?.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"]',
+    );
+    (
+      section?.querySelector<HTMLElement>('[role="grid"]') ??
+      section?.querySelector<HTMLButtonElement>('button')
+    )?.focus({ preventScroll: true });
+  }, [loadPage]);
   const {
     trajectory,
     lifecycle,
@@ -430,10 +448,31 @@ export function TrajectoryPanel({
     | { of: Trajectory | undefined; loader: TrajectoryPageLoader; key: string }
     | undefined
   >();
+  const executions = useMemo(
+    () =>
+      projectTrajectoryExecutions(
+        lifecycle,
+        trajectoryLoaderIdentity(loadPage),
+      ),
+    [lifecycle, loadPage],
+  );
+  const [executionSelection, setExecutionSelection] = useState<{
+    loader: TrajectoryPageLoader | undefined;
+    key: string;
+  }>();
+  const selectedExecution =
+    executionSelection?.loader === loadPage
+      ? executions.rows.find((row) => row.key === executionSelection?.key)
+      : undefined;
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  useEffect(() => {
+    if (executionSelection && !selectedExecution)
+      setExecutionSelection(undefined);
+  }, [executionSelection, selectedExecution]);
   useEffect(() => {
     setInspectorOpen(false);
     setInspectorSelection(undefined);
+    setExecutionSelection(undefined);
   }, [loadPage]);
   useEffect(() => {
     if (
@@ -755,6 +794,7 @@ export function TrajectoryPanel({
       if (visualRows.length === 0) return;
       const clamped = Math.min(Math.max(nextIndex, 0), visualRows.length - 1);
       const key = visualRows[clamped]!.key;
+      setExecutionSelection(undefined);
       setSelectedKey(key);
       if (inspectorOpen && trajectory && loadPage) {
         setInspectorSelection({ of: trajectory, loader: loadPage, key });
@@ -771,6 +811,7 @@ export function TrajectoryPanel({
    */
   const selectRow = useCallback(
     (key: string, focus = true) => {
+      setExecutionSelection(undefined);
       setSelectedKey(key);
       if (inspectorOpen && trajectory && loadPage) {
         setInspectorSelection({ of: trajectory, loader: loadPage, key });
@@ -784,6 +825,7 @@ export function TrajectoryPanel({
     (key = selectedKey) => {
       if (!trajectory || !loadPage || !key) return;
       if (!trajectory.rowIndexByKey.has(key)) return;
+      setExecutionSelection(undefined);
       setInspectorSelection({
         of: trajectory,
         loader: loadPage,
@@ -1132,7 +1174,19 @@ export function TrajectoryPanel({
   );
 
   return (
-    <div className={styles.panel} data-testid="trajectory-panel">
+    <div ref={panelRef} className={styles.panel} data-testid="trajectory-panel">
+      <TrajectoryExecutions
+        rows={executions.rows}
+        omitted={executions.omitted}
+        incomplete={lifecycle.incomplete || lifecycle.truncated}
+        outsideWindow={lifecycle.outsideWindow.length}
+        selectedKey={selectedExecution?.key}
+        onSelect={(key) => {
+          setSelectedKey(undefined);
+          setInspectorOpen(false);
+          setExecutionSelection({ loader: loadPage, key });
+        }}
+      />
       <div className={styles.header}>
         <div className={styles.summary}>
           {summary ? (
@@ -1503,7 +1557,7 @@ export function TrajectoryPanel({
         />
       )}
       <div
-        className={`${styles.tableWrap} ${inspectorOpen ? styles.tableWrapWithInspector : ''}`}
+        className={`${styles.tableWrap} ${inspectorOpen || selectedExecution ? styles.tableWrapWithInspector : ''}`}
       >
         {visualRows.length === 0 ? (
           // An error with nothing folded is already stated by the alert above;
@@ -1696,6 +1750,31 @@ export function TrajectoryPanel({
           </>
         )}
       </div>
+      {selectedExecution && (
+        <TrajectoryInspector
+          key={selectedExecution.key}
+          execution={selectedExecution}
+          title={selectedExecution.name}
+          hiddenByRange={false}
+          hiddenByCollapse={false}
+          onReveal={() => {}}
+          onClearRange={() => {}}
+          onClose={() => {
+            setExecutionSelection(undefined);
+            focusRecentExecutions();
+          }}
+          onFocusedUnmount={focusRecentExecutions}
+          onLocateExecution={
+            selectedExecution.historyRowKey
+              ? () => {
+                  const key = selectedExecution.historyRowKey!;
+                  selectSpan(key);
+                  openInspector(key);
+                }
+              : undefined
+          }
+        />
+      )}
       {inspectorOpen &&
         inspectorSelection !== undefined &&
         inspectorSelection.loader === loadPage && (

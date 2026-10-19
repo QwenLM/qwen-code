@@ -2475,6 +2475,23 @@
     {
       "template": "workflow",
       "domain": "child_run",
+      "id": "workflow-recovery-blocked",
+      "patch": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
       "id": "workflow-start-without-definition",
       "patch": { "run": { "definition": null } },
       "valid": false,
@@ -4357,6 +4374,31 @@
           "state": "cancelled",
           "execution": "not_started_proven",
           "delivery": { "target": "session", "state": "cancelled" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-blocked-on-lost-generation",
+      "before": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         }
       },
       "valid": true

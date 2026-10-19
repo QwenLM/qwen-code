@@ -1711,6 +1711,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
@@ -2346,7 +2347,12 @@ export async function loadCliConfig(
     }
 
     if (sessionId) {
-      sessionService.assertLegacySessionExecution(sessionId);
+      // A Managed host restores its own sessions; a Legacy host must not
+      // execute a Managed transcript. The reverse direction is refused when
+      // the Managed session writer lease sees a Legacy transcript.
+      if (hostPolicy?.executionEngine !== 'managed') {
+        sessionService.assertLegacySessionExecution(sessionId);
+      }
     }
 
     if (argv.forkSession && sessionId) {
@@ -2527,6 +2533,14 @@ export async function loadCliConfig(
     sandbox: sandboxConfig,
     targetDir: cwd,
     provisionalWorkspace,
+    workflowAncestorTrustProvider:
+      bareMode ||
+      safeMode ||
+      sshWorkspace ||
+      agentHostReadOnly ||
+      provisionalWorkspace
+        ? undefined
+        : hostPolicy?.workflowAncestorTrustProvider,
     includeDirectories,
     loadMemoryFromIncludeDirectories: provisionalWorkspace
       ? false
