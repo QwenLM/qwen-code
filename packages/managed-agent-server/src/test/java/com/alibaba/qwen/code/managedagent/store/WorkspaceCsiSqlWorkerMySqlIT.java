@@ -35,12 +35,16 @@ import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -81,11 +85,49 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         }
     }
 
+    @Test
+    void hostedProducerRecoversMissingSettledReceiptWithoutRepeatingFileEffects() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "missing_receipt");
+        }
+    }
+
+    @Test
+    void hostedProducerConsumesCommittedFinalOutputWithoutAnotherModelRequest() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "final_output");
+        }
+    }
+
+    @Test
+    void coldWriterContentionAtReadCommittedHasOneInstalledWinner() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "receipt_complete", Connection.TRANSACTION_READ_COMMITTED);
+        }
+    }
+
+    @Test
+    void coldWriterContentionAtWarmedRepeatableReadHasOneInstalledWinner() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true, "receipt_complete", Connection.TRANSACTION_REPEATABLE_READ);
+        }
+    }
+
     static void acceptance(DataSource source, Path directory, boolean hostedProducer) throws Exception {
         acceptance(source, directory, hostedProducer, false);
     }
 
     static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery) throws Exception {
+        acceptance(source, directory, hostedProducer, coldRecovery, "receipt_complete");
+    }
+
+    static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
+            String recoveryCut) throws Exception {
+        acceptance(source, directory, hostedProducer, coldRecovery, recoveryCut, 0);
+    }
+
+    static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
+            String recoveryCut, int isolation) throws Exception {
         Path root = Path.of("../..").toRealPath();
         assertThat(Files.isRegularFile(root.resolve("packages/cli/dist/src/serve/managed-csi-file-worker.js")))
                 .as("Run npm run build before this explicitly invoked integration gate").isTrue();
@@ -94,6 +136,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var manager = new DataSourceTransactionManager(source);
         var transaction = new TransactionTemplate(manager);
         transaction.setTimeout(10);
+        if (isolation != 0) transaction.setIsolationLevel(isolation);
+        var cold = new ColdContention(source, manager, isolation);
         var registration = new WorkspaceCsiRegistration("tenant", "storage", "owned-cluster", "owned-runtime",
                 "pvc", "pvc-uid", "pv", "pv-uid", "diskplugin.csi.alibabacloud.com", "volume", "backend",
                 "owned-serial", "/workspace", 1);
@@ -192,6 +236,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                             Map.of("writerLeaseUntil", row.getLong(1), "activationExpiresAt", row.getLong(2),
                                                     "databaseNow", row.getLong(3)));
                             case "/fixture:image" -> databaseImage(source, jdbc);
+                            case "/fixture:cold-arm" -> cold.arm(((List<?>) body.get("writers")).stream().map(String.class::cast).toList());
+                            case "/fixture:cold-release" -> cold.release();
                             case "/fixture:publication" -> transaction.execute(status -> {
                                 var writer = journal.lockPublicationWriter("tenant", "workspace", sessionId,
                                         (String) body.get("writerId"), ((Number) body.get("writerGeneration")).longValue(),
@@ -200,8 +246,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                             });
                             case "/fixture:cold-refusals" -> {
                                 var before = databaseImage(source, jdbc);
-                                String execution = jdbc.queryForObject("SELECT execution_call_id FROM ma_tool_execution"
-                                        + " ORDER BY execution_call_id LIMIT 1", String.class);
+                                String execution = jdbc.queryForObject("SELECT e.execution_call_id FROM ma_tool_execution e"
+                                        + " WHERE EXISTS (SELECT 1 FROM ma_session_journal_tx t WHERE t.operation = 'recordToolResult'"
+                                        + " AND t.command_id = e.execution_call_id) ORDER BY e.execution_call_id LIMIT 1", String.class);
                                 for (String mutation : List.of("execution_state = 'UNKNOWN', result_json = NULL, execution_status = NULL, settled_at = NULL",
                                         "cancel_requested = TRUE", "native_authorization_json = NULL",
                                         "execution_status = 'error', result_json = '{\"executionStatus\":\"error\",\"responseParts\":[],\"error\":{\"message\":\"changed\"}}'")) {
@@ -236,7 +283,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                             ? journal.readOwnerResource("tenant", query.get("workspaceId"), sessionId,
                                     suffix.substring("/resources/".length()), token)
                             : transaction.execute(status -> switch (suffix) {
-                                case "/writers:acquire" -> journal.acquireWriter("tenant", sessionId, token,
+                                case "/writers:acquire" -> cold.acquire(journal, token, sessionId,
                                         read(raw, ManagedSessionStoreModels.AcquireWriterRequest.class));
                                 case "/writers:renew" -> journal.renewWriter("tenant", sessionId, token,
                                         read(raw, ManagedSessionStoreModels.RenewWriterRequest.class));
@@ -291,14 +338,17 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             try {
                 Path input = directory.resolve("input.json");
                 String foreignOwner = UUID.randomUUID().toString();
-                JSON.writeValue(input.toFile(), Map.of("adapter", "http://127.0.0.1:" + adapter.getAddress().getPort(),
+                var inputBody = new java.util.LinkedHashMap<String, Object>(Map.of("adapter", "http://127.0.0.1:" + adapter.getAddress().getPort(),
                         "broker", broker.getBaseUri().toString(), "operatorToken", operatorToken,
                         "foreignOwnerSessionId", foreignOwner,
                         "foreignOwnerOperationId", UUID.nameUUIDFromBytes(foreignOwner.getBytes(StandardCharsets.UTF_8)).toString(),
                         "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", sessionId),
                         "hostedProducer", hostedProducer,
                         "coldRecovery", coldRecovery,
+                        "recoveryCut", recoveryCut,
                         "runtime", Map.of("bindingId", binding.getBindingId(), "generation", Long.toString(binding.getGeneration()))));
+                inputBody.put("isolation", isolation);
+                JSON.writeValue(input.toFile(), inputBody);
                 Path producer = directory.resolve("producer.mjs");
                 try (var script = WorkspaceCsiSqlWorkerMySqlIT.class.getResourceAsStream("/csi-sql-worker-acceptance.mjs");
                         var declarations = WorkspaceCsiSqlWorkerMySqlIT.class.getResourceAsStream("/csi-native-file-declarations.json")) {
@@ -382,6 +432,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     child.destroyForcibly();
                     childExited = child.waitFor(10, TimeUnit.SECONDS);
                 }
+                cold.stop();
                 adapter.stop(0);
                 executor.shutdownNow();
                 boolean executorTerminated = executor.awaitTermination(10, TimeUnit.SECONDS);
@@ -436,6 +487,136 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             }
         }
         return result;
+    }
+
+    private static final class ColdContention {
+        private final DataSource source;
+        private final DataSourceTransactionManager manager;
+        private final int isolation;
+        private final Set<String> entered = ConcurrentHashMap.newKeySet();
+        private final Map<String, Map<String, Object>> warmed = new ConcurrentHashMap<>();
+        private final CountDownLatch snapshots = new CountDownLatch(2);
+        private final CountDownLatch start = new CountDownLatch(1);
+        private volatile List<String> writers = List.of();
+        private Connection holder;
+        private long holderId;
+
+        private ColdContention(DataSource source, DataSourceTransactionManager manager, int isolation) {
+            this.source = source;
+            this.manager = manager;
+            this.isolation = isolation;
+        }
+
+        private Map<String, Object> arm(List<String> contenders) throws Exception {
+            assertThat(isolation).isIn(Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ);
+            assertThat(contenders).hasSize(2).doesNotHaveDuplicates();
+            assertThat(writers).isEmpty();
+            writers = List.copyOf(contenders);
+            holder = source.getConnection();
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant", 5);
+            try (var statement = holder.prepareStatement("SELECT CONNECTION_ID()"); var row = statement.executeQuery()) {
+                assertThat(row.next()).isTrue();
+                holderId = row.getLong(1);
+            }
+            return Map.of("holderId", holderId);
+        }
+
+        private ManagedSessionStoreModels.WriterGrant acquire(ManagedSessionStore journal, String token,
+                String session, ManagedSessionStoreModels.AcquireWriterRequest request) {
+            var transaction = new TransactionTemplate(manager);
+            transaction.setTimeout(10);
+            boolean contender = writers.contains(request.writerId()) && entered.add(request.writerId());
+            if (isolation != 0) {
+                transaction.setIsolationLevel(isolation);
+            }
+            return transaction.execute(status -> {
+                if (contender) {
+                    new ManagedSchemaJdbcTemplate(source).execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                        assertThat(connection.getAutoCommit()).isFalse();
+                        assertThat(connection.getTransactionIsolation()).isEqualTo(isolation);
+                        try (var statement = connection.prepareStatement("SELECT CONNECTION_ID(), writer_id, writer_generation,"
+                                + " journal_revision, committed_sequence, last_commit_digest, activation_epoch FROM ma_session_head");
+                                var row = statement.executeQuery()) {
+                            assertThat(row.next()).isTrue();
+                            warmed.put(request.writerId(), Map.of("connectionId", row.getLong(1),
+                                    "isolation", connection.getTransactionIsolation(), "autoCommit", connection.getAutoCommit(),
+                                    "writerId", row.getString(2), "writerGeneration", row.getLong(3),
+                                    "journalRevision", row.getLong(4), "committedSequence", row.getLong(5),
+                                    "lastCommitDigest", row.getString(6), "activationEpoch", row.getLong(7)));
+                            assertThat(row.next()).isFalse();
+                        }
+                        snapshots.countDown();
+                        await(start);
+                        return null;
+                    });
+                }
+                return journal.acquireWriter("tenant", session, token, request);
+            });
+        }
+
+        private Map<String, Object> release() throws Exception {
+            try {
+                await(snapshots);
+                start.countDown();
+                var jdbc = new ManagedSchemaJdbcTemplate(source);
+                List<Map<String, Object>> waits = List.of();
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                var connections = warmed.values().stream().map(row -> ((Number) row.get("connectionId")).longValue()).toList();
+                while (System.nanoTime() < until) {
+                    waits = jdbc.queryForList("SELECT DISTINCT requester.PROCESSLIST_ID AS requester, blocker.PROCESSLIST_ID AS blocker,"
+                            + " locks.OBJECT_NAME AS table_name, requester.PROCESSLIST_INFO AS sql_text"
+                            + " FROM performance_schema.data_lock_waits waits"
+                            + " JOIN performance_schema.data_locks locks ON locks.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID"
+                            + " JOIN performance_schema.threads requester ON requester.THREAD_ID=waits.REQUESTING_THREAD_ID"
+                            + " JOIN performance_schema.threads blocker ON blocker.THREAD_ID=waits.BLOCKING_THREAD_ID"
+                            + " WHERE locks.OBJECT_SCHEMA=DATABASE()");
+                    var direct = waits.stream().filter(row -> ((Number) row.get("blocker")).longValue() == holderId)
+                            .map(row -> ((Number) row.get("requester")).longValue()).toList();
+                    if (direct.containsAll(connections)) {
+                        break;
+                    }
+                    Thread.sleep(10);
+                }
+                assertThat(connections).hasSize(2).doesNotHaveDuplicates().doesNotContain(holderId);
+                assertThat(waits).hasSizeBetween(2, 3);
+                var direct = waits.stream().filter(row -> ((Number) row.get("blocker")).longValue() == holderId)
+                        .map(row -> ((Number) row.get("requester")).longValue()).toList();
+                assertThat(direct).containsExactlyInAnyOrderElementsOf(connections);
+                for (var row : waits) {
+                    assertThat(row.get("table_name")).isEqualTo("ma_tenant_guard");
+                    long blocker = ((Number) row.get("blocker")).longValue();
+                    assertThat(blocker == holderId || connections.contains(blocker)).isTrue();
+                    assertThat(connections).contains(((Number) row.get("requester")).longValue());
+                    assertThat(((Number) row.get("requester")).longValue()).isNotEqualTo(blocker);
+                    assertThat((String) row.get("sql_text")).contains("INSERT INTO ma_tenant_guard");
+                }
+                return Map.of("warmed", warmed, "waits", waits, "holderId", holderId);
+            } finally {
+                stop();
+            }
+        }
+
+        private static void await(CountDownLatch latch) {
+            try {
+                assertThat(latch.await(8, TimeUnit.SECONDS)).as("Owned contention barrier timed out").isTrue();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Owned contention barrier interrupted", interrupted);
+            }
+        }
+
+        private synchronized void stop() throws Exception {
+            start.countDown();
+            if (holder != null) {
+                try {
+                    holder.rollback();
+                } finally {
+                    holder.close();
+                    holder = null;
+                }
+            }
+        }
     }
 
     private static void respond(HttpExchange exchange, int status, Object body) throws java.io.IOException {

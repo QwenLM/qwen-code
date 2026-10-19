@@ -1284,6 +1284,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
             String promptId, String batchId) {
+        return readCsiBatch(harnessSessionId, runtimeSessionId, promptId, batchId, null);
+    }
+
+    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
+            String promptId, String batchId, Map<String, Object> recoveryOwner) {
         requireOpen();
         BrokerValues.requireId(promptId, "promptId");
         BrokerValues.requireId(batchId, "batchId");
@@ -1292,7 +1297,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     context.lock();
                     try {
                         return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
-                                context.binding(), promptId, batchId);
+                                context.binding(), promptId, batchId, recoveryOwner);
                     } finally {
                         context.unlock();
                     }
