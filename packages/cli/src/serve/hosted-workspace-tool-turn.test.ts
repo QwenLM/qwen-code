@@ -5765,7 +5765,14 @@ it.each([false, true])(
           signal,
         ),
         `attempt ${attempt}`,
-      ).toEqual(oversized ? refused : [...refused, { text: 'batch reviewed' }]);
+      ).toEqual(
+        oversized
+          ? JSON.parse(JSON.stringify(refused))
+          : [
+              ...JSON.parse(JSON.stringify(refused)),
+              { text: 'batch reviewed' },
+            ],
+      );
       if (oversized) expect(restored.hookStopReason).toContain('60 KiB');
       expect(seen).toHaveLength(dispatched);
     }
