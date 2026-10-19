@@ -613,8 +613,9 @@ describe('Hosted real-process gates', () => {
       // the FG13a execute lost-reply cell adds 150 s, so the fork moves to
       // 6735; the FG13a status lost-reply cell adds 150 s, so the fork moves
       // to 6885 and the Verify step to 125 minutes; the FG11c Harness-crash
-      // method (144.8 s measured, 550 s budgeted) moves the fork to 7435 and
-      // the Verify step to 134 minutes):
+      // method (144.8 s measured, 550 s budgeted) moves the fork to 7435;
+      // the FG13d DELETE-drain cell adds 150 s, so the fork moves to 7585
+      // and the Verify step to 137 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.

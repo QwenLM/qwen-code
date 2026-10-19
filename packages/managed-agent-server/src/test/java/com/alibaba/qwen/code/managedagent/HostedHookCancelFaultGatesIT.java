@@ -264,7 +264,6 @@ class HostedHookCancelFaultGatesIT {
         assertThat(events("hook.done").stream()
                 .filter(event -> "SessionDelete".equals(event.path("eventName").asText())).count()).isEqualTo(1);
         assertHookUnitsEmpty();
-        assertThat(events("hook.allow")).isEmpty();
         assertThat(modelFailure.get()).isNull();
     }
 
@@ -543,7 +542,8 @@ class HostedHookCancelFaultGatesIT {
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
-                    && List.of("FG13_CANCEL", "FG13_CANCEL_DROP", "FG13_CANCEL_STOP", "FG13_TIMEOUT").contains(prompt);
+                    && List.of("FG13_CANCEL", "FG13_CANCEL_DROP", "FG13_CANCEL_STOP", "FG13_TIMEOUT",
+                            "FG13_DELETE_DRAIN").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
