@@ -65,12 +65,18 @@ public class ManagedToolResultProjector {
         } catch (RuntimeException error) {
             LOG.warn("Managed tool result backfill could not advance: {}", error.getClass().getSimpleName());
         }
-        for (int index = 0; index < 8; index++) {
-            var claim = store.claim();
-            if (claim.isEmpty()) {
-                return;
+        try {
+            for (int index = 0; index < 8; index++) {
+                var claim = store.claim();
+                if (claim.isEmpty()) {
+                    return;
+                }
+                project(claim.get());
             }
-            project(claim.get());
+        } catch (RuntimeException error) {
+            // Sibling collectors' shape: a held tenant guard refuses the claim (503) and the
+            // claim lapses back to due, so the next tick retries instead of an ERROR per pass.
+            LOG.warn("Managed tool result projection will retry: {}", error.getClass().getSimpleName());
         }
     }
 

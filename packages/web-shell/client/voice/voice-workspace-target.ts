@@ -15,8 +15,8 @@ import type {
 
 const PRIMARY_VOICE_FEATURE = 'voice_transcribe';
 const QUALIFIED_VOICE_FEATURE = 'workspace_qualified_voice';
-const QUALIFIED_CORE_FEATURE = 'workspace_qualified_rest_core';
-const WORKSPACE_SETTINGS_FEATURE = 'workspace_settings';
+export const QUALIFIED_CORE_FEATURE = 'workspace_qualified_rest_core';
+export const WORKSPACE_SETTINGS_FEATURE = 'workspace_settings';
 
 const MODERN_WORKSPACE_FEATURES = new Set([
   'dynamic_workspace_registration',
