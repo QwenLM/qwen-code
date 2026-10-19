@@ -111,6 +111,10 @@ The attachment limit remains 8 MiB. If an upload expires or the daemon restarts,
   - **Cause:** tmux can translate wheel gestures into plain arrow-key sequences. Those sequences are indistinguishable from real arrow-key presses by the time qwen-code receives them.
   - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). To hand plain `Up Arrow` / `Down Arrow` to the viewport while the composer is empty, set `ui.arrowKeysScrollTranscript` to `true`; input history is then reachable with `Ctrl+P` / `Ctrl+N`. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
+- **ConEmu/Cmder output flickers during streaming**
+  - **Cause:** ConEmu repaints on every write and does not coalesce rapid full-viewport updates. Virtualized History rewrites the visible viewport during streaming, so each update can appear as a flicker.
+  - **Solution:** Qwen Code detects ConEmu/Cmder (via `ConEmuPID` or `CMDER_SHELL`) and automatically uses the append-only renderer, which only redraws the dynamic tail. To force Virtualized History back on, set `"ui.useTerminalBuffer": true`; set it to `false` to use the append-only renderer in other terminals. Requires restart.
+
 - **Right-click does nothing, links do not open, or text cannot be selected in the terminal**
   - **Issue:** Native right-click context menus, OSC 8 hyperlink clicks, and terminal-native text selection stop working while Qwen Code is running.
   - **Cause:** When `ui.mouseTracking` is enabled (the default), Qwen Code captures all mouse events via SGR mouse tracking to power in-app text selection, click-to-position, row hover, history-item toggling, and viewport scrolling. The terminal forwards every mouse event to the app instead of handling it natively. Qwen Code supplies its own replacements while tracking is on: a single click opens an http(s) OSC 8 hyperlink, and right-click on a link or text selection opens an in-app context menu.
