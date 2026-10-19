@@ -13,6 +13,8 @@ import {
   GROUP_COLOR_OPTIONS,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -76,6 +78,91 @@ describe('merged session catalog pagination', () => {
       bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
     };
   }
+
+  it('enriches only returned rows with the recorded user time, independent of live activity', async () => {
+    await persist(summary(0));
+    await persist(summary(1));
+    const { bridge } = bridgeFor([
+      { ...summary(0), updatedAt: summary(10).createdAt },
+    ]);
+    const read = vi.spyOn(SessionService.prototype, 'getLastUserPromptAt');
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(page.sessions).toHaveLength(1);
+    expect(page.sessions[0]?.sessionId).toBe(summary(0).sessionId);
+    expect(page.sessions[0]?.lastUserPromptAt).toBe(summary(0).createdAt);
+    expect(page.sessions[0]?.updatedAt).toBe(summary(10).createdAt);
+    expect(read.mock.calls).toEqual([[summary(0).sessionId, 'active']]);
+  });
+
+  it('keeps an oversized historical row visible without inventing its question time', async () => {
+    const item = summary(0);
+    await persist(item);
+    const file = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+      `${item.sessionId}.jsonl`,
+    );
+    const assistants = Array.from(
+      { length: 12 },
+      (_, index) =>
+        JSON.stringify({
+          uuid: `assistant-${index}`,
+          parentUuid: index
+            ? `assistant-${index - 1}`
+            : `${item.sessionId}-user`,
+          sessionId: item.sessionId,
+          timestamp: item.createdAt,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'output' }] },
+          cwd: workspaceCwd,
+        }) + '\n',
+    ).join('');
+    await fs.appendFile(file, assistants);
+    await fs.truncate(file, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+    const { bridge } = bridgeFor([]);
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true },
+    );
+    expect(page.sessions.map((row) => row.sessionId)).toEqual([item.sessionId]);
+    expect(page.sessions[0]?.lastUserPromptAt).toBeUndefined();
+  });
+
+  it('bounds timestamp reads to two and aborts the waiter without starting later rows', async () => {
+    const { bridge } = bridgeFor([
+      summary(1),
+      summary(2),
+      summary(3),
+      summary(4),
+    ]);
+    const pending: Array<(value: string | undefined) => void> = [];
+    const read = vi
+      .spyOn(SessionService.prototype, 'getLastUserPromptAt')
+      .mockImplementation(
+        () => new Promise((resolve) => pending.push(resolve)),
+      );
+    const controller = new AbortController();
+    const request = listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 4 },
+      { runtimeBaseDir, paginateMerged: true, signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    const reason = new Error('test stopped');
+    controller.abort(reason);
+    await expect(request).rejects.toBe(reason);
+    pending.forEach((resolve) => resolve(undefined));
+    await Promise.resolve();
+    expect(read).toHaveBeenCalledTimes(2);
+  });
 
   it('paginates persisted and live-only rows without dropping or duplicating merged rows', async () => {
     await persist(summary(0));

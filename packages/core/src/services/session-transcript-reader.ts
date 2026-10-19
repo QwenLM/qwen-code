@@ -14,6 +14,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { z } from 'zod';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -465,6 +466,17 @@ interface RestoreProjectionReadOptions {
   validateFirstRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
 }
 
+interface LastUserPromptReadOptions {
+  validateFirstRecord?: (
+    record: Pick<ChatRecord, 'sessionId' | 'cwd'>,
+  ) => boolean | Promise<boolean>;
+}
+
+interface LastUserPromptSnapshot {
+  lastUserPromptAt?: string;
+  firstRecordOwner?: Pick<ChatRecord, 'sessionId' | 'cwd'>;
+}
+
 interface SessionTranscriptFileIdentity {
   dev: number;
   ino: number;
@@ -499,6 +511,7 @@ interface AggregatedRecordReadContext {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  lastUserPromptAt?: string;
   sessionIdMatchesFile: boolean;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
@@ -646,6 +659,8 @@ function recordRestoreSelectionAttributes(
 }
 
 const indexCache = new Map<string, CacheEntry>();
+const lastUserPromptCache = new Map<string, Promise<LastUserPromptSnapshot>>();
+const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 512;
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
 // key-file path). Rotating a key file externally therefore requires a daemon
 // restart to take effect — the only in-process invalidation is the corrupt
@@ -1802,6 +1817,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
       estimateStringBytes(uuid) +
       estimateStringBytes(entry.parentUuid) +
+      estimateStringBytes(entry.lastUserPromptAt) +
       estimateStringBytes(entry.type) +
       estimateStringBytes(entry.subtype) +
       estimateStringBytes(entry.navigationKind) +
@@ -2106,6 +2122,40 @@ async function readGoalStatePayloadBeforePosition(
   return parseGoalStateRecordPayloadV2(record?.systemPayload);
 }
 
+const userPromptTimestampSchema = z.string().datetime({ offset: true });
+
+function userPromptTimestamp(record: ChatRecord): string | undefined {
+  if (
+    record.type !== 'user' ||
+    record.forkedFrom !== undefined ||
+    record.agentId !== undefined ||
+    record.isSidechain === true ||
+    (record.provenance !== undefined && record.provenance !== 'real_user') ||
+    (record.subtype !== undefined &&
+      record.subtype !== 'mid_turn_user_message' &&
+      record.subtype !== 'realtime_message' &&
+      record.subtype !== 'agent_mention')
+  ) {
+    return undefined;
+  }
+  if (!userPromptTimestampSchema.safeParse(record.timestamp).success)
+    return undefined;
+  const timestamp = Date.parse(record.timestamp);
+  return Number.isFinite(timestamp)
+    ? new Date(timestamp).toISOString()
+    : undefined;
+}
+
+function lastUserPromptFromIndex(index: TranscriptIndex): string | undefined {
+  for (let position = index.replayUuids.length - 1; position >= 0; position--) {
+    const timestamp = index.byUuid.get(
+      index.replayUuids[position]!,
+    )?.lastUserPromptAt;
+    if (timestamp !== undefined) return timestamp;
+  }
+  return undefined;
+}
+
 /**
  * The index entry for one record's first fragment.
  *
@@ -2122,6 +2172,7 @@ function newIndexEntry(
   const navigationKind = navigationKindForRecord(record);
   return {
     parentUuid: record.parentUuid,
+    lastUserPromptAt: userPromptTimestamp(record),
     sessionIdMatchesFile: record.sessionId === sessionId,
     type: record.type,
     ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
@@ -2567,6 +2618,7 @@ async function hasSnapshotSignature(
   fileIdentity: SessionTranscriptFileIdentity,
   snapshotSize: number,
   lastUpdated: string,
+  allowAppend = false,
 ): Promise<boolean> {
   let stats: fs.Stats;
   try {
@@ -2576,9 +2628,11 @@ async function hasSnapshotSignature(
     throw error;
   }
   return (
-    stats.size === snapshotSize &&
+    (stats.size === snapshotSize ||
+      (allowAppend && stats.size > snapshotSize)) &&
     sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
-    new Date(stats.mtimeMs).toISOString() === lastUpdated
+    ((allowAppend && stats.size > snapshotSize) ||
+      new Date(stats.mtimeMs).toISOString() === lastUpdated)
   );
 }
 
@@ -2886,7 +2940,10 @@ export class SessionTranscriptReader {
     this.storage = new Storage(workspaceCwd, runtimeBaseDir);
   }
 
-  getSessionFilePath(sessionId: string): string {
+  getSessionFilePath(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+  ): string {
     if (!SESSION_TRANSCRIPT_SESSION_ID_PATTERN.test(sessionId)) {
       debugLogger.debug(`invalid session id for transcript read: ${sessionId}`);
       throw makeSessionTranscriptNotFoundError(sessionId);
@@ -2894,8 +2951,104 @@ export class SessionTranscriptReader {
     return path.join(
       this.storage.getProjectDir(),
       'chats',
+      ...(archiveState === 'archived' ? ['archive'] : []),
       `${sessionId}.jsonl`,
     );
+  }
+
+  async getLastUserPromptAt(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+    readOptions: LastUserPromptReadOptions = {},
+  ): Promise<string | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    const stats = await fsp.stat(filePath);
+    if (stats.size > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) return undefined;
+    const fileIdentity = fileIdentityFromStats(stats);
+    const lastUpdated = new Date(stats.mtimeMs).toISOString();
+    const key = makeCacheKey(filePath, fileIdentity, stats.size, lastUpdated);
+    const cached = lastUserPromptCache.get(key);
+    if (cached) {
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, cached);
+      const snapshot = await cached;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    const pending = (async (): Promise<LastUserPromptSnapshot> => {
+      let index: TranscriptIndex;
+      try {
+        index = await getCachedIndex({
+          filePath,
+          fileIdentity,
+          snapshotSize: stats.size,
+          lastUpdated,
+        });
+      } catch (error) {
+        if (
+          error instanceof EmptySessionTranscriptError &&
+          (await hasSnapshotSignature(
+            filePath,
+            fileIdentity,
+            stats.size,
+            lastUpdated,
+            true,
+          ))
+        )
+          return {};
+        throw error;
+      }
+      const [firstRecord] = await readAggregatedRecords(index, [
+        index.firstRecordUuid,
+      ]);
+      if (!firstRecord)
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      const effective = indexHasManagedHeader(index)
+        ? managedPageIndex(
+            index,
+            await this.readManagedRecords(sessionId, index, {}),
+          )
+        : index;
+      const timestamp = lastUserPromptFromIndex(effective);
+      if (
+        !(await hasSnapshotSignature(
+          filePath,
+          fileIdentity,
+          stats.size,
+          lastUpdated,
+          true,
+        ))
+      ) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      return {
+        lastUserPromptAt: timestamp,
+        firstRecordOwner: {
+          sessionId: firstRecord.sessionId,
+          cwd: firstRecord.cwd,
+        },
+      };
+    })();
+    lastUserPromptCache.set(key, pending);
+    while (lastUserPromptCache.size > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
+      lastUserPromptCache.delete(lastUserPromptCache.keys().next().value!);
+    }
+    let snapshot: LastUserPromptSnapshot;
+    try {
+      snapshot = await pending;
+    } catch (error) {
+      if (lastUserPromptCache.get(key) === pending)
+        lastUserPromptCache.delete(key);
+      throw error;
+    }
+    return readOptions.validateFirstRecord &&
+      (!snapshot.firstRecordOwner ||
+        !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+      ? undefined
+      : snapshot.lastUserPromptAt;
   }
 
   private decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
@@ -4122,6 +4275,7 @@ export class SessionTranscriptReader {
 }
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
+  lastUserPromptCache.clear();
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;

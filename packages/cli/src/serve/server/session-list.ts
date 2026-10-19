@@ -1369,6 +1369,31 @@ async function listWorkspaceSessionsByMetadataForResponse(
   };
 }
 
+function waitForQuestionTime(
+  promise: Promise<string | undefined>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    void promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function listWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
@@ -1398,6 +1423,24 @@ export async function listWorkspaceSessionsForResponse(
           : {}),
         runtimeBaseDir,
       }),
+  );
+  readOptions.signal?.throwIfAborted();
+  const service = new SessionService(workspaceCwd, { runtimeBaseDir });
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(2, result.sessions.length) }, async () => {
+      while (nextIndex < result.sessions.length) {
+        readOptions.signal?.throwIfAborted();
+        const session = result.sessions[nextIndex++]!;
+        session.lastUserPromptAt = await waitForQuestionTime(
+          service.getLastUserPromptAt(
+            session.sessionId,
+            options?.archiveState ?? 'active',
+          ),
+          readOptions.signal,
+        );
+      }
+    }),
   );
   readOptions.signal?.throwIfAborted();
   return result;
