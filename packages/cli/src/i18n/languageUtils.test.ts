@@ -502,6 +502,58 @@ Always use formal tone.
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
+    it('should preserve an existing file when its language label is unfamiliar', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      const customContent =
+        '# Output language preference: Chinese, Simplified\n' +
+        '<!-- qwen-code:llm-output-language: Chinese, Simplified -->\n' +
+        '\nKeep this custom guidance.\n';
+      vi.mocked(fs.readFileSync).mockReturnValue(customContent);
+
+      initializeLlmOutputLanguage('English');
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should preserve non-empty rule files with an unrecognized language marker', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        '<!-- qwen-code:llm-output-language: English/中文 -->\n\nKeep this custom guidance.\n',
+      );
+
+      initializeLlmOutputLanguage('Russian');
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it.each(['', ' \n\t'])(
+      'should regenerate an empty rule file with the configured language (%j)',
+      (content) => {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+        initializeLlmOutputLanguage('Russian');
+
+        expect(fs.writeFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('output-language.md'),
+          expect.stringContaining('Russian'),
+          'utf-8',
+        );
+      },
+    );
+
+    it('should preserve a valid marker at the start of an oversized file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      const customContent =
+        '<!-- qwen-code:llm-output-language: Russian -->\n' +
+        'x'.repeat(16 * 1024);
+      vi.mocked(fs.readFileSync).mockReturnValue(customContent);
+
+      initializeLlmOutputLanguage('English');
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
     it('should ignore migration write failures when an existing generated file is still valid', () => {
       writeOutputLanguageFile('Chinese');
       const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock

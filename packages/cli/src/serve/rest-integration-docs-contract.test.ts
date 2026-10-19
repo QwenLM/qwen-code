@@ -68,6 +68,7 @@ const GUIDE_OPERATIONS: readonly string[] = [
   'GET /stat',
   'GET /list',
   'GET /glob',
+  'POST /workspace/generate',
 ];
 
 const SDK_METHOD_BY_OPERATION: Readonly<Record<string, string>> = {
@@ -97,6 +98,7 @@ const SDK_METHOD_BY_OPERATION: Readonly<Record<string, string>> = {
   'GET /stat': 'DaemonClient.fileStat',
   'GET /list': 'DaemonClient.dirList',
   'GET /glob': 'DaemonClient.glob',
+  'POST /workspace/generate': 'DaemonClient.generateWorkspaceContent',
 };
 
 const HTTP_METHODS = ['get', 'post', 'patch', 'put', 'delete'] as const;
@@ -566,6 +568,32 @@ describe('REST integration documentation contract', () => {
       expect(cells[4]).toBe(`\`${operation['x-qwen-sdk-method']}\``);
     }
     expect([...operations.keys()].filter((key) => !seen.has(key))).toEqual([]);
+  });
+
+  it('keeps grouped reference capability tags registered', () => {
+    const groupedRows = readFileSync(REFERENCE, 'utf8')
+      .split('\n')
+      .filter(
+        (line) =>
+          line.startsWith('| ') &&
+          !line.startsWith('| [`') &&
+          !line.startsWith('| ---') &&
+          line.split('|').length >= 5,
+      );
+
+    for (const row of groupedRows) {
+      const capabilityCell = row.split('|')[3] ?? '';
+      const capabilityTags = [...capabilityCell.matchAll(/`([^`]+)`/g)].map(
+        (match) => match[1],
+      );
+      for (const capability of capabilityTags) {
+        expect(
+          SERVE_CAPABILITY_REGISTRY[
+            capability as keyof typeof SERVE_CAPABILITY_REGISTRY
+          ],
+        ).toBeDefined();
+      }
+    }
   });
 
   it('indexes every operation with a dedicated protocol section', () => {
