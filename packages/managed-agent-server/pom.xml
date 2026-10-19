@@ -403,7 +403,7 @@
                                  becomes 3874 s and the fork 4484 s,
                                  which the Verify step's 90 minutes
                                  still wrap. The FG12a MCP reply-loss
-                                 letter (HostedMcpReplyLossIT, three
+                                 letter (HostedMcpReplyLossIT, eight
                                  cases) measures 5.1-7.4 s healthy
                                  locally on macOS JDK 21 + MariaDB
                                  10.11 (~15 s budgeted at 2x): the

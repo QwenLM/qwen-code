@@ -258,9 +258,36 @@ class HostedMcpReplyLossIT {
                 + session.id() + "/status", null, session.clientId(), 200)
                         .path("hasActivePrompt").asBoolean()).isFalse());
         assertThat(startCalls()).hasSize(startsBefore + 1);
-        assertThat(startCalls().getLast().dropped()).isTrue();
-        assertThat(startCalls().getLast().status()).isEqualTo(200);
-        assertThat(executionReads()).isNotEmpty();
+        ProxyCall lostStart = startCalls().getLast();
+        assertThat(lostStart.dropped()).isTrue();
+        assertThat(lostStart.status()).isEqualTo(200);
+        String executionId = lostStart.path().substring(
+                lostStart.path().lastIndexOf("/executions/")
+                        + "/executions/".length(),
+                lostStart.path().length() - ":start".length());
+        assertThat(executionId).isNotBlank();
+        assertThat(startCalls().stream()
+                .filter(call -> call.path().contains(executionId)).count())
+                .isEqualTo(1);
+        int lostStartIndex = -1;
+        for (int index = 0; index < proxyCalls.size(); index++) {
+            if (proxyCalls.get(index) == lostStart) {
+                lostStartIndex = index;
+                break;
+            }
+        }
+        assertThat(lostStartIndex).isGreaterThanOrEqualTo(0);
+        int readIndex = lostStartIndex;
+        for (int index = lostStartIndex + 1; index < proxyCalls.size();
+                index++) {
+            ProxyCall call = proxyCalls.get(index);
+            if ("GET".equals(call.method())
+                    && call.path().contains("/executions/" + executionId)) {
+                readIndex = index;
+                break;
+            }
+        }
+        assertThat(readIndex).isGreaterThan(lostStartIndex);
         assertThat(effects("tool_call"))
                 .containsExactly("FG12_TOOL", "FG12_TOOL_2");
 
@@ -453,13 +480,6 @@ class HostedMcpReplyLossIT {
                 .toList();
     }
 
-    private List<ProxyCall> executionReads() {
-        return proxyCalls.stream()
-                .filter(call -> "GET".equals(call.method())
-                        && call.path().contains("/executions/"))
-                .toList();
-    }
-
     private int storageHolders(SessionRef session) {
         String binding = jdbc.queryForObject(
                 "SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?"
@@ -525,18 +545,26 @@ class HostedMcpReplyLossIT {
 
     private JsonNode harnessRequest(String method, String path, Object body,
             String clientId, int expected) throws Exception {
-        return harnessRequestAsync(method, path, body, clientId).thenApply(
-                response -> {
-                    assertThat(response.statusCode()).as("%s %s: %s", method,
-                            path, response.body()).isEqualTo(expected);
-                    try {
-                        return response.body().isEmpty()
-                                ? json.createObjectNode()
-                                : json.readTree(response.body());
-                    } catch (IOException error) {
-                        throw new IllegalStateException(error);
-                    }
-                }).get(30, TimeUnit.SECONDS);
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(
+                "http://127.0.0.1:" + harnessPort + path))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id", bootId)
+                .header("Content-Type", "application/json")
+                .method(method, body == null
+                        ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers
+                                .ofString(json.writeValueAsString(body)));
+        if (clientId != null) {
+            builder.header("X-Qwen-Client-Id", clientId);
+        }
+        HttpResponse<String> response = http.send(builder.build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).as("%s %s: %s", method, path,
+                response.body()).isEqualTo(expected);
+        return response.body().isEmpty() ? json.createObjectNode()
+                : json.readTree(response.body());
     }
 
     private CompletableFuture<HttpResponse<String>> harnessRequestAsync(
