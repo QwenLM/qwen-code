@@ -18,6 +18,7 @@ vi.mock('node:os', async (importOriginal) => {
   };
 });
 
+// Mirrors packages/cli/src/test-utils/slow-test-host.test.ts; keep both in sync.
 describe('isSlowTestHost', () => {
   const initialRunnerName = process.env['RUNNER_NAME'];
 

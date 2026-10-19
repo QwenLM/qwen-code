@@ -11,6 +11,8 @@ import * as os from 'node:os';
  * review-address verification gate re-runs package tests through an
  * `env -i` child that does not carry it. Fall back to measured saturation
  * so the raised slow-host budgets still apply on an overloaded runner.
+ *
+ * Mirrors packages/cli/src/test-utils/slow-test-host.ts; keep both in sync.
  */
 export function isSlowTestHost(): boolean {
   if (process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')) {
