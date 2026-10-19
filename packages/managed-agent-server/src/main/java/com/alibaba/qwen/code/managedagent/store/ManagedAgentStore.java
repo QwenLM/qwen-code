@@ -1990,6 +1990,9 @@ public class ManagedAgentStore implements AgentStateStore {
             "('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE')";
     /** Turn input whose submission no Harness answered (D7-2). */
     static final String SUBMIT_INPUT_UNCONFIRMED = "submit_input_unconfirmed";
+    /** A Turn cancel whose effect on an unobserved execution no Harness
+     * answered (D7-2). */
+    static final String CANCEL_UNCONFIRMED = "cancel_unconfirmed";
     /** A Session title whose submitted delivery no Harness answered (D7-2). */
     static final String SESSION_TITLE_UNCONFIRMED = "session_title_unconfirmed";
     /** A parked Session title the sealed journal proves never landed. */
@@ -2057,7 +2060,10 @@ public class ManagedAgentStore implements AgentStateStore {
      * cancelled or failed Turn ends the input undelivered. A cancel
      * completes when the Turn is cancelled — by the Harness, or by Java
      * before any Harness admitted it — and fails turn_already_settled when
-     * the Turn ended otherwise. A Turn that has not ended leaves its cancels
+     * the Turn ended otherwise. One whose admitted Turn failed with
+     * managed_runtime_recovery_blocked parks recovery_blocked with
+     * cancel_unconfirmed: the cancel's effect on the unobserved execution
+     * is itself unknown. A Turn that has not ended leaves its cancels
      * pending, so cancels of one Turn coalesce.
      */
     private void settleTurnCommands(String tenantId, String sessionId,
@@ -2092,9 +2098,19 @@ public class ManagedAgentStore implements AgentStateStore {
                     OperationKind.CANCEL, "COMPLETED",
                     admitted ? "HARNESS_CONFIRMED" : "JAVA_DURABLE", null, now);
         } else if (!ACTIVE_TURN_STATES.contains(turn.status())) {
-            settleTurnCommand(tenantId, sessionId, turnId,
-                    OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
-                    "turn_already_settled", now);
+            if (admitted && "managed_runtime_recovery_blocked".equals(
+                    turn.errorCode())) {
+                // The cancel was admitted, but whether it reached the
+                // unobserved execution is itself unknown. Park it instead
+                // of claiming a terminal turn_already_settled.
+                settleTurnCommand(tenantId, sessionId, turnId,
+                        OperationKind.CANCEL, "RECOVERY_BLOCKED",
+                        "JAVA_DURABLE", CANCEL_UNCONFIRMED, now);
+            } else {
+                settleTurnCommand(tenantId, sessionId, turnId,
+                        OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
+                        "turn_already_settled", now);
+            }
         }
     }
 
