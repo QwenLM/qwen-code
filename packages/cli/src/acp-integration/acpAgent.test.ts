@@ -1229,6 +1229,8 @@ import {
   WorkflowCheckpointUnwritableError,
   WorkflowJournalUnavailableError,
   type Config,
+  type ContentGeneratorConfig,
+  type ContentGeneratorConfigSources,
   type GoalSnapshotV2,
   type WorkflowSnapshot,
 } from '@qwen-code/qwen-code-core';
@@ -12160,6 +12162,149 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    ['samplingParams', false],
+    ['extra_body', false],
+    ['extra_body', true],
+  ] as const)(
+    'projects final DeepSeek %s.model capabilities in live workspace status (auxiliary only: %s)',
+    async (source, fastOnly) => {
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn(() => '/work/status'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'deepseek-v4.1-flash-1017'),
+        getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'deepseek-v4.1-flash-1017',
+            label: 'Flash',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+          },
+          {
+            id: 'deepseek-v4-pro',
+            label: 'Pro',
+            fastOnly,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+          },
+        ]),
+        getResolvedModelConfig: vi.fn((_auth: AuthType, id: string) => ({
+          baseUrl,
+          generationConfig:
+            id === 'deepseek-v4.1-flash-1017'
+              ? { [source]: { model: 'deepseek-v4-pro' } }
+              : {},
+          capabilities: {
+            reasoning: {
+              thinking: true,
+              disableField: 'enable_thinking',
+              efforts: [id === 'deepseek-v4-pro' ? 'max' : 'low'],
+              defaultEffort: id === 'deepseek-v4-pro' ? 'max' : 'low',
+            },
+          },
+        })),
+      } as unknown as Config;
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const status = await agent.extMethod(
+          SERVE_STATUS_EXT_METHODS.workspaceProviders,
+          {},
+        );
+        expect(status).toMatchObject({
+          providers: [
+            {
+              models: [
+                {
+                  baseModelId: 'deepseek-v4.1-flash-1017',
+                  configOptions: [
+                    {
+                      currentValue: 'max',
+                      options: [{ value: 'none' }, { value: 'max' }],
+                    },
+                  ],
+                },
+                ...(!fastOnly
+                  ? [
+                      {
+                        baseModelId: 'deepseek-v4-pro',
+                        configOptions: [
+                          {
+                            currentValue: 'max',
+                            options: [{ value: 'none' }, { value: 'max' }],
+                          },
+                        ],
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          ],
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('projects DeepSeek route defaults in the live workspace provider status', async () => {
+    const endpoints = [
+      'https://api.deepseek.com/v1',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    ];
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn(() => '/work/status'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getModel: vi.fn(() => 'deepseek-v4-pro'),
+      getCurrentModelRegistryBaseUrl: vi.fn(() => endpoints[0]),
+      getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+      getAllConfiguredModels: vi.fn(() =>
+        endpoints.map((baseUrl) => ({
+          id: 'deepseek-v4-pro',
+          label: baseUrl,
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+          registryBaseUrl: baseUrl,
+        })),
+      ),
+      getResolvedModelConfig: vi.fn(
+        (_auth: AuthType, _id: string, baseUrl?: string) => ({
+          baseUrl,
+          generationConfig:
+            baseUrl === endpoints[0]
+              ? { reasoning: { effort: 'low' } }
+              : { extra_body: { reasoning: { effort: 'max' } } },
+        }),
+      ),
+    } as unknown as Config;
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const status = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        {},
+      );
+      expect(status['errors']).toBeUndefined();
+      const models = (
+        status['providers'] as Array<{
+          models: Array<{ modelId: string; configOptions?: unknown[] }>;
+        }>
+      ).flatMap((provider) => provider.models);
+      expect(models).toHaveLength(2);
+      expect(
+        models.every((model) => model.modelId.startsWith('qwen-route:v1:')),
+      ).toBe(true);
+      expect(models[0]?.configOptions).toMatchObject([{ currentValue: 'low' }]);
+      expect(models[1]?.configOptions).toMatchObject([{ currentValue: 'max' }]);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('projects reasoning preview only for stable non-runtime qwen3.8-max', async () => {
     mockConfig = {
       ...mockConfig,
@@ -13177,6 +13322,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it.each(['samplingParams', 'extra_body'] as const)(
+    'rejects Low and confirms Max for final DeepSeek %s.model in an ACP session',
+    async (source) => {
+      const sessionId = 'deepseek-static-model';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const generation = innerConfig.getContentGeneratorConfig();
+      Object.assign(generation, {
+        model: 'deepseek-v4.1-flash-1017',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        reasoning: { effort: 'low' },
+        [source]: { model: 'deepseek-v4-pro' },
+      });
+      innerConfig.getModel = vi.fn(() => generation.model);
+      innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const response = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as NewSessionResponse;
+        expect(
+          response.configOptions?.find(
+            (option) => option.id === 'reasoning_effort',
+          ),
+        ).toMatchObject({
+          currentValue: 'high',
+          options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+        });
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'low',
+          }),
+        ).rejects.toThrow('Unknown reasoning effort: low');
+        const selected = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'max',
+        })) as {
+          configOptions: NonNullable<NewSessionResponse['configOptions']>;
+        };
+        expect(
+          selected.configOptions.find(
+            (option) => option.id === 'reasoning_effort',
+          )?.currentValue,
+        ).toBe('max');
+        expect(generation.reasoning).toEqual({ effort: 'max' });
+        expect(generation[source]).toEqual({ model: 'deepseek-v4-pro' });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -13458,6 +13663,78 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('rolls back explicit DeepSeek off provenance when persisting default fails', async () => {
+    const sessionId = 'deepseek-failed-default';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: ContentGeneratorConfig = {
+      model: 'deepseek-flash',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.deepseek.com/v1',
+      reasoning: false,
+      extra_body: {
+        thinking: { type: 'disabled' },
+        reasoning: { effort: 'max' },
+      },
+    };
+    const before = structuredClone(generation);
+    const rebuildable = { ...generation };
+    const source = {
+      kind: 'settings',
+      settingsPath: 'model.reasoningEffort',
+    } as const;
+    const sources: ContentGeneratorConfigSources = { reasoning: source };
+    const rebuildableSources: ContentGeneratorConfigSources = {
+      reasoning: source,
+    };
+    Object.assign(innerConfig.getModelsConfig(), {
+      getGenerationConfig: () => rebuildable,
+      getGenerationConfigSources: () => rebuildableSources,
+    });
+    innerConfig.getModel = vi.fn(() => generation.model);
+    innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    Object.assign(innerConfig, {
+      getContentGeneratorConfigSources: vi.fn(() => sources),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      lastSessionMock!.getDefaultReasoningConfig.mockReturnValue(false);
+      lastSessionMock!.persistReasoningSelection.mockImplementation(() => {
+        throw new Error('settings are read-only');
+      });
+      const request = {
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningSelection': true },
+      };
+      await expect(agent.setSessionConfigOption(request)).rejects.toThrow(
+        'settings are read-only',
+      );
+      expect(generation).toEqual(before);
+      expect(rebuildable.reasoning).toBe(false);
+      expect(sources['reasoning']).toEqual(source);
+      expect(rebuildableSources['reasoning']).toEqual(source);
+      lastSessionMock!.persistReasoningSelection.mockImplementation(
+        () => undefined,
+      );
+      const reset = (await agent.setSessionConfigOption(
+        request,
+      )) as SetSessionConfigOptionResponse;
+      expect(
+        reset.configOptions.find((option) => option.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('none');
+      expect(generation.reasoning).toBe(false);
+      expect(sources['reasoning']).toBeUndefined();
+      expect(rebuildableSources['reasoning']).toBeUndefined();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('reconciles session reasoning after a workspace model-name reload', async () => {
     const cfg = await setupSessionMocks('model-name-reload');
     const settings = makeSessionSettings({
@@ -13503,6 +13780,219 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     }
   });
+
+  it.each([
+    'https://api.deepseek.com/v1',
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  ])(
+    'restores persisted DeepSeek effort over a disabled profile after authentication at %s',
+    async (baseUrl) => {
+      const innerConfig = await setupSessionMocks('deepseek-persisted-effort');
+      const generation: ContentGeneratorConfig = {
+        model: 'deepseek-flash',
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+        reasoning: false,
+      };
+      vi.mocked(loadSettings).mockReturnValue(
+        makeSessionSettings({ model: { reasoningEffort: 'max' } }),
+      );
+      innerConfig.getModel = vi.fn(() => generation.model);
+      innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+      innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+      innerConfig.refreshAuth = vi.fn(async () => {
+        generation.reasoning = false;
+      });
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as SetSessionConfigOptionResponse;
+        expect(generation.reasoning).toEqual({ effort: 'max' });
+        expect(
+          session.configOptions.find(
+            (option) => option.id === 'reasoning_effort',
+          )?.currentValue,
+        ).toBe('max');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    ['https://api.deepseek.com/v1', ['low', 'high', 'max'], false],
+    ['https://api.deepseek.com/v1', ['low', 'high', 'max'], true],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ['high', 'max'],
+      false,
+    ],
+  ] as const)(
+    'projects and changes DeepSeek reasoning on the selected %s route',
+    async (baseUrl, efforts, legacyDeclaration) => {
+      const sessionId = 'deepseek-reasoning-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const switchField = baseUrl.includes('dashscope')
+        ? 'enable_thinking'
+        : 'thinking';
+      const generation: ContentGeneratorConfig = {
+        model: 'deepseek-v4-pro',
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+        extra_body: {
+          [switchField]:
+            switchField === 'thinking' ? { type: 'disabled' } : false,
+          reasoning: { effort: 'max', budget_tokens: 8192 },
+        },
+      };
+      if (legacyDeclaration) {
+        generation.reasoningSnapshot = [
+          {
+            id: generation.model,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            reasoning: {
+              thinking: true,
+              efforts,
+              defaultEffort: 'high',
+              disableField: 'thinking',
+            },
+          },
+        ];
+      }
+      innerConfig.getModel = vi.fn().mockReturnValue(generation.model);
+      innerConfig.getAuthType = vi.fn().mockReturnValue(AuthType.USE_OPENAI);
+      innerConfig.getCurrentModelRegistryBaseUrl = vi.fn(() => baseUrl);
+      innerConfig.getAllConfiguredModels = vi.fn(() => [
+        {
+          id: generation.model,
+          authType: AuthType.USE_OPENAI,
+          label: 'Official',
+          baseUrl: 'https://api.deepseek.com/v1',
+          registryBaseUrl: 'https://api.deepseek.com/v1',
+        },
+        {
+          id: generation.model,
+          authType: AuthType.USE_OPENAI,
+          label: 'MaaS',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          registryBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        },
+      ]);
+      innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as SetSessionConfigOptionResponse;
+        expect(
+          session.configOptions.find((item) => item.id === 'model')
+            ?.currentValue,
+        ).toMatch(/^qwen-route:v1:/);
+        expect(
+          session.configOptions.find((item) => item.id === 'reasoning_effort'),
+        ).toMatchObject({
+          currentValue: 'none',
+          options: [{ value: 'none' }, ...efforts.map((value) => ({ value }))],
+        });
+        const enabled = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+        })) as SetSessionConfigOptionResponse;
+        expect(
+          enabled.configOptions.find((item) => item.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe('high');
+        expect(generation.extra_body).toEqual({
+          reasoning: { budget_tokens: 8192 },
+        });
+
+        const selected = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'max',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        })) as SetSessionConfigOptionResponse;
+        expect(generation.reasoning).toEqual({ effort: 'max' });
+        expect(
+          selected.configOptions.find((item) => item.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe('max');
+        expect(lastSessionMock?.persistReasoningSelection).toHaveBeenCalledWith(
+          'max',
+        );
+
+        const disabled = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        })) as SetSessionConfigOptionResponse;
+        expect(generation.reasoning).toBe(false);
+        expect(
+          disabled.configOptions.find((item) => item.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe('none');
+        Object.assign(lastSessionMock!, {
+          setMode: vi.fn().mockResolvedValue({}),
+        });
+        for (const [override, expected] of [
+          [
+            { reasoning_effort: 'xhigh' },
+            baseUrl.includes('dashscope') ? 'max' : 'high',
+          ],
+          [{ reasoning: { effort: 'max' } }, 'max'],
+        ] as const) {
+          generation.reasoning = { effort: 'low' };
+          generation.extra_body = override;
+          const refreshed = (await agent.setSessionConfigOption({
+            sessionId,
+            configId: 'mode',
+            value: 'default',
+          })) as SetSessionConfigOptionResponse;
+          expect(
+            refreshed.configOptions.find(
+              (item) => item.id === 'reasoning_effort',
+            )?.currentValue,
+          ).toBe(expected);
+        }
+        await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'high',
+        });
+        expect(generation.extra_body).toEqual({});
+        expect(generation.reasoning).toEqual({ effort: 'high' });
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value: 'medium',
+          }),
+        ).rejects.toThrow('Unknown reasoning effort: medium');
+        if (!efforts.some((effort) => effort === 'low')) {
+          await expect(
+            agent.setSessionConfigOption({
+              sessionId,
+              configId: 'reasoning_effort',
+              value: 'low',
+            }),
+          ).rejects.toThrow('Unknown reasoning effort: low');
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('projects qwen3.8-max reasoning controls through one ACP option', async () => {
     const sessionId = 'qwen38-reasoning-session';
