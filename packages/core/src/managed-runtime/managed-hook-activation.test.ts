@@ -93,6 +93,10 @@ describe('Managed Hook model activation', () => {
   it('commits complete final Parts with its output marker after renewal and refuses changed replay', async () => {
     const { session, controller, options } = await fixture();
     await createManagedHarnessHandle(session).ensureRunnable();
+    const recoveryRef = await session.resources.publish(
+      'hosted-model-request',
+      Buffer.from('{}'),
+    );
     const record = {
       uuid: randomUUID(),
       parentUuid: null,
@@ -118,7 +122,7 @@ describe('Managed Hook model activation', () => {
     };
     await controller.runTurn('turn-1', async (scope) => {
       await scope.bindBudget(new TurnBudget(), 'original');
-      const complete = await scope.beginMainAttempt('main');
+      const complete = await scope.beginMainAttempt('main', recoveryRef);
       await Promise.all([
         session.authority.renewActivation({ leaseDurationMs: 60_000 }),
         complete(true, [{ candidatesTokenCount: 30 }], record),
@@ -155,6 +159,7 @@ describe('Managed Hook model activation', () => {
     const message = rows[markerIndex - 1].managedSession;
     expect(marker.eventCount).toBe(2);
     expect(attempt.kind).toBe('model.attempt');
+    expect(attempt.payload.recoveryRef).toEqual(recoveryRef);
     expect(message.kind).toBe('message.committed');
     expect(message.sequence).toBe(attempt.sequence + 1);
     expect(message.payload.modelAttemptId).toBe(attempt.payload.attemptId);

@@ -112,6 +112,14 @@ public final class JdbcCsiExecutionAdmission {
             JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
         var members = receiptMembers(connection, original, head, head.prefix(), true);
         require(!members.isEmpty());
+        var batch = head.prefix().pendingBatch();
+        if (batch != null) {
+            require(members.stream().map(member -> member.getReference().get("functionCallId"))
+                    .collect(java.util.stream.Collectors.toSet()).equals(batch.calls().stream()
+                            .map(CsiNativeActivationProof.FunctionCall::id)
+                            .filter(id -> !batch.refusedFunctionIds().contains(id))
+                            .collect(java.util.stream.Collectors.toSet())));
+        }
         for (var member : members) {
             require(member.getState() == ToolExecutionRecord.State.SETTLED && !member.isCancelRequested()
                     && member.getResult() != null && member.getAuthorizedDispatchGeneration() != null

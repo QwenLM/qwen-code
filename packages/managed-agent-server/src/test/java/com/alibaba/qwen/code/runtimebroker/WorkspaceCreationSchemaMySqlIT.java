@@ -24,11 +24,11 @@ import java.util.List;
 /** Uses its own disposable empty application catalog. */
 class WorkspaceCreationSchemaMySqlIT {
     @Test
-    void addsRetirementEvidenceAfterPublishedPlanModeWithoutChangingPlanValuesOrHistory() {
+    void addsRetirementEvidenceAfterPublishedWakeRecoveryWithoutChangingPlanValuesOrHistory() {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             var source = database.source();
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
-                    .target("10").load().migrate();
+                    .target("11").load().migrate();
             var jdbc = new JdbcTemplate(source);
             jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,plan_enabled,"
                     + "selected_approval_mode,approval_revision,gmt_create,gmt_modified)"
@@ -41,12 +41,12 @@ class WorkspaceCreationSchemaMySqlIT {
             var history = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
             var lastInstalledRank = jdbc.queryForObject(
                     "SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
-            assertEquals(10, ManagedSchema.schemaVersion(source));
+            assertEquals(11, ManagedSchema.schemaVersion(source));
 
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(11, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_session")).usingRecursiveComparison().isEqualTo(session);
             assertThat(jdbc.queryForMap("SELECT * FROM ma_turn")).usingRecursiveComparison().isEqualTo(turn);
             assertEquals(history, jdbc.queryForList("SELECT * FROM flyway_schema_history"
@@ -88,7 +88,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(11, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
@@ -130,7 +130,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(11, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
                     .usingRecursiveComparison().isEqualTo(existing);
             operation(jdbc, "created", "WORKSPACE_CREATE");
@@ -180,7 +180,7 @@ class WorkspaceCreationSchemaMySqlIT {
                 }
                 ManagedSchema.initialize(source);
                 ManagedSchema.validate(source);
-                assertEquals(11, ManagedSchema.schemaVersion(source));
+                assertEquals(12, ManagedSchema.schemaVersion(source));
                 try (var connection = source.getConnection();
                         var statement = connection.createStatement()) {
                     receipt(

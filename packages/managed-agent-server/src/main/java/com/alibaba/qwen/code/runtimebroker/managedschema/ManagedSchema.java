@@ -18,7 +18,7 @@ public final class ManagedSchema {
     public static final String PRIVATE_AUTHORITY =
             "/db/managed-schema/V2__private_csi_authority.sql";
     public static final String K2_RETIREMENT =
-            "/db/managed-schema/V11__k2_retirement_evidence.sql";
+            "/db/managed-schema/V12__k2_retirement_evidence.sql";
     public static final String SESSION_LIST =
             "/db/managed-schema/V3__session_list_created_at.sql";
     public static final String WORKSPACE_CREATION = "/db/managed-schema/V4__workspace_creation.sql";
@@ -26,6 +26,7 @@ public final class ManagedSchema {
     public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
     public static final String RUNTIME_SESSION_HARNESS = "/db/managed-schema/V9__runtime_session_harness.sql";
     public static final String PLAN_MODE = "/db/managed-schema/V10__session_plan_mode.sql";
+    public static final String WAKE_RECOVERY = "/db/managed-schema/V11__wake_recovery.sql";
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
             "/db/managed-schema/V7__ssh_workspace_registration.sql";
@@ -36,7 +37,7 @@ public final class ManagedSchema {
             new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
             new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS),
             new Migration(9, RUNTIME_SESSION_HARNESS), new Migration(10, PLAN_MODE),
-            new Migration(11, K2_RETIREMENT));
+            new Migration(11, WAKE_RECOVERY), new Migration(12, K2_RETIREMENT));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {

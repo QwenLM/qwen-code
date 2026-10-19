@@ -38,6 +38,7 @@ import {
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
+  semanticInputDigest,
 } from './hosted-hook-session.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
 import * as stdio from '../utils/stdioHelpers.js';
@@ -443,6 +444,111 @@ it('commits a pinned plan before dispatch and replays the original occurrence af
     ),
   ).rejects.toThrow('input conflict');
   expect(session.authority.taskViews()).toEqual([]);
+});
+
+async function savedPlan(occurrenceId: string) {
+  const marker = parseHookExecution(
+    session.authority.extensionRecord(
+      'hook_execution',
+      hostedHookOccurrenceId(HookEventName.PreToolUse, occurrenceId),
+    )!.record,
+  );
+  return JSON.parse(
+    (await session.resources.read(marker.planRef)).toString(),
+  ) as { input: Record<string, unknown>; refusedInputDigest?: string };
+}
+
+it('resumes a saved occurrence on the fields an earlier release built, and plans new ones on the current fields', async () => {
+  const earlier = { tool_name: 'read_file', tool_input: { file_path: 'c' } };
+  const current = { tool_name: 'read_file', tool_input: { file_path: 'b' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    earlier,
+    signal(),
+  );
+  const replacement = new HostedHookSession(options, session, pin);
+  expect(
+    await replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      earlier,
+    ),
+  ).toEqual(output);
+  await expect(
+    replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      { ...earlier, tool_input: { file_path: 'a' } },
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  await replacement.fire(
+    HookEventName.PreToolUse,
+    'call-2',
+    current,
+    signal(),
+    undefined,
+    earlier,
+  );
+  expect((await savedPlan('call-2')).input).toMatchObject(current);
+  expect(
+    requests.flatMap((request) =>
+      request.kind === 'hook-execute'
+        ? [(request.input as unknown as Record<string, unknown>)['tool_input']]
+        : [],
+    ),
+  ).toEqual([earlier.tool_input, current.tool_input]);
+});
+
+it('resumes an oversized saved occurrence only on the digest of the fields it was planned for', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], config: { type: HookType.Function } }],
+  };
+  hooks.setMessagesProvider(() => [{ text: 'x'.repeat(8 * 1024 * 1024 + 1) }]);
+  const earlier = { tool_name: 'read_file', tool_input: { file_path: 'c' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    earlier,
+    signal(),
+  );
+  const saved = await savedPlan('call-1');
+  expect(saved.refusedInputDigest).toBe(semanticInputDigest(earlier));
+  expect(saved.input).not.toHaveProperty('tool_input');
+  const replacement = new HostedHookSession(options, session, pin);
+  const current = { ...earlier, tool_input: { file_path: 'b' } };
+  expect(
+    await replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      // Only the Session-level fields differ, which the digest leaves out.
+      { ...earlier, session_id: 'other', timestamp: 'later', messages: [] },
+    ),
+  ).toEqual(output);
+  await expect(
+    replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      { ...earlier, tool_use_id: 'call-2' },
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(0);
+  expect(await savedPlan('call-1')).toEqual(saved);
 });
 
 it('consumes once at intent even when execution fails', async () => {

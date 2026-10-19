@@ -309,6 +309,14 @@ describe('broadcast ids (H4e-b2 decision 4)', () => {
     expect(hops.map((hop) => hop.length)).toEqual([46, 46, 46]);
     expect(hostedCallKey(`${run}:accept:notify`, callId)).toHaveLength(46);
   });
+
+  it('keeps child calls from a crash continuation inside the lineage bound', () => {
+    const turnId = `wake-recovery:${'a'.repeat(64)}`;
+    expect(hostedPromptKey(turnId)).toMatch(/^[0-9a-f]{16}$/);
+    expect(hostedCallKey(turnId, 'call-0123456789abcdef01234567')).toHaveLength(
+      46,
+    );
+  });
 });
 
 describe('member-message ids (H4e-b3 decision 8, b3c)', () => {

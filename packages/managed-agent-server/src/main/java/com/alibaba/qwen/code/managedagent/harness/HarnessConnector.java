@@ -9,6 +9,11 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
+    /** Reattaches a SQL-proven unowned Session without trusting the local attachment cache. */
+    default void recoverForWake(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("Hosted wake recovery is unavailable");
+    }
+
     default boolean supportsApprovalSelection() { return false; }
 
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }

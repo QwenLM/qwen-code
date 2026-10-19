@@ -13,9 +13,9 @@
 
 ## 数据库结构与行身份
 
-保留当前主干 V1–V10 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段，V6 增加四个审批选择字段。V7 增加 SSH storage 索引并扩展 operation kinds，V8 增加 input/cancel operation kinds，均不新增表或列。V9 增加 runtime Session 的 harness 索引，不新增表或列。V10 增加 Session 与 Turn 的 plan policy 字段。未发布的 K2 退役增量以不变 SQL 字节顺延为 V11，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 757 列，应用清单为 33 表 751 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
+保留当前主干 V1–V11 的原始字节。V1 为 32 表 707 列，包含新增重试预算字段；V2 增加四个私有 CSI 权限字段，V3 调整列表索引，V4 扩展 Workspace 创建 receipt namespace，V5 增加四个模型选择字段，V6 增加四个审批选择字段。V7 增加 SSH storage 索引并扩展 operation kinds，V8 增加 input/cancel operation kinds，均不新增表或列。V9 增加 runtime Session 的 harness 索引，不新增表或列。V10 增加 Session 与 Turn 的 plan policy 字段。V11 为 Session head 增加四个带版本戳的 wake/retry 字段。未发布的 K2 退役增量以不变 SQL 字节顺延为 V12，增加十一个应用进度字段、`ma_csi_source`（19 列）和 `ma_csi_physical`（6 列）。有效结构为 34 表 761 列，同步后的应用清单为 33 表 755 列，物理伴随表单独检查。`ma_session.csi_guard` 由私有工具 profile 或持久 runtime request pin 生成。
 
-十三个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL、三项重试预算字段、四项审批选择字段与两项 plan policy 字段。私有 Session 仅支持审批覆盖 `(NULL,0)`；非默认覆盖阻塞，普通审批选择保留主干行为，Turn 审批字段保留实际 nullable 快照。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4/V6/V7 不伪装为已发布主干迁移，不修改 Flyway 历史。缺少已发布 SSH 索引或 operation check 的旧私有预览 catalog 在迁移前拒绝；历史访问保留原构建，本候选使用全新临时 catalog。
+十七个主干新增字段均进入原始 typed whole-row 比较，包括 Session 模型 `(NULL,0)`、Turn 模型双 NULL、三项重试预算字段、四项审批选择字段、两项 plan policy 字段与四项 wake/retry 字段。私有 Session 仅支持审批覆盖 `(NULL,0)`；非默认覆盖阻塞，普通审批选择保留主干行为，Turn 审批字段保留实际 nullable 快照。`model_id` 使用严格 UTF-8 identity 解码，但不成为新的强引用根。私有首条路径保持固定 native 模型策略，只支持实际 Session 默认 `(NULL,0)`；非默认选择完整进入清单并阻塞退役，普通公开模型选择保持不变。旧 inventory/2 baseline 缺列时仍被拒绝，不补默认值、不改 header/hash 或已存 bytes。旧未发布 K2 V4/V6/V7 不伪装为已发布主干迁移，不修改 Flyway 历史。缺少已发布 SSH 索引或 operation check 的旧私有预览 catalog 在迁移前拒绝；历史访问保留原构建，本候选使用全新临时 catalog。
 
 原生资源读取证据使用现有 `ma_request_receipt`，namespace 为 `SESSION_COMMAND`，
 operation 为 `CSI_RESOURCE_READ`，真实主键为 `key("csi-read", readId)`。
@@ -114,3 +114,11 @@ latest-main Flyway 检查在 head `167edd8222` 复现已发布 `V10__session_pla
 Root build/typecheck/bundle、定向 Core/WebShell 回归及完整579项 Hosted Session 文件重跑通过。初次 CLI 组合运行有一项 wake-park 拒绝码不匹配，原因尚未确认；源码未变的完整文件重跑是独立证据。三项与主干一致的 workflow meta-test 夹具在本地 macOS Bash 3.2 解析器失败，不据此声称 Ubuntu 结果。上述边界及先前失败尝试保留在 E2E 记录中；本地结果不等于 CI 或累计 Draft 批准。
 
 冷 writer 争用及独立 content publication 旧 owner 验收仍是计划增量。原生安装、已资格化物理释放和复用仍未完成。
+
+## 已发布主干 V11 wake recovery 与私有 V12 延续
+
+主干 `c2f0169884f58c36b4846843e3563c3ebd61abb1` 增加已发布 `V11__wake_recovery.sql`。逐字保留十一份已发布 SQL 资源，仅将正文不变的私有退役 SQL 顺延为 V12。已发布 V11 升级保留 plan-enabled Session/Turn 行及全部历史 Flyway 行。实际旧私有 V10、V11 catalog 在有/无旧 history 时均拒绝；不得通过 baseline adopt、checksum repair、默认值回填或已存清单重写将其变为当前结构。
+
+本次整合分为两个候选：先解决 Java 合并、catalog 和版本引用，保留原清单/镜像不兼容以供受控 H2 复现；再增加四个 typed wake 列及准确的专用 terminal delta。source-only typed 夹具将前32次普通提交建模为 `wake_pending=false`、`wake_head_revision=32`、`wake_retry_at=0`、`wake_scan_pending=false`；它不代表实际 SQL 或 native 执行。`commitCsiTerminal` 使用独立 SQL 更新，保留三项持久化 wake 字段，仅推进 journal revision，因此生成的 scan 标志按保留值重新计算。不得通过推进版本戳为落后或 NULL hint 伪造新鲜度。普通提交的条件版本戳更新是另一条路径，并非 terminal cut。完整列与完整字节比较仍严格，缺少新列的旧 inventory/2 字节拒绝。CSI source7、boot 与 handle 协议保持不变。
+
+此组合的验证要求先使用不依赖已构建 JavaScript 的原 H2 inventory 消费者复现明确的 head schema 不匹配；编译或 setup 失败不能算该复现。之后验证完整 inventory、专用 cut 预期、全部 ordinary/static 门禁以及受影响 MySQL 类，包括 WakeRecovery 与 WorkspaceFile。保留新主干 profile 的实际 fork 预算及 Linux 条件。上文 V10/私有 V11 报告继续限定原源码/输入范围，不能验证此次 V11/私有 V12 组合、native 安装或物理释放。

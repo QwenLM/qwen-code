@@ -12,7 +12,11 @@ import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/m
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { convertManagedRuntimeToolResult } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-tool-response.js';
-import { publishHostedCsiReceipt } from './hosted-csi-tool-evidence.js';
+import {
+  acceptedCsiToolInput,
+  publishHostedCsiReceipt,
+} from './hosted-csi-tool-evidence.js';
+import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import {
   readCsiRecoveryResult,
   readHostedCsiRecoveryBatch,
@@ -119,6 +123,86 @@ export async function recoverHostedCsiReceipts(
     )
       throw new Error('Original CSI accepted function differs.');
   }
+  const expectedRefusals = functions.flatMap((original, ordinal) => {
+    if (items.some((item) => item.ordinal === ordinal)) return [];
+    const call = {
+      callId: original.call.id ?? '',
+      name: original.call.name ?? '',
+      args: original.call.args ?? {},
+      isClientInitiated: false,
+      prompt_id: promptId,
+    };
+    let reason: string | undefined;
+    try {
+      const input = acceptedCsiToolInput(call);
+      const payloadJson = JSON.stringify({ toolName: call.name, input });
+      if (
+        Buffer.byteLength(
+          JSON.stringify({
+            harnessSessionId: authority.sessionHeader.sessionKey.sessionId,
+            runtimeSessionId: authority.sessionHeader.sessionKey.sessionId,
+            payloadJson,
+          }),
+        ) >
+        64 * 1024
+      )
+        reason = 'CSI file input exceeds the durable Session limit.';
+    } catch {
+      reason = 'CSI file input is invalid.';
+    }
+    if (!reason) throw new Error('Original CSI accepted function gap differs.');
+    return [
+      {
+        ordinal,
+        parts: convertToFunctionErrorResponse(
+          call.name,
+          call.callId,
+          [],
+          reason,
+        ),
+      },
+    ];
+  });
+  const firstAfterBatch = projected[batchIndex + 1];
+  const firstResponse = (
+    firstAfterBatch?.message?.parts as Part[] | undefined
+  )?.[0]?.functionResponse;
+  const hasRefusalPrefix = expectedRefusals.some(
+    (refusal) => refusal.parts[0].functionResponse?.id === firstResponse?.id,
+  );
+  let refusalParent = batchId;
+  if (hasRefusalPrefix) {
+    for (const [index, refusal] of expectedRefusals.entries()) {
+      const candidate = projected[batchIndex + 1 + index];
+      const uuid = candidate?.uuid;
+      const timestamp = candidate?.timestamp;
+      if (
+        typeof uuid !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          uuid,
+        ) ||
+        typeof timestamp !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(
+          timestamp,
+        ) ||
+        !Number.isFinite(Date.parse(timestamp)) ||
+        !isDeepStrictEqual(candidate, {
+          ...authority.recordEnvelope,
+          sessionId: authority.sessionHeader.sessionKey.sessionId,
+          uuid,
+          timestamp,
+          parentUuid: refusalParent,
+          type: 'tool_result',
+          daemonPromptId: promptId,
+          model: batch.model,
+          message: { role: 'user', parts: refusal.parts },
+        })
+      )
+        throw new Error('Original CSI refusal message differs.');
+      refusalParent = uuid;
+    }
+  }
+  const refusalCount = hasRefusalPrefix ? expectedRefusals.length : 0;
   const receiptEvents = items.map((item) =>
     events.filter(
       (event) =>
@@ -149,7 +233,7 @@ export async function recoverHostedCsiReceipts(
     exists: boolean;
     parts: Part[];
   }> = [];
-  let parentUuid: string | null = batchId;
+  let parentUuid: string | null = refusalParent;
   let existingCount = 0;
   const ids = new Set(projected.map((record) => record.uuid));
   for (const [index, item] of items.entries()) {
@@ -239,7 +323,7 @@ export async function recoverHostedCsiReceipts(
       if (
         existingCount !== index ||
         !isDeepStrictEqual(existing, record) ||
-        projected[batchIndex + 1 + index]?.uuid !== record.uuid
+        projected[batchIndex + 1 + refusalCount + index]?.uuid !== record.uuid
       )
         throw new Error('Original CSI tool message differs.');
       existingCount++;
@@ -263,7 +347,7 @@ export async function recoverHostedCsiReceipts(
     });
     parentUuid = record.uuid;
   }
-  const tail = projected.slice(batchIndex + 1 + existingCount);
+  const tail = projected.slice(batchIndex + 1 + refusalCount + existingCount);
   let finalOutput: ChatRecord | undefined;
   if (tail.length !== 0) {
     const candidate = tail[0];
@@ -330,7 +414,11 @@ export async function recoverHostedCsiReceipts(
     throw new Error('Original CSI final output history is not closed.');
   // No durable repair happens before the complete original batch passes preflight.
   const harness = createManagedHarnessHandle(session);
-  const responses: Part[] = [];
+  const responses = new Map<number, Part[]>(
+    hasRefusalPrefix
+      ? expectedRefusals.map((refusal) => [refusal.ordinal, refusal.parts])
+      : [],
+  );
   for (const plan of planned) {
     const ref =
       plan.ref ??
@@ -342,7 +430,7 @@ export async function recoverHostedCsiReceipts(
     if (!plan.exists) await session.sink.write(plan.record);
     if (plan.item.state === 'in_progress')
       await harness.resolveAwaitRuntime(plan.item.executionCallId, ref);
-    responses.push(...plan.parts);
+    responses.set(plan.item.ordinal, plan.parts);
   }
   if (saved['preparation'] !== null) {
     const observation = await requestHostedCsiHistory(
@@ -363,5 +451,10 @@ export async function recoverHostedCsiReceipts(
     );
   }
   await requireClosedHostedCsiHistory(session);
-  return { parts: responses, ...(finalOutput ? { finalOutput } : {}) };
+  return {
+    parts: [...responses.entries()]
+      .sort(([left], [right]) => left - right)
+      .flatMap(([, parts]) => parts),
+    ...(finalOutput ? { finalOutput } : {}),
+  };
 }

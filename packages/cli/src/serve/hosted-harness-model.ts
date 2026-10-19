@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
+import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 
 import type { Content, Part } from '@google/genai';
 import { createHash, randomUUID } from 'node:crypto';
@@ -44,6 +45,7 @@ import type {
   ManagedMainModelAttempt,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
+import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { createHostedPromptHookRunner } from './hosted-hook-model.js';
 import {
   HookEventName,
@@ -227,6 +229,9 @@ export async function runHostedHarnessTextTurn(input: {
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
+  let pendingToolResults =
+    input.resumeFromToolResults !== undefined ||
+    (input.resumeModel?.pendingToolResults ?? false);
   const initialMessages: Content[] = input.history.flatMap((record) =>
     (record.type === 'user' ||
       record.type === 'assistant' ||
@@ -500,9 +505,6 @@ export async function runHostedHarnessTextTurn(input: {
           ...(effectivePrompt ? [{ text: effectivePrompt }] : []),
           ...(input.attachmentParts ?? []),
         ];
-    let pendingToolResults =
-      input.resumeFromToolResults !== undefined ||
-      (input.resumeModel?.pendingToolResults ?? false);
     const selectedSkills =
       !input.resumeFromToolResults && !input.resumeModel && input.toolTurn
         ? (input.skills?.invocations(effectivePrompt) ?? [])
@@ -633,7 +635,7 @@ export async function runHostedHarnessTextTurn(input: {
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = 64 * 1024;
+      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {
@@ -759,16 +761,12 @@ export async function runHostedHarnessTextTurn(input: {
           )
             throw new Error('Hosted final model output is unavailable.');
           finalOutputHandled = true;
-          try {
-            await input.completeFinalOutput(
-              completeAttempt,
-              usage,
-              structuredClone(output.parts),
-              config.getModel(),
-            );
-          } catch (cause) {
-            throw new HostedToolRecoveryRequiredError(cause);
-          }
+          await input.completeFinalOutput(
+            completeAttempt,
+            usage,
+            structuredClone(output.parts),
+            config.getModel(),
+          );
         }
       } catch (cause) {
         if (
@@ -854,6 +852,15 @@ export async function runHostedHarnessTextTurn(input: {
       );
       pendingToolResults = true;
     }
+  } catch (cause) {
+    if (
+      cause instanceof ManagedSessionRecordError ||
+      cause instanceof HostedToolRecoveryRequiredError
+    )
+      throw cause;
+    if (pendingToolResults && input.completeFinalOutput)
+      throw new HostedToolRecoveryRequiredError(cause);
+    throw cause;
   } finally {
     input.hooks?.setMessagesProvider(undefined);
     try {

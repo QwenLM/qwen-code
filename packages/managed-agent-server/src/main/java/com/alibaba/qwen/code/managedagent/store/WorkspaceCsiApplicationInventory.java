@@ -235,7 +235,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "activation_id:VARBINARY,activation_phase:VARCHAR,activation_event_epoch:BIGINT,"
                     + "activation_expires_at:BIGINT,activation_head_revision:BIGINT,tenant_key:CHAR,harness_key:CHAR,"
                     + "harness_session_id:VARBINARY,head_kind:VARCHAR,phase:VARCHAR,operation_id:VARBINARY,"
-                    + "claim_generation:BIGINT,claim_lease_until:BIGINT"),
+                    + "claim_generation:BIGINT,claim_lease_until:BIGINT,wake_pending:BOOLEAN,"
+                    + "wake_head_revision:BIGINT,wake_retry_at:BIGINT,wake_scan_pending:BOOLEAN"),
             declaration("ma_session_journal_tx", "tenant_id,session_id,journal_revision",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,journal_revision:BIGINT,"
                     + "command_key_hash:CHAR,transaction_id:VARBINARY,operation:LONGTEXT,command_id:VARBINARY,"

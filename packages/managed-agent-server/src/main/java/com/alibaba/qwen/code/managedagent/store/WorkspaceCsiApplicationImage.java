@@ -71,6 +71,8 @@ final class WorkspaceCsiApplicationImage {
             Map<String, byte[]> headDelta = new LinkedHashMap<>();
             put(headDelta, "state", "SEALED");
             put(headDelta, "journal_revision", revision);
+            put(headDelta, "wake_scan_pending", Boolean.TRUE.equals(head.bool("wake_pending"))
+                    || head.number("wake_head_revision") == null || head.number("wake_head_revision") != revision);
             put(headDelta, "committed_sequence", request.path("lastSequence").longValue());
             put(headDelta, "last_commit_digest", text(request, "commitDigest"));
             put(headDelta, "activation_phase", "released");

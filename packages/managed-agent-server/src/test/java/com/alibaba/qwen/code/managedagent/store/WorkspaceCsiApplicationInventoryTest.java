@@ -1084,6 +1084,10 @@ class WorkspaceCsiApplicationInventoryTest {
         head.put("activation_id", activation.path("activationId").textValue().getBytes(StandardCharsets.UTF_8));
         head.put("activation_expires_at", activation.path("expiresAt").asText().getBytes(StandardCharsets.UTF_8));
         head.put("activation_head_revision", "32".getBytes(StandardCharsets.UTF_8));
+        head.put("wake_pending", "false".getBytes(StandardCharsets.UTF_8));
+        head.put("wake_head_revision", "32".getBytes(StandardCharsets.UTF_8));
+        head.put("wake_retry_at", "0".getBytes(StandardCharsets.UTF_8));
+        head.put("wake_scan_pending", "false".getBytes(StandardCharsets.UTF_8));
         head.put("writer_id", fixture.path("expected").path("writerId").textValue().getBytes(StandardCharsets.UTF_8));
         head.put("latest_checkpoint_resource_id", fixture.path("requests").get(31).path("latestCheckpointResourceId")
                 .textValue().getBytes(StandardCharsets.UTF_8));
@@ -1103,7 +1107,7 @@ class WorkspaceCsiApplicationInventoryTest {
         var row = rows.getFirst();
         Map<String, byte[]> values = new java.util.LinkedHashMap<>();
         row.fields().forEach((column, cell) -> values.put(column, cell.bytes()));
-        values.put(field, value.getBytes(StandardCharsets.UTF_8));
+        values.put(field, value == null ? null : value.getBytes(StandardCharsets.UTF_8));
         rows.set(0, WorkspaceCsiApplicationInventory.expectedRow(name, values, row.membership()));
         rows.sort(WorkspaceCsiApplicationInventory::compareKeys);
         var tables = new java.util.ArrayList<>(baseline.tables());
@@ -1125,7 +1129,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(33);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(751);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(755);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1619,6 +1623,11 @@ class WorkspaceCsiApplicationInventoryTest {
                 com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.CUT, frozen, json.writeValueAsBytes(delta), null);
         long millis = Instant.parse(writtenAt).toEpochMilli();
         assertThat(image.table("ma_session_head").rows().getFirst().number("gmt_modified")).isEqualTo(millis);
+        var terminalHead = image.table("ma_session_head").rows().getFirst();
+        assertThat(terminalHead.bool("wake_pending")).isFalse();
+        assertThat(terminalHead.number("wake_head_revision")).isEqualTo(32L);
+        assertThat(terminalHead.number("wake_retry_at")).isZero();
+        assertThat(terminalHead.bool("wake_scan_pending")).isTrue();
         for (String table : List.of("ma_resource", "ma_resource_ref", "ma_session_journal_tx")) {
             var added = image.table(table).rows().stream().filter(row -> row.number("gmt_create") != null
                     && row.number("gmt_create") == millis).toList();
@@ -1632,6 +1641,47 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThatThrownBy(() -> WorkspaceCsiApplicationImage.expected(baseline,
                 com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.CUT, frozen, json.writeValueAsBytes(delta), null))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void terminalCutRecomputesWakeScanWithoutCertifyingStoredHints() throws Exception {
+        record Hint(boolean pending, Long revision, boolean before, boolean after) {
+        }
+        var json = new ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode fixture;
+        try (var input = getClass().getResourceAsStream("/csi-native-text-fixture.json")) {
+            fixture = json.readTree(input);
+        }
+        var original = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
+        var nativeRows = preparedNativeFixture(original, fixture);
+        var control = WorkspaceCsiApplicationInventory.expectedImage(original.tables().stream().map(table ->
+                List.of("ma_session_head", "ma_session_journal_tx", "ma_resource", "ma_resource_ref").contains(table.name())
+                        ? nativeRows.table(table.name()) : table).toList());
+        byte[] body = json.writeValueAsBytes(fixture.path("requests").get(32));
+        for (var hint : List.of(new Hint(false, 32L, false, true), new Hint(false, null, true, true),
+                new Hint(false, 31L, true, true), new Hint(false, 33L, true, false), new Hint(true, 33L, true, true))) {
+            var baseline = nativeCellFixture(control, "ma_session_head", "wake_pending", Boolean.toString(hint.pending()));
+            baseline = nativeCellFixture(baseline, "ma_session_head", "wake_head_revision",
+                    hint.revision() == null ? null : hint.revision().toString());
+            baseline = nativeCellFixture(baseline, "ma_session_head", "wake_retry_at", "17");
+            baseline = nativeCellFixture(baseline, "ma_session_head", "wake_scan_pending", Boolean.toString(hint.before()));
+            var envelope = json.createObjectNode().put("commitBodyBase64", java.util.Base64.getEncoder().encodeToString(body))
+                    .put("preparedCommitSha256", sha(body)).put("baselineBase64", java.util.Base64.getEncoder().encodeToString(baseline.bytes()))
+                    .put("writerTokenSha256", "a".repeat(64));
+            byte[] frozen = json.writeValueAsBytes(envelope);
+            var delta = json.createObjectNode().put("format", "qwen-csi-application-cut/1")
+                    .put("retirementId", baseline.table("ma_operation").rows().getFirst().text("operation_id"))
+                    .put("frozenRequestSha256", sha(frozen)).put("baselineSha256", sha(baseline.bytes()))
+                    .put("preparedCommitSha256", sha(body)).put("writtenAt", "2040-01-01T00:00:00.123Z");
+            var image = WorkspaceCsiApplicationImage.expected(baseline,
+                    com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.CUT, frozen, json.writeValueAsBytes(delta), null);
+            var head = image.table("ma_session_head").rows().getFirst();
+            assertThat(head.number("journal_revision")).isEqualTo(33L);
+            assertThat(head.bool("wake_pending")).isEqualTo(hint.pending());
+            assertThat(head.number("wake_head_revision")).isEqualTo(hint.revision());
+            assertThat(head.number("wake_retry_at")).isEqualTo(17L);
+            assertThat(head.bool("wake_scan_pending")).isEqualTo(hint.after());
+        }
     }
 
     @Test
