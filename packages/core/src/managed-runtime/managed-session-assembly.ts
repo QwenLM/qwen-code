@@ -32,20 +32,30 @@ const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
  * is alive. The install stamps a fixed expiry, so without renewal a session
  * that outlives its lease reads as abandoned behind a live writer lock.
  * Renewal failures are retried on the next tick: a durable write failure
- * already fences new appends, so the timer only logs.
+ * already fences new appends, so the timer only logs. A renewal that is still
+ * in flight owns the next attempt: queueing another one behind a stalled Store
+ * call would grow the backlog for the whole outage.
  */
 function startActivationRenewal(
   authority: LocalManagedSessionAuthority,
   leaseDurationMs: number,
 ): { stop: () => void } {
   const intervalMs = Math.max(Math.floor(leaseDurationMs / 3), 1);
+  let inFlight = false;
   const timer = setInterval(() => {
-    authority.renewActivation({ leaseDurationMs }).catch((error: unknown) => {
-      debugLogger.debug(
-        'Managed Session activation renewal failed',
-        describeRenewalError(error),
-      );
-    });
+    if (inFlight) return;
+    inFlight = true;
+    authority
+      .renewActivation({ leaseDurationMs })
+      .catch((error: unknown) => {
+        debugLogger.debug(
+          'Managed Session activation renewal failed',
+          describeRenewalError(error),
+        );
+      })
+      .finally(() => {
+        inFlight = false;
+      });
   }, intervalMs);
   timer.unref();
   return {

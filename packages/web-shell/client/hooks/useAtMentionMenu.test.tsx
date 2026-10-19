@@ -144,6 +144,98 @@ afterEach(() => {
 });
 
 describe('useAtMentionMenu', () => {
+  it('prepares a Managed snapshot before inserting its file chip', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    let resolve!: (tag: WebShellComposerTag) => void;
+    const pending = new Promise<WebShellComposerTag>((done) => {
+      resolve = done;
+    });
+    const prepare = vi.fn(() => pending);
+    const discarded = vi.fn();
+    const effect = vi.fn(() => StateEffect.define<unknown>().of('snapshot'));
+    mount({
+      view,
+      builtinProviders: ['files'],
+      createInlineTagEffect: effect,
+      actions: {
+        filesOnly: true,
+        prepareFileReference: prepare,
+        onFileReferenceDiscarded: discarded,
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [{ name: 'notes.ts', kind: 'file', ignored: false }],
+          truncated: false,
+        }),
+      },
+    });
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: { fileKind: 'file', filePath: 'notes.ts' },
+      }),
+    );
+    expect(view.dispatch).not.toHaveBeenCalled();
+    await act(async () =>
+      resolve({
+        id: 'snapshot',
+        kind: 'file',
+        value: 'notes.ts',
+        metadata: { contents: 'selected bytes' },
+      }),
+    );
+    expect(effect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: expect.objectContaining({
+          id: 'snapshot',
+          metadata: { contents: 'selected bytes' },
+        }),
+      }),
+    );
+    expect(view.dispatch).toHaveBeenCalledTimes(1);
+    expect(discarded).not.toHaveBeenCalled();
+  });
+
+  it('keeps a changed draft intact and reports a discarded file selection', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    let resolve!: (tag: WebShellComposerTag) => void;
+    const pending = new Promise<WebShellComposerTag>((done) => {
+      resolve = done;
+    });
+    const discarded = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      actions: {
+        filesOnly: true,
+        prepareFileReference: () => pending,
+        onFileReferenceDiscarded: discarded,
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [{ name: 'notes.ts', kind: 'file', ignored: false }],
+          truncated: false,
+        }),
+      },
+    });
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => latest!.accept(0));
+    setViewState(view, 'changed draft');
+    await act(async () =>
+      resolve({ id: 'snapshot', kind: 'file', value: 'notes.ts' }),
+    );
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe('changed draft');
+    expect(discarded).toHaveBeenCalledTimes(1);
+  });
+
   it('does not open while disabled', () => {
     mount({ disabled: true });
 

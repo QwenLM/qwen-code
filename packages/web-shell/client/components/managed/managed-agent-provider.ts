@@ -249,6 +249,13 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly toolDetails?: {
+    get(
+      sessionId: string,
+      itemId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellToolDetails']>;
+  };
   readonly tasks?: {
     list(
       sessionId: string,
@@ -315,6 +322,16 @@ export interface ManagedAgentProvider {
       request: { modelId: string; expectedRevision: number },
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedModelChangeResult>;
+  };
+  readonly workspaceFiles?: {
+    query(
+      request: components['schemas']['WebShellWorkspaceFileQueryRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFilePage']>;
+    read(
+      request: components['schemas']['WebShellWorkspaceFileReadRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
   };
   readonly workspaceBinding?: {
     readonly agentId: string;

@@ -71,6 +71,11 @@ public class ManagedArtifactConfiguration {
         return builder.poolSize(1).threadNamePrefix("message-relay-").build();
     }
 
+    @Bean
+    public ThreadPoolTaskScheduler wakeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("wake-recovery-").build();
+    }
+
     /**
      * The child Workspace scan's own tick (#13753 I1): its steps run Git
      * for up to the Git timeout each, which must stall neither the relay
