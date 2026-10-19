@@ -278,7 +278,7 @@ export class InteractiveModToolScheduler {
           }
           publish();
         }
-        if (sessionSignal.aborted) return;
+        sessionSignal.throwIfAborted();
         clearDisplay();
         delivered = true;
         await this.options.onAllToolCallsComplete(

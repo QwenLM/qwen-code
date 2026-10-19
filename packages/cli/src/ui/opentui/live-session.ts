@@ -979,8 +979,27 @@ export async function* livePromptEvents(
         live.close();
       },
     });
-    void scheduler.schedule(pending as never, abort).catch((error: unknown) => {
-      live.push({ type: 'error', text: String(error) });
+    const scheduled = scheduler.schedule(pending as never, abort);
+    void scheduled.catch((error: unknown) => {
+      const cancelled =
+        abort.aborted ||
+        (error instanceof Error && error.name === 'AbortError');
+      const ids = new Set([
+        ...pending.map((call) => call.callId),
+        ...waitingSeen,
+        ...queuedSeen,
+        ...descriptionSeen,
+      ]);
+      for (const id of ids) {
+        live.push({ type: 'tool-queued', id, queued: false });
+        live.push({ type: 'confirm-resolved', id, outcome: 'rejected' });
+        live.push({
+          type: 'tool-end',
+          id,
+          success: false,
+          summary: cancelled ? 'cancelled' : 'error',
+        });
+      }
       live.close();
     });
     for (;;) {
@@ -988,6 +1007,7 @@ export async function* livePromptEvents(
       if (ev === undefined) break;
       yield ev;
     }
+    await scheduled;
 
     const usesMods = completed.some((call) => call.nativeAttemptsObserved);
     const finalResponses = usesMods

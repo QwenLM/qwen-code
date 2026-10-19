@@ -48,6 +48,9 @@ const visionMocks = vi.hoisted(() => ({
 }));
 
 const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+const schedulerControl = vi.hoisted(() => ({
+  finish: null as (() => Promise<void>) | null,
+}));
 vi.mock('../../services/interactive-mod-session.js', () => ({
   getInteractiveModSession: modMocks.get,
 }));
@@ -76,6 +79,24 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
+        const failure = calls.find(
+          (c) => (c.args as { __scheduleFailure?: string })?.__scheduleFailure,
+        )?.args as { __scheduleFailure: string } | undefined;
+        if (failure) {
+          this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          if (failure.__scheduleFailure === 'cancelled')
+            throw new DOMException('Mod generation revoked', 'AbortError');
+          throw new Error('Scheduler failed');
+        }
+        if (
+          calls.some((c) => (c.args as { __deferred?: boolean })?.__deferred)
+        ) {
+          schedulerControl.finish = () =>
+            this.schedule(calls.map((c) => ({ ...c, args: {} })));
+          return;
+        }
         const bounce = calls.some(
           (c) =>
             (c.args as { __bounceApproval?: boolean } | undefined)
@@ -392,6 +413,7 @@ describe('livePromptEvents', () => {
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
     modMocks.get.mockReset();
+    schedulerControl.finish = null;
   });
 
   it('seeds prompt ids past claims in the resumed transcript', () => {
@@ -2251,6 +2273,76 @@ describe('livePromptEvents', () => {
     )) as OpenTuiStreamEvent[];
 
     expect(events.some((e) => e.type === 'tool-description')).toBe(false);
+  });
+
+  it.each(['cancelled', 'error'])(
+    'rejects a %s batch after draining UI-only terminal states without committing results',
+    async (summary) => {
+      const send = oneToolBatchStream({
+        callId: 'revoked',
+        name: 'test_tool',
+        args: { __scheduleFailure: summary },
+      });
+      const recordToolResult = vi.fn();
+      const config = {
+        ...createFakeConfig(send),
+        getChatRecordingService: () => ({ recordToolResult }),
+      } as unknown as Config;
+      const events: OpenTuiStreamEvent[] = [];
+      const run = (async () => {
+        for await (const event of livePromptEvents(config, 'run'))
+          events.push(event);
+      })();
+      await expect(run).rejects.toThrow(
+        summary === 'cancelled' ? 'Mod generation revoked' : 'Scheduler failed',
+      );
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: 'revoked',
+        success: false,
+        summary,
+      });
+      expect(events).toContainEqual({
+        type: 'tool-queued',
+        id: 'revoked',
+        queued: false,
+      });
+      expect(events).toContainEqual({
+        type: 'confirm-resolved',
+        id: 'revoked',
+        outcome: 'rejected',
+      });
+      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(send).toHaveBeenCalledOnce();
+      expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+      expect(recordToolResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the native queue open when schedule resolves before completion', async () => {
+    const send = oneToolBatchStream({
+      callId: 'deferred',
+      name: 'test_tool',
+      args: { __deferred: true },
+    });
+    let settled = false;
+    const run = drain(livePromptEvents(createFakeConfig(send), 'run')).then(
+      (events) => {
+        settled = true;
+        return events;
+      },
+    );
+    await vi.waitFor(() => expect(schedulerControl.finish).not.toBeNull());
+    expect(settled).toBe(false);
+    expect(send).toHaveBeenCalledOnce();
+    await schedulerControl.finish!();
+    expect(await run).toContainEqual({
+      type: 'tool-end',
+      id: 'deferred',
+      success: true,
+      summary: 'ok',
+    });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it('ends the turn without a follow-up request when the whole batch was cancelled', async () => {

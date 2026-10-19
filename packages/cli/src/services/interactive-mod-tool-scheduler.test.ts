@@ -268,13 +268,14 @@ describe('interactive Mod logical scheduler', () => {
     test.generation.abort();
     expect(test.update.mock.lastCall?.[0]).toEqual([]);
     let finished = false;
-    void run.then(() => {
+    const rejected = run.catch((error: unknown) => {
       finished = true;
+      return error;
     });
     await Promise.resolve();
     expect(finished).toBe(false);
     drained.resolve();
-    await run;
+    expect(await rejected).toBe(test.generation.signal.reason);
     expect(test.complete).not.toHaveBeenCalled();
     expect(test.observe).not.toHaveBeenCalled();
   });
