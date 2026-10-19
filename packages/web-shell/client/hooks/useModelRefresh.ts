@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   useActions,
   useConnection,
@@ -54,5 +54,8 @@ export function useModelRefresh(
     (!connection.sessionContext ||
       connection.sessionContext.kind === 'workspace') &&
     connection.capabilities?.features.includes('workspace_model_reload');
-  return { refresh: available ? refresh : undefined, refreshing, error };
+  return useMemo(
+    () => ({ refresh: available ? refresh : undefined, refreshing, error }),
+    [available, refresh, refreshing, error],
+  );
 }

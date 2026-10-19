@@ -40,6 +40,12 @@ afterEach(async () => {
 });
 
 describe('model refresh controls', () => {
+  it('keeps composer props stable across unrelated parent renders', async () => {
+    const before = state;
+    await act(async () => root.render(<Host />));
+    expect(state).toBe(before);
+  });
+
   it('coalesces duplicate clicks and exposes a retryable error', async () => {
     let reject!: (error: Error) => void;
     mock.actions.refreshModels.mockImplementation(
