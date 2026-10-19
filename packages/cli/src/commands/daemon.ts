@@ -280,22 +280,35 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
 async function handleStatus(argv: StatusArgs): Promise<void> {
   ignoreBrokenPipe();
   const { entries, invalid } = readDaemonDiscoveries();
-  const rows: DaemonStatusRow[] = [];
+  let rows: DaemonStatusRow[] = [];
   for (const entry of entries) {
     rows.push({ entry, health: await probeHealth(entry.record) });
   }
 
   if (argv.prune === true) {
+    const kept: DaemonStatusRow[] = [];
     for (const row of rows) {
-      if (row.health !== 'stale') continue;
-      removeDaemonDiscovery(row.entry.record.port, {
-        expectedPid: row.entry.record.pid,
-      });
+      if (row.health !== 'stale') {
+        kept.push(row);
+        continue;
+      }
+      // A refused removal means the record is still there — a concurrent
+      // instance republished it — so it stays listed under its own pid.
+      if (
+        !removeDaemonDiscovery(row.entry.record.port, {
+          expectedPid: row.entry.record.pid,
+        })
+      ) {
+        kept.push(row);
+      }
     }
+    rows = kept;
   }
 
   for (const bad of invalid) {
-    writeStderrLine(`qwen daemon: ignoring ${bad.path}: ${bad.reason}`);
+    writeStderrLine(
+      `qwen daemon: ignoring ${sanitize(bad.path)}: ${sanitize(bad.reason)}`,
+    );
   }
 
   if (argv.json === true) {
