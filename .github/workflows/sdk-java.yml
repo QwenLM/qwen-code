@@ -38,13 +38,14 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    # One full per-host lock wait plus the locked Maven work it guards: the
-    # fast-tier leg holds sdk-java-tests.lock for the sdk-java suite plus
-    # the full managed-agent H2 suite — 2440 s measured on the Java 21 leg
-    # of run 39145783034 — so the old 40-minute budget lost to ONE sibling
-    # hold and main run 39143975111 starved on both attempts (#14608). The
-    # wait is two such holds (5400 s); the ceiling is that wait plus the
-    # ~41-minute hold plus the ~11 minutes of uncapped setup, plus margin.
+    # One per-host lock wait plus the locked Maven work it guards. In job
+    # 117729316936 (run 39145783034) this step spent 1515 s waiting behind
+    # sibling holds and then held sdk-java-tests.lock for 925 s while Maven
+    # ran, so the old 40-minute wait lost to a queue of holds rather than to
+    # one hold (#14608). A wait now covers about 5.8 such holds (5400 s); the
+    # ceiling is that wait plus one hold (925 s) plus the ~11 minutes of
+    # uncapped setup, plus margin: 150. Hosted lanes never take the lock and
+    # inherit this ceiling as a bound, not as an expected duration.
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -428,13 +429,17 @@ jobs:
     # (measured run 37743332082: 1193 s of waits against 818 s of holds),
     # and main run 38258395829 exhausted it — the verify step below starved
     # a full 1200 s behind cross-run pool traffic and failed before Maven
-    # started (#13989). The 40-minute budget assumed 818 s sibling holds,
-    # but the sibling test job's fast-tier leg now runs the full
-    # managed-agent H2 suite inside the lock — 2440 s on run 39145783034 —
-    # so one hold exhausted it (#14608). Each acquisition now waits out two
-    # such holds (flock --wait 5400); the ceiling is two 90-minute lock
-    # waits plus the ~14 minutes of measured Maven work, plus margin: 200.
-    timeout-minutes: 200
+    # started (#13989). The 40-minute budget then lost to the same queue: the
+    # sibling test job holds the lock for the sdk-java suite plus the full
+    # managed-agent H2 suite, 925 s of Maven work per hold in job 117729316936
+    # (run 39145783034), and main run 39143975111 starved on both attempts
+    # (#14608). That hold can only arrive cross-run, because this lane runs
+    # only on the full tier and the full-H2 hold sits on the fast tier, so a
+    # wait covers a queue of holds rather than one: 5400 s is about 5.8 of
+    # them. The ceiling is both waits plus the ~14 minutes of measured Maven
+    # work plus 15 minutes of uncapped setup, plus margin: 220. Hosted lanes
+    # never take the lock and inherit this ceiling as a bound, not a duration.
+    timeout-minutes: 220
     services:
       mariadb:
         image: 'mariadb:10.11.18'

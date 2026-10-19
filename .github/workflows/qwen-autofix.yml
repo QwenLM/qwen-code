@@ -150,7 +150,7 @@ env:
   # shutdown, a git fetch/clone dying mid-transfer, the hosted pool never
   # handing the job a runner (#13622: "repeatedly failed to be acquired"), or a
   # shared-host test lock starving past its per-acquisition budget (#14550:
-  # "sdk-java host lock not acquired within 90 minutes").
+  # "sdk-java host lock not acquired within 40 minutes").
   # Full rationale → qwen-autofix.md#af-076
   INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
