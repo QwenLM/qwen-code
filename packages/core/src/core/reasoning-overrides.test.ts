@@ -74,6 +74,100 @@ function snapshotConfig(
 }
 
 describe('reasoning declarations', () => {
+  it('infers known DeepSeek routes only when no capability is declared', () => {
+    const target = {
+      ...route,
+      model: 'deepseek-v4.1-flash-1017',
+      baseUrl:
+        'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    };
+    expect(resolveReasoningCapabilities(target, undefined)).toMatchObject({
+      profile: 'deepseek-openai',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'enable_thinking',
+    });
+    expect(resolveReasoningCapabilities(target, declaration)).toMatchObject({
+      ...declaration,
+      disableField: 'reasoning_effort',
+    });
+    const legacy = {
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'max',
+      disableField: 'enable_thinking',
+    };
+    expect(resolveReasoningCapabilities(target, legacy)).toEqual(legacy);
+    expect(
+      resolveReasoningCapabilities(target, { thinking: true }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ['https://api.deepseek.com/v1', 'deepseek-flash', 'low', 'low'],
+    ['https://api.deepseek.com/v1', 'deepseek-flash', 'xhigh', 'high'],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'deepseek-v4.1-flash-1017',
+      'xhigh',
+      'high',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'deepseek-v4-flash',
+      'low',
+      'high',
+    ],
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'deepseek-v4-pro',
+      'xhigh',
+      'max',
+    ],
+  ] as const)(
+    'normalizes %s / %s / %s before generic clamping',
+    (baseUrl, model, effort, expected) => {
+      const target = { ...route, baseUrl, model, reasoning: { effort } };
+      const resolved = resolveReasoningCapabilities(target, undefined);
+      expect(getEffectiveReasoning(target, resolved)).toEqual({
+        effort: expected,
+      });
+      expect(
+        getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+      ).toBe(false);
+      expect(
+        getEffectiveReasoning({ ...target, reasoning: undefined }, resolved),
+      ).toEqual({ effort: 'high' });
+    },
+  );
+
+  it('keeps a DeepSeek profile declaration ahead of native alias mapping', () => {
+    const target = {
+      ...route,
+      model: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com/v1',
+      reasoning: { effort: 'xhigh' as const },
+    };
+    const resolved = resolveReasoningCapabilities(target, {
+      profile: 'deepseek-openai',
+      efforts: ['medium', 'xhigh'],
+      defaultEffort: 'medium',
+    });
+    expect(getEffectiveReasoning(target, resolved)).toEqual({
+      effort: 'xhigh',
+    });
+    expect(
+      getEffectiveReasoning({ ...target, reasoning: undefined }, resolved),
+    ).toEqual({ effort: 'medium' });
+    const legacy = resolveReasoningCapabilities(target, {
+      thinking: true,
+      efforts: ['low', 'max'],
+      defaultEffort: 'max',
+      disableField: 'thinking',
+    });
+    expect(getEffectiveReasoning(target, legacy)).toEqual({ effort: 'max' });
+  });
+
   it('overrides a known default without persisting a user choice', () => {
     const resolved = resolveReasoningCapabilities(
       {

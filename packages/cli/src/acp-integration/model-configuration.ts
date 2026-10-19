@@ -20,7 +20,12 @@ import {
   resolveReasoningForModel,
   getEffectiveReasoning,
   type ReasoningProfile,
+  type ResolvedReasoning,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import {
+  getBuiltinDeepSeekReasoning,
+  getDeepSeekReasoningState,
+} from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -389,6 +394,10 @@ export function isReasoningSelectionSupported(
 export function clearReasoningRequestOverrides(
   generation: ContentGeneratorConfig,
 ): void {
+  const deepSeek = getDeepSeekReasoningState(
+    generation,
+    resolveReasoningForModel(undefined, generation),
+  );
   if (
     getGptReasoningCapabilities(generation.model) ||
     getGptReasoningOverrideState(
@@ -404,6 +413,22 @@ export function clearReasoningRequestOverrides(
     delete next['enable_thinking'];
     delete next['reasoning_effort'];
     delete next['thinking_budget'];
+    if (deepSeek) {
+      delete next['thinking'];
+      const reasoning = next['reasoning'];
+      if (
+        reasoning &&
+        typeof reasoning === 'object' &&
+        !Array.isArray(reasoning)
+      ) {
+        const { effort: _effort, ...rest } = reasoning as Record<
+          string,
+          unknown
+        >;
+        if (Object.keys(rest).length) next['reasoning'] = rest;
+        else delete next['reasoning'];
+      }
+    }
     generation[source] = next;
   }
 }
@@ -448,6 +473,22 @@ export function applyReasoningSelection(
   const modelsConfig = config.getModelsConfig?.();
   const rebuildable = modelsConfig?.getGenerationConfig?.();
   if (rebuildable !== live) apply(rebuildable);
+  if (live && getBuiltinDeepSeekReasoning(live)) {
+    for (const sources of [
+      config.getContentGeneratorConfigSources?.(),
+      modelsConfig?.getGenerationConfigSources?.(),
+    ]) {
+      if (!sources) continue;
+      if (selection === REASONING_EFFORT_NONE) {
+        sources['reasoning'] = {
+          kind: 'programmatic',
+          detail: 'reasoning selection',
+        };
+      } else {
+        delete sources['reasoning'];
+      }
+    }
+  }
 }
 
 export function buildModelReasoningConfigOption(
@@ -610,11 +651,42 @@ export function buildModelReasoningConfigPreview(
 
 export function buildModelReasoningRoutePreview(
   generation: ContentGeneratorConfig,
-  reasoning: ModelReasoningConfiguration | undefined,
+  reasoning: ResolvedReasoning | undefined,
   selection: unknown,
   opaqueRoute = false,
 ): SessionConfigOption[] | undefined {
-  if (opaqueRoute && !reasoning?.profile) return undefined;
+  if (
+    opaqueRoute &&
+    !reasoning?.profile &&
+    !getDeepSeekReasoningState(generation, reasoning)
+  )
+    return undefined;
+  const parsedSelection = parseReasoningSelection(selection);
+  const usesConfiguredState =
+    !parsedSelection ||
+    parsedSelection === REASONING_EFFORT_DEFAULT ||
+    !isReasoningSelectionSupported(
+      generation.model,
+      parsedSelection,
+      generation.thinkingMandatory === true,
+      reasoning,
+    );
+  const deepSeekState = usesConfiguredState
+    ? getDeepSeekReasoningState(
+        {
+          ...generation,
+          ...(parsedSelection &&
+          parsedSelection !== REASONING_EFFORT_DEFAULT &&
+          parsedSelection !== REASONING_EFFORT_NONE &&
+          generation.reasoning !== false
+            ? {
+                reasoning: { ...generation.reasoning, effort: parsedSelection },
+              }
+            : {}),
+        },
+        reasoning,
+      )
+    : undefined;
   return buildModelReasoningConfigPreview(
     generation.model,
     {
@@ -626,6 +698,7 @@ export function buildModelReasoningRoutePreview(
         generation.thinkingMandatory === true,
         reasoning,
       ),
+      ...deepSeekState,
     },
     reasoning,
     generation,
@@ -638,6 +711,8 @@ export function getReasoningForDisplay(
 ) {
   const resolved = resolveReasoningForModel(config, generation);
   if (!resolved) return generation.reasoning;
+  const deepSeek = getDeepSeekReasoningState(generation, resolved);
+  if (deepSeek) return deepSeek.enabled ? { effort: deepSeek.effort } : false;
   const override = getGptReasoningOverrideState(generation, resolved);
   if (override) return override.enabled ? { effort: override.effort } : false;
   if (config.getReasoningEffortOverride?.()) return generation.reasoning;

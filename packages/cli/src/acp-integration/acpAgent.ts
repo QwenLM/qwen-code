@@ -319,7 +319,11 @@ import {
   startChildHeapProbe,
   type ChildHeapProbe,
 } from './child-heap-probe.js';
-import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import {
+  resolveReasoningCapabilities,
+  resolveReasoningForModel,
+} from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { getDeepSeekReasoningState } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
@@ -6974,6 +6978,10 @@ class QwenAgent implements Agent {
             .getModelsConfig?.()
             ?.getGenerationConfig?.();
           const previousRebuildableReasoning = rebuildable?.reasoning;
+          const previousReasoningSources = [
+            config.getContentGeneratorConfigSources?.(),
+            config.getModelsConfig?.()?.getGenerationConfigSources?.(),
+          ].map((sources) => [sources, sources?.['reasoning']] as const);
           try {
             if (modelReasoning && !modelReasoning.toggleOnly) {
               clearReasoningRequestOverrides(generation);
@@ -7028,6 +7036,11 @@ class QwenAgent implements Agent {
             Object.assign(generation, previous);
             if (rebuildable)
               rebuildable.reasoning = previousRebuildableReasoning;
+            for (const [sources, previousSource] of previousReasoningSources) {
+              if (!sources) continue;
+              if (previousSource) sources['reasoning'] = previousSource;
+              else delete sources['reasoning'];
+            }
             throw error;
           }
         }
@@ -16097,8 +16110,15 @@ class QwenAgent implements Agent {
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
       clearReasoningRequestOverrides(generation);
     }
-    if (selection === REASONING_EFFORT_NONE) {
-      applyReasoningSelection(config, REASONING_EFFORT_NONE);
+    if (
+      selection === REASONING_EFFORT_NONE ||
+      (generation &&
+        getDeepSeekReasoningState(
+          generation,
+          resolveReasoningForModel(config, generation),
+        ))
+    ) {
+      applyReasoningSelection(config, selection);
     }
   }
 
@@ -16885,10 +16905,18 @@ class QwenAgent implements Agent {
       currentModelId,
     );
 
+    const generation = config.getContentGeneratorConfig?.();
+    const deepSeekState =
+      generation &&
+      getDeepSeekReasoningState(
+        generation,
+        resolveReasoningForModel(config, generation),
+      );
     if (
       activeRuntimeSnapshot ||
       (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
-        !modelReasoning?.profile) ||
+        !modelReasoning?.profile &&
+        !deepSeekState) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,
@@ -16899,7 +16927,6 @@ class QwenAgent implements Agent {
       return [modeConfigOption, modelConfigOption];
     }
 
-    const generation = config.getContentGeneratorConfig?.();
     if (!generation) {
       return [modeConfigOption, modelConfigOption];
     }
@@ -16984,6 +17011,7 @@ class QwenAgent implements Agent {
           {
             enabled: reasoningEnabled,
             effort: effectiveModelEffort,
+            ...deepSeekState,
             ...(gptEnableOverride?.blocksTierChange
               ? gptEnableOverride.enabled && defaultReasoning !== false
                 ? { enableValue: REASONING_EFFORT_DEFAULT }
@@ -17046,8 +17074,16 @@ class QwenAgent implements Agent {
         config.getCurrentModelRegistryBaseUrl?.(),
       );
     const reasoning = getConfiguredModelReasoning(config);
+    const generation = config.getContentGeneratorConfig?.();
+    const deepSeekState =
+      generation &&
+      getDeepSeekReasoningState(
+        generation,
+        resolveReasoningForModel(config, generation),
+      );
     return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
-      !reasoning?.profile
+      !reasoning?.profile &&
+      !deepSeekState
       ? undefined
       : reasoning;
   }

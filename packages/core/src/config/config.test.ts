@@ -6917,6 +6917,112 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it.each([
+      ['https://api.deepseek.com/v1', 'settings'],
+      ['https://api.deepseek.com/v1', 'programmatic'],
+      ['https://api.deepseek.com/v1', 'modelProviders'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'settings'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'programmatic'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'modelProviders'],
+    ] as const)(
+      'preserves only explicit DeepSeek off on %s from %s across refresh and reload',
+      async (baseUrl, kind) => {
+        const actual = await vi.importActual<
+          typeof import('../core/contentGenerator.js')
+        >('../core/contentGenerator.js');
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          actual.resolveContentGeneratorConfigWithSources,
+        );
+        const model = 'deepseek-flash';
+        const source =
+          kind === 'settings'
+            ? { kind, settingsPath: 'model.reasoningEffort' }
+            : kind === 'programmatic'
+              ? { kind, detail: 'reasoning selection' }
+              : {
+                  kind,
+                  authType: AuthType.USE_OPENAI,
+                  modelId: model,
+                  detail: 'generationConfig.reasoning',
+                };
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          generationConfig: { apiKey: 'test-key', baseUrl, reasoning: false },
+          generationConfigSources: { reasoning: source },
+          modelProvidersConfig: {
+            openai: [
+              { id: model, baseUrl, generationConfig: { reasoning: false } },
+            ],
+          },
+        });
+        for (const stage of ['initial', 'refresh', 'reload']) {
+          if (stage === 'reload') {
+            config.reloadModelProvidersConfig({
+              openai: [
+                {
+                  id: model,
+                  baseUrl,
+                  generationConfig: { reasoning: { effort: 'high' } },
+                },
+              ],
+            });
+          }
+          await config.refreshAuth(AuthType.USE_OPENAI, stage === 'initial');
+          const expected =
+            kind === 'modelProviders' && stage === 'reload'
+              ? { effort: 'high' }
+              : false;
+          expect(config.getContentGeneratorConfig().reasoning).toEqual(
+            expected,
+          );
+          expect(
+            config.getModelsConfig().getGenerationConfig().reasoning,
+          ).toEqual(expected);
+          expect(
+            config.getContentGeneratorConfigSources()['reasoning'],
+          ).toMatchObject(source);
+          expect(
+            config.getModelsConfig().getGenerationConfigSources()['reasoning'],
+          ).toMatchObject(source);
+        }
+      },
+    );
+
+    it.each([
+      { model: 'deepseek-v4-pro' },
+      { authType: AuthType.USE_ANTHROPIC },
+      { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+      { thinkingMandatory: true },
+    ])(
+      'does not restore explicit DeepSeek off onto a changed route or mandatory profile %j',
+      async (changed) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'deepseek-flash',
+          generationConfig: {
+            baseUrl: 'https://api.deepseek.com/v1',
+            reasoning: false,
+          },
+          generationConfigSources: {
+            reasoning: {
+              kind: 'settings',
+              settingsPath: 'model.reasoningEffort',
+            },
+          },
+        });
+        resolveGeneratorTo({
+          model: 'deepseek-flash',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'test-key',
+          baseUrl: 'https://api.deepseek.com/v1',
+          ...changed,
+        });
+        await config.refreshAuth(changed.authType ?? AuthType.USE_OPENAI, true);
+        expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      },
+    );
+
     it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
       // Regression: the provider sync (applyResolvedModelDefaults) overwrites
       // `reasoning` with the provider preset's undefined value, dropping the

@@ -279,7 +279,7 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
     });
 
     // https://api-docs.deepseek.com/zh-cn/api/create-chat-completion —
-    // DeepSeek expects a flat `reasoning_effort` body parameter (high/max);
+    // DeepSeek expects a flat `reasoning_effort` body parameter (low/high/max);
     // the standard `reasoning: { effort }` shape from the OpenAI pipeline
     // would otherwise be ignored.
     it('translates `reasoning.effort` into top-level `reasoning_effort`', () => {
@@ -296,17 +296,19 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
       expect(r['reasoning']).toBeUndefined();
     });
 
-    it("maps backward-compat 'xhigh' effort to 'max' (DeepSeek doc behavior)", () => {
+    it("maps backward-compat 'xhigh' effort to 'high' for current official models", () => {
       const r = buildHi({ reasoning: { effort: 'xhigh' } });
 
-      expect(r['reasoning_effort']).toBe('max');
+      expect(r['reasoning_effort']).toBe('high');
     });
 
-    it('maps backward-compat `low`/`medium` effort to `high` (DeepSeek doc behavior)', () => {
-      for (const effort of ['low', 'medium'] as const) {
-        const r = buildHi({ reasoning: { effort } });
-        expect(r['reasoning_effort']).toBe('high');
-      }
+    it('preserves low and maps medium to high on current official models', () => {
+      expect(
+        buildHi({ reasoning: { effort: 'low' } })['reasoning_effort'],
+      ).toBe('low');
+      expect(
+        buildHi({ reasoning: { effort: 'medium' } })['reasoning_effort'],
+      ).toBe('high');
     });
 
     it('preserves an explicitly set top-level `reasoning_effort` (no clobber)', () => {

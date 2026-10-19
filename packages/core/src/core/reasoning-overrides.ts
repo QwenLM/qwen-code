@@ -12,6 +12,10 @@ import type {
 } from '../models/types.js';
 import { ALL_PROVIDERS } from '../providers/all-providers.js';
 import { normalize } from './tokenLimits.js';
+import {
+  getBuiltinDeepSeekReasoning,
+  normalizeDeepSeekReasoningEffort,
+} from './deepseek-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 import {
   parseClaudeModelVersion,
@@ -142,6 +146,7 @@ export function validateReasoningCapabilities(
   route: Route,
   declaration: unknown,
 ): ResolvedReasoning | undefined {
+  if (declaration === undefined) return getBuiltinDeepSeekReasoning(route);
   const input = validateReasoningDeclaration(route, declaration);
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)
@@ -361,7 +366,8 @@ export function resolveReasoningForModel(
 }
 
 export function getEffectiveReasoning(
-  generation: Pick<ContentGeneratorConfig, 'reasoning'>,
+  generation: Pick<ContentGeneratorConfig, 'reasoning'> &
+    Partial<Pick<ContentGeneratorConfig, 'model' | 'baseUrl' | 'authType'>>,
   resolved?: ResolvedReasoning,
 ): ContentGeneratorConfig['reasoning'] {
   if (!resolved) return generation.reasoning;
@@ -376,12 +382,23 @@ export function getEffectiveReasoning(
     return false;
   if (resolved.toggleOnly)
     return selected ?? (resolved.profile ? {} : undefined);
-  const effort = selected?.effort ?? resolved.defaultEffort;
+  const knownDeepSeek =
+    (resolved.profile === undefined ||
+      resolved.profile === 'deepseek-openai') &&
+    getBuiltinDeepSeekReasoning(generation);
+  let effort = selected?.effort ?? resolved.defaultEffort;
+  if (effort && knownDeepSeek && !resolved.efforts.includes(effort))
+    effort = normalizeDeepSeekReasoningEffort(
+      effort,
+      generation.model,
+      generation.baseUrl,
+    ) as ReasoningEffort;
   return effort
     ? {
         ...selected,
         effort:
-          resolved.profile && REASONING_EFFORT_TIERS.includes(effort)
+          (resolved.profile || knownDeepSeek) &&
+          REASONING_EFFORT_TIERS.includes(effort)
             ? clampReasoningEffort(effort, resolved.efforts)
             : effort,
       }

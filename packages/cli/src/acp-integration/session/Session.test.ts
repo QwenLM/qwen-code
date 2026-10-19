@@ -10282,6 +10282,59 @@ describe('Session', () => {
       },
     );
 
+    it.each(['low', 'none'] as const)(
+      'reconciles persisted %s across official and MaaS routes of the same DeepSeek model',
+      async (selection) => {
+        const official = 'https://api.deepseek.com/v1';
+        const maas = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+        const models = [official, maas].map((baseUrl) => ({
+          id: 'deepseek-v4-pro',
+          label: baseUrl,
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+          registryBaseUrl: baseUrl,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        const state = installReasoningPreference(selection);
+        Object.assign(state.live, {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: official,
+        });
+        Object.assign(state.rebuildable, state.live);
+        switchModelSpy.mockImplementation(async (authType, modelId, route) => {
+          currentAuthType = authType;
+          currentModel = modelId;
+          Object.assign(state.live, {
+            model: modelId,
+            authType,
+            baseUrl: route?.baseUrl,
+            reasoning: undefined,
+          });
+          Object.assign(state.rebuildable, state.live);
+        });
+        const routes = buildAcpModelOptions(models);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: routes[0]!.modelId,
+        });
+        expect(state.live.reasoning).toEqual(
+          selection === 'none' ? false : { effort: 'low' },
+        );
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: routes[1]!.modelId,
+        });
+        const expected = selection === 'none' ? false : undefined;
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.user.settings.model.reasoningEffort).toBe(
+          selection === 'none' ? 'none' : undefined,
+        );
+      },
+    );
+
     it('falls back to a compatible persisted tier after dropping a session-only tier', async () => {
       const state = installReasoningPreference('low');
       session.setSessionReasoningSelection('max');
