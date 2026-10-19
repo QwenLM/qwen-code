@@ -59,6 +59,9 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   时，Spring 根本不会提交 `automation_run`，首次构造拿到的是空 run 列表，
   没有东西可以结算成 `cancelled`。要构造它，需要在「run 已提交、wake turn
   尚未开始」之间扣留，本夹具暂未暴露该注入点。
+- `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
+  Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
+  `workspace_unavailable`——与 FG11f 记录的执行授权缺口相同。
 - 取消期间的租约接管不在范围内，与 FG11c 一致。
 - stream gap 门禁（FG11e）不在此处。
 

@@ -71,6 +71,10 @@ around it.
   the first construction observed an empty run list and nothing to settle
   `cancelled`. Staging it needs a hold between the run commit and the wake
   turn, which this fixture does not expose yet.
+- `close-*` needs a workspace-backed Session: the automation API refuses a
+  Session without one (`session_not_found`), while closing a workspace
+  Session in this fixture answers `workspace_unavailable` — the same
+  execution-authority gap FG11f records.
 - Lease takeover during a cancel is out of scope, as in FG11c.
 - The stream-gap gate (`FG11e`) is untouched.
 
