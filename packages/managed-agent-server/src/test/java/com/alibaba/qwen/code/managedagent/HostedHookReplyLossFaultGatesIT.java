@@ -424,29 +424,42 @@ class HostedHookReplyLossFaultGatesIT {
     @Timeout(300)
     void fg13fDenyReplyLossReplaysTheBlockedDecisionOnMySql() throws Exception {
         boot("60000", "1000", "hook-deny");
-        proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+        // The reply is lost once the worker has already settled the deny:
+        // only a settled/blocking status reply may consume the drop, so the
+        // running receipt cannot stand in for the decision.
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.dropResponse(
                 (method, path, body) -> path.contains("/control")
-                        && body.contains("\"kind\":\"hook-execute\""),
-                "hook-deny-reply"));
+                        && body.contains("\"kind\":\"hook-status\""),
+                reply -> reply.contains("\"state\":\"settled\"")
+                        && reply.contains("\"outcome\":\"blocking\""),
+                "hook-deny-settled-reply"));
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
         submit(session, "FG13_DENY_LOSS");
         waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        // The dropped settled reply leaves the honest unknown first.
         waitFor(() -> {
             JsonNode execution = hookExecution(session);
-            assertThat(execution.at("/run/state").asText()).isEqualTo("settled");
-            assertThat(execution.at("/run/execution").asText()).isEqualTo("settled");
+            assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
         });
-        assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.deny")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
+        // A later read of the same operation returns the same decision.
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        assertThat(events("hook.call")).hasSize(1);
         assertThat(hookResult(session).path("outcome").asText()).isEqualTo("blocking");
-        // The deny is persisted and replayed after the lost dispatch reply:
-        // the tool never reads the file and the model sees the deny reason.
-        waitFor(() -> assertThat(modelRequests.toString()).contains("FG13_DENIED"));
         assertThat(modelRequests.toString()).doesNotContain(PROOF);
         assertThat(Files.readString(temporary.resolve("proxy.log")))
-                .contains("PROXY dropped hook-deny-reply");
+                .contains("PROXY dropped hook-deny-settled-reply");
         assertThat(modelFailure.get()).isNull();
     }
 
