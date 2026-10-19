@@ -54,7 +54,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(10, ManagedSchema.schemaVersion(source));
+            assertEquals(11, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
@@ -92,7 +92,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(10, ManagedSchema.schemaVersion(source));
+            assertEquals(11, ManagedSchema.schemaVersion(source));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
                     .usingRecursiveComparison().isEqualTo(existing);
             operation(jdbc, "created", "WORKSPACE_CREATE");
@@ -126,11 +126,16 @@ class WorkspaceCreationSchemaMySqlIT {
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
-            assertEquals(10, ManagedSchema.schemaVersion(source));
+            assertEquals(11, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement();
                     var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
                 String baseline = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+                statement.execute("DROP INDEX ix_ma_head_wake ON ma_session_head");
+                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_scan_pending");
+                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_retry_at");
+                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_head_revision");
+                statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_pending");
                 statement.execute(
                         "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
                 statement.execute("ALTER TABLE ma_request_receipt ADD "
@@ -172,7 +177,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(10, ManagedSchema.schemaVersion(source));
+            assertEquals(11, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(

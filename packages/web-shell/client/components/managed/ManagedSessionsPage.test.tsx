@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
+import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
 import type {
   ManagedAgentProvider,
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
+  clearEditor: vi.fn(),
   editorProps: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
@@ -98,6 +100,10 @@ vi.mock('../ChatEditor', async () => {
           ({
             setText: update,
             clearText: () => update(''),
+            clear: () => {
+              mocks.clearEditor();
+              update('');
+            },
             getText: () => input.current?.value ?? '',
             focus: () => input.current?.focus(),
           }) as EditorHandle,
@@ -284,6 +290,62 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('connects the Session Skill catalog to the composer without enabling other Workspace features', async () => {
+    const skills = [{ name: 'review', description: 'Pinned review.' }];
+    const list = vi.fn().mockResolvedValue({ skills });
+    provider = { ...provider, skills: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await act(async () => mocks.editorProps?.onSkillsOpenChange?.(true));
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+    expect(mocks.editorProps?.skills).toEqual(skills);
+    expect(mocks.editorProps?.skillsLoaded).toBe(true);
+  });
+
+  it('keeps Workspace file references available alongside the pinned Skill catalog', async () => {
+    const skills = [{ name: 'review', description: 'Pinned review.' }];
+    const list = vi.fn().mockResolvedValue({ skills });
+    const query = vi.fn().mockResolvedValue({
+      scopeRevision: 'registered',
+      directory: '.',
+      entries: [],
+      truncated: false,
+    });
+    provider = {
+      ...provider,
+      skills: { list },
+      workspaceFiles: { query, read: vi.fn() },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+        workspace: { workspaceId: 'ws', cwdRelative: '.' },
+      }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(mocks.editorProps?.persistFileReferences).toBe(true);
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    await act(async () => mocks.editorProps?.onSkillsOpenChange?.(true));
+    expect(mocks.editorProps?.skills).toEqual(skills);
+    expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(query).toHaveBeenCalledWith(
+      { workspaceId: 'ws', cwdRelative: '.', directory: '.', query: '' },
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
 
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',
@@ -515,6 +577,102 @@ describe('ManagedSessionsPage', () => {
       expect(provider.approvalChange.submit).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    '{',
+  ])(
+    'requires explicit discard before sending after a pending record cannot be restored (%s)',
+    async (stored) => {
+      const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+      sessionStorage.setItem(key, stored);
+      await render('s1');
+      expect(container.textContent).toContain(
+        'may already have been submitted',
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(
+        false,
+      );
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(
+        'Could not discard this request.',
+      );
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      await act(async () => {
+        mocks.editorProps!.onSubmit(
+          'blocked request',
+          undefined,
+          undefined,
+          vi.fn(),
+        );
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'Could not discard this request.',
+      );
+      expect(container.textContent).not.toContain(
+        'may already have been submitted',
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        mocks.editorProps!.onSubmit(
+          'new explicit request',
+          undefined,
+          undefined,
+          vi.fn(),
+        );
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps submissions serialized while the frozen request is being persisted', async () => {
+    await render('s1');
+    let acknowledge!: (saved: boolean) => void;
+    const save = vi
+      .spyOn(pendingStorage, 'saveManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+    const send = mocks.editorProps!.onSubmit;
+    await act(async () => {
+      send('first draft', undefined, undefined, vi.fn());
+      await flush();
+      send('second draft', undefined, undefined, vi.fn());
+      await flush();
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      acknowledge(true);
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt.mock.calls[0]?.[1]).toMatchObject({
+      text: 'first draft',
+    });
+    save.mockRestore();
+  });
 
   it('switches only after admission and readback, preserves the draft and blocks a same-frame send', async () => {
     let session = switchableSession();
@@ -2184,6 +2342,7 @@ describe('ManagedSessionsPage', () => {
       )?.disabled,
     ).toBe(true);
     expect(onSelect).toHaveBeenLastCalledWith('s1');
+    expect(mocks.clearEditor).toHaveBeenCalledOnce();
   });
 
   it('preserves the visible foreign draft when retrying a live retained commit', async () => {
