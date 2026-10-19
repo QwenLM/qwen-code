@@ -2354,7 +2354,11 @@ describe('createDaemonSessionActions', () => {
           });
           if (!('elapsedMs' in preflightResult))
             throw new Error('Expected capability preflight timeout');
-          expect(preflightResult.elapsedMs).toBe(singleRequestBudgetMs);
+          // The preflight keeps the generic 30s request budget while the
+          // create sizes itself from the advertised session budget, falling
+          // back to the 70s default here (no budget advertised).
+          expect(preflightResult.elapsedMs).toBe(30_000);
+          expect(singleRequestBudgetMs).toBe(70_000);
 
           const { actions, existing } = createWorkspaceCreateHarness(
             path,
@@ -2415,12 +2419,12 @@ describe('createDaemonSessionActions', () => {
           const pending = actions
             .createSession({ sourceType: 'default' })
             .catch(rejected);
-          await vi.advanceTimersByTimeAsync(74_999);
+          await vi.advanceTimersByTimeAsync(114_999);
           expect(rejected).not.toHaveBeenCalled();
           await vi.advanceTimersByTimeAsync(1);
           expect(rejected).toHaveBeenCalledExactlyOnceWith(
             expect.objectContaining({
-              message: 'Create session timed out after 75000ms',
+              message: 'Create session timed out after 115000ms',
             }),
           );
           await pending;
@@ -2452,10 +2456,10 @@ describe('createDaemonSessionActions', () => {
           );
           const rejected = vi.fn();
           const pending = actions.createSession().catch(rejected);
-          await vi.advanceTimersByTimeAsync(75_000);
+          await vi.advanceTimersByTimeAsync(115_000);
           expect(rejected).toHaveBeenCalledExactlyOnceWith(
             expect.objectContaining({
-              message: 'Create session timed out after 75000ms',
+              message: 'Create session timed out after 115000ms',
             }),
           );
           await pending;
@@ -2554,7 +2558,7 @@ describe('createDaemonSessionActions', () => {
             const { client, fetch, signals } = createTimedCreateClient({
               features: failure === 'missing capability' ? [] : undefined,
               sessionDelayMs:
-                failure === 'request timeout' ? 35_000 : undefined,
+                failure === 'request timeout' ? 75_000 : undefined,
             });
             const { actions } = createWorkspaceCreateHarness(path, client);
             const rejected = vi.fn((error: unknown) => error);
@@ -2563,7 +2567,7 @@ describe('createDaemonSessionActions', () => {
               .catch(rejected);
             await vi.advanceTimersByTimeAsync(20_000);
             if (failure === 'request timeout') {
-              await vi.advanceTimersByTimeAsync(29_999);
+              await vi.advanceTimersByTimeAsync(69_999);
               expect(rejected).not.toHaveBeenCalled();
               expect(signals.at(-1)?.aborted).toBe(false);
               await vi.advanceTimersByTimeAsync(1);
