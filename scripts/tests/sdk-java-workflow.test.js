@@ -709,8 +709,10 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       );
       expect(s.run, s.name).toContain('flock --wait 5400 9');
       // Main requires at least an hour per acquisition; 5400 s is 90 minutes.
-      expect(Number(s.run.match(/flock --wait (\d+) 9/)?.[1]), s.name)
-        .toBeGreaterThanOrEqual(50 * 60);
+      expect(
+        Number(s.run.match(/flock --wait (\d+) 9/)?.[1]),
+        s.name,
+      ).toBeGreaterThanOrEqual(50 * 60);
     }
     // The wait budget is read back from the workflow so the arithmetic below
     // cannot drift from it: the value pins above still force a deliberate
