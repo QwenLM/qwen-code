@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.transport.CsiCreationContractFixture;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiCreationContractFixture;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 

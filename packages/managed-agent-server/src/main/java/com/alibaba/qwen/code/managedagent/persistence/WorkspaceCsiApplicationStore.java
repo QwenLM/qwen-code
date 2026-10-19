@@ -1,9 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationInventory.Snapshot;
-import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
-import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage;
@@ -14,6 +12,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.ConnectionCallback;

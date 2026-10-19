@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.charset.StandardCharsets;
