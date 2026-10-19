@@ -400,7 +400,7 @@ class HostedAutomationSpringCrashIT {
     }
 
     @Test
-    @Timeout(900)
+    @Timeout(600)
     void fg11c2ScannerFiresOneOccurrenceOnMySql() throws Exception {
         assertThat(System.getProperty("mysql.url"))
                 .as("FG11c slice 2 requires -Dmysql.url")
@@ -468,7 +468,7 @@ class HostedAutomationSpringCrashIT {
     }
 
     @Test
-    @Timeout(900)
+    @Timeout(600)
     void fg11c2SpringKillBeforeWatermarkNeverFiresTwice() throws Exception {
         assertThat(System.getProperty("os.name"))
                 .as("FG11c slice 2 sends POSIX signals")
@@ -538,7 +538,7 @@ class HostedAutomationSpringCrashIT {
     }
 
     @Test
-    @Timeout(900)
+    @Timeout(600)
     void fg11c2SpringKillBeforeAnswerNeverFiresTwice() throws Exception {
         assertThat(System.getProperty("os.name"))
                 .as("FG11c slice 2 sends POSIX signals")
@@ -617,7 +617,7 @@ class HostedAutomationSpringCrashIT {
     }
 
     @Test
-    @Timeout(900)
+    @Timeout(600)
     void fg11c2TwoScannerRaceFiresOnce() throws Exception {
         assertThat(System.getProperty("mysql.url"))
                 .as("FG11c slice 2 requires -Dmysql.url")

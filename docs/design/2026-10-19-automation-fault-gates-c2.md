@@ -10,9 +10,12 @@ the three SIGKILL points on a run's revisions, all on the packaged stack.
 This slice covers the cells that live in Spring, where the scanner and its
 lease run:
 
-| Case                        | Injection                                                                                                                               | Expected                                                                                                                                         |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `spring-kill-before-answer` | The occurrence row is `firing` and the fixture parks the scanner's `runAutomationOperation` call; SIGKILL the Spring child. Restart it. | The re-driven fire meets the same derived `arun_` id. One run chain, one accepted input, one model Turn. The occurrence is `fired` exactly once. |
+| Case                           | Injection                                                                                                                               | Expected                                                                                                                                                                         |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spring-kill-before-answer`    | The occurrence row is `firing` and the fixture parks the scanner's `runAutomationOperation` call; SIGKILL the Spring child. Restart it. | The re-driven fire meets the same derived `arun_` id. One run chain, one accepted input, one model Turn. The occurrence is `fired` exactly once.                                 |
+| `spring-kill-before-watermark` | The answer landed (revision 2 committed) and the fixture parks `advanceWatermark`; SIGKILL the Spring child, then restart.              | No second fire for the same slot. The watermark catches up and the ledger holds one run chain. The wake turn may be aborted by the kill, so its model Turn is not asserted here. |
+| `two-scanner-race`             | Two Spring children on one MySQL and tenant, with a short lease and one due slot.                                                       | Exactly one child claims the slot. The loser writes no occurrence, no run and no watermark; the ledger holds one chain.                                                          |
+| `parked-tool-harness-kill`     | The wake turn is parked on a Runtime tool call; SIGKILL the Harness child.                                                              | Deferred: see the note under Budget.                                                                                                                                             |
 
 The live-run reconcile case ("a wake turn is live past its first transcript
 write, drive `reconcile_run` through an overlap-`skip` slot, the run stays
@@ -64,19 +67,27 @@ The facts come from the Session journal, the run records
 
 Each witness runs alone against its own case and is restored byte for byte.
 
-| Witness | Mutation                                                                       | Expected red at                                                                |
-| ------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| s1      | The scanner re-fires without claiming the occurrence first                     | `spring-kill-before-answer`: a second run chain beside the re-driven one       |
-| s2      | The watermark update drops the lease-fence predicate                           | `two-scanner-race`: the losing child advances the watermark                    |
-| s3      | The settle reads the projected turn result before the journal's `turn.settled` | `parked-tool-harness-kill`: the run settles `failed` although the turn settled |
+| Witness | Mutation                                                                     | Expected red at                                                          |
+| ------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| s1      | `automationRunId` gains a per-call nonce, so a re-drive derives a new run id | `spring-kill-before-answer`: a second run chain beside the re-driven one |
+| s2      | The lease claim drops the owner and fence predicate                          | `two-scanner-race`: two run chains, or a second model Turn               |
+| s3      | Removed with the deferred cell (settle order stays pinned by slice 1)        | -                                                                        |
 
 ## Budget
 
-The four cases run in one class with one Harness that the parked-tool
-case kills and restarts, and up to two Spring children. The measured runtime is recorded here before merge and
-composed into `hostedForkHealthySeconds` and the packaged lane's Verify and
-job ceilings by the same meta-test as slice 1. No budget number is asserted
-until the case has been measured on the acceptance host.
+The class runs five tests — the fixture smoke, the fire path, and the three
+windows — in one fork with one Harness and up to two Spring children. The
+whole class measured 262.0 s locally on JDK 21 + MySQL 8.0.46, budgeted at
+524 s (2x): `main`'s healthy sum 6835 s to 7359 s, the Hosted fork 7435 s to
+7959 s with the method's 600 s ceiling, the Verify step 134 to 143 minutes,
+and the job ceiling 227 to 236 minutes.
+
+`parked-tool-harness-kill` is deferred: slice 1's `turn-crash` already pins
+"the Harness dies mid-turn and the run settles exactly once as
+`failed`/`outcome_unknown`", and the merged #14526 gates pin the parked
+execution's cancellation and lease release. The remaining delta — a Runtime
+tool call is not replayed — would need a tool-call model stub and broker
+wiring whose cost outweighs the increment.
 
 ## Acceptance
 

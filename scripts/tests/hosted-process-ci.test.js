@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (134 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (143 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 214, 227],
+    ['hosted-harness-mysql', 223, 236],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -619,7 +619,7 @@ describe('Hosted real-process gates', () => {
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(7435);
+        expect(forkSeconds).toBe(7959);
       }
     },
   );
@@ -681,7 +681,7 @@ describe('Hosted real-process gates', () => {
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 6835;
+  const hostedForkHealthySeconds = 7359;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -741,6 +741,7 @@ describe('Hosted real-process gates', () => {
     // on main (#14148).
     expect(hostedTestClasses().map(({ name }) => name)).toEqual([
       'HostedAutomationFaultGatesIT',
+      'HostedAutomationSpringCrashIT',
       'HostedChannelFaultGatesIT',
       'HostedChannelProcessCrashIT',
       'HostedCommittedEventLineReplayIT',

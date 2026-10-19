@@ -9,9 +9,12 @@ Issue #14446 是 #12380 的 Stage F 第 FG11 轮，覆盖自动化域 `schedule`
 的三个 revision 上各 SIGKILL 一次，跑在打包栈上。本片覆盖住在 Spring 里的格——
 scanner 及其租约所在处：
 
-| 用例                        | 注入                                                                                                         | 期望                                                                                                                      |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `spring-kill-before-answer` | occurrence 行已记 `firing`，夹具把 scanner 的 `runAutomationOperation` 调用挂起；SIGKILL Spring 子进程后重启 | 重新驱动的 fire 命中同一个派生的 `arun_` id。一条 run 链、一个被接受的 input、一次模型 Turn；occurrence 恰好 `fired` 一次 |
+| 用例                           | 注入                                                                                                         | 期望                                                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spring-kill-before-answer`    | occurrence 行已记 `firing`，夹具把 scanner 的 `runAutomationOperation` 调用挂起；SIGKILL Spring 子进程后重启 | 重新驱动的 fire 命中同一个派生的 `arun_` id。一条 run 链、一个被接受的 input、一次模型 Turn；occurrence 恰好 `fired` 一次                      |
+| `spring-kill-before-watermark` | 应答已落（revision 2 已提交），夹具把 `advanceWatermark` 挂起；SIGKILL Spring 子进程后重启                   | 同一 slot 不出现第二次 fire；watermark 追上，账本只有一条 run 链。杀进程会断开 Harness 的会话，wake turn 可能被中止，因此这一格不断言模型 Turn |
+| `two-scanner-race`             | 两个 Spring 子进程共用一台 MySQL 与同一个 tenant，租约设短，只有一个到期 slot                                | 恰好一个子进程认领该 slot；输者不写 occurrence、不写 run、不推进 watermark，账本只有一条链                                                     |
+| `parked-tool-harness-kill`     | wake turn 停在 Runtime 工具调用上时 SIGKILL Harness 子进程                                                   | 延期：见预算段说明                                                                                                                             |
 
 live-run reconcile 格（存活 turn 经 overlap-`skip` slot 驱动 `reconcile_run`，run
 保持 `running`）已由 #14480 的路由测试钉住，本片不重复。
@@ -56,17 +59,24 @@ prompt。
 
 每个见证单独对各自的用例运行，并逐字节恢复。
 
-| 见证 | 变异                                                     | 预期变红处                                                         |
-| ---- | -------------------------------------------------------- | ------------------------------------------------------------------ |
-| s1   | scanner 不先认领 occurrence 就 fire                      | `spring-kill-before-answer`：重新驱动的那条链旁边出现第二条 run 链 |
-| s2   | watermark 更新去掉租约 fence 谓词                        | `two-scanner-race`：输掉的子进程推进了 watermark                   |
-| s3   | 结算先读投影的 turn 结果、后读 journal 的 `turn.settled` | `parked-tool-harness-kill`：turn 已结算，run 却记成 `failed`       |
+| 见证 | 变异                                                            | 预期变红处                                                         |
+| ---- | --------------------------------------------------------------- | ------------------------------------------------------------------ |
+| s1   | `automationRunId` 每次调用加 nonce，重新驱动会派生出新的 run id | `spring-kill-before-answer`：重新驱动的那条链旁边出现第二条 run 链 |
+| s2   | 租约认领去掉 owner 与 fence 谓词                                | `two-scanner-race`：出现两条 run 链，或第二次模型 Turn             |
+| s3   | 随延期格移除（结算顺序仍由第 1 片钉住）                         | -                                                                  |
 
 ## 预算
 
-四个用例同属一个类，共用一个 Harness（parked-tool 用例会杀掉并重启它）与最多两个 Spring 子进程。合入前把实测
-耗时记在此处，并由与第 1 片相同的元测试叠加进 `hostedForkHealthySeconds` 以及打包
-lane 的 Verify 与 job 上限。用例未在验收机上实测之前，不把任何预算数字写成断言。
+该类跑五个测试——夹具烟测、fire 路径与三个窗口——同处一个 fork，共用一个
+Harness 与最多两个 Spring 子进程。整类在 JDK 21 + MySQL 8.0.46 上实测 262.0 秒，
+按 524 秒（2x）计入：`main` 的健康总和 6835 秒到 7359 秒，Hosted fork 由 7435 秒
+升到 7959 秒（方法本身 600 秒上限不变），Verify 步骤由 134 分钟升到 143 分钟，
+job 上限由 227 分钟升到 236 分钟。
+
+`parked-tool-harness-kill` 延期：第 1 片的 `turn-crash` 已钉住「Harness 在 turn
+中途死掉、run 恰好结算一次 `failed`/`outcome_unknown`」，已合入的 #14526 门禁
+钉住挂起执行的取消与租约释放。本格真正的增量只剩「Runtime 工具调用不重放」，
+需要另造会发 tool-call 的模型桩与 broker 交互，成本高于增量价值。
 
 ## 验收
 
