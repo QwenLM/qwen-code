@@ -60,7 +60,7 @@ reason and native memory refs for additions. Result counts distinguish source
 sections from new native documents. A completed task can contain conflicts that
 need caller review. Retry processes only pending/failed items, not conflicts or
 successful items. Cancellation prevents further publication; a provider request
-already in flight may finish, but its result is discarded.
+already in flight may finish, but its result is discarded. Model responses are scope-validated before retention; retry can regenerate scope-invalid items retained by older versions without resetting usage or changing valid sibling records. A CLI reader closing its output pipe early does not turn completed work into an error; use the idempotency key to retrieve the result again.
 
 Registered runtimes recover queued/running batches when the daemon activates the
 service; later registered runtimes recover on first import access. Model failures

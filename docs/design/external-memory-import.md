@@ -62,9 +62,13 @@ request. A response must contain exactly one native-validated decision per sourc
 Per-source identity and publication ledgers remain unchanged. Before the first write,
 the complete batch response and baseline document hashes are journaled. Later items
 accept only that baseline plus this batch's verified publications; external edits,
-deletions or additions cause conflicts. Recovery reuses journaled responses.
+deletions or additions cause conflicts. Recovery reuses journaled responses. Scope validation happens before journaling a
+model response. If an older journal contains a scope-invalid item, retry discards
+only that item and requests a fresh response within the remaining budget, retaining
+sibling decisions, baselines and publication records.
 
-The model receives a bounded metadata index and relevant complete documents, not a
+The metadata index uses the native parser's recognized fields, including its
+normalization rules. The model receives this bounded index and relevant complete documents, not a
 copy of every existing body. The local full snapshot still protects against edits
 and forgetting. If the index or relevant evidence cannot fit, fail with an actionable
 context-limit result rather than silently dropping relevant evidence. Index-only

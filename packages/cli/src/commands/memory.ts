@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { previewSource, readLocalSource } from '../memory-import/source.js';
-import { writeStdoutLine } from '../utils/stdioHelpers.js';
+import { ignoreBrokenPipe, writeStdoutLine } from '../utils/stdioHelpers.js';
 
 // The JSON envelopes are the result of this command; exiting on an
 // unflushed async write truncates them on a pipe. A reader that left
@@ -72,6 +72,7 @@ export const memoryCommand: CommandModule = {
             })
             .strict(),
         handler: async (args) => {
+          ignoreBrokenPipe();
           if (args['apply'] && args['dry-run'])
             throw new Error('--apply and --dry-run cannot be combined.');
           if (

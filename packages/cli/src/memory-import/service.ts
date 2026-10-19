@@ -199,14 +199,18 @@ function selectImportContext(
   );
   const context = existing.map((item) => {
     const parsed = parseAutoMemoryTopicDocument('existing.md', item.content);
-    // Keep the complete native metadata as the discovery index; never truncate it.
-    const metadata = item.content.match(
-      /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
-    )?.[0];
-    if (!parsed || !metadata)
+    if (!parsed)
       throw new ImportContextError(
         'Existing memory has no bounded metadata index. Repair its native metadata before importing.',
       );
+    const metadata = JSON.stringify({
+      name: parsed.title,
+      description: parsed.description,
+      type: parsed.type,
+      category: parsed.category,
+      keywords: parsed.keywords,
+      usage_scenarios: parsed.usageScenarios,
+    });
     const words = new Set(
       [
         parsed.title,
@@ -233,6 +237,19 @@ function selectImportContext(
       'Existing memory index or relevant evidence exceeds the 32 KiB import context budget. Select a narrower source group or consolidate existing memory before retrying. No model call was made.',
     );
   return context;
+}
+
+function respectsImportScope(
+  proposal: MemoryImportProposal,
+  scope: Scope,
+): boolean {
+  return (
+    scope !== 'user' ||
+    proposal.documents.every((content) => {
+      const type = parseAutoMemoryTopicDocument('import.md', content)?.type;
+      return type === 'user' || type === 'feedback';
+    })
+  );
 }
 
 export class MemoryImportService {
@@ -639,6 +656,26 @@ export class MemoryImportService {
         entry.scope === section.scope &&
         entry.sections.some((item) => item.id === section.id),
     );
+    if (
+      journal &&
+      !respectsImportScope(
+        journal.proposal.items.find((item) => item.id === section.id)!,
+        section.scope,
+      )
+    ) {
+      // Older tasks could retain a response before enforcing its scope. Keep
+      // sibling decisions and their baseline; only the invalid item is retried.
+      journal.sections = journal.sections.filter(
+        (item) => item.id !== section.id,
+      );
+      journal.proposal.items = journal.proposal.items.filter(
+        (item) => item.id !== section.id,
+      );
+      if (!journal.sections.length)
+        journals.splice(journals.indexOf(journal), 1);
+      await writeJson(journalFile, journals);
+      journal = undefined;
+    }
     if (!journal) {
       const eligible = source.sections.filter(
         (candidate) =>
@@ -687,6 +724,14 @@ export class MemoryImportService {
           await abortable(signal, () => this.options.propose(input, signal)),
           batch.map((item) => item.id),
         );
+        if (
+          proposal.items.some(
+            (item) => !respectsImportScope(item, section.scope),
+          )
+        )
+          throw new ImportContextError(
+            'Model returned project knowledge for user memory. Retry to request a scope-valid response; consumed budget is retained.',
+          );
       } catch (error) {
         if (!signal.aborted)
           for (const item of task.items)

@@ -75,6 +75,121 @@ const selection = () => [
   { id: previewSource(source).sections[0].id, scope: 'project' },
 ];
 describe('durable memory import', () => {
+  it.each(['LF', 'CRLF'])(
+    'uses native metadata parsing with %s closing-fence whitespace',
+    (newline) =>
+      context(async () => {
+        const memory = getImportedProjectMemoryRoot(project);
+        await fs.mkdir(memory, { recursive: true });
+        let content = doc.replace('\n---\n', '\n--- \n');
+        if (newline === 'CRLF') content = content.replaceAll('\n', '\r\n');
+        await fs.writeFile(path.join(memory, 'existing.md'), content);
+        const input = {
+          ...source,
+          files: [
+            {
+              path: 'MEMORY.md',
+              content:
+                '# Cloud\ncwd: /synthetic/project\nCloud widget deployment.',
+            },
+          ],
+        };
+        const propose = vi.fn(async (request: MemoryImportModelInput) => ({
+          items: request.sources.map(({ id }) => ({
+            id,
+            decision: 'skip' as const,
+            reason: 'No new facts.',
+            documents: [],
+          })),
+        }));
+        const svc = new MemoryImportService({
+          projectRoot: project,
+          assertActive: () => {},
+          propose,
+        });
+        const task = await svc.submit(
+          input,
+          [{ id: previewSource(input).sections[0].id, scope: 'project' }],
+          'native-metadata',
+        );
+        expect((await svc.idle(task.id)).items[0].status).toBe('skipped');
+        expect(propose).toHaveBeenCalledTimes(1);
+        const existing = propose.mock.calls[0][0].existing[0];
+        expect(existing.indexOnly).toBe(true);
+        expect(JSON.parse(existing.content)).toMatchObject({
+          name: 'Review migrations',
+          type: 'project',
+          keywords: ['database migrations', 'rollback checks'],
+        });
+      }),
+  );
+
+  it.each(['new', 'retained'])(
+    'retries a %s scope-invalid model proposal without resetting usage',
+    (mode) =>
+      context(async () => {
+        const proposed = vi
+          .fn()
+          .mockResolvedValueOnce({
+            decision: 'new',
+            reason: 'Invalid user scope.',
+            documents: [doc],
+          })
+          .mockResolvedValue({
+            decision: 'new',
+            reason: 'Portable knowledge.',
+            documents: [doc.replace('type: project', 'type: user')],
+          });
+        const svc = service(proposed);
+        const selected = [{ ...selection()[0], scope: 'user' }];
+        const task = await svc.submit(source, selected, 'scope-retry');
+        const first = await svc.idle(task.id);
+        expect(first.items[0].status).toBe('failed');
+        const journal = path.join(
+          runtime,
+          'memory-import',
+          'batches',
+          digest(project),
+          task.id,
+          'proposals.json',
+        );
+        if (mode === 'new')
+          await expect(fs.stat(journal)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+        else
+          await fs.writeFile(
+            journal,
+            JSON.stringify([
+              {
+                scope: 'user',
+                sections: [{ id: selected[0].id, key: selected[0].id }],
+                baseline: [],
+                proposal: {
+                  items: [
+                    {
+                      id: selected[0].id,
+                      decision: 'new',
+                      reason: 'Legacy invalid scope.',
+                      documents: [doc],
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+        const restarted = service(proposed);
+        await restarted.retry(task.id);
+        const done = await restarted.idle(task.id);
+        expect(done.items[0].status).toBe('added');
+        expect(proposed).toHaveBeenCalledTimes(2);
+        expect(done.usage.modelCalls).toBe(2);
+        expect(done.usage.reservedTokens).toBeGreaterThan(
+          first.usage.reservedTokens,
+        );
+      }),
+  );
+
   it('does not allocate state for unknown retry IDs', () =>
     context(async () => {
       const svc = service();

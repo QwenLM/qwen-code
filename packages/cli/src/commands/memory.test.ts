@@ -3,12 +3,33 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import yargs from 'yargs';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { memoryCommand } from './memory.js';
+
+let stdoutListeners: ReturnType<typeof process.stdout.listeners>;
+let stderrListeners: ReturnType<typeof process.stderr.listeners>;
+beforeEach(() => {
+  stdoutListeners = process.stdout.listeners('error');
+  stderrListeners = process.stderr.listeners('error');
+});
+afterEach(() => {
+  for (const listener of process.stdout.listeners('error'))
+    if (!stdoutListeners.includes(listener))
+      process.stdout.removeListener(
+        'error',
+        listener as (error: Error) => void,
+      );
+  for (const listener of process.stderr.listeners('error'))
+    if (!stderrListeners.includes(listener))
+      process.stderr.removeListener(
+        'error',
+        listener as (error: Error) => void,
+      );
+});
 
 const fail = (message: string, error?: Error) => {
   throw error ?? new Error(message);
@@ -64,6 +85,9 @@ it('rejects a repeated --source instead of importing the default directory', asy
 
 it('resolves the flushed write when the reader has already left (EPIPE)', async () => {
   const directory = await codexDir();
+  const destroy = vi
+    .spyOn(process.stdout, 'destroy')
+    .mockReturnValue(process.stdout);
   const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((
     chunk: unknown,
     a?: unknown,
@@ -87,8 +111,16 @@ it('resolves the flushed write when the reader has already left (EPIPE)', async 
       .exitProcess(false)
       .fail(fail)
       .parseAsync();
+    expect(() =>
+      process.stdout.emit(
+        'error',
+        Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+      ),
+    ).not.toThrow();
+    expect(destroy).toHaveBeenCalled();
   } finally {
     spy.mockRestore();
+    destroy.mockRestore();
   }
 });
 
