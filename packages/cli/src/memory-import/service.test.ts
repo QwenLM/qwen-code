@@ -692,6 +692,53 @@ describe('durable memory import', () => {
       expect((await worker.idle(task.id)).status).toBe('cancelled');
       expect((await scanAutoMemorySnapshot(project)).docs).toEqual([]);
     }));
+  it('rejects a symlinked user memory root before model usage, including retry', () =>
+    context(async () => {
+      const external = path.join(root, 'dotfiles-memories');
+      await fs.mkdir(external);
+      const existing = doc.replace('type: project', 'type: user');
+      await fs.writeFile(path.join(external, 'existing.md'), existing);
+      const memory = getUserAutoMemoryRoot();
+      await fs.mkdir(path.dirname(memory), { recursive: true });
+      await fs.symlink(external, memory, 'dir');
+      const propose = vi.fn(
+        async (): Promise<MemoryImportProposal> => ({
+          decision: 'new',
+          reason: 'Portable preference.',
+          documents: [
+            existing.replace(
+              'Validate rollback paths for every schema migration.',
+              'Prefer concise explanations with runnable examples.',
+            ),
+          ],
+        }),
+      );
+      const svc = service(propose);
+      const task = await svc.submit(
+        source,
+        [{ ...selection()[0], scope: 'user' }],
+        'symlinked-user-root',
+      );
+      for (const retry of [false, true]) {
+        if (retry) await svc.retry(task.id);
+        const result = await svc.idle(task.id);
+        expect(result.status).toBe('partial');
+        expect(result.items[0]).toMatchObject({
+          status: 'failed',
+          reason: expect.stringContaining('symlinked memory root'),
+        });
+        expect(result.usage).toEqual({ modelCalls: 0, reservedTokens: 0 });
+      }
+      expect(propose).not.toHaveBeenCalled();
+      expect(await fs.readdir(external)).toEqual(['existing.md']);
+      expect(
+        await fs.readFile(path.join(external, 'existing.md'), 'utf8'),
+      ).toBe(existing);
+      expect((await fs.lstat(memory)).isSymbolicLink()).toBe(true);
+      expect(
+        (await scanAutoMemorySnapshot(project, { scopes: ['user'] })).docs,
+      ).toHaveLength(1);
+    }));
   it('rejects a symlinked batch directory on reads', () =>
     context(async () => {
       const svc = service();

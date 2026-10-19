@@ -842,6 +842,10 @@ export class MemoryImportService {
       async (signal) => {
         signal.throwIfAborted();
         this.options.assertActive();
+        if ((await exists(root)) && (await fs.lstat(root)).isSymbolicLink())
+          throw new ImportContextError(
+            'Memory import does not support a symlinked memory root. Use a non-symlink memory root before retrying; existing memories were not changed.',
+          );
         const ledgerPath = path.join(scopeState, 'ledger.json');
         const ledger: Ledger = (await exists(ledgerPath))
           ? await this.readState(ledgerPath)

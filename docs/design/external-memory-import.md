@@ -56,6 +56,13 @@ worktree-scoped. Native scanning, search, fetch, recall and forget include the
 imported layer. Source snapshots never enter native scanning. Native writers are
 not granted arbitrary access to retained sources.
 
+Import publication currently requires a non-symlink memory root. A symlinked root
+is rejected per item before scanning existing content or reserving model budget,
+with a reason asking the user to select a non-symlink layout before retrying.
+Existing memories and links remain untouched; ordinary native scanning retains
+its support for a symlinked user root. Private import-state symlink guards remain
+unchanged. Supporting publication through an external root is deferred.
+
 ## Batching and cost limits
 
 Each runtime groups selected sections by confirmed scope and original project group,
