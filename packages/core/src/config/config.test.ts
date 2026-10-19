@@ -1757,6 +1757,16 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('lsp client lifecycle', () => {
+    it('stops the session lsp client on shutdown (#14751)', async () => {
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize(SKIP_ALL_INIT);
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // Shared isolation for the debug-fallback tests. The module-level
   // vi.mock('node:fs') overrides only the sync fs API, so an un-spied
   // fs.promises call would write into the real global debug dir: spy the whole

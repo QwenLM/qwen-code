@@ -8151,6 +8151,13 @@ export class Config {
       }
 
       if (this.initialized) {
+        // Stop this session's language servers first: the client fronts a
+        // NativeLspService/LspServerManager with one subprocess per server,
+        // and a sibling cleanup failure below must not strand them (they
+        // outlive the session's Config and leak until the host process
+        // exits otherwise, #14751).
+        await this.lspClient?.stop?.();
+
         this.skillManager?.stopWatching();
 
         if (this.toolRegistry) {
