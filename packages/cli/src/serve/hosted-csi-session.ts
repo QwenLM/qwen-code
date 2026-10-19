@@ -479,7 +479,13 @@ export function registerHostedCsiSessionRoutes(
           const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
           const managed = owner.session!.managed;
           const resumed = owner.recovering
-            ? await recoverHostedCsiReceipts(managed, broker, promptId, text)
+            ? await recoverHostedCsiReceipts(managed, broker, promptId, text, {
+                bindingId: owner.admission!.bindingId,
+                generation: owner.admission!.generation,
+                ...(await owner.stores!.publication.owner()),
+                activationId: managed.activation.activationId,
+                activationEpoch: managed.activation.epoch,
+              })
             : undefined;
           if (resumed === undefined) {
             const contentRef = await managed.resources.publish(
@@ -515,7 +521,8 @@ export function registerHostedCsiSessionRoutes(
             promptId,
             text,
             abort,
-            resumed,
+            resumed?.parts,
+            resumed?.finalOutput,
           );
         } catch (cause) {
           blockOwner(owner, contract.bootId, 'text turn', cause);
