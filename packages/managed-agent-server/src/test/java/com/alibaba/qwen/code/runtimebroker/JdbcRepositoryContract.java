@@ -553,6 +553,10 @@ public final class JdbcRepositoryContract {
             admitHoldRow(bindings, sessions, executions, fixture,
                     "settled-" + index, "background_v3_process", true);
         }
+        // A PREPARED non-hold row survives the SQL state window but not the
+        // family filter, so a page can be fully filtered at the row level
+        // (#13930 R1-47 verification).
+        fixture.prepare("filler-4");
         java.util.Set<String> found = new java.util.LinkedHashSet<>();
         String after = null;
         for (int page = 0; page < 20; page++) {
