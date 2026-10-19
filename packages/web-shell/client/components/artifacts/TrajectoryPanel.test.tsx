@@ -234,6 +234,88 @@ const metricsOf = (container: HTMLElement) =>
   ).map((node) => node.textContent ?? '');
 
 describe('TrajectoryPanel', () => {
+  it.each([false, true])(
+    'does not recover old execution focus into a different loader (shadow=%s)',
+    async (shadow) => {
+      const store = createTrajectoryLiveStore();
+      const seed = (sessionId: string) =>
+        store.begin(
+          {},
+          {
+            sessionId,
+            scope: 'scope',
+            incomplete: false,
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'agent_message_chunk',
+                  _meta: {
+                    executionLifecycle: {
+                      v: 1,
+                      kind: 'request',
+                      phase: 'started',
+                      executionId: 'selected',
+                      sessionId,
+                      promptId: 'p',
+                      model: 'model',
+                      startedAt: 10,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        );
+      const client = {
+        getSessionTranscriptPage: async () => page(REAL_EVENTS),
+      };
+      seed('old');
+      const container = await render(
+        createTrajectoryPageLoader(client, 'old', 'scope'),
+        store,
+        0,
+        shadow,
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const close = container.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      close.focus();
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(close);
+      const focus = vi.fn();
+      container.addEventListener('focusin', focus);
+      await act(async () => {
+        seed('new');
+        mounted.at(-1)!.root.render(
+          <I18nProvider language="en">
+            <TrajectoryLiveContext.Provider value={store}>
+              <TrajectoryPanel
+                loadPage={createTrajectoryPageLoader(client, 'new', 'scope')}
+              />
+            </TrajectoryLiveContext.Provider>
+          </I18nProvider>,
+        );
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="trajectory-execution-row"]'),
+      ).not.toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
   it('discloses incomplete lifecycle details separately from page truncation', async () => {
     const store = createTrajectoryLiveStore();
     store.begin(

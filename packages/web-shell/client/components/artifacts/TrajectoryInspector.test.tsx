@@ -602,11 +602,13 @@ it.each([false, true])(
       ),
     );
     const other = document.createElement('button');
-    host.append(other);
+    container.after(other);
     act(() => root.render(null));
     other.focus();
     await act(async () => {});
     expect(fallback).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(other);
+    expect(
+      (container.getRootNode() as Document | ShadowRoot).activeElement,
+    ).toBe(other);
   },
 );

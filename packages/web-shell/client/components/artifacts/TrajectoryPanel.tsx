@@ -326,7 +326,12 @@ export function TrajectoryPanel({
 }: TrajectoryPanelProps) {
   const { t } = useI18n();
   const panelRef = useRef<HTMLDivElement>(null);
+  const committedLoaderRef = useRef(loadPage);
+  useLayoutEffect(() => {
+    committedLoaderRef.current = loadPage;
+  }, [loadPage]);
   const focusRecentExecutions = useCallback(() => {
+    if (committedLoaderRef.current !== loadPage) return;
     const section = panelRef.current?.querySelector<HTMLElement>(
       '[data-testid="trajectory-executions"]',
     );
@@ -334,7 +339,7 @@ export function TrajectoryPanel({
       section?.querySelector<HTMLElement>('[role="grid"]') ??
       section?.querySelector<HTMLButtonElement>('button')
     )?.focus({ preventScroll: true });
-  }, []);
+  }, [loadPage]);
   const {
     trajectory,
     lifecycle,

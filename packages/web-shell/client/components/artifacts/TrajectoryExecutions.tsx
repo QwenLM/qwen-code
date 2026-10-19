@@ -7,7 +7,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import { useI18n } from '../../i18n';
-import { getShadowAwareActiveElement } from '../../utils/dom';
+import { getShadowAwareActiveElement, isFocusUnclaimed } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import styles from './TrajectoryExecutions.module.css';
 
@@ -36,12 +36,12 @@ export function TrajectoryExecutions({
     const previous = scrollRef.current;
     if (!node && previous?.contains(getShadowAwareActiveElement(previous))) {
       // Resolve the fallback after siblings have finished updating.
+      const root = previous.getRootNode();
       queueMicrotask(() => {
         const target = scrollRef.current ?? toggleRef.current;
         if (
           !previous.isConnected &&
-          previous.ownerDocument.activeElement ===
-            previous.ownerDocument.body &&
+          isFocusUnclaimed(root) &&
           target?.isConnected
         ) {
           target.focus({ preventScroll: true });

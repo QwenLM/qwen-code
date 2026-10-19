@@ -14,7 +14,7 @@ import {
 } from 'react';
 import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { getShadowAwareActiveElement } from '../../utils/dom';
+import { getShadowAwareActiveElement, isFocusUnclaimed } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import type { TrajectoryLifecycleEntry } from '../../trajectory/project-trajectory-lifecycle';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
@@ -101,11 +101,9 @@ export function TrajectoryInspector({
     const previous = sectionRef.current;
     if (!node && previous?.contains(getShadowAwareActiveElement(previous))) {
       // Wait for the commit; simulated cleanup leaves the node connected.
+      const root = previous.getRootNode();
       queueMicrotask(() => {
-        if (
-          !previous.isConnected &&
-          previous.ownerDocument.activeElement === previous.ownerDocument.body
-        ) {
+        if (!previous.isConnected && isFocusUnclaimed(root)) {
           onFocusedUnmountRef.current?.();
         }
       });
