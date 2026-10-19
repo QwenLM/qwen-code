@@ -894,6 +894,21 @@ export class LocalManagedSessionAuthority {
     );
   }
 
+  appendExecutionEvents(
+    command: ManagedSessionCommand,
+    events: (firstSequence: number) => readonly unknown[],
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionCommitReceipt> {
+    return this.runSerial(() => {
+      const values = events(this.committed + 1);
+      return this.commit(
+        command,
+        values,
+        values.map(() => actor),
+      );
+    });
+  }
+
   /** The latest committed action for this request, if any. */
   action(requestId: string): ManagedSessionAction | undefined {
     return this.actions.get(requestId);
@@ -1109,7 +1124,9 @@ export class LocalManagedSessionAuthority {
    * initialisation establishes before any model request.
    */
   async commitCheckpoint(
-    command: ManagedSessionCommand,
+    command:
+      | ManagedSessionCommand
+      | ((state: Buffer, coveredSequence: number) => ManagedSessionCommand),
     request: {
       state: Buffer;
       boundary: string | null;
@@ -1164,9 +1181,11 @@ export class LocalManagedSessionAuthority {
               },
             })
           : request.state;
+      const assignedCommand =
+        typeof command === 'function' ? command(state, covered) : command;
       const stateRef = await store.publish('managed-checkpoint', state);
       const receipt = await this.commit(
-        command,
+        assignedCommand,
         [
           ...(action
             ? [
@@ -1174,7 +1193,7 @@ export class LocalManagedSessionAuthority {
                   v: MANAGED_SESSION_FORMAT_VERSION,
                   sequence: this.committed + 1,
                   eventId: `action:${action.requestId}:requested`,
-                  sessionKey: command.sessionKey,
+                  sessionKey: assignedCommand.sessionKey,
                   kind: 'action.changed',
                   occurredAt: this.now(),
                   subject: {
@@ -1196,7 +1215,7 @@ export class LocalManagedSessionAuthority {
             v: MANAGED_SESSION_FORMAT_VERSION,
             sequence: this.committed + (action ? 2 : 1),
             eventId: checkpointId,
-            sessionKey: command.sessionKey,
+            sessionKey: assignedCommand.sessionKey,
             kind: 'checkpoint.committed',
             occurredAt: this.now(),
             subject: {
