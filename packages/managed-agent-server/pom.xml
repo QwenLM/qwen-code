@@ -479,11 +479,16 @@
                                  DELETE-drain cell (issue #14449) adds
                                  150 s: the healthy sum becomes 6985 s,
                                  so the fork moves to 7585 s and the
-                                 Verify step to 137 minutes. The FG13a
-                                 catalog lost-reply cell adds 150 s, so the
-                                 healthy sum becomes 7135 s, the fork moves
-                                 to 7735 s and Verify to 140 minutes. -->
-                            <forkedProcessTimeoutInSeconds>7735</forkedProcessTimeoutInSeconds>
+                                 Verify step to 137 minutes. The FG11c
+                                 Spring-crash class (five cases, 262.0 s
+                                 measured) is budgeted at 524 s: the healthy
+                                 sum becomes 7509 s, so the fork moves to
+                                 8109 s and the Verify step to 146 minutes.
+                                 The FG13a catalog lost-reply cell (issue
+                                 #14449) adds 150 s: the healthy sum becomes
+                                 7659 s, so the fork moves to 8259 s and the
+                                 Verify step to 148 minutes. -->
+                            <forkedProcessTimeoutInSeconds>8259</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
