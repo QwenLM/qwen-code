@@ -773,7 +773,7 @@ export class NotebookEditTool
     super(
       NotebookEditTool.Name,
       ToolDisplayNames.NOTEBOOK_EDIT,
-      `Edits a Jupyter notebook (.ipynb) safely at the cell level. Use this instead of ${ToolNames.EDIT} or ${ToolNames.WRITE_FILE} for notebook cells. Supports replacing, inserting, and deleting cells. Always read the notebook first with ${ToolNames.READ_FILE}; then use the cell IDs shown in that output.`,
+      `Edits a Jupyter notebook (.ipynb). Use this instead of ${ToolNames.EDIT} or ${ToolNames.WRITE_FILE} for cells. Always read the notebook first with ${ToolNames.READ_FILE}, then use the cell IDs from that output.`,
       Kind.Edit,
       {
         properties: {
@@ -804,8 +804,7 @@ export class NotebookEditTool
             enum: ['replace', 'insert', 'delete'],
           },
           record_as_artifact: {
-            description:
-              'Set false to skip creating a session artifact for this edit. An artifact the session already has for the path is still refreshed. Defaults to true.',
+            description: 'Refresh existing only.',
             type: 'boolean',
           },
         },

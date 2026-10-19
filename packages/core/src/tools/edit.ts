@@ -931,8 +931,7 @@ Expectation for required parameters:
           },
           record_as_artifact: {
             type: 'boolean',
-            description:
-              'Set false to skip creating a session artifact for this edit. An artifact the session already has for the path is still refreshed. Defaults to true for artifact-like extensions.',
+            description: 'Refresh existing only.',
           },
         },
         required: ['file_path', 'old_string', 'new_string'],
