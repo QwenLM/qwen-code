@@ -1262,18 +1262,22 @@ public class ManagedAgentStore implements AgentStateStore {
                         false, null, now);
             }
         }
-        if (!commandEffect && !ACTIVE_TURN_STATES.contains(turn.status())) {
-            // This cancel arrived after the Turn ended, so no execution
-            // could have seen it. Settle this operation directly; the
-            // Turn-wide scan must not mistake it for one that predates the
-            // failure.
-            boolean cancelled = "CANCELLED".equals(turn.status());
-            settleTurnCommand(tenantId, sessionId, turnId,
-                    OperationKind.CANCEL,
-                    cancelled ? "COMPLETED" : "FAILED",
-                    cancelled && turn.harnessEventEpoch() != null
-                            ? "HARNESS_CONFIRMED" : "JAVA_DURABLE",
-                    cancelled ? null : "turn_already_settled", now);
+        if (!commandEffect) {
+            // The Turn read before insertCommand can be a stale snapshot
+            // while another transaction already made it terminal. Re-read
+            // it FOR UPDATE and settle this new cancel from the current
+            // row; a CANCELLING Turn still carries it with the earlier one.
+            TurnRecord current = requireTurnForUpdate(tenantId, sessionId,
+                    turnId);
+            boolean cancelled = "CANCELLED".equals(current.status());
+            if (cancelled || !ACTIVE_TURN_STATES.contains(current.status())) {
+                settleTurnCommand(tenantId, sessionId, turnId,
+                        OperationKind.CANCEL,
+                        cancelled ? "COMPLETED" : "FAILED",
+                        cancelled && current.harnessEventEpoch() != null
+                                ? "HARNESS_CONFIRMED" : "JAVA_DURABLE",
+                        cancelled ? null : "turn_already_settled", now);
+            }
         }
         return new Admission(sessionId, turnId, false, commandEffect,
                 operationId);

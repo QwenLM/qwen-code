@@ -137,7 +137,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 
 ### 11. 未观察到执行的 cancel 停车
 
-一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 在 Turn 失败时、Session 行锁之下，把所有仍为 pending 的 cancel 记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。Turn 结束后才提交的 cancel 在 `insertCancelCommand` 读到终态行，直接结算为 `turn_already_settled`，因此副本时钟偏移不会改变分类；从未尝试提交的 Turn 走同一路径。该停车行目前不在 acceptance-unknown kind 集合中，因此会一直停车（诚实、不再投递），直到后续新增从 Turn journal 读取的 `CancelEvidence`。
+一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 在 Turn 失败时、Session 行锁之下，把所有仍为 pending 的 cancel 记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。Turn 结束后才提交的 cancel 在 CAS 落空后用 `requireTurnForUpdate` 重新读取当前行，并按终态结算为 `turn_already_settled`，因此陈旧快照不会让它停在 PENDING，副本时钟偏移也不会改变分类；从未尝试提交的 Turn 走同一路径。该停车行目前不在 acceptance-unknown kind 集合中，因此会一直停车（诚实、不再投递），直到后续新增从 Turn journal 读取的 `CancelEvidence`。
 
 ## 验证
 
@@ -150,7 +150,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - 第三阶段：`ManagedRenameReconciliationTest`（H2，以及 InnoDB 上的 `ManagedRenameReconciliationMySqlIT`）覆盖：提交时抛错的投递带着认领和已退役的回执挂起，不再被认领或投递，也不挡住关闭；因崩溃挂起的标题在扫描把它挂起之前挡住后续改名，之后被替换；遗留的 `UNKNOWN` 行被转换；没有 journal、head 为 `ACTIVE`、另一个标题的 digest 时结论为未知，之后变为已提交，回执、这一行和标题都记为完成并只产生一个事件，key 重放结果；已提交的标题在已关闭的 Session 上展示，在删除中的 Session 上不展示；head 为 `DELETING` 时证明未提交，压缩开始后证明不了任何事，失败的 key 用新 revision 重试且不会被标为已替换；未知结论重新挂起并多计一次尝试；认领自己的迟到应答能完成挂起的标题；未提交之前的失败仍然重试并保持生命周期屏障；请求里缺少标题的行永远不会被判为已提交，但完整的 journal 仍能让它失败；通过 store 的 `@Transactional` 代理注入语句故障，挂起与回执退役、已提交结算与标题、事件和回执都整体回滚。`OperationReconcilerTest.aParkedTitleSettlesThroughItsOwnSettle` 覆盖标题经由自己的结算、从不走通用结算。`ManagedSessionLifecycleTest` 现在会在标题挂起时关闭 Session，且不重发标题。`WorkspaceMigrationStoreTest` 统计挂起和遗留的标题，不再统计已完成、已替换或已失败的标题。
 - Turn 层读取：`hosted-workspace-broker.test.ts` 固定了恢复读取上的 reconcile 查询、每个未知记录恰好一次 reconcile 尝试、一次性决策（已结算才返回，仍在执行或仍未知都不轮询），以及终态围栏。`hosted-runtime-recovery.test.ts` 覆盖被动加载逐执行对账、证据读不出来时报未知，以及继续加载把已结算结果记入 journal、或报未知/abandoned 且不写 journal。
 - Turn 挂起：`HarnessCoordinatorTest` 覆盖用挂起替代 budget-exempt 重试、复查丢弃快照并重新询问、仍未知时再次挂起，以及取消就绪后的终止。
-- 未观察到执行的 cancel：`ManagedTurnCommandOperationTest.aCancelOfAnUnknownExecutionParksInsteadOfFailingAlreadySettled` 覆盖已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，cancel 停车为 `recovery_blocked`/`cancel_unconfirmed`；Turn 结束后才提交的 cancel，以及因其他错误码失败的已准入 Turn，仍以 `turn_already_settled` 失败。
+- 未观察到执行的 cancel：`ManagedTurnCommandOperationTest.aCancelOfAnUnknownExecutionParksInsteadOfFailingAlreadySettled` 覆盖已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，cancel 停车为 `recovery_blocked`/`cancel_unconfirmed`；Turn 结束后才提交的 cancel，以及因其他错误码失败的已准入 Turn，仍以 `turn_already_settled` 失败。`ManagedTurnCommandOperationMySqlIT.aCancelAdmittedOnAStaleSnapshotOfAnEndedTurnSettlesAtAdmission` 覆盖 REPEATABLE READ 陈旧快照：CAS 被已提交的失败击败后，当前读结算 cancel，绝不停在 PENDING。
 
 ## 验收（来自 #14166）
 
