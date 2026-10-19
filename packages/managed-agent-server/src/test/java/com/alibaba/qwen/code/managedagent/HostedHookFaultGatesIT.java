@@ -209,8 +209,8 @@ class HostedHookFaultGatesIT {
         waitFor(() -> {
             assertThat(running(hook)).isFalse();
             assertThat(running(child)).isFalse();
+            assertHookUnitsEmpty();
         });
-        assertHookUnitsEmpty();
         JsonNode refused = api("POST", "/v1/agents/sessions/" + session + "/close", null, "close", 409, 503);
         assertThat(refused.toString()).containsAnyOf("turn_active", "runtime_reconciliation_required");
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
