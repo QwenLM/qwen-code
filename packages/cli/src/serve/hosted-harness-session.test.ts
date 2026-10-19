@@ -35033,6 +35033,7 @@ describe('Hosted Harness stored definitions', () => {
           supertest(replacement).get(`/session/${SESSION_ID}/status`),
         ).set('X-Qwen-Client-Id', loaded.body.clientId);
         expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
       },
       { timeout: SETTLE_TIMEOUT_MS },
     );
