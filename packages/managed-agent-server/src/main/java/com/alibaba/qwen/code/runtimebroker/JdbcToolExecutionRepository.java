@@ -643,7 +643,7 @@ public final class JdbcToolExecutionRepository
 
     private record CsiContinuation(
             JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiReadyAdmission.Admission progress,
+            JdbcCsiApplicationProgress.Continuation progress,
             JdbcCsiActivationAdmission.NativeHead head,
             RuntimeSessionRecord runtime) {
         void require(ToolExecutionRecord execution) {

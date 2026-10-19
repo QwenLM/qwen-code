@@ -137,7 +137,7 @@ class WorkspaceCsiSessionGuardTest {
     }
 
     @Test
-    void drainRefusesAdmissionAcquireCompletionAndOriginalWriterRenewal() {
+    void settlingClosesNewAdmissionButBoundsOriginalWriterRenewal() {
         ready();
         var runtime = bindings.admitSession(sessions, candidate(sessionId));
         transaction.execute(status -> acquire());
@@ -148,10 +148,20 @@ class WorkspaceCsiSessionGuardTest {
                 runtime.withState(RuntimeSessionRecord.State.READY, Instant.now())), "runtime_admission_closed");
         assertThat(sessions.findById(request.getScope(), sessionId).getState())
                 .isEqualTo(RuntimeSessionRecord.State.ACQUIRING);
+        var renewed = transaction.execute(status -> journal.renewWriter("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 60_000L)));
+        assertThat(renewed.writerGeneration()).isEqualTo(1);
+        assertThat(renewed.leaseUntil()).isLessThanOrEqualTo(jdbc.queryForObject(
+                "SELECT settlement_deadline_ms FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'", Long.class));
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head");
         assertBrokerCode(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 300_000L))),
+                "csi_application_continuation_unavailable");
+        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head")).isEqualTo(before);
+        jdbc.update("UPDATE ma_operation SET progress_stage = 'FROZEN', progress_version = 2 WHERE operation_kind = 'CSI_RETIREMENT'");
+        assertBrokerCode(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, TOKEN,
                 new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 60_000L))),
-                "runtime_admission_closed");
+                "csi_application_continuation_unavailable");
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head")).isEqualTo(before);
         assertThat(reservations.inspect(registration).phase()).isEqualTo("DRAINING");
     }
