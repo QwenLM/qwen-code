@@ -114,6 +114,8 @@ export function clearSessionCommits(): void {
 const DYNAMIC = '\0';
 /** An unquoted expansion, which the shell may split into any number of words. */
 const SPLIT = '\u0001';
+/** A brace/pathname pattern, kept distinct from variable word splitting. */
+const PATTERN = `${SPLIT}\u0002`;
 
 const words = (list: string) => new Set(list.split(' '));
 
@@ -462,13 +464,15 @@ function wordOf(node: SyntaxNode): string {
       if (node.text.startsWith('~')) return DYNAMIC;
       // Pathname expansion (`*`, `?`, `[`) turns one word into any number.
       if (hasShellPatternExpansion(node.text.replace(/\\./g, ''))) {
-        return SPLIT;
+        return PATTERN;
       }
       return node.text.replace(/\\(\n|.)/g, (_, c: string) =>
         c === '\n' ? '' : c,
       );
     case 'number':
       return node.text;
+    case 'brace_expression':
+      return PATTERN;
     case 'raw_string':
       return node.text.slice(1, -1);
     case 'ansi_c_string':
@@ -490,8 +494,9 @@ function wordOf(node: SyntaxNode): string {
           part.type === 'word' ? part.text.replace(/\\./g, '') : '\0',
         )
         .join('');
-      if (hasShellBraceExpansion(unquoted)) return SPLIT;
+      if (hasShellBraceExpansion(unquoted)) return PATTERN;
       const parts = node.namedChildren.map(wordOf);
+      if (parts.some((part) => part.includes(PATTERN))) return PATTERN;
       return parts.some((part) => part.includes(SPLIT))
         ? SPLIT
         : parts.join('');
@@ -541,7 +546,12 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
     // e.g. `$GIT reset --hard`: the program is only known at run time.
     scan.hiddenCode = true;
     if (
-      args.some((arg) => PROTECTED_OPERATIONS.has(arg) || arg.includes(SPLIT))
+      args.some(
+        (arg) =>
+          PROTECTED_OPERATIONS.has(arg) ||
+          arg.includes(PATTERN) ||
+          (head.includes(PATTERN) && arg.includes(SPLIT)),
+      )
     ) {
       scan.unverifiable = true;
     }

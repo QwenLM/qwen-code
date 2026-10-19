@@ -5947,17 +5947,27 @@ describe('CoreToolScheduler', () => {
       expect(execute).toHaveBeenCalledOnce();
     });
 
-    it('lets printed text reach the classifier and run when it allows', async () => {
-      runSideQueryMock.mockResolvedValue({ shouldBlock: false });
-      const execute = vi.fn().mockResolvedValue(textResult('printed'));
-      const command = `printf '%s\\n' 'git reset --hard'`;
-      const harness = autoScheduler(shellTool(command, vi.fn(), execute));
+    it.each([
+      `printf '%s\\n' 'git reset --hard'`,
+      'TOOL=printf; TEXT=hello; $TOOL $TEXT',
+      'TOOL=printf; TEXT=hello; $TOOL "$TEXT"',
+    ])(
+      'lets harmless %s reach the classifier and run when it allows',
+      async (command) => {
+        runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+        const execute = vi.fn().mockResolvedValue(textResult('printed'));
+        const harness = autoScheduler(shellTool(command, vi.fn(), execute));
 
-      await scheduleAndSettle(harness, shellRequest('print-example', command));
+        await scheduleAndSettle(
+          harness,
+          shellRequest('harmless-command', command),
+        );
 
-      expect(runSideQueryMock).toHaveBeenCalled();
-      expect(execute).toHaveBeenCalledOnce();
-    });
+        expect(runSideQueryMock).toHaveBeenCalled();
+        expect(execute).toHaveBeenCalledOnce();
+        expectStatus(firstBatch(harness.onAllToolCallsComplete)[0], 'success');
+      },
+    );
 
     it.each(['git -C /repo reset --hard', "env -S 'git reset --hard'"])(
       'blocks %s before a classifier that would allow it',
