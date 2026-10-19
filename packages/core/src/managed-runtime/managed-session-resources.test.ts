@@ -19,17 +19,25 @@ import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
 type DirectorySyncFault = (Error & NodeJS.ErrnoException) | null;
 
-const directorySyncFault = vi.hoisted<{ error: DirectorySyncFault }>(() => ({
-  error: null,
-}));
+const directorySyncFault = vi.hoisted<{
+  error: DirectorySyncFault;
+  target: string | null;
+}>(() => ({ error: null, target: null }));
+
+const noFollowFault = vi.hoisted<{
+  error: (Error & { code?: string }) | null;
+  calls: string[];
+  override: null | ((filePath: string) => Promise<unknown>);
+}>(() => ({ error: null, calls: [], override: null }));
 
 // Everything stays real except the directory fsync. The store imports `open`
 // by name, so `vi.spyOn` cannot reach it; the seam is the same one
 // `services/sessionService.test.ts` uses for its own directory-sync fault
 // case. `syncDirectory` opens the containing directory read-only purely to
 // fsync it, while `publish` opens the pending file `'wx'` — so fault only the
-// `'r'` handle. The pending-file sync runs earlier and must keep succeeding,
-// or `publish` never reaches the guard these cases pin.
+// `'r'` handle, and only when it names the kind directory. The ancestor syncs
+// this change added run first and must keep succeeding, or `publish` never
+// reaches the post-rename guard these cases pin.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -37,10 +45,34 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     open: async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
       const failure = directorySyncFault.error;
-      if (failure !== null && args[1] === 'r') {
+      if (
+        failure !== null &&
+        args[1] === 'r' &&
+        args[0] === directorySyncFault.target
+      ) {
         handle.sync = () => Promise.reject(failure);
       }
       return handle;
+    },
+  };
+});
+
+// `openNoFollow` reaches `fs.promises.open` through the default `node:fs`
+// import, so the mock above is not a seam for it. The helper module is.
+vi.mock('../utils/no-follow-open.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/no-follow-open.js')>();
+  return {
+    ...actual,
+    openNoFollow: async (filePath: string) => {
+      noFollowFault.calls.push(filePath);
+      if (noFollowFault.override !== null) {
+        return (await noFollowFault.override(filePath)) as Awaited<
+          ReturnType<typeof actual.openNoFollow>
+        >;
+      }
+      if (noFollowFault.error !== null) throw noFollowFault.error;
+      return actual.openNoFollow(filePath);
     },
   };
 });
@@ -155,7 +187,29 @@ describe('managed session resource store', () => {
       'short',
       'utf8',
     );
-    await expect(store.read(ref)).rejects.toThrow(/bytes where 8 was recorded/);
+    await expect(store.read(ref)).rejects.toThrow(
+      /on disk where 8 was recorded/,
+    );
+  });
+
+  it('rejects content that changes after it was opened', async () => {
+    const { store } = await createStore();
+    const ref = await store.publish(
+      'managed-input',
+      Buffer.from('original', 'utf8'),
+    );
+    noFollowFault.override = async () => ({
+      stat: async () => ({ isFile: () => true, size: 8 }),
+      readFile: async () => Buffer.from('short'),
+      close: async () => undefined,
+    });
+    try {
+      await expect(store.read(ref)).rejects.toThrow(
+        /is 5 bytes where 8 was recorded/,
+      );
+    } finally {
+      noFollowFault.override = null;
+    }
   });
 
   it('reports a missing resource rather than returning empty content', async () => {
@@ -198,6 +252,30 @@ describe('managed session resource store', () => {
       expect(stat.mode & 0o777).toBe(0o700);
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'tightens a pre-existing directory to 0700',
+    async () => {
+      const { store } = await createStore();
+      const kindDir = path.join(store.sessionRoot, 'managed-input');
+      await fs.mkdir(kindDir, { recursive: true, mode: 0o755 });
+      await fs.chmod(store.sessionRoot, 0o755);
+      await fs.chmod(kindDir, 0o755);
+
+      const ref = await store.publish(
+        'managed-input',
+        Buffer.from('x', 'utf8'),
+      );
+
+      for (const directory of [
+        store.sessionRoot,
+        path.join(store.sessionRoot, ref.kind),
+      ]) {
+        const stat = await fs.stat(directory);
+        expect(stat.mode & 0o777).toBe(0o700);
+      }
+    },
+  );
 
   it('refuses to publish through a symlinked session directory', async () => {
     const { store, runtimeBaseDir } = await createStore();
@@ -251,6 +329,33 @@ describe('managed session resource store', () => {
     await expect(store.read(ref)).rejects.toThrow(/is not a regular file/);
   });
 
+  it('maps an ELOOP from the no-follow open to a record error', async () => {
+    const { store } = await createStore();
+    const ref = await store.publish('managed-input', Buffer.from('x', 'utf8'));
+    noFollowFault.error = Object.assign(new Error('ELOOP'), {
+      code: 'ELOOP',
+    });
+    try {
+      await expect(store.read(ref)).rejects.toThrow(/is not a regular file/);
+    } finally {
+      noFollowFault.error = null;
+    }
+  });
+
+  it('never opens a symlinked leaf', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const ref = await store.publish('managed-input', Buffer.from('x', 'utf8'));
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.writeFile(outside, 'x', 'utf8');
+    const leaf = path.join(store.sessionRoot, ref.kind, ref.resourceId);
+    await fs.unlink(leaf);
+    await fs.symlink(outside, leaf);
+    noFollowFault.calls = [];
+
+    await expect(store.read(ref)).rejects.toThrow(/is not a regular file/);
+    expect(noFollowFault.calls).not.toContain(leaf);
+  });
+
   it('refuses a publish above the byte limit', async () => {
     const { store } = await createStore();
     const bytes = Buffer.alloc(
@@ -259,6 +364,17 @@ describe('managed session resource store', () => {
 
     await expect(store.publish('managed-tool-outcome', bytes)).rejects.toThrow(
       /is the maximum/,
+    );
+  });
+
+  it('accepts a publish exactly at the byte limit', async () => {
+    const { store } = await createStore();
+    const bytes = Buffer.alloc(
+      MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes,
+    );
+    const ref = await store.publish('managed-tool-outcome', bytes);
+    expect(ref.byteLength).toBe(
+      MANAGED_SESSION_RESOURCE_LIMITS.maxResourceBytes,
     );
   });
 });
@@ -376,11 +492,15 @@ describe('directory sync refusal', () => {
     directorySyncFault.error = failure;
     try {
       const { store } = await createStore();
+      // Arm the fault on the kind directory so it reaches the post-rename
+      // sync; the ancestor syncs this change added must keep succeeding.
+      directorySyncFault.target = path.join(store.sessionRoot, 'managed-input');
       return await body({ store, failure });
     } finally {
       // This file's `afterEach` does not restore mocks, so both the fault and
       // the platform stub are cleared here or they leak into every later case.
       directorySyncFault.error = null;
+      directorySyncFault.target = null;
       platformStub.mockRestore();
     }
   }

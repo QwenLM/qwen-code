@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { openNoFollow } from '../utils/no-follow-open.js';
@@ -158,7 +158,7 @@ export class LocalManagedSessionResourceStore
     }
     if (size !== ref.byteLength) {
       throw new ManagedSessionRecordError(
-        `resource ${ref.resourceId} is ${size} bytes where ${ref.byteLength} was recorded.`,
+        `resource ${ref.resourceId} is ${size} bytes on disk where ${ref.byteLength} was recorded.`,
       );
     }
     let handle: FileHandle;
@@ -290,8 +290,14 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
   const stat = await lstat(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new ManagedSessionRecordError(
-      'session resource directory is not private.',
+      `session resource directory is not private: ${directory} is not a real directory.`,
     );
+  }
+  // Directories written by an earlier build carry the process default mode.
+  // Tighten them in place instead of refusing: every existing session tree
+  // would otherwise fail to publish.
+  if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700) {
+    await chmod(directory, 0o700);
   }
   // `publish` promises a ref that is safe to reference from a transaction
   // once it resolves, so the directory entry has to be durable in its parent
