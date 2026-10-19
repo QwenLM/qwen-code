@@ -514,7 +514,7 @@ export async function runHostedHarnessTextTurn(input: {
           { role: 'user', parts: request },
           { role: 'model', parts },
         ]);
-      input.toolTurn.setModelRound?.(0);
+      input.toolTurn.setModelRound?.(input.initialRound ?? 0);
       request = await input.toolTurn.execute(
         calls,
         parts,

@@ -2059,52 +2059,59 @@ it('advertises only the published Skill catalog while keeping host Skill discove
   expect(mocks.refreshSystemInstruction).toHaveBeenCalled();
 });
 
-it('loads explicit Skills before the first model request and preserves the task and attachments', async () => {
-  const mocks = config([{ type: LlmEventType.Finished }]);
-  const skills = new HostedSkillCatalog([
-    { name: 'review', description: 'Review.', body: 'PINNED_REVIEW_BODY' },
-    { name: 'testing', description: 'Test.', body: 'PINNED_TEST_BODY' },
-  ]);
-  const execute = vi.fn(async (calls: ToolCallRequestInfo[]) =>
-    calls.map((call) => ({
-      functionResponse: {
-        id: call.callId,
-        name: call.name,
-        response: { output: skills.response(call.args) },
-      },
-    })),
-  );
-  const toolTurn = {
-    execute,
-    consumeResults: vi.fn(async () => undefined),
-    declarations: vi.fn(async () => [skills.declaration()!]),
-    setPromptHookRunner: vi.fn(),
-  };
-  const prompt = '/review /testing /review inspect the patch';
-  const attachmentParts = [{ text: 'ATTACHMENT_CONTENT' }];
-  await runHostedHarnessTextTurn({
-    ...input,
-    prompt,
-    attachmentParts,
-    skills,
-    toolTurn,
-  });
-  expect(execute).toHaveBeenCalledOnce();
-  expect(execute.mock.calls[0][0]).toMatchObject([
-    { name: 'skill', args: { skill: 'review' }, isClientInitiated: true },
-    { name: 'skill', args: { skill: 'testing' }, isClientInitiated: true },
-  ]);
-  expect(mocks.setHistory).toHaveBeenLastCalledWith([
-    { role: 'user', parts: [{ text: prompt }, ...attachmentParts] },
-    { role: 'model', parts: expect.any(Array) },
-  ]);
-  expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_REVIEW_BODY');
-  expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_TEST_BODY');
-  expect(mocks.sendOptions[0]).toMatchObject({
-    type: SendMessageType.ToolResult,
-  });
-  expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
-});
+it.each([undefined, 3])(
+  'loads explicit Skills before the first model request and preserves the task and attachments (initial round: %s)',
+  async (initialRound) => {
+    const mocks = config([{ type: LlmEventType.Finished }]);
+    const skills = new HostedSkillCatalog([
+      { name: 'review', description: 'Review.', body: 'PINNED_REVIEW_BODY' },
+      { name: 'testing', description: 'Test.', body: 'PINNED_TEST_BODY' },
+    ]);
+    const setModelRound = vi.fn();
+    const execute = vi.fn(async (calls: ToolCallRequestInfo[]) => {
+      expect(setModelRound).toHaveBeenLastCalledWith(initialRound ?? 0);
+      return calls.map((call) => ({
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: { output: skills.response(call.args) },
+        },
+      }));
+    });
+    const toolTurn = {
+      execute,
+      setModelRound,
+      consumeResults: vi.fn(async () => undefined),
+      declarations: vi.fn(async () => [skills.declaration()!]),
+      setPromptHookRunner: vi.fn(),
+    };
+    const prompt = '/review /testing /review inspect the patch';
+    const attachmentParts = [{ text: 'ATTACHMENT_CONTENT' }];
+    await runHostedHarnessTextTurn({
+      ...input,
+      prompt,
+      initialRound,
+      attachmentParts,
+      skills,
+      toolTurn,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0]).toMatchObject([
+      { name: 'skill', args: { skill: 'review' }, isClientInitiated: true },
+      { name: 'skill', args: { skill: 'testing' }, isClientInitiated: true },
+    ]);
+    expect(mocks.setHistory).toHaveBeenLastCalledWith([
+      { role: 'user', parts: [{ text: prompt }, ...attachmentParts] },
+      { role: 'model', parts: expect.any(Array) },
+    ]);
+    expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_REVIEW_BODY');
+    expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_TEST_BODY');
+    expect(mocks.sendOptions[0]).toMatchObject({
+      type: SendMessageType.ToolResult,
+    });
+    expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
+  },
+);
 
 it('uses saved Skill results on continuation without loading the selection again', async () => {
   const mocks = config([{ type: LlmEventType.Finished }]);

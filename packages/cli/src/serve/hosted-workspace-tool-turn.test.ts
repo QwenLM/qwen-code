@@ -188,7 +188,7 @@ function createTurn(
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
   skills?: HostedSkillCatalog,
-  publicPlanMode = false,
+  planMode: 'none' | 'public' | 'member' = 'none',
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -211,8 +211,9 @@ function createTurn(
     {
       hooks,
       skills,
-      publicPlanMode,
-      ...(publicPlanMode ? { profile: 'hosted-workspace-files/1' } : {}),
+      publicPlanMode: planMode === 'public',
+      memberPlanMode: planMode === 'member',
+      ...(planMode === 'public' ? { profile: 'hosted-workspace-files/1' } : {}),
     },
   );
 }
@@ -333,10 +334,10 @@ const publishedSkills = () =>
     },
   ]);
 
-it.each([false, true])(
+it.each(['none', 'public', 'member'] as const)(
   'loads a published static Skill durably without Runtime execution or approval (Plan: %s)',
   async (planMode) => {
-    if (planMode)
+    if (planMode === 'public')
       vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
     const skills = publishedSkills();
     turn = createTurn(false, { mode: 'default' }, undefined, skills, planMode);
@@ -347,7 +348,7 @@ it.each([false, true])(
     expect(
       await turn.declarations(new AbortController().signal),
     ).toContainEqual(skills.declaration());
-    if (planMode)
+    if (planMode === 'public')
       expect(await turn.declarations(new AbortController().signal)).not.toEqual(
         expect.arrayContaining([
           expect.objectContaining({ name: 'write_file' }),
