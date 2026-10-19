@@ -24,10 +24,12 @@ second command.
 2. **The retry is a status poll, not a second execute.** The Harness falls
    back to `hook-status` on the record's own `runtimeSessionId` when the
    dispatch reply is lost, which is what keeps the physical call at one.
-3. **Two cells, one fixture each.** Both hold a solo command for one second
-   and allow; a dropped dispatch reply must resolve through status, and a
-   dropped status reply must stay unknown until a later poll of the same
-   owner settles it. Neither may add a second physical call.
+3. **Three cells, one fixture each.** The first two hold a solo command for one
+   second and allow; a dropped dispatch reply must resolve through status, and a
+   dropped status reply must stay unknown until a later poll of the same owner
+   settles it. Neither may add a second physical call. The third drops the
+   catalog reply before the registration commits: the failed admission is
+   retried, and the retry must register the pinned catalog once.
 
 ## Case
 
@@ -35,6 +37,7 @@ second command.
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `execute-reply-lost` | A `PreToolUse` command Hook runs; the broker proxy drops the `hook-execute` control reply after the worker admitted it. | Exactly one physical call; the retry resolves the same operation through the owner's status; the record settles `settled` with `outcome=success`; the allow reaches the model once; the proxy log records the drop.           |
 | `status-reply-lost`  | The same solo command; the broker proxy drops the reply to a `hook-status` poll after the dispatch.                     | The dropped poll cannot prove the end, so the record first reports `recovery_blocked` / `outcome_unknown`; a later poll of the same owner settles it `success`, with exactly one physical call and the drop in the proxy log. |
+| `catalog-reply-lost` | The broker proxy drops the reply to the first `hook-catalog` control call, before the registration commits.             | The admission fails, the coordinator retries the Turn, and the retry settles one `hook_registration` at the pinned catalog revision; the Hook runs exactly once, and the proxy log records the drop.                          |
 
 ## Mutation witness
 
@@ -50,10 +53,17 @@ Each witness must turn the cell red before the slice merges.
   (the branch that records `recovery_blocked` / `outcome_unknown` when the
   poll cannot prove the end). The record stays `running`, so the state
   assertion fails.
+- `catalog-reply-lost`: treat the lost catalog reply as an empty catalog
+  instead of surfacing the failure, so `configure` proceeds without a
+  registered pin. The Turn then runs with no Hook, and both the `hook.call`
+  and the one-registration assertions fail. A second witness caches the
+  catalog in memory before the registration commits; the retry then answers
+  from that cache, leaving no settled `hook_registration`, and the one-record
+  assertion fails.
 
 ## Non-goals
 
-The rest of FG13a — `hook-catalog`, `hook-cancel`, the store acks of the
+The rest of FG13a — `hook-cancel`, the store acks of the
 `dispatch_started` and result commits, and a lost HTTP Hook response — stays
 on #14449. Also out: FG13b, FG13e, FG13f, local non-managed
 Hooks, Windows/macOS and #13133's design items.

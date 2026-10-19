@@ -17,9 +17,11 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
    durable worker 与转发代理；只丢弃 `hook-execute` 控制调用的回复，其余请求直通。
 2. **重试走状态轮询，而不是第二次 execute。** 派发回复丢失时，Harness 会按记录
    自身的 `runtimeSessionId` 回落到 `hook-status`，这正是物理调用保持一次的原因。
-3. **两格、各自一套夹具。** 两格都让 solo 命令保持 1 秒后放行；派发回复丢失必须
-   通过 status 解析，status 回复丢失必须先保持未知，直到同一 owner 的后续轮询
-   把它结算。两者都不得增加第二次物理调用。
+3. **三格、各自一套夹具。** 前两格都让 solo 命令保持 1 秒后放行；派发回复丢失
+   必须通过 status 解析，status 回复丢失必须先保持未知，直到同一 owner 的后续
+   轮询把它结算。两者都不得增加第二次物理调用。第三格在注册提交前丢弃 catalog
+   回复：准入失败后协调器重试该 Turn，重试必须只注册一次，且保持定义里 pin 的
+   catalog 修订。
 
 ## 用例
 
@@ -27,6 +29,7 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
 | -------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `execute-reply-lost` | `PreToolUse` 命令 Hook 运行中；broker 代理在 worker 已接收后丢弃 `hook-execute` 的回复。 | 恰好一次物理调用；重试通过 owner 状态解析同一操作；记录结算 `settled` 且 `outcome=success`；放行结果只到达模型一次；代理日志记录这次丢弃。                           |
 | `status-reply-lost`  | 同样的 solo 命令；broker 代理在派发后丢弃一次 `hook-status` 轮询的回复。                 | 丢失的轮询无法证明结束，因此记录先落 `recovery_blocked` / `outcome_unknown`；随后对同一 owner 的轮询把它结算为 `success`，物理调用仍恰好一次，代理日志记录这次丢弃。 |
+| `catalog-reply-lost` | broker 代理丢弃第一次 `hook-catalog` 控制调用的回复，此时注册尚未提交。                  | 准入失败，协调器重试该 Turn；重试只结算一条 `hook_registration`，修订等于定义里 pin 的值；Hook 恰好运行一次，代理日志记录这次丢弃。                                  |
 
 ## 变异见证
 
@@ -39,11 +42,15 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
 - `status-reply-lost`：去掉 `fire` 循环里如实记录 unknown 的提交分支（轮询无法
   证明结束时写 `recovery_blocked` / `outcome_unknown` 的那一支）。记录会停在
   `running`，状态断言失败。
+- `catalog-reply-lost`：把丢失的 catalog 回复当成空 catalog 吞掉，让 `configure`
+  在未注册 pin 的情况下继续。Turn 因此没有 Hook 可跑，`hook.call` 与“只有一条注册”
+  两条断言都会失败。另一个见证：在注册提交前就把 catalog 缓存进内存，重试直接读
+  缓存，于是没有已结算的 `hook_registration`，单记录断言失败。
 
 ## 非目标
 
-FG13a 其余部分——`hook-catalog`、`hook-cancel`、`dispatch_started` 与结果提交的
-store ack、以及 HTTP Hook 响应丢失——仍留在 #14449。同样不在范围：FG13b、
+FG13a 其余部分——`hook-cancel`、`dispatch_started` 与结果提交的 store ack、以及
+HTTP Hook 响应丢失——仍留在 #14449。同样不在范围：FG13b、
 FG13e、FG13f、本地非托管 Hook、Windows/macOS，以及 #13133 的设计项。
 
 ## 验证

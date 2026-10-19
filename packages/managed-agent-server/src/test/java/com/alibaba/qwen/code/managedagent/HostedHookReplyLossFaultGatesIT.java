@@ -55,7 +55,9 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 // FG13a (issues #14054/#14449): lost replies for the managed command Hook.
 // The dispatch reply is dropped after the worker admitted the operation, so
 // the retry must resolve the same operation through the owner's status, keep
-// exactly one physical call, and apply its single result.
+// exactly one physical call, and apply its single result. The catalog reply
+// is dropped before the registration commits, so the retried admission must
+// register the pinned catalog once instead of appending a second record.
 @EnabledOnOs(OS.LINUX)
 class HostedHookReplyLossFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-files/1";
@@ -297,6 +299,54 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13aCatalogReplyLossRegistersThePinnedCatalogOnceOnMySql()
+            throws Exception {
+        boot("60000", "1000", "hook-solo");
+        // The reply is lost before the registration commits, so the first
+        // admission fails and the coordinator retries the same Turn. The
+        // retry must register the pinned catalog once, at its own revision.
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+                (method, path, body) -> path.contains("/control")
+                        && body.contains("\"kind\":\"hook-catalog\""),
+                "hook-catalog-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_CATALOG_LOSS");
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("settled");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("settled");
+        });
+        assertThat(events("hook.allow")).hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("success");
+        // The retry reuses the deterministic registration id, so a lost
+        // reply leaves one settled record at the pin from the definition.
+        List<JsonNode> registrations = HostedGateTestSupport.extensionRecords(
+                jdbc, tenant, session, "hook_registration");
+        assertThat(registrations).as("hook registration records").hasSize(1);
+        JsonNode registration = registrations.getFirst();
+        assertThat(registration.path("registrationId").asText())
+                .startsWith("hook-catalog-");
+        assertThat(registration.path("catalogId").asText()).isEqualTo("fg13-hooks");
+        assertThat(registration.path("catalogRevision").asInt()).isEqualTo(1);
+        assertThat(registration.at("/run/state").asText()).isEqualTo("settled");
+        assertThat(Files.readString(temporary.resolve("proxy.log")))
+                .contains("PROXY dropped hook-catalog-reply");
+        waitFor(() -> assertThat(modelRequests.toString()).contains(PROOF));
+        long results = 0;
+        for (JsonNode message : modelRequests.getLast().path("messages")) {
+            if ("tool".equals(message.path("role").asText())
+                    && "call_FG13_CATALOG_LOSS".equals(message.path("tool_call_id").asText())) {
+                results++;
+            }
+        }
+        assertThat(results).as("tool results for the emitted call").isEqualTo(1);
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
@@ -379,7 +429,8 @@ class HostedHookReplyLossFaultGatesIT {
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
-                    && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS").contains(prompt);
+                    && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS",
+                            "FG13_CATALOG_LOSS").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);

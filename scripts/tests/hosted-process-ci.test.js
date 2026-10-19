@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (137 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (140 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 217, 230],
+    ['hosted-harness-mysql', 220, 233],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -614,13 +614,14 @@ describe('Hosted real-process gates', () => {
       // 6735; the FG13a status lost-reply cell adds 150 s, so the fork moves
       // to 6885 and the Verify step to 125 minutes; the FG11c Harness-crash
       // method (144.8 s measured, 550 s budgeted) moves the fork to 7435;
-      // the FG13d DELETE-drain cell adds 150 s, so the fork moves to 7585
-      // and the Verify step to 137 minutes):
+      // the FG13d DELETE-drain cell adds 150 s, so the fork moves to 7585;
+      // the FG13a catalog lost-reply cell adds 150 s, so the fork moves to
+      // 7735 and the Verify step to 140 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(7585);
+        expect(forkSeconds).toBe(7735);
       }
     },
   );
