@@ -4123,6 +4123,12 @@ export class CoreToolScheduler {
                   outcome.reason === 'ask_rule' &&
                   outcome.requiresHumanDecision
                 ) {
+                  if (outcome.message) {
+                    autoModeFallback = {
+                      reason: outcome.reason,
+                      message: outcome.message,
+                    };
+                  }
                   debugLogger.warn(
                     `Auto mode ask rule on a destructive-guard call; waiting for a human: ${outcome.message ?? ''}`,
                   );

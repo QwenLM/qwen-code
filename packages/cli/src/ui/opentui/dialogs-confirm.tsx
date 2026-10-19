@@ -630,6 +630,11 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
   const prompt = buildConfirmationPrompt(details, config.isTrustedFolder());
   return (
     <InlineConfirmation>
+      {details.autoModeFallback && (
+        <text fg={C.yellow}>
+          {sanitizeTerminalText(`⚠ ${details.autoModeFallback.message}`)}
+        </text>
+      )}
       <box
         flexDirection="column"
         marginLeft={1}

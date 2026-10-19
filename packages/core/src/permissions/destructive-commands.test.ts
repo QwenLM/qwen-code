@@ -97,6 +97,8 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     ['pulumi -C infra destroy --yes', 'pulumi destroy'],
     ['cdk --profile prod destroy MyStack', 'cdk destroy'],
     ['npx cdk destroy', 'cdk destroy'],
+    ['npx aws-cdk destroy --force', 'cdk destroy'],
+    ['npx aws-cdk@latest destroy --force', 'cdk destroy'],
   ])('blocks %j as %s', async (command, label) => {
     expect(await reasonFor(command)).toContain(`"${label}"`);
   });
@@ -135,6 +137,9 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     'git stash',
     'git stash pop',
     'git stash list',
+    'git stash push -m "WIP $(date)"',
+    'git stash --quiet push -m "$MESSAGE"',
+    'git stash list --format="$FORMAT"',
     // The message value is not an option.
     'git commit -m --amend',
     // A prefix of a value option takes the next word as its value.
@@ -351,6 +356,22 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `git config alias.r 'reset --hard'; git r`,
     `printf '[alias]\\nnuke = !git reset --hard\\n' >> .git/config && git nuke`,
     `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0='!git reset --hard' git nuke`,
+    `env GIT_SEQUENCE_EDITOR='git reset --hard;:' git rebase -i HEAD~1`,
+    `sudo GIT_SEQUENCE_EDITOR='git reset --hard;:' git rebase -i HEAD~1`,
+    `env -- GIT_PAGER='git reset --hard' git log`,
+    `env -u HOME GIT_PAGER='git reset --hard' git log`,
+    `printf 'git reset --hard' > e.sh; env BASH_ENV=./e.sh bash -c :`,
+    `git config set sequence.editor 'git reset --hard;:' && git rebase -i HEAD~1`,
+    `git config -f .git/config core.pager 'git reset --hard'`,
+    `git config --file=.git/config --add core.pager 'git reset --hard'`,
+    `git config --file .git/config set --type string core.pager 'git reset --hard'`,
+    `git config --replace-all -f.git/config core.pager "$PAGER_COMMAND"`,
+    `git config set "$KEY" 'git reset --hard'`,
+    `git config --file $CONFIG '!git reset --hard' '.*'`,
+    `git config -f $CONFIG '!git reset --hard' '.*'`,
+    `git config set --type $TYPE '!git reset --hard'`,
+    `git stash "$ACTION" -m WIP`,
+    `git stash $OPTIONS push -m WIP`,
     // xargs appends what it reads behind a wrapper too.
     'sudo xargs git checkout',
     'env xargs git checkout',
@@ -363,6 +384,9 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     // The parser cannot read these.
     `case "$1" in x) git reset --hard ;; esac`,
     `case x in a) eval "$(printf '\\g\\x69t reset --hard')" ;; esac`,
+    `export TOOL=git; bash -c 'case x in x) $TOOL reset --hard;; esac'`,
+    `case x in x) $TOOL reset --hard;; esac`,
+    `sed -i 's/.*/git reset --hard/e' README.md`,
     `echo 'git reset --hard`,
   ])('blocks %j', async (command) => {
     expect(await reasonFor(command)).toContain(UNVERIFIABLE);
@@ -427,6 +451,12 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     './scripts/build.sh && sudo git checkout main',
     "trap 'npm test' EXIT",
     "git config --get-regexp '^alias\\.'",
+    `git config set user.name "$NAME"`,
+    `git config --file "$CONFIG" user.name 'git reset --hard'`,
+    `git config --file config.txt user.name 'git reset --hard'`,
+    `git config get sequence.editor 'git reset --hard'`,
+    `git config --get core.pager 'git reset --hard'`,
+    `env NOTE='git reset --hard' printf '%s' "$NOTE"`,
     'git nuke',
     // File names are not words.
     `printf 'echo cleaning\\n' > git-clean-branches.sh && bash git-clean-branches.sh`,
@@ -536,6 +566,31 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expect(await reasonFor('git -C own commit --amend', root)).toBeNull();
     expect(
       await reasonFor(`git -C ${other} commit --amend --no-edit`, own),
+    ).toContain('git commit --amend');
+  });
+
+  it.each([
+    '--no-pager',
+    '-P',
+    '--literal-pathspecs',
+    '--glob-pathspecs',
+    '--noglob-pathspecs',
+    '--icase-pathspecs',
+    '--no-replace-objects',
+    '--no-optional-locks',
+  ])('preserves the session amend target with %s', async (option) => {
+    const { root, own, other } = makeRepos();
+    expect(
+      await reasonFor(`git ${option} commit --amend --no-edit`, own),
+    ).toBeNull();
+    expect(
+      await reasonFor(`git ${option} -C own commit --amend --no-edit`, root),
+    ).toBeNull();
+    expect(
+      await reasonFor(
+        `git ${option} -C ${other} commit --amend --no-edit`,
+        own,
+      ),
     ).toContain('git commit --amend');
   });
 

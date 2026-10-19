@@ -199,6 +199,12 @@ const WRAPPERS: Record<string, Wrapper> = {
 const GIT_GLOBAL_OPTIONS_WITH_VALUE = words(
   '-C -c --git-dir --work-tree --namespace --super-prefix --config-env --attr-source',
 );
+const GIT_GLOBAL_OPTIONS_WITHOUT_VALUE = words(
+  '-p --paginate -P --no-pager --literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-replace-objects --no-optional-locks --no-lazy-fetch --no-advice',
+);
+const GIT_CONFIG_OPTIONS_WITH_VALUE = words(
+  'file blob type default value comment',
+);
 const GIT_REPOSITORY_VARIABLES = words('GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR');
 /** Environment variables whose value git runs or reads settings from. */
 const GIT_COMMAND_VARIABLE =
@@ -465,6 +471,10 @@ function visitAssignment(node: SyntaxNode, scan: Scan): void {
   const name = node.childForFieldName('name')?.text ?? '';
   const valueNode = node.childForFieldName('value');
   const value = valueNode ? wordOf(valueNode) : '';
+  checkAssignment(name, value, scan);
+}
+
+function checkAssignment(name: string, value: string, scan: Scan): void {
   if (GIT_REPOSITORY_VARIABLES.has(name)) {
     scan.movesRepository = true;
   } else if (STARTUP_FILE_VARIABLES.has(name)) {
@@ -728,15 +738,20 @@ function runWrapped(
   let replace: string | undefined;
   let skipped = 0;
   let i = 0;
+  let options = true;
   for (; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg === '--') {
-      i++;
-      break;
+    if (options && arg === '--') {
+      options = false;
+      continue;
     }
     // `env FOO=1 cmd`, `sudo FOO=1 cmd`.
-    if (/^[A-Za-z_]\w*=/.test(arg)) continue;
-    if (!literalOf(arg).startsWith('-') || arg === '-') {
+    if (/^[A-Za-z_]\w*=/.test(arg)) {
+      const equals = arg.indexOf('=');
+      checkAssignment(arg.slice(0, equals), arg.slice(equals + 1), scan);
+      continue;
+    }
+    if (!options || !literalOf(arg).startsWith('-') || arg === '-') {
       // Operands before the command; options may follow them.
       if (skipped++ < (wrapper.skip ?? 0)) continue;
       break;
@@ -774,6 +789,10 @@ function runWrapped(
   if (wrapper.scriptOnly) return;
   const command = args.slice(i);
   if (command.length === 0) return;
+  // npx resolves the package's sole binary (`aws-cdk` publishes `cdk`).
+  if (program === 'npx' && /^aws-cdk(?:@[^/]+)?$/.test(command[0]!)) {
+    command[0] = 'cdk';
+  }
   if (wrapper.joins) {
     return runScript(command.join(' '), inner, scan, command);
   }
@@ -821,6 +840,7 @@ function checkGit(
     if (!literal.startsWith('-')) break;
     const equals = literal.indexOf('=');
     const option = equals < 0 ? literal : literal.slice(0, equals);
+    if (GIT_GLOBAL_OPTIONS_WITHOUT_VALUE.has(arg)) continue;
     if (!GIT_GLOBAL_OPTIONS_WITH_VALUE.has(option)) {
       // Unknown effect on which repository the command reaches.
       dir = undefined;
@@ -857,9 +877,7 @@ function checkGit(
     scan.movesRepository = true;
   }
   if (subcommand === 'config') {
-    // Setting an alias or a command-valued setting.
-    const operands = rest.filter((word) => !literalOf(word).startsWith('-'));
-    if (operands.length >= 2) checkGitSetting(operands[0]!, operands[1]!, scan);
+    checkGitConfig(rest, scan);
   } else if (!GIT_SUBCOMMANDS.has(subcommand)) {
     // Possibly an alias, which runs whatever it was set to.
     scan.hiddenCode = true;
@@ -876,8 +894,9 @@ function checkGit(
     report(scan, force, parsed.dynamicOption, 'git clean -f');
   } else if (subcommand === 'stash') {
     // Options may come before the action (`git stash -q drop`).
-    const action = rest.find((word) => !literalOf(word).startsWith('-')) ?? '';
-    const dynamic = rest.some((word) => isDynamic(word));
+    const at = rest.findIndex((word) => !literalOf(word).startsWith('-'));
+    const action = rest[at] ?? '';
+    const dynamic = (at < 0 ? rest : rest.slice(0, at + 1)).some(isDynamic);
     report(scan, action === 'drop', dynamic, 'git stash drop');
   } else if (subcommand === 'commit') {
     const parsed = parseOptions(
@@ -912,6 +931,47 @@ function checkGit(
       runArgv(rest.slice(at + 1), { ...ctx, cwd: undefined }, scan);
     }
   }
+}
+
+function checkGitConfig(args: string[], scan: Scan): void {
+  const operands: string[] = [];
+  let options = true;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (options && arg === '--') {
+      options = false;
+    } else if (options && arg.startsWith('--')) {
+      const name = arg.slice(2);
+      if (
+        /^(?:get(?:-.+)?|list|unset(?:-all)?|rename-section|remove-section)$/.test(
+          name,
+        )
+      ) {
+        return;
+      }
+      if (
+        [...GIT_CONFIG_OPTIONS_WITH_VALUE].some((option) =>
+          option.startsWith(name),
+        )
+      ) {
+        if (args[++i]?.includes(SPLIT)) scan.unverifiable = true;
+      }
+    } else if (options && /^-[ft]/.test(arg)) {
+      if (arg.length === 2 && args[++i]?.includes(SPLIT)) {
+        scan.unverifiable = true;
+      }
+    } else if (!options || !arg.startsWith('-')) {
+      operands.push(arg);
+    }
+  }
+  if (operands[0] === 'set') operands.shift();
+  else if (
+    /^(?:get|list|unset|rename-section|remove-section|edit)$/.test(
+      operands[0] ?? '',
+    )
+  )
+    return;
+  if (operands.length >= 2) checkGitSetting(operands[0]!, operands[1]!, scan);
 }
 
 /** `git -c key=value`, `git config key value`, `--config-env`. */

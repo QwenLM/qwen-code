@@ -305,6 +305,36 @@ describe('OpenTuiToolConfirmation', () => {
     mocks.state.dimensions = { width: 110, height: 40 };
   });
 
+  it('shows the destructive guard reason for an ask rule with single-use choices', () => {
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'ask-destructive',
+          name: 'run_shell_command',
+          confirmationDetails: {
+            ...execDetails(true),
+            command: 'git reset --hard',
+            rootCommand: 'git',
+            autoModeFallback: {
+              reason: 'ask_rule',
+              message: 'Blocked destructive git command: "git reset --hard".',
+            },
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain(
+      'Blocked destructive git command: "git reset --hard".',
+    );
+    expect(text).toContain('Yes, allow once');
+    expect(text).not.toContain('Always allow');
+    expect(text).not.toContain('Switch to Default Mode');
+  });
+
   it('settles Cancel on Esc exactly once, whatever arrives afterwards', () => {
     const onConfirm = vi.fn(async () => {});
     const onSettled = vi.fn();

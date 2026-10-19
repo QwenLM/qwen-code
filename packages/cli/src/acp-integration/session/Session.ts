@@ -15448,6 +15448,8 @@ export class Session implements SessionContext {
               (outcome.reason === 'classifier_unavailable' ||
                 outcome.reason === 'external_write' ||
                 outcome.reason === 'external_directory' ||
+                (outcome.reason === 'ask_rule' &&
+                  outcome.requiresHumanDecision) ||
                 isDenialFallbackReason(outcome.reason))
             ) {
               autoModeFallback = {

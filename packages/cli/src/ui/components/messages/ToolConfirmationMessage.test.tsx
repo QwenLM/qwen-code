@@ -351,35 +351,47 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
-  it('renders blocked retry guidance without offering a mode switch', () => {
-    const confirmationDetails: ToolCallConfirmationDetails = {
-      type: 'exec',
-      title: 'Confirm Shell Command',
-      command: 'touch /tmp/marker',
-      rootCommand: 'touch',
-      hideAlwaysAllow: true,
-      autoModeFallback: {
-        reason: 'classifier_blocked_retry',
-        message: 'This exact action was previously blocked.',
-      },
-      onConfirm: vi.fn(),
-    };
+  it.each([
+    {
+      reason: 'classifier_blocked_retry',
+      message: 'This exact action was previously blocked.',
+    },
+    {
+      reason: 'ask_rule',
+      message: 'Blocked destructive git command: "git reset --hard".',
+    },
+  ] as const)(
+    'renders $reason guidance without offering a mode switch',
+    ({ reason, message }) => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason,
+          message,
+        },
+        onConfirm: vi.fn(),
+      };
 
-    const { lastFrame } = renderWithProviders(
-      <ToolConfirmationMessage
-        confirmationDetails={confirmationDetails}
-        config={mockConfig}
-        availableTerminalHeight={12}
-        contentWidth={80}
-      />,
-    );
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={12}
+          contentWidth={80}
+        />,
+      );
 
-    const frame = lastFrame() ?? '';
-    expect(frame).toContain('This exact action was previously blocked.');
-    expect(frame).toContain('Yes, allow once');
-    expect(frame).not.toContain('Switch to Default Mode');
-    expect(frame).not.toContain('Always allow');
-  });
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain(message);
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).not.toContain('Switch to Default Mode');
+      expect(frame).not.toContain('Always allow');
+    },
+  );
 
   it('offers a mode switch after consecutive classifier failures', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {

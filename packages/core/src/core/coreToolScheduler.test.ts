@@ -5760,6 +5760,7 @@ describe('CoreToolScheduler', () => {
     it('waits for a human on an ask-ruled destructive call even when a PermissionRequest hook allows', async () => {
       const onConfirm = vi.fn().mockResolvedValue(undefined);
       const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const setAutoModeDenialState = vi.fn();
       const messageBus = permissionRequestHookBus({ behavior: 'allow' });
       const harness = autoScheduler(
         shellTool('git reset --hard', onConfirm, execute),
@@ -5767,6 +5768,12 @@ describe('CoreToolScheduler', () => {
           messageBus,
           disableHooks: false,
           permissionManager: rulesResolving('ask'),
+          autoModeDenialState: {
+            ...ZERO_DENIAL_STATE,
+            consecutiveBlock: 1,
+            totalBlock: 4,
+          },
+          setAutoModeDenialState,
         },
       );
 
@@ -5778,6 +5785,10 @@ describe('CoreToolScheduler', () => {
       const waiting = await waitForApproval(harness.onToolCallsUpdate);
       expect(waiting.confirmationDetails).toMatchObject({
         hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'ask_rule',
+          message: 'Blocked destructive git command: "git reset --hard".',
+        },
       });
       expect(permissionRequests(messageBus)).toHaveLength(1);
       expect(runSideQueryMock).not.toHaveBeenCalled();
@@ -5791,6 +5802,7 @@ describe('CoreToolScheduler', () => {
         expect(harness.onAllToolCallsComplete).toHaveBeenCalled(),
       );
       expect(execute).toHaveBeenCalledOnce();
+      expect(setAutoModeDenialState).not.toHaveBeenCalled();
     });
 
     it('runs nothing when the human declines an ask-ruled destructive call', async () => {
@@ -6055,6 +6067,10 @@ describe('CoreToolScheduler', () => {
         const waiting = await waitForApproval(harness.onToolCallsUpdate);
         expect(waiting.confirmationDetails).toMatchObject({
           hideAlwaysAllow: true,
+          autoModeFallback: {
+            reason: 'ask_rule',
+            message: expect.stringContaining('Blocked'),
+          },
         });
         expect(permissionRequests(messageBus)).toHaveLength(1);
         expect(runSideQueryMock).not.toHaveBeenCalled();

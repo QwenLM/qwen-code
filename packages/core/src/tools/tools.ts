@@ -1225,6 +1225,7 @@ export interface ToolInfoConfirmationDetails {
 
 export interface AutoModeFallbackConfirmation {
   reason:
+    | 'ask_rule'
     | 'classifier_blocked_retry'
     | 'classifier_unavailable'
     | 'consecutive_block'

@@ -39342,6 +39342,13 @@ describe('Session', () => {
       expect(request.toolCall.rawInput).toEqual({
         command: 'git reset --hard',
       });
+      expect(request.toolCall.content).toContainEqual({
+        type: 'content',
+        content: {
+          type: 'text',
+          text: 'Blocked destructive git command: "git reset --hard".',
+        },
+      });
       expect(
         request.options.filter(
           (option: { kind: string }) => option.kind === 'allow_always',
@@ -39356,16 +39363,17 @@ describe('Session', () => {
     ])(
       'asks the ACP client rather than a PermissionRequest hook for an ask-ruled destructive call ($answer)',
       async ({ answer, runs }) => {
-        const { execute, generateJson } = configureAutoModeShellFallback({
-          callId: 'ask-ruled-destructive',
-          command: 'git reset --hard',
-          denialState: {
-            consecutiveBlock: 0,
-            consecutiveUnavailable: 0,
-            totalBlock: 0,
-            totalUnavailable: 0,
-          },
-        });
+        const { execute, generateJson, getDenialState } =
+          configureAutoModeShellFallback({
+            callId: 'ask-ruled-destructive',
+            command: 'git reset --hard',
+            denialState: {
+              consecutiveBlock: 1,
+              consecutiveUnavailable: 0,
+              totalBlock: 4,
+              totalUnavailable: 0,
+            },
+          });
         mockConfig.getPermissionManager = vi.fn().mockReturnValue({
           isToolEnabled: vi.fn().mockResolvedValue(true),
           hasRelevantRules: () => true,
@@ -39400,13 +39408,27 @@ describe('Session', () => {
         expect(executedBeforeAnswer).toBe(false);
         const [request] = vi.mocked(mockClient.requestPermission).mock
           .calls[0]!;
+        expect(request.toolCall.content).toContainEqual({
+          type: 'content',
+          content: {
+            type: 'text',
+            text: 'Blocked destructive git command: "git reset --hard".',
+          },
+        });
         expect(
-          request.options.filter(
-            (option: { kind: string }) => option.kind === 'allow_always',
-          ),
-        ).toEqual([]);
+          request.options.map((option: PermissionOption) => option.optionId),
+        ).toEqual([
+          core.ToolConfirmationOutcome.ProceedOnce,
+          core.ToolConfirmationOutcome.Cancel,
+        ]);
         expect(generateJson).not.toHaveBeenCalled();
         expect(execute).toHaveBeenCalledTimes(runs);
+        expect(getDenialState()).toEqual({
+          consecutiveBlock: 1,
+          consecutiveUnavailable: 0,
+          totalBlock: 4,
+          totalUnavailable: 0,
+        });
       },
     );
 
