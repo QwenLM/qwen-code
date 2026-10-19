@@ -473,13 +473,8 @@
                                  cell (issue #14449) adds 150 s: the
                                  healthy sum becomes 6285 s, so the
                                  fork moves to 6885 s and the Verify
-                                 step to 125 minutes. The FG13d
-                                 pre-dispatch cancel cell (issue
-                                 #14449) adds 150 s: the healthy sum
-                                 becomes 6435 s, so the fork moves to
-                                 7035 s and the Verify step to 128
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>7035</forkedProcessTimeoutInSeconds>
+                                 step to 125 minutes. -->
+                            <forkedProcessTimeoutInSeconds>6885</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
