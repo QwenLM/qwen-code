@@ -308,6 +308,16 @@ export interface ManagedAgentProvider {
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedModelChangeResult>;
   };
+  readonly workspaceFiles?: {
+    query(
+      request: components['schemas']['WebShellWorkspaceFileQueryRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFilePage']>;
+    read(
+      request: components['schemas']['WebShellWorkspaceFileReadRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
+  };
   readonly workspaceBinding?: {
     readonly agentId: string;
     readonly registration?: ManagedWorkspaceRegistration;

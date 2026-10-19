@@ -301,6 +301,14 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/workspaces/directories/query",
             Surface.WEBSHELL, RuleClass.WORKSPACE_ALLOCATION,
             EnumSet.of(Capability.WORKSPACE_DIRECTORIES)),
+    WEBSHELL_WORKSPACE_FILES_QUERY(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/files/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_FILES,
+            EnumSet.of(Capability.WORKSPACE_FILES_QUERY)),
+    WEBSHELL_WORKSPACE_FILES_READ(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/files/read",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_FILES,
+            EnumSet.of(Capability.WORKSPACE_FILES_READ)),
     WEBSHELL_SESSION_OPTIONS(Method.POST,
             "/api/agent/web-shell/v1/session-options/query",
             Surface.WEBSHELL, RuleClass.SESSION_OPTIONS,
@@ -563,6 +571,8 @@ public enum SurfaceRegistry {
         ARTIFACT_CONTENT,
         WORKSPACE_CREATE,
         WORKSPACE_DIRECTORIES,
+        WORKSPACE_FILES_QUERY,
+        WORKSPACE_FILES_READ,
         SESSION_OPTIONS,
         SESSION_APPROVAL,
         SESSION_APPROVAL_CHANGE,
@@ -719,6 +729,7 @@ public enum SurfaceRegistry {
         WORKSPACE_DISCOVERY,
         /** A trusted actor allocates an empty root, or selects an existing directory with source ROOT ownership. */
         WORKSPACE_ALLOCATION,
+        WORKSPACE_FILES,
         /** A trusted tenant actor may inspect effective creation policy for a tenant Agent. */
         SESSION_OPTIONS,
         /**

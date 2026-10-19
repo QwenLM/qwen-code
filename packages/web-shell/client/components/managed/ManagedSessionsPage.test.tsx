@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
+  clearEditor: vi.fn(),
   editorProps: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
@@ -98,6 +99,10 @@ vi.mock('../ChatEditor', async () => {
           ({
             setText: update,
             clearText: () => update(''),
+            clear: () => {
+              mocks.clearEditor();
+              update('');
+            },
             getText: () => input.current?.value ?? '',
             focus: () => input.current?.focus(),
           }) as EditorHandle,
@@ -2184,6 +2189,7 @@ describe('ManagedSessionsPage', () => {
       )?.disabled,
     ).toBe(true);
     expect(onSelect).toHaveBeenLastCalledWith('s1');
+    expect(mocks.clearEditor).toHaveBeenCalledOnce();
   });
 
   it('preserves the visible foreign draft when retrying a live retained commit', async () => {

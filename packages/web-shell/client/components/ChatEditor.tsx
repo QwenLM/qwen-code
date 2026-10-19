@@ -23,6 +23,7 @@ import {
   useOptionalWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
+import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
@@ -310,6 +311,8 @@ interface ChatEditorProps {
   disableLegacyHistoryFallback?: boolean;
   shellModeEnabled?: boolean;
   workspaceFeaturesEnabled?: boolean;
+  fileReferenceActions?: AtMentionWorkspaceActions;
+  persistFileReferences?: boolean;
   attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
@@ -1473,6 +1476,8 @@ export const ChatEditor = memo(
       disableLegacyHistoryFallback,
       shellModeEnabled = true,
       workspaceFeaturesEnabled = true,
+      fileReferenceActions,
+      persistFileReferences,
       attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
       onFocusFooter,
@@ -1660,6 +1665,8 @@ export const ChatEditor = memo(
       shellModeEnabled,
       attachmentsEnabled,
       workspaceFeaturesEnabled,
+      fileReferenceActions,
+      persistFileReferences,
       composerTagIcons,
       parseUserMessageContent,
       renderComposerTag,
@@ -1880,7 +1887,16 @@ export const ChatEditor = memo(
       ],
     );
     const handleAddMenuInsertReference = useCallback(
-      (tag: WebShellComposerTag) => {
+      async (tag: WebShellComposerTag) => {
+        const actions = core.workspaceActionsRef.current;
+        try {
+          if (tag.kind === 'file' && actions?.prepareFileReference) {
+            tag = await actions.prepareFileReference(tag);
+            if (core.workspaceActionsRef.current !== actions) return;
+          }
+        } catch {
+          return;
+        }
         addComposerTags([tag], { placement: 'inline', position: 'end' });
         const view = core.viewRef.current;
         if (view) {
@@ -1891,7 +1907,7 @@ export const ChatEditor = memo(
         }
         focusComposer();
       },
-      [addComposerTags, core.viewRef, focusComposer],
+      [addComposerTags, core.viewRef, core.workspaceActionsRef, focusComposer],
     );
     const handleAddMenuPrependSkill = useCallback(
       (invocation: string) => {
@@ -3363,6 +3379,7 @@ export const ChatEditor = memo(
                           : undefined
                       }
                       availabilityKey={JSON.stringify([
+                        core.workspaceActionsRef.current?.scopeKey,
                         fileUploadEnabled === false,
                         attachmentsEnabled,
                         uploadEnabled,
