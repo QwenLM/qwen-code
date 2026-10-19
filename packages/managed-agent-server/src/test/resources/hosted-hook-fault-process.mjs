@@ -84,7 +84,9 @@ if (mode === 'child') {
     child.kill('SIGKILL');
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  record(lifecycle ? 'hook.done' : 'hook.allow');
+  record(lifecycle ? 'hook.done' : 'hook.allow', {
+    eventName: value.hook_event_name,
+  });
   if (lifecycle) process.exit(0);
   process.stdout.write(
     JSON.stringify({
