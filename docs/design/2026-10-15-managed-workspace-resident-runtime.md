@@ -5,8 +5,8 @@
 Status: Section 4.1 is implemented by PR1
 ([#14254](https://github.com/QwenLM/qwen-code/pull/14254)), Section 4.2 by PR2
 ([#14339](https://github.com/QwenLM/qwen-code/pull/14339)) and Section 4.3 by
-PR3 ([#14435](https://github.com/QwenLM/qwen-code/pull/14435)). Section 4.4
-(Session-create warm) and Section 4.5 remain proposals.
+PR3 ([#14435](https://github.com/QwenLM/qwen-code/pull/14435)) and Section 4.4
+(Session-create warm) by PR4. Section 4.5 remains a proposal.
 Tracking issue:
 [#14211](https://github.com/QwenLM/qwen-code/issues/14211). Part of the Managed
 Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). Code
@@ -52,6 +52,15 @@ Revision history:
     CSI shipped separately; its semantics are unchanged;
   - validation scope: this slice carries unit/H2 and mutation evidence; the
     real-process Linux scenarios of Section 9 remain a follow-up.
+- Revision 5 (PR4):
+  - Session-create warm is limited to Workspace isolation:
+    `session-create-warm=true` requires `bound-session-isolation-class=workspace`
+    and no SSH nodes, and otherwise fails the boot. Under Session isolation,
+    which SSH-bound Sessions always use, it would keep one worker per created
+    but unused Session, and the Session-isolated binding it creates
+    disqualifies the v2 never-initialized receipt (Section 4.4);
+  - only a creation without input warms: a creation with input dispatches its
+    first Turn at once, and that Turn already warms.
 
 ## 1. Problem
 
@@ -290,18 +299,42 @@ that as an operator action. The budget in Section 4.5 bounds it later.
 
 ### 4.4 Session-create warm (PR4)
 
-After a bound Session's creation commits, the control plane calls the
-existing `warm(sessionId)` asynchronously through the existing resolver. It is
-placement-only: it never acquires a Runtime Session, installs a context or
-executes anything, so actor grants are still checked at acquisition as today.
+With `session-create-warm=true`, after a bound Session's creation commits
+without input, the control plane calls the existing `warm(sessionId)`
+asynchronously through the existing resolver. Like Turn-time warm, it is
+skipped while the Runtime Broker is off or Workspace files are unavailable.
+It is placement-only: it never acquires a Runtime Session, installs a context
+or executes anything. The resolver authorizes the Session as Turn-time warm
+does, and actor grants are still checked at acquisition.
 
-- Under Session isolation it starts the Session's worker before the first
-  Turn.
-- Under Workspace isolation it is a no-op when the storage's binding is
-  already `READY`.
-
-It emits no public event because there is no Turn yet. Turn-time warm and its
-`environment.*` events stay unchanged.
+- **Workspace isolation only.** The setting requires
+  `bound-session-isolation-class=workspace` and no configured SSH nodes,
+  because SSH-bound Sessions always resolve Session-isolated scopes; anything
+  else fails the boot. On a storage without a live binding, warm starts the
+  shared worker. When the binding is already `READY`, it only confirms the
+  worker and starts no process. Under Session isolation, warm at creation
+  would:
+  - keep one worker per created Session until that Session closes, including
+    Sessions that never run a Turn, because durable `release` does nothing and
+    idle retirement is deferred;
+  - create a Session-isolated binding keyed by the Session. That disqualifies
+    the v2 never-initialized receipt, so closing a never-used Session would
+    need the Harness settle instead of the store-synthesized receipt.
+- **Creations without input only.** A creation with input dispatches its first
+  Turn at once, and that Turn's warm already runs concurrently with model
+  inference. Empty Session creation in the Web Shell and channel route
+  creation both create without input.
+- **Off the request thread.** The resolver and `findOrCreate` run
+  synchronously on the caller's thread, with database and filesystem checks,
+  so the call is submitted to the dispatch executor that runs Turn-time warm.
+- **Failure.** A failed warm is logged and never fails the creation. Nothing
+  retries it; the first Turn warms again. It emits no public event because
+  there is no Turn yet. Turn-time warm and its `environment.*` events stay
+  unchanged.
+- **Close is unchanged.** Warm writes no `ma_runtime_session` row and no
+  Session-isolated binding, so a Session that never ran a Turn still closes on
+  the never-initialized receipt. A warm racing a close at most starts or
+  confirms the shared worker that other Sessions use.
 
 ### 4.5 Deferred: idle retirement and generation budget
 
@@ -333,12 +366,12 @@ needed. Research for revision 2 found what they will have to handle:
 
 ### 4.6 Configuration summary
 
-All keys are proposed. Every behaviour change defaults off.
+Every behaviour change defaults off.
 
 | Key (`qwen.managed-agent.runtime-broker.`)                                                       | Default   | Slice |
 | ------------------------------------------------------------------------------------------------ | --------- | ----- |
 | `bound-session-isolation-class` (bound Sessions only; the global `isolation-class` is unchanged) | `session` | PR3   |
-| `session-create-warm`                                                                            | `false`   | PR4   |
+| `session-create-warm` (requires `bound-session-isolation-class=workspace` and no SSH nodes)      | `false`   | PR4   |
 
 Durations follow the existing unit rules and must be written with a suffix.
 
@@ -357,6 +390,7 @@ Durations follow the existing unit rules and must be written with a suffix.
 | Accept per-turn worker growth in the first delivery                               | Each entry is small, and retiring the storage's binding resets it.                                                                  | Ship the budget first: it needs the deferred retirement mechanics.                                                                                         |
 | Exclude child Workspaces                                                          | Their merge needs a closed child to stop its own worker, and the relay locates a child by its own binding.                          | Generalize child close in this work: it is a separate design.                                                                                              |
 | Defer keep-warm                                                                   | Session-create warm fixes the user-visible cold start; keep-warm needs measurements.                                                | Ship keep-warm now: it adds standing cost before measurements exist.                                                                                       |
+| Session-create warm only under Workspace isolation                                | It starts at most one worker per storage and leaves close unchanged.                                                                | Warm under Session isolation too: a standing worker per unused Session, whose close loses the never-initialized receipt.                                   |
 
 ## 6. Delivery slices
 
@@ -442,8 +476,15 @@ and links the run in the pull request body.
   - storage retirement stops the shared worker with a drain receipt;
   - Session-isolated close is unchanged;
   - unbound Sessions keep their isolation.
-- **PR4:** Session-create warm reaches `READY` before the first tool call, and
-  is a no-op for an already `READY` Workspace binding.
+- **PR4:** unit tests pin the configuration gate (Workspace isolation and no
+  SSH nodes required), the warm gates (setting on, Runtime warmer enabled,
+  Workspace files available), the dispatch executor, that only a creation
+  without input warms, and that a failed warm neither fails the creation nor
+  emits an event; each fails under a targeted mutation. The real-process
+  scenarios join the PR3 follow-up in #14211:
+  - an empty Session's shared worker reaches `READY` before the first tool
+    call;
+  - a second empty Session on the same storage starts no process.
 - **All:** build, typecheck, bundle, a dispatched `SDK Java` run, and two clean
   full-diff self-audits.
 
@@ -487,3 +528,5 @@ Resolved:
 - Idle retirement and the generation budget: deferred (maintainer,
   2026-10-16).
 - Prewarm: Session-create warm only; keep-warm deferred.
+- Session-create warm scope: Workspace isolation and creations without input
+  only (PR4).

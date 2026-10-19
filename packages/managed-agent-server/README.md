@@ -16,6 +16,21 @@ authentication and writer credentials" below.
 设计说明：[English](../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
 
+## Java package layout
+
+Business components live in `managedagent.session`, `workspace`, `artifact`,
+`channel`, `automation`, `catalog` and `event`. Controllers and HTTP filters
+remain in `managedagent.api`; shared contracts and application errors live in
+`managedagent.model` and `exception`. The shared SQL aggregate remains in
+`managedagent.persistence` so its transaction and locking helpers stay
+package-private. Broker providers, HTTP adapters and credential protection live
+in `runtimebroker.provisioning`, `transport` and `security` respectively. The
+separate `maintenance` configuration remains outside the server's component scan.
+
+These are packages in one Maven module. See the package-boundary design:
+[English](../../docs/design/2026-10-19-managed-agent-package-boundaries.md) |
+[简体中文](../../docs/design/2026-10-19-managed-agent-package-boundaries.zh-CN.md).
+
 ## Integration status
 
 The Hosted path supports durable no-tool Sessions and private Workspace tool
@@ -74,6 +89,28 @@ Actions (Hosted permission approvals): [English](../../docs/design/2026-09-30-ma
 [简体中文](../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md);
 AgentDefinition revisions: [English](../../docs/design/2026-10-01-managed-agent-definitions.md) |
 [简体中文](../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
+
+## On-demand tool details
+
+Managed ReadFile and Shell cards read saved arguments, output and errors only
+when expanded, through `/api/agent/web-shell/v1/tool-details/get`, without a
+feature switch. Each request requires a trusted actor and current
+Session/Workspace read access, rechecked before returning. It does not require
+Artifact publication or download permissions and never executes a tool or starts
+a Harness.
+
+Lifecycle events remain metadata-only. Existing retained private results can be
+read without backfilling public events. Allowlisted input is limited to 4 KiB;
+text is limited to 8 KiB and 200 lines, with truncation reported. Closed cards do
+not fetch details. Reads stay inside the saved Session/Workspace and have a
+bounded history budget.
+Saved version-1 Shell display records also supply structured execution details to
+the shared daemon card. Their text fields share a separate 8 KiB/200-line budget,
+and directory/output-file paths share an 8 KiB budget. Unsupported or malformed
+structures retain the legacy text fallback; private fields are excluded.
+See the complete design:
+[English](../../docs/design/2026-10-19-managed-inline-tool-details.md) |
+[简体中文](../../docs/design/2026-10-19-managed-inline-tool-details.zh-CN.md).
 
 ## Tool publication storage
 
@@ -165,12 +202,16 @@ Design and client migration contract:
 ## Experimental reference distribution
 
 The independent Hosted Java reference distribution packages the runnable
-server, operator-recovery entry point, embedded Broker component, provenance
-manifest, checksums, and deployment/upgrade instructions. Pull requests and
-manual dry runs build and boot the same Linux archive; only a protected-main
-production dispatch publishes an immutable prerelease. See
+server, operator-recovery entry point, embedded Broker component, a
+configuration template, systemd unit templates, a credential bootstrap,
+provenance manifest, checksums,
+and deployment/upgrade instructions. Pull requests and manual dry runs build
+and boot the same Linux archive; only a protected-main production dispatch
+publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
+The bundled launcher also supports `--check`, a read-only preflight for
+configuration, Harness reachability, ports and database grants.
 
 ## Prerequisites
 
@@ -419,7 +460,8 @@ lease, durably records the replacement attachment watermark before invoking
 checkpoint-bound continuation with the original public prompt identity, and
 advances the cursor after the response. Unit, contract, and H2 coordinator/store
 tests verify that this path does not resubmit the Prompt or replay the tool. Do
-not advertise general automatic cross-Pod recovery yet: multi-tool recovery,
+not advertise general automatic cross-Pod recovery yet. The SQL scan below
+discovers eligible committed wake inputs after writer loss; multi-tool recovery,
 recovered cancellation, event/checkpoint reconstruction after a
 mid-continuation Harness crash, the full multi-process in-flight failure matrix,
 OSS-backed resources, and scheduler recovery are still pending. Resources
@@ -429,6 +471,40 @@ Production deployments must add mTLS or equivalent service authentication;
 the tenant and writer headers are scope and fencing inputs, not a substitute
 for transport identity. Responses under the private prefix use
 `Cache-Control: no-store`.
+
+### Wake recovery after Harness loss
+
+With the Session Store enabled, an independent control-plane scan discovers
+committed Monitor/background Shell, channel, child-result, workflow, Automation and Session
+message inputs after their writer lease expires. It runs every two seconds on a
+dedicated scheduler, handles up to eight candidate Sessions per pass, and leaves
+a durable 30-second retry delay after a claim. EventTransport is optional; an
+acknowledged or already-claimed MQ wake cannot suppress this scan.
+
+Only a matching committed `turn.settled` consumes an input. Recovery reattaches
+the Session and lets its existing wake pump run unattempted inputs or settle
+interrupted attempts honestly. It does not replay tool effects or turn unknown
+results into success. Old inputs retain this policy regardless of age. Closing,
+retired, private CSI and stopped or terminal child runs are excluded; Workspace grants
+and mount checks still apply. A failed recovery logs the tenant and Session and
+remains retryable without a permanent attempt limit. Backlog or unavailable
+execution/restore evidence can delay recovery beyond the lease and retry time.
+
+Schema V11 adds a revision-stamped wake hint and retry timestamp to the existing
+Session head. Unknown or stale hints rebuild from committed journal events;
+compacted heads are excluded without marking their inputs consumed, while missing
+or corrupt proof is refused. Each proof invocation reads at most 32 transactions
+and yields with its complete continuation for a later claim; partial proof never
+clears the hint or triggers a load. At most 128 exact-prefix continuations or
+positive memos are retained. Live partials keep their slots; new long proofs wait
+for completed or ineligible holders to free capacity. A new revision or process
+restart begins proof at zero with the durable hint intact.
+Upgrade the Server and Broker together; rollback binaries must understand V11.
+This scan is locally verified on macOS/MySQL 8.4. Linux/Windows, real MQ-on and
+deployed provider acceptance remain unverified; see also [Hosted recovery scope](#hosted-recovery-scope).
+The [English design](../../docs/design/2026-10-18-hosted-wake-recovery.md) and
+[Chinese design](../../docs/design/2026-10-18-hosted-wake-recovery.zh-CN.md) describe
+the recovery boundary and acceptance criteria.
 
 ## Managed automation (H6)
 
@@ -896,8 +972,8 @@ and what it would have bound before (milliseconds); a suffixed value never
 warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
-`dispatch.scan-delay`, `events.replay-floor-interval` and
-`message-relay.scan-delay` — also read a bare number as milliseconds,
+`dispatch.scan-delay`, `events.replay-floor-interval`,
+`message-relay.scan-delay` and `wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
 
@@ -1134,7 +1210,7 @@ crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 
 ```bash
 mvn -q -DskipTests compile exec:java \
-  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
 ```
 
@@ -1142,7 +1218,7 @@ The same entry is available from a shipped Spring Boot fat jar, without the sour
 
 ```bash
 java -cp /path/to/app.jar \
-  -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed
 ```
@@ -1393,8 +1469,30 @@ npm run test:e2e:managed-harness-restart-approval-expiry
 npm run test:e2e:managed-harness-restart-continuation-closeout
 ```
 
+Four additional arms layer one fault on the Allow path (#14481 step 2). The
+first crashes the replacement Harness as soon as the decision is durably
+recorded; the second holds the Runtime Broker's execution `:start` so the
+crash lands after the `PREPARED` row and before the physical dispatch. Both
+leave the original Action, prepare key, digest and Runtime identity in place,
+start a third Harness generation, and require exactly one settled execution,
+one file effect and one terminal. The other two drop the control plane's
+reply after it committed; the retry under the same `Idempotency-Key` must
+land on the original record, so a lost decision produces one
+`ACTION_RESPONSE` operation and a lost Turn admission produces one Turn row:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-after-decision
+npm run test:e2e:managed-harness-restart-approval-after-prepare
+npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
+npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
-`G3_VERIFY_REPORT_DIR` overrides the directory.
+`G3_VERIFY_REPORT_DIR` overrides the directory. The approval path still has no
+packaged arm for a lost load reply, a failed cleanup followed by another
+crash, a committed terminal that was not delivered, a payable checkpoint
+whose terminal write is missing, or a crash after the approved result
+commits; those rows stay focused or integration tested (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:
@@ -1419,6 +1517,10 @@ itself, so a failing test in the Hosted MySQL job does not skip the arms, and
 each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
+
+The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
+macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
+provider acceptance. The scope below does not extend those claims.
 
 The first Hosted release supports recovery for one Java control-plane instance
 on one trusted Linux host. That control plane replaces reachable Hosted Harness

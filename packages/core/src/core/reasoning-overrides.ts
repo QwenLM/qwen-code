@@ -6,12 +6,17 @@
 
 import type { Config } from '../config/config.js';
 import type { ContentGeneratorConfig } from './contentGenerator.js';
+import { getRequestModel } from './request-model.js';
 import type {
   AvailableModel,
   ModelReasoningCapabilities,
 } from '../models/types.js';
 import { ALL_PROVIDERS } from '../providers/all-providers.js';
 import { normalize } from './tokenLimits.js';
+import {
+  getBuiltinDeepSeekReasoning,
+  normalizeDeepSeekReasoningEffort,
+} from './deepseek-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 import {
   parseClaudeModelVersion,
@@ -142,6 +147,7 @@ export function validateReasoningCapabilities(
   route: Route,
   declaration: unknown,
 ): ResolvedReasoning | undefined {
+  if (declaration === undefined) return getBuiltinDeepSeekReasoning(route);
   const input = validateReasoningDeclaration(route, declaration);
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)
@@ -318,6 +324,7 @@ export function resolveReasoningForModel(
   model = generation.model,
   strict = false,
 ): ResolvedReasoning | undefined {
+  model = getRequestModel(generation, model);
   let declaration: unknown;
   if (generation.reasoningSnapshot) {
     const rows = generation.reasoningSnapshot.filter(
@@ -361,7 +368,13 @@ export function resolveReasoningForModel(
 }
 
 export function getEffectiveReasoning(
-  generation: Pick<ContentGeneratorConfig, 'reasoning'>,
+  generation: Pick<ContentGeneratorConfig, 'reasoning'> &
+    Partial<
+      Pick<
+        ContentGeneratorConfig,
+        'model' | 'baseUrl' | 'authType' | 'samplingParams' | 'extra_body'
+      >
+    >,
   resolved?: ResolvedReasoning,
 ): ContentGeneratorConfig['reasoning'] {
   if (!resolved) return generation.reasoning;
@@ -376,12 +389,24 @@ export function getEffectiveReasoning(
     return false;
   if (resolved.toggleOnly)
     return selected ?? (resolved.profile ? {} : undefined);
-  const effort = selected?.effort ?? resolved.defaultEffort;
+  const model = getRequestModel(generation);
+  const knownDeepSeek =
+    (resolved.profile === undefined ||
+      resolved.profile === 'deepseek-openai') &&
+    getBuiltinDeepSeekReasoning({ ...generation, model });
+  let effort = selected?.effort ?? resolved.defaultEffort;
+  if (effort && knownDeepSeek && !resolved.efforts.includes(effort))
+    effort = normalizeDeepSeekReasoningEffort(
+      effort,
+      model,
+      generation.baseUrl,
+    ) as ReasoningEffort;
   return effort
     ? {
         ...selected,
         effort:
-          resolved.profile && REASONING_EFFORT_TIERS.includes(effort)
+          (resolved.profile || knownDeepSeek) &&
+          REASONING_EFFORT_TIERS.includes(effort)
             ? clampReasoningEffort(effort, resolved.efforts)
             : effort,
       }

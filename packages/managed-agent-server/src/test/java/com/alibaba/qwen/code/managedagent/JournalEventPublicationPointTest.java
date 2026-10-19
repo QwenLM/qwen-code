@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.store.JournalEventTransport;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;

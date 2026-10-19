@@ -15,18 +15,18 @@ import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
+import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.AgentDefinitionExtensions;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
-import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
 
@@ -206,7 +206,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public com.fasterxml.jackson.databind.JsonNode settleLifecycle(
-            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+            com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         try {
             return doSettleLifecycle(operation, "effects");
         } catch (HostedHarnessGenerationException error) {
@@ -216,7 +216,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private com.fasterxml.jackson.databind.JsonNode doSettleLifecycle(
-            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation, String phase) {
+            com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation, String phase) {
         SessionRecord session = sessions.requireSession(operation.tenantId(), operation.sessionId());
         if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
             throw new IllegalArgumentException("Unknown lifecycle protocol");
@@ -262,16 +262,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    public void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         runResourcePhase(operation, "prepare_resources");
     }
 
     @Override
-    public void settleLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    public void settleLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         runResourcePhase(operation, "settle_resources");
     }
 
-    private void runResourcePhase(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation, String phase) {
+    private void runResourcePhase(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation, String phase) {
         try {
             doSettleLifecycle(operation, phase);
         } catch (HostedHarnessGenerationException error) {
@@ -281,7 +281,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         try {
             doDetachLifecycle(operation);
         } catch (HostedHarnessGenerationException error) {
@@ -290,7 +290,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
-    private void doDetachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    private void doDetachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         AttachmentKey key = new AttachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
         try {
@@ -386,22 +386,51 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         if (session.workspace() != null
                 && !approvalModeConfirmed(session, attached, minted)) {
-            attachments.remove(key);
+            attachments.remove(key, attached);
             throw new IllegalStateException(
                     "Hosted Harness did not confirm the Session approval mode");
         }
-        attachments.put(key, attached);
-        // A passive re-attach (rename / close / the adoptGeneration notices)
-        // carries the takeover recovery snapshot exactly like the
-        // recovery-load path that re-mints it: restore the pending marker
-        // or the next dispatch's cached branch answers "nothing parked"
-        // over the snapshot it still holds (R11-3). The marker is safe
-        // here: it was minted under the live boot, so a boot-identity
-        // eviction drops the attachment itself first.
-        if (attached.getRuntimeRecovery() != null) {
-            pendingRecovery.add(key);
-        } else {
-            pendingRecovery.remove(key);
+        HarnessSessionRef loaded = attached;
+        attachments.compute(key, (ignored, held) -> {
+            if (passiveManagedRuntimeRecovery && loadExisting) {
+                HostedHarnessClient current = client;
+                if (current == null) {
+                    throw new IllegalStateException("Hosted Harness generation moved during passive load");
+                }
+                String liveBootId = current.capabilities().getBootId();
+                if (!liveBootId.equals(loaded.getHarnessBootId())) {
+                    throw new IllegalStateException("Hosted Harness generation moved during passive load");
+                }
+            }
+            return loaded;
+        });
+        HarnessSessionRef published = attachments.computeIfPresent(key, (ignored, held) -> {
+            if (held != loaded) {
+                return held;
+            }
+            if (passiveManagedRuntimeRecovery && loadExisting) {
+                HostedHarnessClient current = client;
+                if (current == null || !current.capabilities().getBootId().equals(loaded.getHarnessBootId())) {
+                    pendingRecovery.remove(key);
+                    return null;
+                }
+            }
+            // A passive re-attach (rename / close / the adoptGeneration notices)
+            // carries the takeover recovery snapshot exactly like the
+            // recovery-load path that re-mints it: restore the pending marker
+            // or the next dispatch's cached branch answers "nothing parked"
+            // over the snapshot it still holds (R11-3). The ref must already
+            // be published for adoption's orphan-marker cleanup, and this
+            // slot prevents a late response changing a newer ref's marker.
+            if (loaded.getRuntimeRecovery() != null) {
+                pendingRecovery.add(key);
+            } else {
+                pendingRecovery.remove(key);
+            }
+            return loaded;
+        });
+        if (passiveManagedRuntimeRecovery && loadExisting && published != loaded) {
+            throw new IllegalStateException("Hosted Harness generation moved during passive load");
         }
         return new Attachment(attached.getHarnessBootId(),
                 attached.getRuntimeRecovery(),
@@ -880,6 +909,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void recoverForWake(String tenantId, String sessionId) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            // Passive load always makes a round trip, even with a cached ref, and never
+            // drives an unrelated foreground Turn. The loaded wake pump owns its inputs.
+            doCreateOrLoad(tenantId, sessionId, true, true, false);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public boolean activateForWake(String tenantId, String sessionId) {
         try {
             // An attachment held here is not this verb's to evict: a wake
@@ -1178,6 +1220,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             adoptGeneration(error);
             throw error;
         }
+    }
+
+    @Override
+    public void discardManagedRecovery(String tenantId, String sessionId) {
+        // The recheck must ask the Broker again, not replay the snapshot the
+        // park was decided on. Dropping the cached attachment forces the
+        // next load to re-read; a concurrent stream keeps its own ref.
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        pendingRecovery.remove(key);
+        attachments.remove(key);
     }
 
     private Attachment loadCancellationTakeover(SessionRecord session) {
