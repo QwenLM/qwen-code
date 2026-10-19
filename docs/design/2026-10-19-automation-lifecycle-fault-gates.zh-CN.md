@@ -2,7 +2,7 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-状态：第 1 片部分交付。`disable-span` 已实现并实跑绿；其余三格与第 2 片已定界但未实现。
+状态：第 1 片部分交付。`disable-span` 已实现并实跑绿；其余两格与第 2 片已定界但未实现。
 
 Issue：#14446，FG11 tracker。`d` 行记载按 run 取消已由 #14526 实现，并声明
 retire、disable、close 与 round 级取消矩阵并未因该合并而结清。
@@ -27,11 +27,12 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 
 两片都落在 `HostedAutomationFaultGatesIT`：它已提供打包栈——进程内 Spring
 （scanner 开启）、`HostedLifecycleRelay` 背后的真实 Harness、真实 MySQL 与
-模型桩。这些格子不执行 Workspace 工具，因此绕开阻塞 FG11f 的执行授权路径。
-
-故障由既有 relay 承载：`held(...)` 在 Harness 看到操作之前扣住它，
+模型桩。故障由既有 relay 承载：`held(...)` 在 Harness 看到操作之前扣住它，
 `relayed(...)` 丢掉一次应答，scanner 自己的调度器在用例布置期间被挂起。
-第 1 片不需要新夹具。
+
+只有 `disable-span` 能直接跑在这套夹具上。`retire-at-intent` 需要在
+「run 已提交、wake turn 未开始」之间扣留，`close-*` 需要夹具当前能够接受的
+会话关闭；两点记在「边界」里，而不是当作已就绪。
 
 ## 第 1 片：retire、disable、close
 
