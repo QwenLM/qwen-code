@@ -421,6 +421,88 @@ describe('TrajectoryPanel', () => {
     expect(document.activeElement).toBe(refresh);
   });
 
+  it.each(['grid', 'collapsed', 'outside'] as const)(
+    'recovers focused details on execution eviction (%s)',
+    async (target) => {
+      const store = createTrajectoryLiveStore();
+      const owner = {};
+      store.begin(owner, {
+        sessionId: 's',
+        scope: 'scope',
+        epoch: 'epoch',
+        events: [],
+        incomplete: false,
+      });
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+      const event = (id: number): DaemonEvent => ({
+        v: 1,
+        id: id + 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            executionLifecycle: {
+              v: 1,
+              kind: 'request',
+              phase: 'ended',
+              executionId: `execution-${id}`,
+              sessionId: 's',
+              promptId: 'p',
+              model: 'model',
+              startedAt: id,
+              endedAt: id + 1,
+              durationMs: 1,
+              outcome: 'success',
+            },
+          },
+        },
+      });
+      store.ingest(owner, event(0));
+      const loader = createTrajectoryPageLoader(
+        { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+        's',
+        'scope',
+      );
+      const container = await render(loader, store);
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-executions"] > button',
+      )!;
+      if (target === 'collapsed') await act(async () => toggle.click());
+      const details = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-inspector"]',
+      )!;
+      const refresh = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Refresh"]',
+      )!;
+      const close = details.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      (target === 'outside' ? refresh : close).focus();
+      await act(async () => {
+        for (let id = 1; id <= 256; id++) store.ingest(owner, event(id));
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(document.activeElement).toBe(
+        target === 'outside'
+          ? refresh
+          : target === 'collapsed'
+            ? toggle
+            : container.querySelector(
+                '[data-testid="trajectory-executions"] [role="grid"]',
+              ),
+      );
+    },
+  );
+
   it('returns focus to the recent toggle when closing details with its grid collapsed', async () => {
     const store = createTrajectoryLiveStore();
     store.begin(

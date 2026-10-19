@@ -326,6 +326,15 @@ export function TrajectoryPanel({
 }: TrajectoryPanelProps) {
   const { t } = useI18n();
   const panelRef = useRef<HTMLDivElement>(null);
+  const focusRecentExecutions = useCallback(() => {
+    const section = panelRef.current?.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"]',
+    );
+    (
+      section?.querySelector<HTMLElement>('[role="grid"]') ??
+      section?.querySelector<HTMLButtonElement>('button')
+    )?.focus({ preventScroll: true });
+  }, []);
   const {
     trajectory,
     lifecycle,
@@ -1747,14 +1756,9 @@ export function TrajectoryPanel({
           onClearRange={() => {}}
           onClose={() => {
             setExecutionSelection(undefined);
-            const section = panelRef.current?.querySelector<HTMLElement>(
-              '[data-testid="trajectory-executions"]',
-            );
-            (
-              section?.querySelector<HTMLElement>('[role="grid"]') ??
-              section?.querySelector<HTMLButtonElement>('button')
-            )?.focus({ preventScroll: true });
+            focusRecentExecutions();
           }}
+          onFocusedUnmount={focusRecentExecutions}
           onLocateExecution={
             selectedExecution.historyRowKey
               ? () => {

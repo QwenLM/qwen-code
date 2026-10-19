@@ -217,3 +217,29 @@ it('opens in one click after manual collapse and a compact viewport resize', asy
   expect(toggle.getAttribute('aria-expanded')).toBe('true');
   expect(vi.getTimerCount()).toBe(1);
 });
+
+for (const removal of ['compact', 'empty'] as const) {
+  it.each([false, true])(
+    `restores focus on ${removal} only when the removed grid owns it (outside=%s)`,
+    async (outside) => {
+      const { container, update } = await mount([running()]);
+      const grid = container.querySelector<HTMLElement>('[role="grid"]')!;
+      const toggle = container.querySelector<HTMLButtonElement>('button')!;
+      const other = document.createElement('button');
+      container.append(other);
+      (outside ? other : grid).focus();
+      if (removal === 'compact') {
+        act(() =>
+          resize(
+            [{ contentRect: { height: 400 } } as ResizeObserverEntry],
+            {} as ResizeObserver,
+          ),
+        );
+      } else {
+        await update([]);
+      }
+      expect(container.querySelector('[role="grid"]')).toBeNull();
+      expect(document.activeElement).toBe(outside ? other : toggle);
+    },
+  );
+}

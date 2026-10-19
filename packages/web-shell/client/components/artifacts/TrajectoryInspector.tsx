@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
@@ -50,6 +50,7 @@ export function TrajectoryInspector({
   onReveal,
   onClearRange,
   onClose,
+  onFocusedUnmount,
 }: {
   row?: TrajectoryRow;
   lifecycle?: TrajectoryLifecycleEntry;
@@ -65,11 +66,13 @@ export function TrajectoryInspector({
   onReveal: () => void;
   onClearRange: () => void;
   onClose: () => void;
+  onFocusedUnmount?: () => void;
 }) {
   const { t, language } = useI18n();
   const [tab, setTab] = useState<Tab>('summary');
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'failed'>();
+  const sectionRef = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const alive = useRef(true);
   const copyVersion = useRef(0);
@@ -81,6 +84,15 @@ export function TrajectoryInspector({
       alive.current = false;
     };
   }, []);
+
+  useLayoutEffect(
+    () => () => {
+      if (sectionRef.current?.contains(document.activeElement)) {
+        onFocusedUnmount?.();
+      }
+    },
+    [onFocusedUnmount],
+  );
 
   const rowKind = row?.kind;
   const executionKey = execution?.key;
@@ -375,6 +387,7 @@ export function TrajectoryInspector({
 
   return (
     <section
+      ref={sectionRef}
       className={styles.inspector}
       aria-label={t('trajectory.inspector.title')}
       data-testid="trajectory-inspector"

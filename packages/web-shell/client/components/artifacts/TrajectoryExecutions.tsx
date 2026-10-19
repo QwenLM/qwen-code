@@ -3,7 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import { useI18n } from '../../i18n';
@@ -29,7 +29,14 @@ export function TrajectoryExecutions({
   const [expanded, setExpanded] = useState(true);
   const [compact, setCompact] = useState(false);
   const rootRef = useRef<HTMLElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const setScrollElement = useCallback((node: HTMLDivElement | null) => {
+    if (!node && scrollRef.current?.contains(document.activeElement)) {
+      toggleRef.current?.focus({ preventScroll: true });
+    }
+    scrollRef.current = node;
+  }, []);
   const [visible, setVisible] = useState(() => !document.hidden);
   const [now, setNow] = useState(Date.now);
   const [activeKey, setActiveKey] = useState<string>();
@@ -90,6 +97,7 @@ export function TrajectoryExecutions({
       data-testid="trajectory-executions"
     >
       <button
+        ref={toggleRef}
         type="button"
         className={styles.toggle}
         aria-expanded={open}
@@ -134,7 +142,7 @@ export function TrajectoryExecutions({
             <p className={styles.notice}>{t('trajectory.executions.empty')}</p>
           ) : (
             <div
-              ref={scrollRef}
+              ref={setScrollElement}
               className={styles.scroll}
               role="grid"
               tabIndex={0}
