@@ -341,8 +341,10 @@ class WorkspaceStorageGuardTest {
         var client = mock(HostedHarnessClient.class);
         var capabilities = mock(HostedHarnessCapabilities.class);
         when(client.capabilities()).thenReturn(capabilities);
-        when(capabilities.getBootId()).thenReturn(UUID.randomUUID().toString());
+        String bootId = UUID.randomUUID().toString();
+        when(capabilities.getBootId()).thenReturn(bootId);
         var attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(bootId);
         when(attached.getApprovalMode()).thenReturn("default");
         when(client.loadSession(any())).thenReturn(attached);
         ReflectionTestUtils.setField(connector, "client", client);
@@ -410,8 +412,10 @@ class WorkspaceStorageGuardTest {
         var client = mock(HostedHarnessClient.class);
         var capabilities = mock(HostedHarnessCapabilities.class);
         when(client.capabilities()).thenReturn(capabilities);
-        when(capabilities.getBootId()).thenReturn(UUID.randomUUID().toString());
+        String bootId = UUID.randomUUID().toString();
+        when(capabilities.getBootId()).thenReturn(bootId);
         var attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(bootId);
         when(attached.getApprovalMode()).thenReturn("default");
         when(client.loadSession(any())).thenReturn(attached);
         ReflectionTestUtils.setField(connector, "client", client);

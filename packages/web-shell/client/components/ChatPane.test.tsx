@@ -116,6 +116,10 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
   current: null as Record<string, unknown> | null,
 }));
 
+const paneSettings = vi.fn(async () => ({ v: 1, settings: [] }));
+const workspaceByCwd = vi.fn(() => ({ workspaceSettings: paneSettings }));
+const paneWorkspaceClient = { workspaceByCwd };
+
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => daemonActions,
@@ -148,7 +152,8 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => ({}),
   useWorkspace: () => ({
     capabilities: connectionState.capabilities,
-    client: {},
+    client: paneWorkspaceClient,
+    status: connectionState.status,
     workspaceCwd: '/primary',
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
@@ -427,6 +432,9 @@ let container: HTMLDivElement | null = null;
 const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
+  paneSettings.mockReset();
+  paneSettings.mockResolvedValue({ v: 1, settings: [] });
+  workspaceByCwd.mockClear();
   connectionState = {
     status: 'connected',
     sessionId: 'sess-1',
@@ -3977,3 +3985,138 @@ it.each(['builtin-command', 'project', 'missing'])(
     expect(sendPrompt).toHaveBeenCalledTimes(source === 'project' ? 1 : 0);
   },
 );
+
+describe('pane approval mode allowlist', () => {
+  beforeEach(() => {
+    connectionState.capabilities = {
+      features: ['workspace_qualified_rest_core', 'workspace_settings'],
+    };
+  });
+
+  it('applies host choices to split and embedded side-task composers', async () => {
+    connectionState.currentMode = 'yolo';
+    render({ embedded: true }, { allowedApprovalModes: ['default', 'auto'] });
+    expect(latestChatEditorProps.availableModes).toEqual(['default', 'auto']);
+    act(() => latestChatEditorProps.onSelectMode('yolo'));
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    act(() => latestChatEditorProps.onCycleMode());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('default', {
+      planMode: false,
+    });
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    rerender({ embedded: true }, { allowedApprovalModes: [] });
+    setApprovalMode.mockClear();
+    act(() => latestChatEditorProps.onCycleMode());
+    expect(latestChatEditorProps.availableModes).toEqual([]);
+    expect(setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('reports when a directly selected mode is not offered', () => {
+    const onError = vi.fn();
+    render({ onError }, { allowedApprovalModes: ['default', 'auto'] });
+    act(() => latestChatEditorProps.onSelectMode('yolo'));
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('not offered here: yolo'),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('keeps reporting plan as unsupported when an allowlist is set', async () => {
+    const onError = vi.fn();
+    render({ onError }, { allowedApprovalModes: ['auto'] });
+    await act(async () => {
+      latestChatEditorProps.onSelectMode('plan');
+      await Promise.resolve();
+    });
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          'Unsupported execution approval mode: plan',
+        ),
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('reads its own workspace settings and drops old choices on workspace change', async () => {
+    paneSettings.mockResolvedValueOnce({
+      v: 1,
+      settings: [
+        { key: 'ui.allowedApprovalModes', values: { effective: ['auto'] } },
+      ],
+    } as never);
+    render({ workspaceCwd: '/secondary' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(latestChatEditorProps.availableModes).toEqual(['auto']);
+    paneSettings.mockResolvedValueOnce({
+      v: 1,
+      settings: [
+        { key: 'ui.allowedApprovalModes', values: { effective: ['default'] } },
+      ],
+    } as never);
+    rerender({ workspaceCwd: '/third' });
+    expect(latestChatEditorProps.availableModes).toEqual([
+      'default',
+      'auto-edit',
+      'auto',
+      'yolo',
+    ]);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceByCwd).toHaveBeenLastCalledWith('/third');
+    expect(latestChatEditorProps.availableModes).toEqual(['default']);
+  });
+
+  it('ignores an older workspace response after the pane has moved', async () => {
+    const old = deferred<Awaited<ReturnType<typeof paneSettings>>>();
+    paneSettings.mockReturnValueOnce(old.promise);
+    render({ workspaceCwd: '/old' });
+    paneSettings.mockResolvedValueOnce({
+      v: 1,
+      settings: [
+        { key: 'ui.allowedApprovalModes', values: { effective: ['auto'] } },
+      ],
+    } as never);
+    rerender({ workspaceCwd: '/new' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(latestChatEditorProps.availableModes).toEqual(['auto']);
+    await act(async () => {
+      old.resolve({
+        v: 1,
+        settings: [
+          { key: 'ui.allowedApprovalModes', values: { effective: ['yolo'] } },
+        ],
+      } as never);
+      await old.promise;
+    });
+    expect(latestChatEditorProps.availableModes).toEqual(['auto']);
+  });
+
+  it('does not read primary settings for standalone panes or failed qualified reads', async () => {
+    connectionState.sessionContext = { kind: 'standalone' };
+    render();
+    expect(workspaceByCwd).not.toHaveBeenCalled();
+    connectionState.sessionContext = undefined;
+    paneSettings.mockRejectedValueOnce(new Error('workspace unavailable'));
+    rerender({ workspaceCwd: '/missing' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceByCwd).toHaveBeenCalledOnce();
+    // A failed scoped read fails closed rather than offering every mode.
+    expect(latestChatEditorProps.availableModes).toEqual([]);
+  });
+});

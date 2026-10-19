@@ -23,6 +23,7 @@ import {
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
@@ -31,6 +32,28 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('declares a replace-only Web Shell approval mode allowlist', () => {
+    const { allowedApprovalModes } = getSettingsSchema().ui.properties;
+    expect(allowedApprovalModes).toMatchObject({
+      type: 'array',
+      default: undefined,
+      mergeStrategy: MergeStrategy.REPLACE,
+      showInDialog: false,
+      items: {
+        type: 'string',
+        // Pinned to the SDK vocabulary rather than restated as a literal, so
+        // a permission mode added there without this schema following turns
+        // this assertion red instead of shipping a stale editor enum.
+        enum: DAEMON_APPROVAL_MODES.filter((mode) => mode !== 'plan'),
+      },
+    });
+    // The key is workspace-restricted; the description is the only in-editor
+    // signal, so it must say so (mirrored verbatim into the VSCode schema).
+    expect(allowedApprovalModes.description).toMatch(
+      /values set in Workspace settings are ignored/,
+    );
+  });
+
   describe('getSettingsSchema', () => {
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =

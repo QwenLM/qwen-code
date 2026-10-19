@@ -15,6 +15,10 @@ public final class ManagedSessionStoreModels {
     public static final String WRITER_TOKEN_HEADER =
             "X-Qwen-Managed-Writer-Token";
     public static final int MAX_INLINE_RESOURCE_BYTES = 64 * 1024;
+    public static final int MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
+    public static final int MAX_MODEL_REQUEST_BYTES = 32 * 1024 * 1024;
+    public static final int MAX_INLINE_RESOURCE_BASE64_CHARS = ((MAX_MODEL_REQUEST_BYTES + 2) / 3) * 4;
+    public static final int MAX_INLINE_TRANSACTION_BYTES = 40 * 1024 * 1024;
     /** The agent-instructions bound the publisher and both verifiers
      * must agree on (admission, publish, verify, recovery read). */
     public static final int MAX_AGENT_INSTRUCTIONS_BYTES = 64 * 1024;
@@ -63,6 +67,14 @@ public final class ManagedSessionStoreModels {
     private static final String DIGEST_PATTERN = "^[0-9a-f]{64}$";
 
     private ManagedSessionStoreModels() {
+    }
+
+    public static int inlineResourceBytes(String kind) {
+        return switch (kind) {
+            case "managed-input" -> MAX_ATTACHMENT_INPUT_BYTES;
+            case "hosted-model-request" -> MAX_MODEL_REQUEST_BYTES;
+            default -> MAX_INLINE_RESOURCE_BYTES;
+        };
     }
 
     public record AuthorizeLifecycleRequest(
@@ -135,7 +147,7 @@ public final class ManagedSessionStoreModels {
             @Min(1) int schemaVersion,
             @Min(0) long byteLength,
             @NotBlank @Pattern(regexp = DIGEST_PATTERN) String digest,
-            @Size(max = 90_000) String bytesBase64) {
+            @Size(max = MAX_INLINE_RESOURCE_BASE64_CHARS) String bytesBase64) {
     }
 
     public record PublishToolResultRequest(
