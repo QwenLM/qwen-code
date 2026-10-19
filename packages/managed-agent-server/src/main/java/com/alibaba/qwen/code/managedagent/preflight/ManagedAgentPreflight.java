@@ -21,11 +21,9 @@ import org.springframework.core.io.Resource;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -276,20 +274,20 @@ public final class ManagedAgentPreflight {
         String address = environment.getProperty("server.address",
                 "127.0.0.1");
         try {
-            ServerProperties server = new ServerProperties();
-            server.setAddress(InetAddress.getByName(address));
-            Integer port = environment.getProperty("server.port",
-                    Integer.class);
-            if (port != null) {
-                server.setPort(port);
-            }
-            new BrokerSecurity(properties, server, new WebMvcProperties());
+            ServerProperties server = Binder.get(environment)
+                    .bind("server", Bindable.of(ServerProperties.class))
+                    .orElseGet(ServerProperties::new);
+            WebMvcProperties mvc = Binder.get(environment)
+                    .bind("spring.mvc", Bindable.of(WebMvcProperties.class))
+                    .orElseGet(WebMvcProperties::new);
+            new BrokerSecurity(properties, server, mvc);
         } catch (IllegalStateException error) {
             return new Check("auth", Status.FAIL, error.getMessage(),
                     "correct the auth or bind configuration");
-        } catch (UnknownHostException error) {
+        } catch (RuntimeException error) {
             return new Check("auth", Status.FAIL,
-                    "cannot resolve " + address, "fix the bind address");
+                    "cannot bind server configuration: " + rootMessage(error),
+                    "correct the server or spring.mvc settings");
         }
         if (properties.getAuth().isAllowInsecureBind()) {
             return new Check("auth", Status.WARN,
@@ -419,6 +417,14 @@ public final class ManagedAgentPreflight {
                     "no Workspace mount, creation root or SSH node",
                     "add runtime-broker.workspace-mounts to "
                             + "config/application.yml");
+        }
+        if (!StringUtils.isBlank(broker.getWorkspaceCreationRoot())
+                && (!broker.isDurableLocalProcess()
+                        || !broker.isVerifiedWorkspaceRecoveryEnabled())) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace creation requires durable local-process"
+                            + " execution and verified recovery",
+                    "set verified-workspace-recovery-enabled=true");
         }
         return new Check("tool-path", Status.PASS,
                 "Workspace files enabled in mode " + mode, null);
@@ -644,7 +650,7 @@ public final class ManagedAgentPreflight {
             return null;
         }
         for (String entry : classPath.split(File.pathSeparator)) {
-            Path file = Path.of(entry);
+            Path file = Path.of(entry).toAbsolutePath().normalize();
             if (!entry.endsWith(".jar") || !Files.isRegularFile(file)) {
                 continue;
             }

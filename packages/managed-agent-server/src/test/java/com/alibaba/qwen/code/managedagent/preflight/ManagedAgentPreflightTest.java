@@ -212,6 +212,8 @@ class ManagedAgentPreflightTest {
         properties.getRuntimeBroker().setEnabled(true);
         properties.getRuntimeBroker()
                 .setWorkspaceCreationRoot("/tmp/workspace-root");
+        properties.getRuntimeBroker()
+                .setVerifiedWorkspaceRecoveryEnabled(true);
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
     }
@@ -219,6 +221,15 @@ class ManagedAgentPreflightTest {
     @Test
     void rejectsWorkspaceFilesWithoutAMountOrCreationRoot() {
         ManagedAgentProperties properties = toolProperties();
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsWorkspaceCreationWithoutVerifiedRecovery() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
     }
@@ -288,6 +299,10 @@ class ManagedAgentPreflightTest {
                         + "{\"latestMigrationVersion\":\"999\"}}}");
         assertEquals(manifest,
                 ManagedAgentPreflight.findManifest(jar.toString()));
+        Path relative = Path.of("").toAbsolutePath()
+                .relativize(jar.toAbsolutePath());
+        assertEquals(manifest,
+                ManagedAgentPreflight.findManifest(relative.toString()));
         assertEquals("999",
                 ManagedAgentPreflight.expectedSchemaVersion(manifest));
     }
@@ -301,6 +316,26 @@ class ManagedAgentPreflightTest {
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 ManagedAgentPreflight.authCheck(environment, properties)
                         .status());
+    }
+
+    @Test
+    void rejectsAContextPath() {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setProperty("server.address", "127.0.0.1");
+        environment.setProperty("server.servlet.context-path", "/prefix");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.authCheck(environment,
+                        new ManagedAgentProperties()).status());
+    }
+
+    @Test
+    void rejectsAServletPath() {
+        MockEnvironment environment = new MockEnvironment();
+        environment.setProperty("server.address", "127.0.0.1");
+        environment.setProperty("spring.mvc.servlet.path", "/api");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.authCheck(environment,
+                        new ManagedAgentProperties()).status());
     }
 
     @Test
