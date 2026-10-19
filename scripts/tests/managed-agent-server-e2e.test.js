@@ -363,6 +363,20 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain("approvalFault === 'after-result'");
     expect(source).toContain('expectedModelsAfterResults');
     expect(source).toContain('? 2');
+    // R1-3: the retraction assertion must be pinned, or deleting it keeps
+    // every script suite green while the arm stops proving the prefix left.
+    expect(source).toContain('Result-commit recovery left');
+    // R1-2: the structured half (stream.reconciled ordering) must be
+    // asserted, not only written to the evidence file.
+    expect(source).toContain(
+      'Result-commit recovery did not reconcile the published prefix',
+    );
+    // R1-6: a parity failure must retain the two request bodies for diffing.
+    expect(source).toContain('model-request-parity.json');
+    // R1-5: the pre-dispatch proxy must never hold after-result's :start.
+    expect(source.slice(proxy - 500, proxy)).not.toContain(
+      "approvalFault === 'after-result'",
+    );
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

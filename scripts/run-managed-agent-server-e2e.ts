@@ -2109,12 +2109,12 @@ try {
       replacementSpring = spring;
       replacementSpringUrl = springUrl;
       replacementHarnessPort = harnessPort;
-      // Both crash barriers hold the approved execution's :start before the
-      // Broker sees it: after-prepare waits for the durable PREPARED row,
-      // while after-decision only needs the decision to commit and must not
-      // let that generation reach dispatch or result commit before the
-      // crash. Without the hold a fast Harness could make the arm prove a
-      // later barrier while still calling itself "after decision".
+      // The two pre-dispatch crash barriers hold the approved execution's
+      // :start before the Broker sees it: after-prepare waits for the
+      // durable PREPARED row, while after-decision only needs the decision
+      // to commit. after-result must NOT be held here: its barrier is the
+      // committed result, so holding :start would keep the execution at
+      // PREPARED and its own wait for SETTLED could never succeed.
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare'
@@ -2402,6 +2402,7 @@ try {
             `Original Turn cancel returned ${response.status}: ${await response.text()}`,
           );
       }
+      let publishedPrefixSequences: number[] = [];
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
@@ -2488,7 +2489,7 @@ try {
           approvalFault === 'after-result'
             ? await publicTranscript(replacementSpringUrl, tenant, session.id)
             : undefined;
-        const publishedPrefixSequences = (publishedPrefix?.events ?? [])
+        publishedPrefixSequences = (publishedPrefix?.events ?? [])
           .filter(
             (event) =>
               event.type === 'item.output_text.delta' &&
@@ -2587,6 +2588,19 @@ try {
         if (transcript.text !== continuationResponse)
           throw new Error(
             `Result-commit recovery left ${JSON.stringify(transcript.text)}, not the recovered answer`,
+          );
+        if (
+          publishedPrefixSequences.length === 0 ||
+          !reconciledBetween(
+            transcript.events,
+            Math.min(...publishedPrefixSequences),
+            Math.min(
+              ...deltaSequences(transcript.events, continuationResponse),
+            ),
+          )
+        )
+          throw new Error(
+            'Result-commit recovery did not reconcile the published prefix before the recovered answer',
           );
       }
       const rows = runMysql(
@@ -2711,16 +2725,20 @@ try {
         throw new Error(
           `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
         );
-      if (
-        approvalFault === 'after-result' &&
-        !isDeepStrictEqual(
+      if (approvalFault === 'after-result') {
+        const parity = isDeepStrictEqual(
           modelAfterResults[0]?.body,
           modelAfterResults[1]?.body,
-        )
-      )
-        throw new Error(
-          'Result-commit recovery changed the saved model request',
         );
+        saveEvidence('model-request-parity.json', {
+          requests: modelAfterResults.map((request) => request.body),
+          equal: parity,
+        });
+        if (!parity)
+          throw new Error(
+            'Result-commit recovery changed the saved model request',
+          );
+      }
       if (responseOperation) {
         await waitUntil(
           'Approval response command completion',
