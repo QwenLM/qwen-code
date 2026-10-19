@@ -136,7 +136,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var manager = new DataSourceTransactionManager(source);
         var transaction = new TransactionTemplate(manager);
         transaction.setTimeout(10);
-        if (isolation != 0) transaction.setIsolationLevel(isolation);
+        if (isolation != 0) {
+            transaction.setIsolationLevel(isolation);
+        }
         var cold = new ColdContention(source, manager, isolation);
         var registration = new WorkspaceCsiRegistration("tenant", "storage", "owned-cluster", "owned-runtime",
                 "pvc", "pvc-uid", "pv", "pv-uid", "diskplugin.csi.alibabacloud.com", "volume", "backend",
