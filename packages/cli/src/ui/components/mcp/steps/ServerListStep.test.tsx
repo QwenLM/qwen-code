@@ -64,7 +64,7 @@ describe('ServerListStep', () => {
     });
   });
 
-  it('reports the selected server by its position in `servers` when grouping reorders rows', () => {
+  it('reports the selected server itself when grouping reorders rows', () => {
     // `assembleMcpServers` appends a top-tier server (`--mcp-config`, an ACP
     // session, or bundled Mem0) after project `.mcp.json` servers, while the
     // list renders User before Project. Rows and `servers` therefore diverge:
@@ -82,7 +82,7 @@ describe('ServerListStep', () => {
     expect(lastFrame()).toContain('❯ cli-server');
 
     pressKey({ name: 'return' });
-    expect(onSelect).toHaveBeenCalledWith(2);
+    expect(onSelect).toHaveBeenCalledWith(topTier);
   });
 
   it('navigates with Ctrl+N/P readline aliases', () => {
