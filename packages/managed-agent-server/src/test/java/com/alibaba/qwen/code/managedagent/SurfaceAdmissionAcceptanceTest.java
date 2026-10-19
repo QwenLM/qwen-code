@@ -243,6 +243,9 @@ class SurfaceAdmissionAcceptanceTest {
         var claim = sshWorkspaces.claim(tenant, OWNER,
                 registration.operationId(), "fixture");
         assertThat(claim).isNotNull();
+        // D7-2: only a reserved registration may have reached its node, so
+        // only a reserved one parks recovery_blocked.
+        sshWorkspaces.reserve(claim, "fixture", reservedRegistration(claim, tenant));
         sshWorkspaces.fail(claim, "fixture", "ssh_runtime_identity_mismatch", false);
         registrationOperation = registration.operationId();
     }
@@ -486,6 +489,10 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, null, (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? 401 : 404,
                         (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? "actor_required"
                                 : "session_not_found");
+            }
+            case WORKSPACE_FILES -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
@@ -1608,9 +1615,11 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
+            case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_APPROVAL, SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS -> "{\"sessionId\":\"" + session + "\"}";
             case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
             case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
@@ -1878,5 +1887,18 @@ class SurfaceAdmissionAcceptanceTest {
                             acceptancePublicationData),
                     properties);
         }
+    }
+
+    static java.util.Map<String, Object> reservedRegistration(
+            com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore.Intent intent, String tenant) {
+        java.util.Map<String, Object> identity = java.util.Map.of("root", "/work/project",
+                "hostId", "host-" + tenant, "device", "1", "inode", "2", "birthTime", "3");
+        var marker = new java.util.LinkedHashMap<String, Object>(identity);
+        marker.put("version", 2);
+        marker.put("tenantId", intent.tenantId());
+        marker.put("storageId", intent.storageId());
+        marker.put("registrationId", intent.registrationId());
+        return java.util.Map.of("nodeId", intent.nodeId(), "identity", identity, "marker", marker,
+                "qwenVersion", "0.25.1");
     }
 }

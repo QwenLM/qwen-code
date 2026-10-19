@@ -28,4 +28,12 @@ public class RequestDigests {
                     "Request cannot be canonicalized", error);
         }
     }
+
+    int byteLength(Object value) {
+        try {
+            return canonicalMapper.writeValueAsBytes(value).length;
+        } catch (JsonProcessingException error) {
+            throw new IllegalArgumentException("Request cannot be canonicalized", error);
+        }
+    }
 }

@@ -28,6 +28,33 @@ describe('escapeInvisibleForMerge', () => {
     expect(escapeInvisibleForMerge('a\u001bb')).toBe('a\\u001bb');
   });
 
+  it('is injective: a real invisible character never collides with its own escape text', () => {
+    // The merge view compares these documents. A non-injective transform made a
+    // real U+200B and the literal text `\\u200b` byte-identical, so a file that
+    // changed was reported as unchanged context, while the file-list badge -
+    // computed from the raw texts - still said +1/-1.
+    const pairs: Array<[string, string]> = [
+      ['a\u200bb', 'a\\u200bb'],
+      ['a\u200db', 'a\\u200db'],
+      ['a\u202eb', 'a\\u202eb'],
+      ['a\u0000b', 'a\\u0000b'],
+    ];
+    for (const [real, literal] of pairs) {
+      expect(escapeInvisibleForMerge(real)).not.toBe(
+        escapeInvisibleForMerge(literal),
+      );
+    }
+    // The real character keeps a single backslash; the literal keeps two.
+    expect(escapeInvisibleForMerge('a\u200bb')).toBe('a\\u200bb');
+    expect(escapeInvisibleForMerge('a\\u200bb')).toBe('a\\\\u200bb');
+  });
+
+  it('leaves a plain backslash path readable instead of colliding', () => {
+    // Doubling a backslash is the price of injectivity; it must stay
+    // reversible-looking rather than swallowing the following character.
+    expect(escapeInvisibleForMerge('C:\\tmp')).toBe('C:\\\\tmp');
+  });
+
   it('differs from the decoration class on exactly the structural set', () => {
     // The two classes differ on CR alone: LF and TAB were never in either, so
     // CR is the one character that reached a document as a literal escape.

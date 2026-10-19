@@ -285,9 +285,21 @@ export function parseUnifiedDiff(diff: string): {
   const hunkHeader = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
   const diffLines = diff.split('\n');
   const hasHunks = diffLines.some((line) => hunkHeader.test(line));
+  // Raw patches (a `fileDiff` built by jsdiff and shipped through
+  // `getRawFileDiff`) never carry `DIFF_CRLF_UNIFORM_MARKER`, because no
+  // builder saw the source text. The information is still recoverable from
+  // the rows themselves: a `\r\n` file keeps its `\r` on every content row,
+  // so a patch whose content rows all end with `\r` is uniform by the same
+  // definition the builders use. Collect the terminators and decide at the
+  // end, excluding a possibly-truncated trailing row (`DiffView` slices by
+  // `maxLength`) so truncation cannot turn a uniform file into a mixed one.
+  const endsWithNewline = diff.endsWith('\n');
+  const contentTerminators: boolean[] = [];
 
-  for (const line of diffLines) {
+  for (let index = 0; index < diffLines.length; index++) {
+    const line = diffLines[index];
     const match = line.match(hunkHeader);
+    let contentRow = false;
     if (match) {
       oldLine = parseInt(match[1], 10);
       oldRemaining = match[2] === undefined ? 1 : parseInt(match[2], 10);
@@ -302,11 +314,13 @@ export function parseUnifiedDiff(diff: string): {
       lines.push({ type: 'add', content: line.slice(1), newLine });
       newLine++;
       if (hasHunks) newRemaining--;
+      contentRow = true;
     } else if ((!hasHunks || oldRemaining > 0) && line.startsWith('-')) {
       deletions++;
       lines.push({ type: 'del', content: line.slice(1), oldLine });
       oldLine++;
       if (hasHunks) oldRemaining--;
+      contentRow = true;
     } else if (
       (!hasHunks || (oldRemaining > 0 && newRemaining > 0)) &&
       line.startsWith(' ')
@@ -323,9 +337,21 @@ export function parseUnifiedDiff(diff: string): {
         oldRemaining--;
         newRemaining--;
       }
+      contentRow = true;
     } else {
       lines.push({ type: 'header', content: line });
     }
+    if (contentRow && (endsWithNewline || index < diffLines.length - 1)) {
+      contentTerminators.push(line.endsWith('\r'));
+    }
+  }
+
+  if (
+    !crlfUniform &&
+    contentTerminators.length > 0 &&
+    contentTerminators.every((terminated) => terminated)
+  ) {
+    crlfUniform = true;
   }
 
   return { lines, additions, deletions, crlfUniform };

@@ -25,7 +25,15 @@ export function escapeDiffContent(content: string): string {
 }
 
 export function escapeInvisibleForMerge(content: string): string {
-  return content.replace(DIFF_MERGE_INVISIBLE_CHARACTERS, (character) =>
-    escapeDiffContent(character),
-  );
+  // The merge view compares these documents to decide what changed, so the
+  // transform has to be injective: escape the escape itself before inserting
+  // any. Without this, a real U+200B and the four-character text `\u200b`
+  // collapse to the same string, the merge reports "unchanged" for a file
+  // that did change, and resizing across the wide/narrow breakpoint flips
+  // the verdict because the wide branch compares raw text.
+  return content
+    .replace(/\\/g, '\\\\')
+    .replace(DIFF_MERGE_INVISIBLE_CHARACTERS, (character) =>
+      escapeDiffContent(character),
+    );
 }

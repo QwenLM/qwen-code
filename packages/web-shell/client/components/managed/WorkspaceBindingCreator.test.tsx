@@ -13,12 +13,13 @@ import type {
   ManagedSessionOptions,
 } from './managed-agent-provider';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import * as pendingStorage from './managed-pending-storage';
 
 const editorMocks = vi.hoisted(() => ({
   props: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
-  clearText: vi.fn(),
+  clear: vi.fn(),
   setText: vi.fn(),
 }));
 
@@ -34,7 +35,7 @@ vi.mock('../ChatEditor', async () => {
         ref,
         () =>
           ({
-            clearText: editorMocks.clearText,
+            clear: editorMocks.clear,
             setText: editorMocks.setText,
           }) as EditorHandle,
       );
@@ -386,6 +387,74 @@ describe('WorkspaceBindingCreator', () => {
     );
   });
 
+  // The server reconciles a blocked registration from its machine (D7-2),
+  // so the dialog keeps querying it: a button while it stays open, and a
+  // fresh query each time it opens, without remounting or a discarded draft.
+  it('completes a blocked registration from a later query without remounting', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'workspace_registration_failed',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce({
+      ...blocked,
+      status: 'completed',
+      workspaceId: 'ws-remote',
+    });
+    const storageKey = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'has not confirmed',
+    );
+    await click('Continue confirming registration');
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-blocked',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-remote',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('queries a blocked registration again when the dialog reopens', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'workspace_registration_failed',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce({ ...blocked, status: 'failed' });
+    const storageKey = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    await click('Close');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(registration.query).not.toHaveBeenCalled();
+    await click('Add Workspace');
+    expect(registration.query).toHaveBeenCalledOnce();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Registration failed',
+    );
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(false);
+  });
+
   it('clears only a confirmed blocked browser draft before starting another registration', async () => {
     const registration = enableRegistration();
     const blocked = {
@@ -621,7 +690,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.currentModel).toBe('agent-a');
     expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-a');
     expect(editorMocks.props?.composerScopeKey).toBe(scope);
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     getSession.mockResolvedValue({
       sessionId: 'session-a',
       agentId: 'agent-a',
@@ -637,6 +706,203 @@ describe('WorkspaceBindingCreator', () => {
       expect.any(Object),
     );
     expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    '{',
+  ])(
+    'requires explicit discard before creating after a pending record cannot be restored (%s)',
+    async (stored) => {
+      const { createSession } = approvalSelection();
+      const key = `qwen-managed-workspace-create:${provider.storageKey}`;
+      sessionStorage.setItem(key, stored);
+      await render();
+      expect(container.textContent).toContain(
+        'may already have been submitted',
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(
+        false,
+      );
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(
+        'Could not discard this request.',
+      );
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      await sendInitial('blocked request');
+      expect(createSession).not.toHaveBeenCalled();
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'Could not discard this request.',
+      );
+      expect(container.textContent).not.toContain(
+        'may already have been submitted',
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      await sendInitial('new explicit request');
+      expect(createSession).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps initial submissions serialized while the frozen request is being persisted', async () => {
+    const { createSession } = approvalSelection();
+    await render();
+    let acknowledge!: (saved: boolean) => void;
+    const save = vi
+      .spyOn(pendingStorage, 'saveManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+    const send = editorMocks.props!.onSubmit;
+    await act(async () => {
+      send('first draft', undefined, undefined, vi.fn());
+      await flush();
+      send('second draft', undefined, undefined, vi.fn());
+      await flush();
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(createSession).not.toHaveBeenCalled();
+    await act(async () => {
+      acknowledge(true);
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledOnce();
+    expect(createSession.mock.calls[0]?.[0]).toMatchObject({
+      text: 'first draft',
+    });
+    save.mockRestore();
+  });
+
+  it('freezes attachment-only input and Plan before asynchronous file reading', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'auto-edit'],
+      planModeSupported: true,
+      inputAttachments: true,
+    });
+    let finishReading!: (value: ArrayBuffer) => void;
+    const arrayBuffer = vi.fn(
+      () =>
+        new Promise<ArrayBuffer>((resolve) => {
+          finishReading = resolve;
+        }),
+    );
+    await render();
+    expect(editorMocks.props?.attachmentsEnabled).toBe(true);
+    expect(editorMocks.props?.visibleToolbarActions).toContain('plan');
+    await act(async () => editorMocks.props!.onTogglePlan!());
+    const commit = vi.fn();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        '',
+        undefined,
+        [
+          {
+            name: 'notes.md',
+            media_type: 'text/markdown',
+            data: { size: 12, arrayBuffer } as Blob,
+          },
+        ],
+        commit,
+      );
+      editorMocks.props!.onSelectModel!('agent-b');
+      editorMocks.props!.onSelectMode!('auto-edit');
+      editorMocks.props!.onTogglePlan!();
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(editorMocks.props?.currentModel).toBe('agent-a');
+    expect(editorMocks.props?.planMode).toBe(true);
+    await act(async () => {
+      finishReading(new TextEncoder().encode('你好\nnotes').buffer);
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: 'agent-a',
+        approvalMode: 'default',
+        planMode: true,
+        text: '',
+        input: [
+          {
+            type: 'input_file',
+            name: 'notes.md',
+            mime_type: 'text/markdown',
+            text: '你好\nnotes',
+          },
+        ],
+      }),
+      expect.any(Object),
+    );
+    expect(arrayBuffer).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it('reuses every attachment byte and the request key after an unknown creation and remount', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      inputAttachments: true,
+    });
+    createSession.mockRejectedValueOnce(new Error('Delivery unknown'));
+    await render();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Review',
+        undefined,
+        [{ name: 'notes.txt', media_type: 'text/plain', text: '原始内容' }],
+        vi.fn(),
+      );
+      await flush();
+    });
+    const [request, options] = createSession.mock.calls[0];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Changed draft',
+        undefined,
+        [{ name: 'other.txt', media_type: 'text/plain', text: 'different' }],
+        vi.fn(),
+      );
+      await flush();
+    });
+    expect(createSession).toHaveBeenLastCalledWith(
+      request,
+      expect.objectContaining({ idempotencyKey: options.idempotencyKey }),
+    );
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(request.input).toEqual([
+      { type: 'input_text', text: 'Review' },
+      {
+        type: 'input_file',
+        name: 'notes.txt',
+        mime_type: 'text/plain',
+        text: '原始内容',
+      },
+    ]);
+    expect(onCreated).toHaveBeenCalledWith('session-a');
+    expect(editorMocks.clear).toHaveBeenCalledOnce();
   });
 
   it('blocks creation until supported policy options are loaded and ignores stale Agent replies', async () => {
@@ -674,7 +940,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.availableModes).toEqual(['auto-edit']);
     expect(editorMocks.props?.modeControlsDisabled).toBe(true);
     expect(editorMocks.props?.disabled).toBe(false);
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1015,7 +1281,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-created');
     expect(editorMocks.props?.currentModel).toBe('agent-b');
     expect(editorMocks.props?.composerScopeKey).toBe(composerScope);
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(editorMocks.setText).not.toHaveBeenCalled();
     expect(provider.workspaceBinding?.createEmpty).not.toHaveBeenCalled();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -1085,7 +1351,7 @@ describe('WorkspaceBindingCreator', () => {
       container.querySelector<HTMLInputElement>('#managed-workspace-cwd')
         ?.value,
     ).toBe('project');
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     await act(async () => root.render(null));
     await render();
     expect(provider.workspaceBinding.get).toHaveBeenCalledWith(
@@ -1193,7 +1459,7 @@ describe('WorkspaceBindingCreator', () => {
       expect(createWorkspace.mock.calls[1][1].idempotencyKey).not.toBe(
         original.idempotencyKey,
       );
-      expect(editorMocks.clearText).not.toHaveBeenCalled();
+      expect(editorMocks.clear).not.toHaveBeenCalled();
     },
   );
 
@@ -1550,7 +1816,7 @@ describe('WorkspaceBindingCreator', () => {
     );
     expect(container.querySelector('details [role="alert"]')).toBeNull();
     expect(commit).not.toHaveBeenCalled();
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
   });
 
   it('recovers frozen initial input and restores it after abandoning an uncertain request', async () => {
@@ -1571,7 +1837,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.setText).toHaveBeenCalledExactlyOnceWith(
       'Keep my draft',
     );
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(createSession).toHaveBeenCalledOnce();
   });
 
@@ -1599,7 +1865,7 @@ describe('WorkspaceBindingCreator', () => {
         idempotencyKey: 'old-key',
       }),
     );
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
   });
 

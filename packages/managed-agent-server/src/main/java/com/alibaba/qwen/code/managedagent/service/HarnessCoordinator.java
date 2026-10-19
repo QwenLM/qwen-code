@@ -103,6 +103,7 @@ public class HarnessCoordinator {
     private final Duration batchInterval;
     private final int batchMaxEvents;
     private final int batchMaxBytes;
+    private final boolean sessionCreateWarm;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final Set<String> cancellations = ConcurrentHashMap.newKeySet();
@@ -129,6 +130,7 @@ public class HarnessCoordinator {
         this.runtimeWarmer = runtimeWarmer;
         this.executor = executor;
         this.clock = clock;
+        this.sessionCreateWarm = properties.getRuntimeBroker().isSessionCreateWarm();
         this.leaseDuration = properties.getDispatch().getLeaseDuration();
         this.renewInterval = properties.getDispatch()
                 .getLeaseRenewInterval();
@@ -207,15 +209,43 @@ public class HarnessCoordinator {
                 turnId, false));
     }
 
+    public void warmSession(String tenantId, String sessionId) {
+        if (!sessionCreateWarm || !runtimeWarmer.isEnabled()
+                || !harness.isWorkspaceFilesAvailable()) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                runtimeWarmer.warm(sessionId).whenComplete(
+                        (ignored, error) -> {
+                            if (error != null) {
+                                sessionWarmFailed(tenantId, sessionId, error);
+                            }
+                        });
+            } catch (RuntimeException error) {
+                sessionWarmFailed(tenantId, sessionId, error);
+            }
+        });
+    }
+
+    private static void sessionWarmFailed(String tenantId, String sessionId,
+            Throwable error) {
+        LOG.warn("Managed Runtime create warm failed tenant={} session={}",
+                tenantId, sessionId, error);
+    }
+
     @Scheduled(fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recoverExpiredTurns() {
         if (!harness.isAvailable()) {
             return;
         }
-        for (DispatchTarget target : store.findDispatchable(clock.millis(),
-                50)) {
+        long now = clock.millis();
+        for (DispatchTarget target : store.findDispatchable(now, 50)) {
             dispatch(target.tenantId(), target.sessionId(), target.turnId());
+        }
+        for (DispatchTarget target : store.findRuntimeRecoveryParked(now, 50)) {
+            executor.execute(() -> recoverParkedRuntime(target));
         }
     }
 
@@ -272,6 +302,17 @@ public class HarnessCoordinator {
             if ("await_action".equals(error.getReason())) {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error, true);
+            } else if (recoveryPath.get()
+                    && !"CANCELLING".equals(claimed.status())
+                    && isWorkflowLaunchTurn(claimed)) {
+                // #14387: a decline is terminal for a workflow Turn — the
+                // in-process executor died with its generation and no
+                // retry re-creates it — so the Turn parks blocked, never
+                // FAILED as if its outcome were observed. A CANCELLING
+                // Turn keeps the cancel's own bounded path: the mark
+                // cannot park it (the sweep re-admits CANCELLING rows),
+                // so writing it would only spin the cancel forever.
+                terminal = blockWorkflowRecovery(claimed, leaseLost);
             } else {
                 // The reason is remote-supplied; the terminal write lands
                 // in managed_agent_turn.error_message VARCHAR(2048), so bound it
@@ -306,7 +347,23 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed, submissionAttempted.get(),
                     error, false);
         } catch (DaemonHttpException error) {
-            if (error.getStatusCode() >= 400
+            // #14387: a takeover refusal for a workflow Turn with the
+            // takeover_unrecovered verdict is terminal in effect — the
+            // workflow's in-process executor died with the generation, and
+            // no retry re-creates it — so the Turn parks blocked instead
+            // of retrying into a budget-exhausted FAILED. Every other
+            // reason (a transient restore read hiccup, a takeover still in
+            // flight) keeps the retry path: it is not evidence the
+            // workflow cannot be observed, and a committed result may
+            // already sit journaled behind it.
+            if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
+                    && isWorkflowLaunchTurn(claimed)
+                    && "hosted_turn_recovery_required".equals(
+                            error.getErrorCode())
+                    && "takeover_unrecovered".equals(
+                            error.getBodyField("reason"))) {
+                terminal = blockWorkflowRecovery(claimed, leaseLost);
+            } else if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
                     && error.getStatusCode() != 409) {
                 terminal = failTerminally(claimed, "hosted_harness_rejected",
@@ -372,6 +429,18 @@ public class HarnessCoordinator {
         // here wait on the prior generation's lease, a wait bounded by that
         // lease itself rather than by the pre-admission retry budget.
         recoveryPath.set(session.harnessBootId() != null);
+        // #14387: a workflow Turn whose recovery was already refused
+        // carries the durable mark — end the drive before any attach.
+        // The refusal was decided by the drive that found the generation
+        // lost; re-attaching on every scan would only repeat a takeover
+        // load that must never become a re-execution. A cancel still
+        // drives: settling the Turn cancelled is the cancel's own act.
+        if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
+                && isWorkflowLaunchTurn(claimed)
+                && AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(
+                        claimed.errorCode())) {
+            return false;
+        }
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
             if (!claimed.submissionAttempted()) {
                 // Before submission a Workspace-files outage holds the Turn
@@ -389,6 +458,12 @@ public class HarnessCoordinator {
                 && !claimed.submissionAttempted()) {
             store.cancelBeforeAdmission(claimed.tenantId(),
                     claimed.sessionId(), claimed.turnId(), owner);
+            return true;
+        }
+        if ("CANCELLING".equals(claimed.status())
+                && claimed.harnessEventEpoch() == null
+                && store.cancelUnadmittedTurn(claimed.tenantId(),
+                        claimed.sessionId(), claimed.turnId(), owner)) {
             return true;
         }
         boolean recoveringCancellation =
@@ -409,7 +484,8 @@ public class HarnessCoordinator {
         }
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
-                && runtimeRecovery.hasUnknownOutcome()) {
+                && runtimeRecovery.hasUnknownOutcome()
+                && !recoveringCancellation) {
             return fail(claimed, "managed_runtime_recovery_blocked",
                     "A prior tool execution has an unknown outcome; the"
                             + " Session was blocked without replaying it.");
@@ -418,10 +494,22 @@ public class HarnessCoordinator {
         boolean recoveredCancellation = false;
         boolean cancelledOnAttach = false;
         if (runtimeRecovery != null) {
+            // #14387: continuing a workflow Turn re-runs its deterministic
+            // in-process script while the first run's outcome stays
+            // unwitnessed — the parked snapshot proves nothing about the
+            // in-process subagents the lost generation dispatched. Refuse
+            // the re-execution and mark the Turn so the child result relay
+            // settles the record blocked. A cancel still drives: settling
+            // the Turn cancelled is the cancel's own act, not a re-run.
+            if (!recoveringCancellation && isWorkflowLaunchTurn(claimed)) {
+                return blockWorkflowRecovery(claimed, leaseLost);
+            }
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
                     : !runtimeRecovery.isContinuationReady()) {
-                return fail(claimed, "managed_runtime_recovery_incomplete",
+                return fail(claimed, runtimeRecovery.hasUnknownOutcome()
+                                ? "managed_runtime_recovery_blocked"
+                                : "managed_runtime_recovery_incomplete",
                         "A prior tool execution is not ready for safe"
                                 + (recoveringCancellation
                                         ? " cancellation."
@@ -555,6 +643,19 @@ public class HarnessCoordinator {
             }
             cancelledOnAttach = true;
         } else {
+            // #14387: a workflow Turn re-submitted onto a different
+            // generation may double-run its script — its prior submission
+            // may have been admitted by the lost generation without
+            // recording it (R10-4). The same live boot is safe: the
+            // daemon dedupes the replayed admission, so the drive falls
+            // through to the 409 adopt and the stream. Refuse only with
+            // evidence the generation changed.
+            if (claimed.harnessEventEpoch() == null
+                    && claimed.submissionAttempted()
+                    && isWorkflowLaunchTurn(claimed)
+                    && !attachment.bootId().equals(session.harnessBootId())) {
+                return blockWorkflowRecovery(claimed, leaseLost);
+            }
             boolean bound;
             if (claimed.submissionAttempted()
                     && claimed.harnessEventEpoch() != null
@@ -1062,29 +1163,69 @@ public class HarnessCoordinator {
     // refused while another Turn is live (R6-3). The row is re-read rather
     // than trusted from the claim-time record: the admission the mark
     // precedes may have landed after the claim (R4-1).
-    private void cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn) {
+    private boolean cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn,
+            boolean recoveryBlocked) {
         try {
             TurnRecord current = store.findTurn(turn.tenantId(),
                     turn.sessionId(), turn.turnId()).orElse(null);
-            if (current == null || current.harnessEventEpoch() == null) {
-                return;
+            if (current == null) {
+                return true;
+            }
+            if (current.harnessEventEpoch() == null) {
+                // A lost admission response does not prove the native input idle.
+                // Keep the cancellation entry until recovery can prove ownership.
+                return false;
             }
             SessionRecord session = store.requireSession(turn.tenantId(),
                     turn.sessionId());
             if (session.workspace() != null
                     && !harness.isWorkspaceFilesAvailable()) {
-                return;
+                return false;
+            }
+            if (recoveryBlocked && session.workspace() != null
+                    && "RUNNING".equals(current.status())) {
+                Attachment takeover = harness.recoverManagedFailureCancellation(
+                        session.tenantId(), session.sessionId(), current.turnId(), owner);
+                HarnessRuntimeRecovery recovery = takeover.runtimeRecovery();
+                if (recovery != null) {
+                    if (!recovery.isCancellationReady()) {
+                        return false;
+                    }
+                    harness.cancelManagedRuntime(session.tenantId(), session.sessionId(),
+                            current.promptId(), recovery.getCheckpointId(), recovery.getActivationId());
+                }
+                return true;
             }
             if (session.harnessBootId() != null
                     && store.bindHarness(turn.tenantId(), turn.sessionId(),
                             turn.turnId(), owner, session.harnessBootId())) {
-                harness.cancel(session.tenantId(), session.sessionId());
+                try {
+                    harness.cancel(session.tenantId(), session.sessionId());
+                } catch (DaemonHttpException parked) {
+                    if (parked.getStatusCode() != 409
+                            || !"hosted_turn_recovery_required".equals(parked.getErrorCode())) {
+                        throw parked;
+                    }
+                    Attachment takeover = harness.recoverManagedCancellation(
+                            session.tenantId(), session.sessionId());
+                    HarnessRuntimeRecovery recovery = takeover.runtimeRecovery();
+                    if (recovery != null) {
+                        if (!recovery.isCancellationReady()) {
+                            return false;
+                        }
+                        harness.cancelManagedRuntime(session.tenantId(), session.sessionId(),
+                                current.promptId(), recovery.getCheckpointId(), recovery.getActivationId());
+                    }
+                }
+                return true;
             }
+            return false;
         } catch (RuntimeException error) {
             LOG.warn("Managed Turn post-admission cancel failed tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
                     error.getClass().getSimpleName());
+            return false;
         }
     }
 
@@ -1095,6 +1236,17 @@ public class HarnessCoordinator {
     }
 
     private boolean fail(TurnRecord turn, String code, String message) {
+        // The unknown gate is the only caller that may park an unresolved
+        // Runtime outcome; a terminal write keeps its existing handling.
+        return fail(turn, code, message, null, true);
+    }
+
+    private boolean fail(TurnRecord turn, String code, String message, RuntimeException error) {
+        return fail(turn, code, message, error, false);
+    }
+
+    private boolean fail(TurnRecord turn, String code, String message,
+            RuntimeException error, boolean parkUnreconciled) {
         // The terminal record makes an admitted Turn unreachable: failTurn
         // clears the dispatch owner and leaves the active states, so
         // nothing could later cancel it or re-attach to journal its
@@ -1107,12 +1259,91 @@ public class HarnessCoordinator {
         // R12-3).
         TurnRecord current = store.findTurn(turn.tenantId(),
                 turn.sessionId(), turn.turnId()).orElse(turn);
+        boolean recoveryBlocked = "managed_runtime_recovery_blocked".equals(code);
         if (current.submissionAttempted()) {
-            cancelAdmittedTurnBeforeTerminalFail(current);
+            boolean reconciled = cancelAdmittedTurnBeforeTerminalFail(current, recoveryBlocked);
+            if (!reconciled && recoveryBlocked
+                    && store.requireSession(turn.tenantId(), turn.sessionId()).workspace() != null) {
+                if (parkUnreconciled && !"CANCELLING".equals(current.status())) {
+                    return parkRuntimeRecovery(current);
+                }
+                return transientFailure(current, true,
+                        new IllegalStateException("Recovery cancellation remains unsettled"), true);
+            }
         }
-        store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
-                owner, code, message);
+        if (recoveryBlocked && !"CANCELLING".equals(turn.status())) {
+            if (!store.failRecoveryBlockedTurn(turn.tenantId(), turn.sessionId(),
+                    turn.turnId(), owner, message)) {
+                return false;
+            }
+        } else {
+            store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    owner, code, message);
+        }
+        if (error != null) {
+            LOG.warn("Managed Turn failed terminally tenant={} session={}"
+                            + " turn={} code={} message={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(), code,
+                    message, error);
+        }
         return true;
+    }
+
+    // D7-2: a Turn whose parked Runtime execution still cannot be proved
+    // either way parks on its own code and waits for the reconciler's
+    // recheck. It is never written FAILED, and it no longer spends the
+    // budget-exempt retry lane on every backoff.
+    private boolean parkRuntimeRecovery(TurnRecord turn) {
+        long retryAfter = Math.addExact(clock.millis(),
+                OperationReconciler.RECHECK.toMillis());
+        if (!store.parkTurnForRuntimeRecovery(turn.tenantId(),
+                turn.sessionId(), turn.turnId(), owner,
+                "The parked Runtime execution's acceptance is still"
+                        + " unknown; reconcile before re-executing.",
+                retryAfter)) {
+            LOG.warn("Managed runtime recovery park lost to a lease CAS"
+                            + " tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId());
+        }
+        return true;
+    }
+
+    // D7-2: the recheck drives the cancellation load again, never the
+    // continuation: the Turn was parked because its evidence was unknown.
+    // The cached takeover snapshot is discarded first, so the load asks the
+    // Broker instead of answering from the report the park was decided on.
+    private void recoverParkedRuntime(DispatchTarget target) {
+        TurnRecord claimed = null;
+        try {
+            claimed = store.claimTurn(target.tenantId(),
+                    target.sessionId(), target.turnId(), owner, leaseDuration)
+                    .orElse(null);
+            if (claimed == null) {
+                return;
+            }
+            if ("CANCELLING".equals(claimed.status())) {
+                // A user cancel landed between the park scan and the claim.
+                // The normal sweep owns that lane; releasing the lease lets
+                // it drive the cancel instead of settling the Turn as FAILED
+                // here.
+                store.releaseTurnLease(claimed.tenantId(), claimed.sessionId(),
+                        claimed.turnId(), owner);
+                return;
+            }
+            harness.discardManagedRecovery(claimed.tenantId(),
+                    claimed.sessionId());
+            fail(claimed, "managed_runtime_recovery_blocked",
+                    "The parked Runtime execution is still unknown after"
+                            + " reconciliation.");
+        } catch (RuntimeException error) {
+            LOG.warn("Managed runtime recovery recheck failed tenant={}"
+                            + " session={} turn={}",
+                    target.tenantId(), target.sessionId(), target.turnId(),
+                    error);
+            if (claimed != null && !"CANCELLING".equals(claimed.status())) {
+                parkRuntimeRecovery(claimed);
+            }
+        }
     }
 
     // Terminal failures leave the Turn row as their only trace; log the
@@ -1120,11 +1351,7 @@ public class HarnessCoordinator {
     // actual cause.
     private boolean failTerminally(TurnRecord turn, String code,
             String message, RuntimeException error) {
-        LOG.warn("Managed Turn failed terminally tenant={} session={}"
-                        + " turn={} code={} message={}",
-                turn.tenantId(), turn.sessionId(), turn.turnId(), code,
-                message, error);
-        return fail(turn, code, message);
+        return fail(turn, code, message, error);
     }
 
     private boolean transientFailure(TurnRecord turn,
@@ -1280,6 +1507,50 @@ public class HarnessCoordinator {
 
     private static boolean isHarnessDisabled(RuntimeException error) {
         return error instanceof HarnessDisabledException;
+    }
+
+    // #14387: refuse the workflow Turn's unwitnessed re-execution — mark
+    // it durably (the child result relay reads the code off the Turn line
+    // and settles the record blocked) and end the drive. The Turn itself
+    // stays unsettled: its work's outcome was never observed, so no
+    // terminal status may claim otherwise. The mark is fenced by the live
+    // dispatch lease (the CAS checks dispatch_lease_until), and a locally
+    // lost lease skips the decision outright — another owner re-walks the
+    // same refusal on its own claim.
+    private boolean blockWorkflowRecovery(TurnRecord claimed,
+            AtomicBoolean leaseLost) {
+        if (leaseLost.get()) {
+            return true;
+        }
+        if (!store.markTurnRecoveryBlocked(claimed.tenantId(),
+                claimed.sessionId(), claimed.turnId(), owner,
+                AgentStateStore.WORKFLOW_RECOVERY_BLOCKED,
+                "The Harness generation running this workflow was lost;"
+                        + " the in-process run's outcome was never"
+                        + " observed.")) {
+            // The fenced CAS missed — the lease lapsed between the attach
+            // and this write, so the Turn is neither marked nor parked.
+            // The next claim re-walks the refusal; the lost durable guard
+            // must never be silent.
+            LOG.warn("Managed workflow Turn recovery-blocked mark lost to"
+                            + " a lease CAS tenant={} session={} turn={}",
+                    claimed.tenantId(), claimed.sessionId(),
+                    claimed.turnId());
+        }
+        return true;
+    }
+
+    // #14387: a workflow Turn's work is one deterministic in-process script
+    // — the only Turn kind whose input is a `workflow_launch` block (the
+    // Java creation arm mints it, ManagedAgentService). Identified by the
+    // block's type, never by re-reading the record or the prompt text.
+    private static boolean isWorkflowLaunchTurn(TurnRecord turn) {
+        for (Map<String, Object> block : turn.input()) {
+            if (block != null && "workflow_launch".equals(block.get("type"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String failureLabel(RuntimeException error) {

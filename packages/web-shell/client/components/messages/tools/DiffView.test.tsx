@@ -175,3 +175,32 @@ it('localizes the invisible-character label in Chinese', () => {
     container.querySelector('[title^="不可见字符:"]')?.getAttribute('title'),
   ).toBe('不可见字符: \\u200d');
 });
+
+// Raw patches (`getRawFileDiff`) are rendered straight from jsdiff and never
+// pass a builder, so they arrive without `DIFF_CRLF_UNIFORM_MARKER`. They used
+// to paint a visible `\r` escape chip on every row of a CRLF file's diff.
+const rawPatch = (rows: string[]) =>
+  [
+    'Index: notes.txt',
+    '===================================================================',
+    '--- notes.txt',
+    '+++ notes.txt',
+    '@@ -1,2 +1,2 @@',
+    ...rows,
+    '',
+  ].join('\n');
+
+it('keeps a raw CRLF patch free of trailing \\r chips', () => {
+  const rows = renderDiff(rawPatch([' a\r', '-b\r', '+c\r']));
+  expect(rows.some((row) => row.includes('\\r'))).toBe(false);
+  expect(container.textContent).not.toContain('\r');
+  expect(container.querySelector('[title^="Invisible character:"]')).toBeNull();
+});
+
+it('still marks a \\r that a mixed-ending file really carries', () => {
+  const rows = renderDiff(rawPatch([' a\r', '-b', '+c\r']));
+  expect(rows.some((row) => row.includes('\\r'))).toBe(true);
+  expect(
+    container.querySelectorAll('[title^="Invisible character:"]').length,
+  ).toBeGreaterThan(0);
+});

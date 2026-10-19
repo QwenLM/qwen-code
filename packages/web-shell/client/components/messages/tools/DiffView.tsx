@@ -25,11 +25,12 @@ export const DiffView = memo(function DiffView({
 
   const input = maxLength === undefined ? diff : diff.slice(0, maxLength);
   const { lines, additions, deletions, crlfUniform } = parseUnifiedDiff(input);
-  // Whether a trailing `\r` is part of a `\r\n` terminator is a whole-file
-  // property that only the SOURCE text knows — the builders decide it there
-  // and emit `DIFF_CRLF_UNIFORM_MARKER`. Without that marker the `\r` stays
-  // in the content and renders as a visible escape node: honest rendering
-  // instead of a whole-file certification this layer cannot make.
+  // Whether a trailing `\r` is part of a `\r\n` terminator is decided in
+  // `parseUnifiedDiff`, so both patch sources agree: builders know the source
+  // text and emit `DIFF_CRLF_UNIFORM_MARKER`, while raw patches (which no
+  // builder produced) are judged from their own rows, since a uniform-CRLF
+  // file keeps the `\r` on every content row. A mixed file keeps the `\r`
+  // visible as an escape node, which is the honest rendering there.
   // Builders emit a notice as the whole preview, never inside a raw patch.
   const notice =
     lines.length === 1 && lines[0].type === 'header'

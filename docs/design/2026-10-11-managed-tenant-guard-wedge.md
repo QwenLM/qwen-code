@@ -424,6 +424,27 @@ acquisitions on the apply/admission/receipt lanes and the lease opener
 `tenant_guard_contended` mapping. Witness:
 `ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`.
 
+After acquiring the tenant row, `lockSessionHead` also bounds the root UPSERT,
+root locking read and head locking read to five seconds per statement. These
+waits share the `tenant_guard_contended` mapping, including lock-wait timeout
+1205, so one Session's writer cannot hold the publication guard for the database's
+default lock-wait window. Existing shorter statement or transaction timeouts
+remain shorter. The ordinary root-only writer path keeps its existing wait
+settings and deadlock mapping. The witness
+`ManagedSessionGuardConvoyIT#heldSessionRowsBoundRetentionReads` checks held root
+and head rows and successful reads after release. This covers #14393 A.2;
+producer/dispatch placement remains separate work under #14393 A.1.
+
+The A.3 follow-up in #14393 bounds only the first publication CAS acquisition
+at the reported snapshot expiry, projection-body collection, tool-result
+claim/settlement, Session-resource claim/page and lifecycle completion sites.
+A timeout uses the existing `503 tenant_guard_contended` mapping and rolls
+back the current transaction. CSI checks, placement and Session/event-stream
+waits retain their existing behavior; this does not bound a whole operation.
+Lifecycle publication-entry witness:
+`ManagedSessionGuardConvoyIT#heldPublicationGuardBoundsLifecycleCompletion`.
+Collector-entry runtime witnesses remain pending.
+
 ### F3. Writer acquisition keeps placement before the drain fence
 
 With the ordinary branch of `checkLifecycleWriter` early-returned,
@@ -601,6 +622,11 @@ The review of `e1ba36ad4b` found:
   creation and child Sessions, rename, mutation, close/archive/delete
   admission, cwd change and task-cancel operations. None is per-turn; each
   still waits up to `innodb_lock_wait_timeout` behind a long holder.
+- Bound the remaining `output_publication` acquisitions:
+  `ManagedAgentStore.beginLifecycle` (the close/archive/delete admission of a
+  lifecycle-protocol Session) and the o3-backfill pair in
+  `ManagedToolResultStore`. A user-facing close admission can still wait up to
+  `innodb_lock_wait_timeout` on a held `ma_tenant_guard` row.
 - Materializer gap tripwire quarantine (audit §B2; mark the poisoned
   consumer progress dead instead of a 10 Hz permanent exception).
 - Renewal-scheduler isolation baseline (reproduction hypothesis H2) —

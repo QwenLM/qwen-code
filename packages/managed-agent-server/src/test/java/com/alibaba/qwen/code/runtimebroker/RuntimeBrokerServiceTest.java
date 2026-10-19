@@ -2301,6 +2301,70 @@ class RuntimeBrokerServiceTest {
         verifyMonitorHoldRelease(true);
     }
 
+    @Test
+    void admitsTheHoldRowForAMonitorPayloadWithoutTheOptionalMarker() throws Exception {
+        // #13930 R1-23: the hold family keys on the validated toolName, not
+        // on the optional is_monitor marker — a contract-valid monitor
+        // payload that omits the marker starts a watch that must still own
+        // a ledger row, or a routine release would pass around a live watch.
+        String payload = "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f build.log\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            ToolExecutionRecord watch = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId() + ":process",
+                    ToolExecutionRecord.State.PREPARED);
+            assertEquals("background_v3_monitor",
+                    watch.getReference().get("dispatchMode"));
+
+            // A routine release refuses held by asking monitor-status only,
+            // exactly as the marker-carrying case does.
+            fixture.transport.controlHandler = operation -> CompletableFuture
+                    .completedFuture(Map.of("operationId", "call", "state", "running",
+                            "unitName", "qwen-mon-call"));
+            assertEquals("runtime_session_held",
+                    failure(fixture.service.release("harness", "runtime")).getCode());
+            assertEquals(java.util.List.of("monitor-status"),
+                    fixture.transport.controls.stream()
+                            .map(each -> (String) each.get("kind")).toList());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    fixture.executionRepository.findByExecutionCallId(
+                            prepared.getExecutionCallId() + ":process").getState());
+        }
+    }
+
     private void verifyMonitorHoldRelease(boolean originalFence) throws Exception {
         // The Monitor family rides the same hold-row shape as the Shell: a
         // routine release answers held and stops nothing, the drain issues
@@ -2849,8 +2913,14 @@ class RuntimeBrokerServiceTest {
                         "background_v3_process");
                 expected.add(runtime);
             }
+            fixture.sessionRepository.batchReads.set(0);
+            fixture.sessionRepository.pointReads.set(0);
             assertEquals(expected, Set.copyOf(join(fixture.service
                     .listActiveHoldRuntimeSessionIds("harness"))));
+            // #13986 review R1-9: the release state resolves in one read per
+            // hundred candidates, never one point read per candidate.
+            assertEquals(2, fixture.sessionRepository.batchReads.get());
+            assertEquals(0, fixture.sessionRepository.pointReads.get());
         }
     }
 
@@ -6890,8 +6960,8 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger bindingIds = new AtomicInteger();
         final AtomicInteger executionIds = new AtomicInteger();
         final InMemoryRuntimeBindingRepository bindingRepository;
-        final InMemoryRuntimeSessionRepository sessionRepository =
-                new InMemoryRuntimeSessionRepository();
+        final CountingSessionRepository sessionRepository =
+                new CountingSessionRepository();
         final InMemoryToolExecutionRepository executionRepository;
         final FakeResolver resolver;
         final FakeProvisioner provisioner = new FakeProvisioner();
@@ -6943,6 +7013,29 @@ class RuntimeBrokerServiceTest {
         @Override
         public void close() {
             service.close();
+        }
+    }
+
+    private static final class CountingSessionRepository
+            extends InMemoryRuntimeSessionRepository {
+        final AtomicInteger batchReads = new AtomicInteger();
+        final AtomicInteger pointReads = new AtomicInteger();
+
+        @Override
+        public synchronized RuntimeSessionRecord findHistorical(String tenantId,
+                String harnessSessionId, String runtimeSessionId) {
+            pointReads.incrementAndGet();
+            return super.findHistorical(tenantId, harnessSessionId,
+                    runtimeSessionId);
+        }
+
+        @Override
+        public synchronized List<RuntimeSessionRecord> findHistoricalByIds(
+                String tenantId, String harnessSessionId,
+                java.util.Collection<String> runtimeSessionIds) {
+            batchReads.incrementAndGet();
+            return super.findHistoricalByIds(tenantId, harnessSessionId,
+                    runtimeSessionIds);
         }
     }
 
@@ -7356,7 +7449,7 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
-        public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+        public List<ToolHoldRow> findHoldRowsByHarnessSession(
                 String harnessSessionId, String afterExecutionCallId,
                 int limit) {
             return delegate.findHoldRowsByHarnessSession(harnessSessionId,
@@ -7519,7 +7612,7 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
-        public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
+        public List<ToolHoldRow> findHoldRowsByHarnessSession(
                 String harnessSessionId, String afterExecutionCallId,
                 int limit) {
             return delegate.findHoldRowsByHarnessSession(harnessSessionId,

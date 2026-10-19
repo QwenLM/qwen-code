@@ -30,10 +30,7 @@ import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import type {
-  LocalShellCaptureRequest,
-  LocalShellReceipt,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -189,6 +186,7 @@ export class ManagedToolConflictError extends Error {
       | 'managed_runtime_identity_conflict'
       | 'managed_runtime_provider_operation_failed'
       | 'managed_runtime_owner_hold_pending'
+      | 'managed_runtime_release_timeout'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);
@@ -321,7 +319,7 @@ export interface ManagedShellCapturePublisher {
   accept?(
     identity: ToolResultExpectedIdentity,
     envelope: ToolResultEnvelope,
-  ): Promise<LocalShellReceipt>;
+  ): Promise<ToolResultAcknowledgement>;
   finish?(
     identity: ToolResultExpectedIdentity,
     result: ToolResultEnvelope,

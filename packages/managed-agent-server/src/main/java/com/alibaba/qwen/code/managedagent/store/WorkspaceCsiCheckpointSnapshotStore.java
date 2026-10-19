@@ -35,9 +35,9 @@ import java.util.UUID;
 /** A private component snapshot; it cannot authorize settlement or release. */
 public final class WorkspaceCsiCheckpointSnapshotStore {
     public static final String FORMAT = "qwen-csi-receipt-checkpoint-snapshot/1";
-    private static final long MAX_BYTES = 32L * 1024 * 1024;
+    private static final long MAX_BYTES = 128L * 1024 * 1024;
     private static final int MAX_ROWS = 4096;
-    private static final int MAX_JSON_BYTES = 48 * 1024 * 1024;
+    private static final int MAX_JSON_BYTES = 192 * 1024 * 1024;
     private static final Set<String> TABLES = Set.of("ma_operation",
             "ma_storage", "ma_storage_owner",
             "ma_runtime_binding", "ma_runtime_slot", "ma_runtime_session",
@@ -398,7 +398,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
             scope(row, key);
             require("MYSQL_INLINE".equals(row.get("storage_kind")) && number(row, "schema_version") == 1
                     && row.get("object_key") == null && row.get("object_version_id") == null && row.get("encryption_key_id") == null);
-            byte[] bytes = bytes(row, "inline_bytes", ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
+            byte[] bytes = bytes(row, "inline_bytes", ManagedSessionStoreModels.inlineResourceBytes(text(row, "kind")));
             total += bytes.length;
             require(total <= MAX_BYTES && bytes.length == number(row, "byte_length") && hash(bytes).equals(row.get("sha256")));
             ArrayNode revisions = references.remove(text(row, "resource_id"));
@@ -510,8 +510,10 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
             if (stream == null) {
                 return null;
             }
-            byte[] bytes = stream.readNBytes(ManagedSessionStoreModels.MAX_TRANSACTION_BYTES + 1);
-            require(bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES);
+            int maxBytes = "inline_bytes".equalsIgnoreCase(result.getMetaData().getColumnLabel(index))
+                    ? ManagedSessionStoreModels.MAX_MODEL_REQUEST_BYTES : ManagedSessionStoreModels.MAX_TRANSACTION_BYTES;
+            byte[] bytes = stream.readNBytes(maxBytes + 1);
+            require(bytes.length <= maxBytes);
             return bytes;
         } catch (java.io.IOException error) {
             throw unavailable();

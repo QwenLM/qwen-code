@@ -427,3 +427,53 @@ it.each([
     expect(localizeDiffNotice(diff, stubT)).toBe(diff);
   },
 );
+
+// Raw patches reach the renderer through `getRawFileDiff` and never pass
+// through `buildUnifiedDiff` / `buildContextBoundedDiff`, so they carry no
+// `DIFF_CRLF_UNIFORM_MARKER`. The rows themselves still record the terminator,
+// and leaving them unmasked painted a visible `\r` escape chip on every row of
+// a CRLF file's completed diff.
+describe('raw patches infer CRLF uniformity from their own rows', () => {
+  const rawPatch = (rows: string[], terminator = '\n') =>
+    [
+      'Index: notes.txt',
+      '===================================================================',
+      '--- notes.txt',
+      '+++ notes.txt',
+      '@@ -1,2 +1,2 @@',
+      ...rows,
+      '',
+    ].join(terminator);
+
+  it('reports uniform CRLF when every content row keeps its \\r', () => {
+    const patch = rawPatch([' a\r', '-b\r', '+c\r']);
+    expect(patch).not.toContain(DIFF_CRLF_UNIFORM_MARKER);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+  });
+
+  it('reports a mixed directory line-ending as non-uniform', () => {
+    const patch = rawPatch([' a\r', '-b', '+c\r']);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(false);
+  });
+
+  it('reports a bare-LF patch as non-uniform', () => {
+    expect(parseUnifiedDiff(rawPatch([' a', '-b', '+c'])).crlfUniform).toBe(
+      false,
+    );
+  });
+
+  it('ignores a row truncated by maxLength slicing', () => {
+    // `DiffView` cuts the patch at `maxLength`, which can leave the final row
+    // without its terminator. That partial row must not demote the whole file,
+    // or previews of long CRLF diffs would put the `\r` chips back.
+    const patch = rawPatch([' a\r', '-b\r', '+c\r', ' d\r']);
+    const truncated = patch.slice(0, patch.indexOf('+c\r') + 2);
+    expect(truncated.endsWith('\n')).toBe(false);
+    expect(parseUnifiedDiff(truncated).crlfUniform).toBe(true);
+  });
+
+  it('still honours the marker when a builder supplied one', () => {
+    const patch = `${DIFF_CRLF_UNIFORM_MARKER}\n@@ -1,1 +1,1 @@\n-a\n+b\n`;
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+  });
+});

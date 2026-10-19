@@ -2693,12 +2693,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
-   * Broadcast extension refresh to all active sessions and emit an
-   * `extensions_changed` workspace event when complete.
+   * Refresh selected active sessions, or all when sessionIds is omitted,
+   * and emit an `extensions_changed` workspace event when complete.
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
-    options?: { skillsOnly?: boolean },
+    options?: { skillsOnly?: boolean; sessionIds?: readonly string[] },
   ): Promise<{
     refreshed: number;
     failed: number;
@@ -3066,6 +3066,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     name: string,
     originatorClientId?: string,
   ): Promise<RuntimeMcpServerRemoveResult>;
+
+  /**
+   * Whether this workspace runtime holds any MCP server that was added at
+   * runtime and is still registered. A paired Bridge reads it while it
+   * evaluates whether the Managed engine can reproduce the runtime's
+   * configuration: a Managed child starts without those servers, so a session
+   * must not select Managed while one is registered.
+   */
+  hasRuntimeMcpServers(): boolean;
 
   /**
    * Add a runtime MCP server to one live session only. This does not mutate

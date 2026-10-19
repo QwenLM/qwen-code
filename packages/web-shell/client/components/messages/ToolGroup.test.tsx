@@ -77,6 +77,66 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   };
 }
 
+describe('ReadFile output availability', () => {
+  it.each(['failed', 'completed'] as const)(
+    'labels missing %s read details',
+    (status) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status,
+        }),
+        { forceExpanded: true },
+      );
+      expect(container.textContent).toContain(
+        'Output is unavailable for this tool call.',
+      );
+    },
+  );
+
+  it('distinguishes an explicitly empty read from missing output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        rawOutput: '',
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps waiting for an active read without output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('Waiting for output…');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('recognizes a recorded empty text block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        content: [{ type: 'content', content: { type: 'text', text: '' } }],
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps an opaque recorded result distinct from missing output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', rawOutput: { type: 'structured' } }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+});
+
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
