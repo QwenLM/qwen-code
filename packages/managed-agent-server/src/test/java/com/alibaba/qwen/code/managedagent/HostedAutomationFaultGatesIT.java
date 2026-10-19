@@ -1062,9 +1062,13 @@ class HostedAutomationFaultGatesIT {
         assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
                 + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
                 .as("no run while disabled").isEmpty();
+        long enabledAt = System.currentTimeMillis();
         request("POST", "/v1/agent-automations/" + id, Map.of("enabled", true), "fg11d-enable", 202);
-        assertThat(awaitOccurrence(id, "fired")).as("the first slot after enabling fires")
-                .containsEntry("outcome", "fired");
+        Map<String, Object> fired = awaitOccurrence(id, "fired");
+        assertThat(fired).as("the first slot after enabling fires").containsEntry("outcome", "fired");
+        // A dropped re-arm back-fills the disabled span instead of arming now.
+        assertThat(((Number) fired.get("slot")).longValue())
+                .as("the fired slot is not older than the enable").isGreaterThanOrEqualTo(enabledAt);
         assertThat(jdbc.queryForList("SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ?"
                 + " AND schedule_id = ? AND outcome = 'fired'", String.class, tenant, id))
                 .as("exactly one fired slot after enabling").hasSize(1);
