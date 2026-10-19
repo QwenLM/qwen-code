@@ -63,6 +63,7 @@ public final class HostedAutomationCrashFixtureMain {
         int internalPort = Integer.parseInt(args[4]);
         int brokerPort = Integer.parseInt(args[5]);
         int publicPort = Integer.parseInt(args[6]);
+        int storeBasePort = Integer.parseInt(args[7]);
         ObjectMapper mapper = new ObjectMapper();
         Files.createDirectories(root.resolve("workspace-mount"));
         var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
@@ -74,7 +75,7 @@ public final class HostedAutomationCrashFixtureMain {
                 "--spring.datasource.password=" + System.getenv().getOrDefault(
                         "FG11C_MYSQL_PASSWORD", ""),
                 "--qwen.managed-agent.session-store.enabled=true",
-                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + internalPort,
+                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + storeBasePort,
                 "--qwen.managed-agent.session-store.workspace-id=workspace-0",
                 "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.base-url=" + System.getenv(

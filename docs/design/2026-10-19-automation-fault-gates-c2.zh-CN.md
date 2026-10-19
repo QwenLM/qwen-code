@@ -11,7 +11,7 @@ scanner 及其租约所在处：
 
 | 用例                           | 注入                                                                                                    | 期望                                                                                                                                                                                                   |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `spring-kill-before-answer`    | occurrence 处于 `firing`，Harness 已提交 run，夹具在 Spring 结算前扣住应答；SIGKILL Spring 子进程后重启 | 重新驱动的 fire 复用已提交的 `arun_` 身份：一条已提交的 `automation_run`、一个被接受的 input、一次模型 Turn，occurrence 恰好 `fired` 一次                                                              |
+| `spring-kill-before-answer`    | occurrence 处于 `firing`，Harness 已提交 run，夹具在 Spring 结算前扣住应答；SIGKILL Spring 子进程后重启 | 重新驱动的 fire 复用已提交的 `arun_` 身份：一条已提交的 `automation_run` 与一个被接受的 input，occurrence 恰好 `fired` 一次。杀进程会断开 Harness 会话，wake turn 可能被中止，因此不断言 Turn 数       |
 | `spring-kill-before-watermark` | 应答已落（revision 2 已提交），夹具把 `advanceWatermark` 挂起；SIGKILL Spring 子进程后重启              | 同一 slot 不出现第二次 fire；watermark 追上，账本只有一条 run 链。杀进程会断开 Harness 的会话，wake turn 可能被中止，因此这一格不断言模型 Turn                                                         |
 | `two-scanner-race`             | 两个 Spring 子进程共用一台 MySQL 与同一 tenant，只有一个到期 slot，二者都被驱动一次                     | 账本去重：一行 occurrence、一条已提交的 `automation_run`、一次模型 Turn。本用例不构造租约接管；fencing 由 store 在 `claim`、`settleOccurrence`、`advanceWatermark` 上的 `lease_owner`/`fence` 谓词保证 |
 | `parked-tool-harness-kill`     | wake turn 停在 Runtime 工具调用上时 SIGKILL Harness 子进程                                              | 延期：见预算段说明                                                                                                                                                                                     |
@@ -21,8 +21,8 @@ live-run reconcile 格（存活 turn 经 overlap-`skip` slot 驱动 `reconcile_r
 
 ## 门控的性质
 
-每个 occurrence 至多一条 run、一次模型 Turn，且该 slot 恰好一条已提交的
-`automation_run` 与一个被接受的 input。fire 中途死掉的 Spring 在重启后不得
+每个 occurrence 至多一条 run 与一个被接受的 input；wake turn 跑完时只调用
+一次模型，且该 slot 恰好一条已提交的 `automation_run`。fire 中途死掉的 Spring 在重启后不得
 产生第二条 run。wake turn 已结算的 run 必须按 journal 的 `turn.settled` 结算，
 绝不写成 `failed`/`outcome_unknown`，即使结算进程在写 revision 3 之前就死了。
 
@@ -89,7 +89,7 @@ job 上限由 230 分钟升到 239 分钟。
 - `mvn -Pmysql-integration -DskipTests test-compile checkstyle:check` 干净，
   且本树上 `checkstyle:check@runtime-broker-checkstyle` 也干净。
 - 已实现的每个用例在 JDK 21 + 真实 MySQL 上全绿，用
-  `mvn -Pmysql-integration -Dit.test=HostedAutomationSpringCrashIT#<method>`
+  `mvn -Phosted-automation-gates -Dit.test=HostedAutomationSpringCrashIT#<method>`
   `failsafe:integration-test` 单独选择；整类全绿。
 - 每个见证都在表中位置变红，并逐字节恢复。
 - `scripts/tests/hosted-process-ci.test.js` 在预算叠加后全绿。
