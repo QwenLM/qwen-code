@@ -60,6 +60,8 @@ export const TEST_READ_MARKDOWN = new Set([
   'packages/cua-driver/docs/tool-output-format.md',
   'packages/cua-driver/scripts/README.md',
   'packages/managed-agent-server/README.md',
+  'packages/managed-agent-server/distribution/systemd/README.md',
+  'packages/managed-agent-server/distribution/systemd/README.zh-CN.md',
   'packages/sdk-java/client/QWEN.md',
   'packages/sdk-java/qwencode/RELEASE.md',
   'packages/sdk-python/README.md',
