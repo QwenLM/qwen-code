@@ -639,9 +639,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
       (entry.parts ?? []).map((part) => part.text),
     );
-    expect(texts).toContain(
-      'Remember: every release PR targets release/2.6.',
-    );
+    expect(texts).toContain('Remember: every release PR targets release/2.6.');
   });
 
   it('uses a scoped config that denies shell and outside writes', async () => {
