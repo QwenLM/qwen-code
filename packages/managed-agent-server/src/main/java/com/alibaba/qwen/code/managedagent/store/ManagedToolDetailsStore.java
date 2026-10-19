@@ -204,11 +204,11 @@ public class ManagedToolDetailsStore {
 
     private JsonNode input(String name, JsonNode args) {
         var input = json.createObjectNode();
-        var keys = "read_file".equals(name) ? List.of("file_path", "path", "offset", "limit")
+        var keys = "read_file".equals(name) ? List.of("file_path", "path")
                 : List.of("command", "directory", "timeout");
         for (String key : keys) {
             JsonNode value = args.path(key);
-            boolean numeric = List.of("timeout", "offset", "limit").contains(key);
+            boolean numeric = "timeout".equals(key);
             if (numeric ? value.isNumber() && Double.isFinite(value.doubleValue()) : value.isTextual()) {
                 input.set(key, value);
             }

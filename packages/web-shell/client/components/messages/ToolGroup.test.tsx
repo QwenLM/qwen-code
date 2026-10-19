@@ -105,6 +105,36 @@ describe('ReadFile output availability', () => {
     expect(container.textContent).toContain('No output');
     expect(container.textContent).not.toContain('unavailable');
   });
+
+  it('keeps waiting for an active read without output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('Waiting for output…');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('recognizes a recorded empty text block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        content: [{ type: 'content', content: { type: 'text', text: '' } }],
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps an opaque recorded result distinct from missing output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', rawOutput: { type: 'structured' } }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
 });
 
 function renderToolLine(

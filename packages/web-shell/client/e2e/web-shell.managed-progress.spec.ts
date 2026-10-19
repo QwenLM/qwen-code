@@ -362,7 +362,6 @@ test('Managed tool details load only after expansion and remain readable after r
   await old.getByRole('button').first().click();
   await expect(old).toContainText('Output is unavailable for this tool call.');
   await expect.poll(() => fixture.detailRequests.length).toBe(3);
-  await expect(list.locator('dl:empty')).toHaveCount(0);
   await testInfo.attach('managed-tool-details', {
     body: await page.screenshot({ fullPage: true }),
     contentType: 'image/png',

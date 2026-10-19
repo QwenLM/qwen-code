@@ -10,7 +10,7 @@ ReadFile 和 Shell 详情应仅在用户展开已结束的卡片时加载。为�
 
 ## 读取策略与归属
 
-契约版本 `1.69.0` 新增 `POST /api/agent/web-shell/v1/tool-details/get`，复用已有 Session/Item 请求结构。这是以持久化 Workspace 为作用域的读取：要求可信 actor、当前 Session 可见性及 Workspace 读取授权，并在返回前重新校验。响应使用 `Cache-Control: private, no-store`。路由不启动 Harness、不获取 Runtime、不执行命令，也不回退到其他 Workspace。
+契约版本 `1.70.0` 新增 `POST /api/agent/web-shell/v1/tool-details/get`，复用已有 Session/Item 请求结构。这是以持久化 Workspace 为作用域的读取：要求可信 actor、当前 Session 可见性及 Workspace 读取授权，并在返回前重新校验。响应使用 `Cache-Control: private, no-store`。路由不启动 Harness、不获取 Runtime、不执行命令，也不回退到其他 Workspace。
 
 所有获准读取 Session/Workspace 的用户均可直接读取这些有界工具详情，无需功能开关。Artifact 发布与原始下载权限保持独立，不需要额外发布开关或对象存储。保存的文本可能包含敏感内容，不会自动脱敏。
 
@@ -24,13 +24,13 @@ ReadFile 和 Shell 详情应仅在用户展开已结束的卡片时加载。为�
 
 每次查询最多扫描 512 个 journal 事务，journal/消息总读取量最多 8 MiB。超过预算的 journal 行在传输字节前拒绝。校验 journal 摘要和每个已提交资源引用，支持普通与分块消息。这是仅在展开时进行的有界查询，不是常数时间索引，也不重建已移除的数据。
 
-仅返回标量显示参数：ReadFile 的 `file_path`、`path`、`offset`、`limit`，以及 Shell 的 `command`、`directory`、`timeout`。过滤未知字段及类型错误的标量。超过 4 KiB 的参数不返回，不把原本完整的输出误标为截断。保存的文本限制为 8 KiB、200 行，标识本地及上游输出截断。媒体、私有捕获引用及原始 stdout/stderr 下载不属于此路由。
+仅返回标量显示参数：ReadFile 的 `file_path`、`path`，以及 Shell 的 `command`、`directory`、`timeout`。过滤未知字段及类型错误的标量。超过 4 KiB 的参数不返回，不把原本完整的输出误标为截断。保存的文本限制为 8 KiB、200 行，标识本地及上游输出截断。媒体、私有捕获引用及原始 stdout/stderr 下载不属于此路由。
 
 对 Shell，还从匹配的已提交记录的 `toolCallResult.resultDisplay` 返回可选 `shellResult`，要求 call ID 相同且存在精确匹配的函数响应。沿用已有版本 1 的 `ShellResultDisplay` 结构：输出和显示文本、目录、可空且为安全整数的退出码/信号/PID、可空错误、执行结果、通知、截断标志与输出文件路径。校验字段类型和执行结果，通知和文件路径各最多 32 项，仅复制这些显示字段。输出、显示文本、错误与通知平分独立的合计 8 KiB/200 行文本预算；目录和输出文件路径共用 8 KiB UTF-8 预算。保留已保存的截断标志，并标识额外截断。结构无效、版本不支持、路径超限或调用不匹配时回退到旧文本。保留原有 `output` 字段以兼容旧客户端；响应文本缺失时使用保存的显示文本。结构读取复用同一私有消息，不增加历史扫描或发布。
 
 ## 客户端行为
 
-Managed 会话向 ReadFile/Shell 卡片提供详情加载器。关闭的卡片不发出详情请求。已展开且缺少输入或输出的已结束卡片显示加载状态，读取自己的 Session/Item，随后复用已有渲染器。已有输入和输出时无需额外请求。缺失输出显示不可用提示，已记录的空输出显示不同的空提示。
+Managed 会话向 ReadFile/Shell 卡片提供详情加载器。关闭的卡片不发出详情请求。已展开且缺少输入或输出的已结束卡片显示加载状态，读取自己的 Session/Item，随后复用已有渲染器。已有输入和输出时无需额外请求。缺失输出显示不可用提示，已记录的空输出显示不同的空提示。ReadFile 和 Shell 共用对空文本块和不透明原始结果的记录存在性判断。
 
 关闭卡片或切换 provider、Session、工具身份会中止进行中的读取。展示前核对响应身份和生命周期版本，避免晚到的响应暴露另一 Session 的内容。即使结束回执先到，新的完成来源序号也会重读详情。Shell 执行详情仅在有实际字段行时渲染，耗时继续显示在状态栏。
 

@@ -128,11 +128,14 @@ class ManagedArtifactApiIntegrationTest {
 
     @Test
     void readsCommittedFileErrorsWithoutAnArtifactPublication() throws Exception {
-        savedDetails("read_file", "error", "Path must be relative to the Workspace.");
+        savedDetails("read_file", "error", "Path must be relative to the Workspace.",
+                JSON.createObjectNode().put("file_path", "/tmp/pr-14599.diff").put("offset", 10).put("limit", 100));
         fixture.jdbc().update("DELETE FROM ma_artifact");
         fixture.jdbc().update("DELETE FROM ma_output_capture");
         mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
                 .andExpect(jsonPath("$.input.file_path").value("/tmp/pr-14599.diff"))
+                .andExpect(jsonPath("$.input.offset").doesNotExist())
+                .andExpect(jsonPath("$.input.limit").doesNotExist())
                 .andExpect(jsonPath("$.output").value("Path must be relative to the Workspace."))
                 .andExpect(jsonPath("$.truncated").value(false))
                 .andExpect(response -> contract("getWebShellToolDetails", "WebShellToolDetails",
@@ -158,6 +161,23 @@ class ManagedArtifactApiIntegrationTest {
                 JSON.createObjectNode().put("output", "saved stdout").put("error", "saved failure"));
         mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
                 .andExpect(jsonPath("$.output").value("saved stdout\n\nsaved failure"));
+    }
+
+    @Test
+    void preservesUpstreamTruncationForShortSavedShellPreviews() throws Exception {
+        for (boolean nested : new boolean[] {false, true}) {
+            var response = JSON.createObjectNode().put("output", "short preview");
+            if (nested) {
+                response.set("capture", JSON.createObjectNode().put("previewTruncated", true));
+            } else {
+                response.put("previewTruncated", true);
+            }
+            savedDetails("run_shell_command", JSON.createObjectNode().put("command", "printf sentinel"), response);
+            mvc.perform(asReader(toolDetails())).andExpect(status().isOk())
+                    .andExpect(jsonPath("$.output").value("short preview"))
+                    .andExpect(jsonPath("$.truncated").value(true));
+            fixture.jdbc().update("DELETE FROM ma_resource WHERE resource_id IN (?, ?)", "details-call", "details-result");
+        }
     }
 
     @Test
