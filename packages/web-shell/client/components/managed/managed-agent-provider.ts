@@ -21,6 +21,8 @@ export type ManagedAgentRuntimeState =
 
 export type ManagedApprovalMode = 'default' | 'auto-edit' | 'yolo';
 export type ManagedInputBlock = components['schemas']['InputBlock'];
+export type ManagedSessionSkills =
+  components['schemas']['WebShellSessionSkills'];
 
 export function isManagedApprovalMode(
   value: unknown,
@@ -228,6 +230,12 @@ export interface ManagedAgentProvider {
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly skills?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionSkills>;
+  };
   /** Present when the provider can serve Hosted permission Actions. */
   readonly actions?: {
     listPending(
