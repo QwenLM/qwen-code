@@ -694,11 +694,11 @@ jobs:
     # lost-reply cell adds 150 s, so the fork moves to 8259 s and Verify to
     # 148 minutes, and the FG13a HTTP lost-reply cell adds 150 s, so the fork
     # moves to 8409 s and Verify to 151 minutes, which wraps its fork + 600 s
-    # plus margin; the Broker fault gates keep 10,
+    # plus margin; the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 231 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 244
+    # checks): 241 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 254
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -809,7 +809,8 @@ jobs:
           cd integration-tests
           npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
-        timeout-minutes: 10
+        # Outlive the 600 s surefire fork plus compilation and report teardown.
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: >-
