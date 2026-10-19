@@ -12,6 +12,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,6 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Uses its own disposable empty application catalog. */
 class WorkspaceCreationSchemaMySqlIT {
+    private static final List<String> RETIREMENT_COLUMNS = List.of(
+            "progress_format", "progress_version", "progress_stage", "settlement_deadline_ms",
+            "frozen_request_bytes", "frozen_request_sha256", "cut_bytes", "cut_sha256",
+            "finalize_receipt_bytes", "finalize_receipt_sha256", "csi_retirement_target_key");
+
     @Test
     void addsSshRegistrationAfterPublishedApprovalSelectionWithoutChangingHistory() {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
@@ -53,7 +59,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(12, ManagedSchema.schemaVersion(source));
+            assertEquals(13, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
@@ -91,8 +97,13 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(12, ManagedSchema.schemaVersion(source));
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
+            assertEquals(13, ManagedSchema.schemaVersion(source));
+            var upgraded = jdbc.queryForMap("SELECT * FROM ma_operation");
+            for (String column : RETIREMENT_COLUMNS) {
+                assertThat(upgraded).containsKey(column);
+                assertThat(upgraded.remove(column)).isNull();
+            }
+            assertThat(upgraded)
                     .usingRecursiveComparison().isEqualTo(existing);
             operation(jdbc, "created", "WORKSPACE_CREATE");
             operation(jdbc, "input", "SUBMIT_INPUT");
@@ -125,11 +136,16 @@ class WorkspaceCreationSchemaMySqlIT {
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
-            assertEquals(12, ManagedSchema.schemaVersion(source));
+            assertEquals(13, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement();
                     var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
                 String baseline = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+                statement.execute("DROP TABLE ma_csi_source");
+                statement.execute("DROP INDEX uq_ma_csi_retirement_target ON ma_operation");
+                for (String column : RETIREMENT_COLUMNS) {
+                    statement.execute("ALTER TABLE ma_operation DROP COLUMN " + column);
+                }
                 statement.execute("DROP INDEX ix_ma_head_wake ON ma_session_head");
                 statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_scan_pending");
                 statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_retry_at");
@@ -176,7 +192,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(12, ManagedSchema.schemaVersion(source));
+            assertEquals(13, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(

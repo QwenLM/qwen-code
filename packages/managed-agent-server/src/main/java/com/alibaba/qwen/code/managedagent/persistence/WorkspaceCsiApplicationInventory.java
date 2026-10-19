@@ -604,6 +604,10 @@ final class WorkspaceCsiApplicationInventory {
             inventory.block("inventory", null, "schema_drift");
             return inventory.snapshot();
         }
+        if (WorkspaceCsiNodeSourceStore.hasAssociation(target, original.bindingId(), intent.physicalKey(), true)) {
+            inventory.block("ma_csi_source", null, "node_evidence_retirement_unsupported");
+            return inventory.snapshot();
+        }
         inventory.discover();
         inventory.validate();
         return inventory.snapshot();

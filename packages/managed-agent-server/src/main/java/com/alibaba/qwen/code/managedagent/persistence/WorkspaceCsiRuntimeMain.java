@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiNodeEvidence;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiResourceGuard;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -9,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiNodeSourceClient;
 import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.RuntimeBrokerHttpServer;
@@ -17,6 +19,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -68,12 +71,17 @@ public final class WorkspaceCsiRuntimeMain {
     }
 
     static void run(String[] args) throws Exception {
+        if (args.length == 2 && java.util.Set.of("source-status", "node-config").contains(args[0])) {
+            WorkspaceCsiNodeSourceMain.run(args);
+            return;
+        }
         if (args.length == 3 && ("text".equals(args[0]) || "retire".equals(args[0]))) {
             WorkspaceCsiHostedMain.run(args);
             return;
         }
-        if (args.length != 3 || !"serve".equals(args[0])) {
-            throw new IllegalArgumentException("Usage: serve <reviewed-runtime-json> <port>");
+        boolean evidenceMode = args.length == 4 && "serve-evidence".equals(args[0]);
+        if (!evidenceMode && (args.length != 3 || !"serve".equals(args[0]))) {
+            throw new IllegalArgumentException("Usage: serve <reviewed-runtime-json> <port> | serve-evidence <reviewed-runtime-json> <port> <reviewed-node-json>");
         }
         int port = Integer.parseInt(args[2]);
         if (port < 1024 || port > 65535) {
@@ -108,8 +116,11 @@ public final class WorkspaceCsiRuntimeMain {
         var guard = new WorkspaceCsiResourceGuard(api, required("K2_CLUSTER_DOMAIN"), request.registration(),
                 request.protection());
         var storage = new WorkspaceCsiReservationStore(jdbc, manager, json);
-        var provider = new WorkspaceCsiRuntimeProvisioner(storage, bindings, request.registration(), api,
-                guard, request.image(), request.command(), Duration.ofSeconds(30), request.artifacts(), authorityOrigin);
+        var evidence = evidenceMode ? nodeEvidence(Path.of(args[3]), json, jdbc, manager, bindings, request, api) : null;
+        var provider = evidence == null ? new WorkspaceCsiRuntimeProvisioner(storage, bindings, request.registration(), api,
+                guard, request.image(), request.command(), Duration.ofSeconds(30), request.artifacts(), authorityOrigin)
+                : new WorkspaceCsiRuntimeProvisioner(storage, bindings, request.registration(), api, guard, request.image(),
+                        request.command(), Duration.ofSeconds(30), request.artifacts(), authorityOrigin, evidence);
         try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
                 new JdbcToolExecutionRepository(source, bindings), UUID.randomUUID().toString(),
                 Duration.ofSeconds(30), Duration.ofSeconds(30));
@@ -138,6 +149,41 @@ public final class WorkspaceCsiRuntimeMain {
                 || !request.registration().storageId().equals(binding.getRequest().getStorageId())
                 || !request.registration().mountRoot().equals(binding.getRequest().getScope().getCanonicalCwd())) {
             throw new IllegalArgumentException("Reviewed original CSI Runtime is unavailable");
+        }
+    }
+
+    public record NodeRequest(WorkspaceCsiNodeSourceStore.Node node, String coordinatorPrincipal,
+            Path clientStore, Path passwordFile, Path caFile) { }
+
+    private static WorkspaceCsiNodeEvidence nodeEvidence(Path path, ObjectMapper json, JdbcTemplate jdbc,
+            DataSourceTransactionManager manager, JdbcRuntimeBindingRepository bindings, Request runtime,
+            com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeClient api) throws java.io.IOException {
+        byte[] bytes;
+        try (var input = Files.newInputStream(path)) {
+            bytes = input.readNBytes(WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT + 1);
+        }
+        if (bytes.length == 0 || bytes.length > WorkspaceCsiNodeSourceStore.CONFIGURATION_LIMIT) {
+            throw new IllegalArgumentException("A bounded reviewed node source is required");
+        }
+        var request = json.readValue(bytes, NodeRequest.class);
+        if (request == null || request.node() == null) {
+            throw new IllegalArgumentException("A reviewed node source is required");
+        }
+        var source = new CsiNodeSourceClient(request.node().sourceOrigin(), request.node().sourcePrincipal(),
+                request.coordinatorPrincipal(), request.clientStore(), request.passwordFile(), request.caFile());
+        try {
+            var gateway = new CsiNodeSourceClient(request.node().gatewayOrigin(), request.node().gatewayPrincipal(),
+                    request.coordinatorPrincipal(), request.clientStore(), request.passwordFile(), request.caFile());
+            try {
+                return new WorkspaceCsiNodeEvidence(new WorkspaceCsiNodeSourceStore(jdbc, manager, bindings), request.node(),
+                        runtime.registration(), api, source, gateway, runtime.image());
+            } catch (RuntimeException failure) {
+                gateway.close();
+                throw failure;
+            }
+        } catch (RuntimeException failure) {
+            source.close();
+            throw failure;
         }
     }
 
