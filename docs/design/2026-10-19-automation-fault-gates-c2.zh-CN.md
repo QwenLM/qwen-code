@@ -75,15 +75,17 @@ job 上限由 227 分钟升到 236 分钟。
 
 `parked-tool-harness-kill` 延期：第 1 片的 `turn-crash` 已钉住「Harness 在 turn
 中途死掉、run 恰好结算一次 `failed`/`outcome_unknown`」，已合入的 #14526 门禁
-钉住挂起执行的取消与租约释放。本格真正的增量只剩「Runtime 工具调用不重放」，
+钉住按 run 取消的路径（被取消的 occurrence 不调用模型、不会重复执行）。
+本格真正的增量只剩「Runtime 工具调用不重放」，
 需要另造会发 tool-call 的模型桩与 broker 交互，成本高于增量价值。
 
 ## 验收
 
 - `mvn -Pmysql-integration -DskipTests test-compile checkstyle:check` 干净，
   且本树上 `checkstyle:check@runtime-broker-checkstyle` 也干净。
-- 四个用例在 JDK 21 + 真实 MySQL 上全绿，每个用
-  `-Dqwen.fg11c2.case=<case>` 单独选择；整类全绿。
+- 已实现的每个用例在 JDK 21 + 真实 MySQL 上全绿，用
+  `mvn -Pmysql-integration -Dit.test=HostedAutomationSpringCrashIT#<method>`
+  `failsafe:integration-test` 单独选择；整类全绿。
 - 每个见证都在表中位置变红，并逐字节恢复。
 - `scripts/tests/hosted-process-ci.test.js` 在预算叠加后全绿。
 - 本设计以中英双语交付，结构一致。

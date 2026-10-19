@@ -91,8 +91,9 @@ and the job ceiling 227 to 236 minutes.
 
 `parked-tool-harness-kill` is deferred: slice 1's `turn-crash` already pins
 "the Harness dies mid-turn and the run settles exactly once as
-`failed`/`outcome_unknown`", and the merged #14526 gates pin the parked
-execution's cancellation and lease release. The remaining delta — a Runtime
+`failed`/`outcome_unknown`", and the merged #14526 gates pin the per-run
+cancel path (a cancelled occurrence makes no model call, no duplicate
+execution). The remaining delta — a Runtime
 tool call is not replayed — would need a tool-call model stub and broker
 wiring whose cost outweighs the increment.
 
@@ -100,8 +101,9 @@ wiring whose cost outweighs the increment.
 
 - `mvn -Pmysql-integration -DskipTests test-compile checkstyle:check` clean,
   and `checkstyle:check@runtime-broker-checkstyle` clean on this tree.
-- Each case green on JDK 21 with a real MySQL, selected by
-  `-Dqwen.fg11c2.case=<case>`; the whole class green.
+- Each implemented case green on JDK 21 with a real MySQL, selected with
+  `mvn -Pmysql-integration -Dit.test=HostedAutomationSpringCrashIT#<method>`
+  `failsafe:integration-test`; the whole class green.
 - Every witness red at the site the table names, restored byte for byte.
 - `scripts/tests/hosted-process-ci.test.js` green with the composed budget.
 - This design is delivered in both languages with matching structure.
