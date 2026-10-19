@@ -206,6 +206,118 @@ function turnResult(
 }
 
 describe('hosted automation definitions', () => {
+  it('persists a targeted cancel across reopen without retiring the schedule', async () => {
+    const harness = await createHarness();
+    const runId = automationRunId(SCHEDULE_ID, SLOT_KEY);
+    const siblingId = automationRunId(SCHEDULE_ID, 'manual:sibling');
+    await withSession(harness, async (automations, authority) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: randomUUID(),
+        definition,
+      });
+      await automations.fire(fireParams());
+      await automations.fire(fireParams(1, 'manual:sibling'));
+      await automations.requestCancel(runId);
+      const before = authority.committedSequence;
+      await automations.requestCancel(runId);
+      expect(authority.committedSequence).toBe(before);
+      expect(automations.cancelRequested(automationInputId(runId))).toBe(true);
+      expect(automations.cancelRequested(automationInputId(siblingId))).toBe(
+        false,
+      );
+      expect(automations.run(runId)?.run.state).toBe('running');
+      expect(automations.schedule(SCHEDULE_ID)?.enabled).toBe(true);
+    });
+    await withSession(
+      harness,
+      async (automations) => {
+        expect(automations.cancelRequested(automationInputId(runId))).toBe(
+          true,
+        );
+        expect(automations.cancelRequested(automationInputId(siblingId))).toBe(
+          false,
+        );
+        expect(automations.schedule(SCHEDULE_ID)?.enabled).toBe(true);
+      },
+      { create: false },
+    );
+  });
+
+  it('keeps a naturally completed result when cancellation arrives later', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: randomUUID(),
+        definition,
+      });
+      const fired = await automations.fire(fireParams());
+      harness.records.push(
+        turnRecord(harness, fired.inputId, 'user'),
+        turnResult(fired.inputId, 'completed'),
+      );
+      expect(
+        (await automations.requestCancel(fired.run.automationRunId)).run.state,
+      ).toBe('settled');
+      expect(automations.cancelRequested(fired.inputId)).toBe(false);
+      const before = authority.committedSequence;
+      await automations.requestCancel(fired.run.automationRunId);
+      expect(authority.committedSequence).toBe(before);
+    });
+  });
+
+  it('cancels a claim before dispatch without admitting an input or retiring its definition', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      const opened = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: randomUUID(),
+        definition,
+      });
+      const claim = automationRunClaimBody({
+        schedule: opened.schedule,
+        occurrenceKey: SLOT_KEY,
+      });
+      await authority.commitExtensionRecord(
+        {
+          operation: 'fireRun',
+          commandId: `${claim.automationRunId}:1`,
+          sessionKey,
+          contentDigest: 'd'.repeat(64),
+        },
+        { domain: 'automation_run', record: claim },
+        { class: 'trusted_entry' },
+      );
+      const cancelled = await automations.requestCancel(claim.automationRunId);
+      expect(cancelled.run).toMatchObject({
+        state: 'cancelled',
+        execution: 'not_started_proven',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toEqual([]);
+      expect(automations.schedule(SCHEDULE_ID)?.enabled).toBe(true);
+      expect((await automations.fire(fireParams())).run).toEqual(cancelled);
+      expect(
+        (await automations.fire(fireParams(1, 'manual:next'))).run.run.state,
+      ).toBe('running');
+    });
+  });
+
+  it('refuses a missing run without writing a cancellation', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      const before = authority.committedSequence;
+      await expect(
+        automations.requestCancel(automationRunId(SCHEDULE_ID, SLOT_KEY)),
+      ).rejects.toThrow(AutomationNotFoundError);
+      expect(authority.committedSequence).toBe(before);
+    });
+  });
+
   it('opens, revises append-only, replays unchanged content and retires', async () => {
     const harness = await createHarness();
     await withSession(harness, async (automations, authority) => {

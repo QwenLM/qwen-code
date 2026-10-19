@@ -6,6 +6,7 @@
 
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
   captureHookExecutionOwner,
@@ -5233,7 +5234,9 @@ export class Session implements SessionContext {
     }
     if (params._meta?.[DAEMON_CONTINUE_META_KEY] === true) {
       if (
-        (await this.#hasCancelledTurn()) ||
+        (await this.#isContinueBlocked(
+          params._meta?.['qwen.daemon.confirmCancellation'],
+        )) ||
         !this.#getRecoveryPlan(true)?.continuation
       ) {
         return { stopReason: 'end_turn' };
@@ -5933,15 +5936,21 @@ export class Session implements SessionContext {
     }
   }
 
-  async #hasCancelledTurn(): Promise<boolean> {
+  async #getTurnCancellation() {
     const recorder = this.config.getChatRecordingService();
     if (!recorder) throw new Error('Recovery requires a session transcript');
-    const records = await recorder.readActiveTranscriptChain();
+    return getLastApiPromptCancellation(
+      this.#getCurrentChat().getHistoryShallow(),
+      await recorder.readActiveTranscriptChain(),
+    );
+  }
+
+  async #isContinueBlocked(confirmCancellation?: unknown): Promise<boolean> {
+    const cancellation = await this.#getTurnCancellation();
     return (
-      getLastApiPromptCancellation(
-        this.#getCurrentChat().getHistoryShallow(),
-        records,
-      ) !== undefined
+      (cancellation !== undefined &&
+        cancellation.confirmationId === undefined) ||
+      confirmCancellation !== cancellation?.confirmationId
     );
   }
 
@@ -6011,6 +6020,28 @@ export class Session implements SessionContext {
     };
   }
 
+  async getRecoveryStatusForClient(): Promise<
+    NonNullable<ServeSessionContextStatus['recovery']>
+  > {
+    const initial = this.getRecoveryStatus();
+    if (!initial.canContinue) return initial;
+    try {
+      const cancellation = await this.#getTurnCancellation();
+      const status = this.getRecoveryStatus();
+      if (cancellation && !cancellation.confirmationId) {
+        return { ...status, canContinue: false };
+      }
+      return {
+        ...status,
+        ...(status.canContinue && cancellation?.confirmationId
+          ? { cancellationConfirmationId: cancellation.confirmationId }
+          : {}),
+      };
+    } catch {
+      return { kind: this.getRecoveryStatus().kind, canContinue: false };
+    }
+  }
+
   /**
    * Classify whether an unfinished previous turn can be resumed — an
    * interrupted prompt (the model never answered) or a turn left with dangling
@@ -6024,17 +6055,11 @@ export class Session implements SessionContext {
    * tracked like any other prompt; `prompt()` then re-detects/strips
    * authoritatively. Powers `qwen/control/session/continue`.
    */
-  async continueLastTurn(): Promise<{
+  async continueLastTurn(confirmCancellation?: string): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    if (
-      this.getRecoveryStatus().canContinue &&
-      (await this.#hasCancelledTurn())
-    ) {
-      return { accepted: false, interruption: 'none' };
-    }
-    const recovery = this.getRecoveryStatus();
+    const recovery = await this.getRecoveryStatusForClient();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
       // ten `#hasActiveTurn()` members into one boolean and the only UI
@@ -6064,7 +6089,9 @@ export class Session implements SessionContext {
       });
     }
     return {
-      accepted: recovery.canContinue,
+      accepted:
+        recovery.canContinue &&
+        confirmCancellation === recovery.cancellationConfirmationId,
       interruption:
         recovery.kind === 'interrupted_prompt' ||
         recovery.kind === 'interrupted_turn'
@@ -6523,7 +6550,9 @@ export class Session implements SessionContext {
                 goalTurn.permit,
               );
             } else if (isContinue) {
-              const recoveryPlan = (await this.#hasCancelledTurn())
+              const recoveryPlan = (await this.#isContinueBlocked(
+                promptMetadata?.['qwen.daemon.confirmCancellation'],
+              ))
                 ? undefined
                 : this.#getRecoveryPlan(true);
               if (!recoveryPlan?.continuation) {
@@ -13435,9 +13464,7 @@ export class Session implements SessionContext {
       target.push({
         ...record,
         // Calls outside the model's batch are nested Code Mode originals.
-        ...(ordinal === -1
-          ? { subtype: 'code_mode_tool_result' as const }
-          : {}),
+        ...(ordinal === -1 ? codeModeToolResultStamp() : {}),
         toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,

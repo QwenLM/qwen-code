@@ -17,7 +17,7 @@ import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/service
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
-import { ModSession } from './mod-session.js';
+import { ModSession } from '../services/mod-session.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';

@@ -1106,6 +1106,11 @@ export interface SessionWorkflowPlanRevision {
 /** `goals.modelProposed`: whether the model may propose a Goal for approval. */
 export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 
+export type WorkflowAncestorTrustProvider = (
+  ancestorDirs: readonly string[],
+  canonicalTargetDir: string,
+) => Promise<readonly boolean[]>;
+
 export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
@@ -1197,10 +1202,11 @@ export interface ConfigParameters {
    */
   customSkillDirs?: readonly string[];
   /**
-   * Tool names hidden from the registry at construction time. Unlike
-   * `permissions.deny` (which keeps the tool registered and rejects
-   * invocation), tools listed here are not registered at all and never
-   * appear in `/tools`, `getAllTools()`, or function-call discovery.
+   * Tool names hidden from the registry at construction time. Tools listed
+   * here are not registered at all and never appear in `/tools`,
+   * `getAllTools()`, or function-call discovery. A `permissions.deny` rule
+   * without a specifier has the same effect on built-in tools; a rule with
+   * a specifier keeps the tool registered and rejects matching calls.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
    * `POST /workspace/tools/:name/enable {enabled:false}`. Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the
@@ -1255,6 +1261,7 @@ export interface ConfigParameters {
    * before execution. A configured guard fails closed.
    */
   toolInvocationGuard?: ToolInvocationGuard;
+  workflowAncestorTrustProvider?: WorkflowAncestorTrustProvider;
   /** Internal trusted-host integration; never loaded from workspace settings. */
   shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
@@ -2847,6 +2854,9 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
   private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
+  private readonly workflowAncestorTrustProvider:
+    | WorkflowAncestorTrustProvider
+    | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -3420,6 +3430,7 @@ export class Config {
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
+    this.workflowAncestorTrustProvider = params.workflowAncestorTrustProvider;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -12286,6 +12297,12 @@ export class Config {
     return (
       this.isAgentCollaborationEnabled() && this.sessionSourceType === 'agent'
     );
+  }
+
+  getWorkflowAncestorTrustProvider():
+    | WorkflowAncestorTrustProvider
+    | undefined {
+    return this.workflowAncestorTrustProvider;
   }
 
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
