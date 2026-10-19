@@ -66,6 +66,8 @@ class HostedAutomationSpringCrashIT {
     private JdbcTemplate jdbc;
     private String controlUrl;
     private String internalUrl;
+    private String publicUrl;
+    private String tenant;
 
     @AfterEach
     void tearDown() throws Exception {
@@ -146,7 +148,8 @@ class HostedAutomationSpringCrashIT {
                 HostedAutomationCrashFixtureMain.class.getName(),
                 root.toString(), required("node.executable"),
                 cliEntry().toString(), tenant,
-                String.valueOf(freePort()), String.valueOf(brokerPort));
+                String.valueOf(freePort()), String.valueOf(brokerPort),
+                String.valueOf(freePort()));
         builder.environment().put("FG11C_MYSQL_URL", required("mysql.url"));
         builder.environment().put("FG11C_MYSQL_USER", required("mysql.user"));
         builder.environment().put("FG11C_MYSQL_PASSWORD",
@@ -166,6 +169,8 @@ class HostedAutomationSpringCrashIT {
                 Files.readString(root.resolve("ready.json")));
         controlUrl = ready.path("controlUrl").asText();
         internalUrl = ready.path("internalUrl").asText();
+        publicUrl = ready.path("publicUrl").asText();
+        this.tenant = tenant;
     }
 
     private int freePort() throws IOException {
@@ -354,6 +359,95 @@ class HostedAutomationSpringCrashIT {
                 : "\nlast probe failure: " + lastFailure;
         throw new AssertionError(description + " timed out; harness log:\n"
                 + harnessLogSnapshot() + suffix, lastFailure);
+    }
+
+    @Test
+    @Timeout(900)
+    void fg11c2ScannerFiresOneOccurrenceOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url"))
+                .as("FG11c slice 2 requires -Dmysql.url")
+                .startsWith("jdbc:mysql:");
+        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+                new DriverManagerDataSource(required("mysql.url"),
+                        required("mysql.user"),
+                        System.getProperty("mysql.password", "")));
+        jdbc.setQueryTimeout(10);
+        temporary = temporary.toRealPath();
+        String tenantName = "hosted-automation-fire-" + UUID.randomUUID();
+        startModel();
+        harnessPort = freePort();
+        brokerPort = freePort();
+        Path root = Files.createDirectories(temporary.resolve("fire"));
+        startFixture(root, tenantName);
+        startHarness();
+        String session = createSession("fire");
+        String definition = apiRequest("POST", "/v1/agent-automations",
+                definition(session, "FG11C2_FIRE"), "fg11c2-def", 202)
+                .path("id").asText();
+        assertThat(definition).startsWith("asch_");
+        // One scanner tick must open a slot for the every-minute definition.
+        control("scan", "");
+        await("occurrence for the definition", 120, () -> {
+            Integer count = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_schedule_occurrence"
+                            + " WHERE tenant_id = ? AND schedule_id = ?",
+                    Integer.class, tenant, definition);
+            return count != null && count > 0 ? true : null;
+        });
+    }
+
+    private String createSession(String name) throws Exception {
+        String session = apiRequest("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(),
+                        "workspace", Map.of("workspace_id", "workspace-0",
+                                "cwd_relative", "child")),
+                "fg11c2-session-" + name, 202).path("id").asText();
+        await("session active", 90, () -> "ACTIVE".equals(jdbc.queryForObject(
+                "SELECT status FROM ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                session)) ? true : null);
+        // The automation verbs load the Session on the Harness, never create
+        // it, so the Session runs one Turn first.
+        apiRequest("POST", "/v1/agents/sessions/" + session + "/events",
+                Map.of("type", "agent.session.input.message", "input",
+                        List.of(Map.of("type", "input_text", "text",
+                                "FG11C2_WARM " + name))),
+                "fg11c2-warm-" + name, 202);
+        await("warm turn completed", 120, () -> jdbc.queryForList(
+                "SELECT status FROM ma_turn WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant, session)
+                .contains("COMPLETED") ? true : null);
+        return session;
+    }
+
+    private Map<String, Object> definition(String session, String goal) {
+        return Map.of("session_id", session, "goal", goal,
+                "cron", "* * * * *", "timezone", "UTC",
+                "prompt", goal + " reply with FG11C2_DONE.");
+    }
+
+    private JsonNode apiRequest(String method, String path, Object body,
+            String key, int expected) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(
+                        URI.create(publicUrl + path))
+                .timeout(Duration.ofSeconds(60))
+                .header("X-Qwen-Tenant-Id", tenant)
+                .header("x-qwen-actor", "actor")
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .method(method, body == null
+                        ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(
+                                json.writeValueAsString(body)));
+        if (key != null) {
+            request.header("Idempotency-Key", key);
+        }
+        HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(request.build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode())
+                .as("%s %s: %s", method, path, response.body())
+                .isEqualTo(expected);
+        return json.readTree(response.body());
     }
 
     private String harnessLogSnapshot() {

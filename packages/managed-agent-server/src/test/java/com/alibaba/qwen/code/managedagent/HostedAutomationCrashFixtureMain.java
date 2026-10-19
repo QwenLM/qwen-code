@@ -40,11 +40,12 @@ public final class HostedAutomationCrashFixtureMain {
         String tenant = args[3];
         int internalPort = Integer.parseInt(args[4]);
         int brokerPort = Integer.parseInt(args[5]);
+        int publicPort = Integer.parseInt(args[6]);
         ObjectMapper mapper = new ObjectMapper();
         Files.createDirectories(root.resolve("workspace-mount"));
         var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
-                "--server.address=127.0.0.1", "--server.port=0",
+                "--server.address=127.0.0.1", "--server.port=" + publicPort,
                 "--spring.datasource.url=" + System.getenv("FG11C_MYSQL_URL"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
                 "--spring.datasource.username=" + System.getenv("FG11C_MYSQL_USER"),
@@ -75,6 +76,7 @@ public final class HostedAutomationCrashFixtureMain {
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + root.resolve("workspace-mount"),
                 "--qwen.managed-agent.automation.enabled=true",
+                "--qwen.managed-agent.trusted-actor-header=x-qwen-actor",
                 "--qwen.managed-agent.automation.scan-delay=1s",
                 "--qwen.managed-agent.automation.lease=15s",
                 "--qwen.managed-agent.automation.late-tolerance=30s",
@@ -111,6 +113,7 @@ public final class HostedAutomationCrashFixtureMain {
         Path ready = root.resolve("ready.tmp");
         mapper.writeValue(ready.toFile(), Map.of(
                 "internalUrl", "http://127.0.0.1:" + internalPort,
+                "publicUrl", "http://127.0.0.1:" + publicPort,
                 "controlUrl", "http://127.0.0.1:"
                         + control.getAddress().getPort()));
         Files.move(ready, root.resolve("ready.json"),
