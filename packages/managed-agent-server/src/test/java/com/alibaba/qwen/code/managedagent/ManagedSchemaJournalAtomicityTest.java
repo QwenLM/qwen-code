@@ -133,9 +133,12 @@ class ManagedSchemaJournalAtomicityTest {
                 .isPositive();
     }
 
-    @Test
-    void wakeHintCommitsAndRollsBackWithItsAcceptedInput() throws Exception {
-        jdbc.update("UPDATE ma_session_head SET wake_pending = FALSE, wake_head_revision = 1");
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void wakeHintCommitsAndRollsBackWithItsAcceptedInput(boolean knownPrefix) throws Exception {
+        assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isFalse();
+        jdbc.update("UPDATE ma_session_head SET wake_pending = FALSE, wake_head_revision = ?", knownPrefix ? 1L : null);
         var monitor = ManagedExtensionProjectionContractTest.fixtures()
                 .required("monitorChainCases").get(0).required("revisions").get(0).required("monitorRun");
         var prepared = journal.request("wake-admit", monitor, 1_000);
@@ -149,14 +152,18 @@ class ManagedSchemaJournalAtomicityTest {
         assertThatThrownBy(() -> transactions.executeWithoutResult(status -> {
             journal.commit(request);
             assertThat(jdbc.queryForObject("SELECT wake_pending FROM ma_session_head", Boolean.class)).isTrue();
-            assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class)).isEqualTo(2);
+            assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class))
+                    .isEqualTo(knownPrefix ? 2L : null);
+            assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isTrue();
             throw new SimulatedCrash();
         })).isInstanceOf(SimulatedCrash.class);
         assertThat(jdbc.queryForObject("SELECT wake_pending FROM ma_session_head", Boolean.class)).isFalse();
-        assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class))
+                .isEqualTo(knownPrefix ? 1L : null);
         transactions.executeWithoutResult(status -> journal.commit(request));
         assertThat(jdbc.queryForObject("SELECT wake_pending FROM ma_session_head", Boolean.class)).isTrue();
-        assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class))
+                .isEqualTo(knownPrefix ? 2L : null);
         journal.committed(request);
 
         // A legacy admission did not maintain the hint; an unrelated modern
@@ -168,7 +175,20 @@ class ManagedSchemaJournalAtomicityTest {
                 next.required("occurredAt").longValue());
         transactions.executeWithoutResult(status -> journal.commit(ordinary));
         assertThat(jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT wake_pending FROM ma_session_head", Boolean.class)).isFalse();
         assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isTrue();
+    }
+
+    @Test
+    void anOrdinaryCommitPreservesAnAlreadyPendingWake() throws Exception {
+        jdbc.update("UPDATE ma_session_head SET wake_pending = TRUE, wake_head_revision = 1");
+        var monitor = ManagedExtensionProjectionContractTest.fixtures()
+                .required("monitorChainCases").get(0).required("revisions").get(0).required("monitorRun");
+        var ordinary = journal.request("ordinary-update", monitor, 1_000);
+        transactions.executeWithoutResult(status -> journal.commit(ordinary));
+        assertThat(jdbc.queryForObject("SELECT wake_pending FROM ma_session_head", Boolean.class)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT wake_head_revision FROM ma_session_head", Long.class)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isTrue();
     }
 

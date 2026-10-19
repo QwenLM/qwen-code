@@ -557,7 +557,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -572,7 +572,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -950,11 +950,13 @@ public class ManagedSessionStore {
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
+        boolean wakeInput = false;
         for (String line :
                 new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = ManagedExtensionRecordStore.parse(line);
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
+                wakeInput |= WakeRecoveryStore.isWakeInput(event);
                 ManagedHostedRecoveryRecords.validateEvent(
                         event.path("kind").asText(),
                         event.path("payload"),
@@ -1111,7 +1113,7 @@ public class ManagedSessionStore {
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ?",
                 revision, request.lastSequence(),
-                WakeRecoveryStore.hasWakeInput(validated.recordBytes(), request.eventCount()),
+                wakeInput,
                 head.journalRevision(), revision, request.commitDigest(),
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),

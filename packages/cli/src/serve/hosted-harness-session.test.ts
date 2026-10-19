@@ -7470,6 +7470,7 @@ describe('Hosted Harness no-tool session', () => {
   async function prewriteChannelWriteInterruption(
     cleanupDebt = false,
     previousPromptId?: string,
+    interruption: 'runtime' | 'queued' | 'approval' = 'runtime',
   ): Promise<string> {
     const key = {
       tenantId: 'tenant',
@@ -7605,6 +7606,7 @@ describe('Hosted Harness no-tool session', () => {
         attachments: [],
         replyContext: { parent: '<a@example.com>', references: [] },
       });
+      if (interruption === 'queued') return channelTurn;
       // The wake turn began — its user record is minted — and died inside
       // write_file before the tool result arrived.
       await managed.sink.write({
@@ -7620,6 +7622,48 @@ describe('Hosted Harness no-tool session', () => {
       } as ChatRecord);
       const harness = createManagedHarnessHandle(managed);
       await harness.ensureRunnable();
+      if (interruption === 'approval') {
+        const requestId = 'channel-recovery-approval';
+        const invocationRef = await resources.publish(
+          'managed-tool-input',
+          Buffer.from('{}'),
+        );
+        const now = Date.now();
+        const optionsRef = await resources.publish(
+          'managed-action-options',
+          Buffer.from(
+            JSON.stringify({
+              v: 1,
+              requestId,
+              turnId: channelTurn,
+              functionCallId: 'approval-call',
+              toolName: 'write_file',
+              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+              inputRevision: 1,
+              createdAt: now,
+              expiresAt: now + 600_000,
+              options: [
+                { id: 'allow', label: 'Allow' },
+                { id: 'deny', label: 'Deny' },
+              ],
+            }),
+          ),
+        );
+        await harness.commitDurableWait(
+          {
+            requestId,
+            kind: 'permission',
+            source: 'tool_call',
+            optionsRef,
+            inputRevision: '1',
+            invocationRef,
+            attemptId: 'approval-attempt',
+            routeRef: invocationRef,
+          },
+          { turnId: channelTurn, promptId: channelTurn },
+        );
+        return channelTurn;
+      }
       if (cleanupDebt) {
         const broker = new HostedWorkspaceBroker(
           { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -7714,6 +7758,221 @@ describe('Hosted Harness no-tool session', () => {
     }
     return channelTurn;
   }
+
+  async function loadChannelWakePark(
+    interruption: 'runtime' | 'queued' | 'approval' = 'runtime',
+  ) {
+    const turnId = await prewriteChannelWriteInterruption(
+      false,
+      undefined,
+      interruption,
+    );
+    mockBrokerBroker();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+      () => {},
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      })
+      .expect(200);
+    return {
+      turnId,
+      server,
+      clientId: loaded.body.clientId,
+      resident: capturedWakeSession(),
+    };
+  }
+
+  it('recovers a blocked channel wake through its interruption funnel', async () => {
+    const { turnId, server, clientId, resident } = await loadChannelWakePark();
+    const scheduler = resident.monitorWake as unknown as {
+      deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+    };
+    scheduler.deps.failed(new Error('wake pump failure'));
+    await scheduler.deps.recoverBlocked();
+    expect(resident.blocked).toBe(false);
+    const settlements = resident.managed.authority
+      .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+      .filter(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+      );
+    expect(settlements).toHaveLength(1);
+    expect(settlements[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'harness_interruption',
+    });
+    expect(
+      (await hostedHistory.readHostedFileHistory(resident.managed))
+        ?.pendingTurn ?? null,
+    ).toBeNull();
+    const channels = (resident as unknown as { channels: HostedChannelSession })
+      .channels;
+    expect(await channels.planReply(turnId)).toBeUndefined();
+    await scheduler.deps.recoverBlocked();
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it('never cancels a queued channel input while repairing a blocked wake pump', async () => {
+    const { turnId, server, clientId, resident } =
+      await loadChannelWakePark('queued');
+    const scheduler = resident.monitorWake as unknown as {
+      deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+    };
+    scheduler.deps.failed(new Error('wake input read failure'));
+    await scheduler.deps.recoverBlocked();
+    expect(resident.blocked).toBe(true);
+    expect(
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        ),
+    ).toHaveLength(0);
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it('keeps channel approval resolvable after a wake pump failure', async () => {
+    const { turnId, server, clientId, resident } =
+      await loadChannelWakePark('approval');
+    const scheduler = resident.monitorWake as unknown as {
+      deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+    };
+    scheduler.deps.failed(
+      new Error('wake pump failed with an approval pending'),
+    );
+    await scheduler.deps.recoverBlocked();
+    expect(resident.blocked).toBe(false);
+    expect(
+      resident.managed.authority.action('channel-recovery-approval')?.state,
+    ).toBe('requested');
+    expect(
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        ),
+    ).toBe(false);
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(
+      supertest(server).post(
+        `/session/${SESSION_ID}/actions/channel-recovery-approval/resolve`,
+      ),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        optionId: 'allow',
+        inputRevision: 1,
+        policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+      })
+      .expect(200);
+    expect(
+      resident.managed.authority.action('channel-recovery-approval')?.state,
+    ).toBe('decided');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it.each(['broker', 'checkpoint'] as const)(
+    'retries blocked channel recovery after a %s refusal',
+    async (fault) => {
+      const { turnId, server, clientId, resident } =
+        await loadChannelWakePark();
+      const checkpoint =
+        fault === 'checkpoint'
+          ? vi
+              .spyOn(resident.managed.authority, 'harnessRunAuthorization')
+              .mockResolvedValue({ status: 'blocked', reason: 'invalid_state' })
+          : undefined;
+      if (fault === 'broker')
+        vi.mocked(HostedWorkspaceBroker.prototype.status).mockRejectedValueOnce(
+          new Error('broker unavailable'),
+        );
+      const scheduler = resident.monitorWake as unknown as {
+        deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+      };
+      scheduler.deps.failed(new Error('wake pump failure'));
+      await scheduler.deps.recoverBlocked();
+      expect(resident.blocked).toBe(true);
+      expect(
+        (await hostedHistory.readHostedFileHistory(resident.managed))
+          ?.pendingTurn,
+      ).toBe(turnId);
+      checkpoint?.mockRestore();
+      await scheduler.deps.recoverBlocked();
+      expect(resident.blocked).toBe(false);
+      const settlements = resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        );
+      expect(settlements).toHaveLength(1);
+      expect(settlements[0]!.payload).toMatchObject({
+        outcome: 'cancelled',
+        stopReason: 'harness_interruption',
+      });
+      expect(
+        (await hostedHistory.readHostedFileHistory(resident.managed))
+          ?.pendingTurn ?? null,
+      ).toBeNull();
+      expect(state.model).not.toHaveBeenCalled();
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+    },
+  );
+
+  it('refuses a fresh prompt while a channel wake holds a Runtime park', async () => {
+    const { server, clientId, resident } = await loadChannelWakePark();
+    const promptId = randomUUID();
+    const prompt = [{ type: 'text', text: 'Wait for channel recovery' }];
+    const response = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(409);
+    expect(response.body.code).toBe('hosted_turn_recovery_in_progress');
+    expect(
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === promptId,
+        ),
+    ).toBe(false);
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
 
   it('recovers a channel turn interrupted inside a Write at attachment instead of refusing the load', async () => {
     // The R4 P1 witness: the load gate refused every attachment shape (the

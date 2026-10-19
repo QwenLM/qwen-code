@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
+import com.alibaba.qwen.code.managedagent.service.WakeRecovery;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -402,6 +403,17 @@ class ManagedAgentPropertiesTest {
             assertThat(scheduled.timeUnit())
                     .isEqualTo(TimeUnit.MILLISECONDS);
         });
+    }
+
+    @Test
+    void theWakeRecoveryScanUsesItsDedicatedSchedulerAndMillisecondCadence() {
+        assertThat(schedulesOn(WakeRecovery.class, "wake-recovery.scan-delay"))
+                .hasSize(1).allSatisfy(scheduled -> {
+                    assertThat(scheduled.fixedDelayString()).isEqualTo(
+                            "${qwen.managed-agent.wake-recovery.scan-delay:2s}");
+                    assertThat(scheduled.scheduler()).isEqualTo("wakeRecoveryScheduler");
+                    assertThat(scheduled.timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
+                });
     }
 
     @Test

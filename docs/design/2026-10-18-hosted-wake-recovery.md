@@ -32,6 +32,9 @@ An additive V11 migration extends the existing Session head without changing the
 `wake_head_revision` stamp are maintained with journal commits. A generated
 `wake_scan_pending` column includes both hinted work and unknown/stale stamps;
 an index orders candidates by durable `wake_retry_at` and the scoped head keys.
+Each pass reads hinted work first, then uses remaining slots for stale-stamp
+backfill. A new head stamps its proven empty prefix at revision zero; existing
+heads retain their unknown stamps.
 
 New wake admissions set the hint. Other commits advance a current stamp without
 clearing the hint. Settlement is proven by replaying the committed journal prefix
@@ -45,8 +48,9 @@ Only an `ACTIVE`, non-retired public Session with a matching Workspace and an
 expiry. Private CSI authority is excluded. Workspace admission, grants, physical
 mount verification and the Harness's writer generation acquisition remain the
 final fences. Closing, closed, deleted and retired Sessions never resume here.
-Stopped child runs are left to their stop relay, so recovery cannot restart the
-messages that stop is cancelling.
+Stopped or terminal child runs are left to their stop/close relay. The scanner
+clears their hint at the proved revision, so it neither restarts cancelled work
+nor repeatedly reloads a terminal run awaiting close.
 
 Writer acquisition locks and checks the public Session's status, including an
 unbound Session. A close that wins after discovery therefore still fences the
@@ -57,7 +61,8 @@ matching normal admission and lifecycle. Its durable retry timestamp commits
 before journal replay or Harness HTTP; no database lock spans a load. This avoids
 the head-to-Session inversion an update with a Session subquery would introduce.
 
-The scanner reads bounded journal pages, verifies their scope, byte digests and
+The scanner reads one journal transaction per page (at most 8 MiB of stored
+record bytes), verifies its scope, byte digest and
 contiguous committed prefix, and derives the pending set from input acceptance
 and Turn settlement. A missing, compacted or corrupt prefix is refused and logged;
 it is never interpreted as no pending work. The Harness independently verifies
@@ -75,6 +80,22 @@ scan retries with the new boot. This also covers channel Sessions with no saved
 public Turn boot binding. Passive takeover does not drive an unrelated parked
 foreground Turn; that remains the dispatcher's work.
 
+The connector validates a passive response against its currently serving boot
+inside the cache slot. It publishes the attachment before its recovery marker,
+then changes that marker only while the cache still holds the same ref. A late
+old response cannot replace a current attachment or erase its marker, and
+generation adoption cannot mistake a not-yet-published ref's marker for an
+orphan. The marker phase rechecks the boot after publication and removes an
+invalid ref if adoption skipped its earlier unpublished slot. No HTTP call or
+connector monitor is held inside those cache operations.
+
+The Harness uses the same six-source classifier for pump selection, blocked
+recovery and the prompt park guard. A channel turn's aftermath reuses its own
+interruption funnel, including Runtime settlement and file-history cleanup;
+it does not use the generic wake error outcome. Recovery requires a proven
+prior attempt, preserves queued inputs, and keeps held approvals resolvable.
+Transient or unprovable recovery leaves the input pending for another pass.
+
 No age-based cancellation is introduced. An unattempted wake keeps its original
 identity and runs through ordinary admission even after a long outage. An
 attempted wake uses its existing source-specific crash aftermath: committed
@@ -89,10 +110,18 @@ relay give-up states remain unchanged: the scan does not re-admit an input that
 never committed, or upgrade an unknown source receipt into success. Each failure
 names its tenant and Session in the server log.
 
-Initial proof still reads the complete history, and candidate filtering may
-visit ineligible historical heads. The page limit bounds returned candidates,
-not database work. Large catalogs and first-time histories can delay the single
-scanner; incremental replay and a resumable raw-head scan remain capacity work.
+Proof still reads the complete history after any new journal revision, cache
+eviction or process restart. Its work grows with history length, and repeated
+claims after intervening commits repeat that cost. Candidate filtering may visit
+live-writer, HARNESS, closed, retired and CSI historical heads; those index
+entries need not converge away. The page limit bounds returned candidates, not
+database work or whole-proof time. Large catalogs and histories can delay the
+single scanner. Incremental/resumable proof and catalog cleanup remain capacity
+work. A fixed budget that always restarts from revision zero would permanently
+exclude long journals, so it is not a safe substitute. Any resumable proof must
+retain the pending/settled sets and sequence continuity and must never clear a
+hint from a partial prefix. Lifecycle cleanup must not bless unexamined history
+for a state that can later become eligible again.
 
 MQ continues to accelerate first discovery. Its `wake_covered_sequence` is only
 notice deduplication; an `OWNED`, duplicate, failed or dropped notice cannot hide
@@ -121,13 +150,17 @@ retry delay and scan/load time. Backlog, an unavailable Harness, revoked grants,
 an unreadable journal or a blocked Runtime can extend it; recovery does not claim
 a successful outcome while those conditions persist.
 
-## Observed local validation
+## Initial implementation validation
 
-The complete Java unit run executes 4,670 tests with zero failures/errors and
+Before the review fixes, the complete Java unit run executed 4,670 tests with zero failures/errors and
 18 predefined skips. Eleven isolated MySQL tests cover discovery, exact
 settlement, revision races, durable claims and the Session-before-head lock
 order. Checkstyle, SpotBugs, the latest-main root build/bundle and Markdown
 formatting/reference checks pass.
+
+Validation of subsequent review fixes is recorded on
+[PR #14603](https://github.com/QwenLM/qwen-code/pull/14603). The initial counts
+below do not establish validation of those later changes.
 
 Real Spring/MySQL/Harness process probes reproduce the missing automatic load
 and verify monitor, actual Automation define/fire and actual channel input

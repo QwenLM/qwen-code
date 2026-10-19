@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.WakeRecoveryStore;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -50,7 +51,9 @@ public class WakeRecovery {
                     if (run == null) {
                         throw new IllegalStateException("Child wake recovery cannot read its parent run");
                     }
-                    if (run.path("stopRequested").asBoolean()) {
+                    if (ManagedExtensionRecords.isTerminalRunState(run.path("run").path("state").asText())
+                            || run.path("stopRequested").asBoolean()) {
+                        store.recordPending(candidate, false);
                         continue;
                     }
                 }

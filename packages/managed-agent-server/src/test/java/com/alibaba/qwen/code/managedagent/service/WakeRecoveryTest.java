@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.managedagent.store.WakeRecoveryStore;
 import com.alibaba.qwen.code.managedagent.store.WakeRecoveryStore.Candidate;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
@@ -51,7 +53,61 @@ class WakeRecoveryTest {
         when(records.childRunBody("tenant", "parent", "run"))
                 .thenReturn(JsonNodeFactory.instance.objectNode().put("stopRequested", true));
         recovery().scan();
+        verify(store).recordPending(child, true);
+        verify(store).recordPending(child, false);
+        verify(records).childRunBody("tenant", "parent", "run");
         verify(harness, never()).recoverForWake(anyString(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"settled", "failed", "cancelled", "running"})
+    void onlyAnActiveChildRunCanRecover(String state) {
+        var child = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run");
+        when(harness.isAvailable()).thenReturn(true);
+        when(store.findPending("workspace", 8)).thenReturn(List.of(child));
+        when(store.claim(child)).thenReturn(true);
+        when(store.hasPendingInput(child)).thenReturn(true);
+        when(store.recordPending(child, true)).thenReturn(true);
+        var body = JsonNodeFactory.instance.objectNode().put("stopRequested", false);
+        body.putObject("run").put("state", state);
+        when(records.childRunBody("tenant", "parent", "run")).thenReturn(body);
+        recovery().scan();
+        verify(records).childRunBody("tenant", "parent", "run");
+        if ("running".equals(state)) {
+            verify(harness).recoverForWake("tenant", "child");
+            verify(store, never()).recordPending(child, false);
+        } else {
+            verify(harness, never()).recoverForWake(anyString(), anyString());
+            verify(store).recordPending(child, false);
+        }
+    }
+
+    @Test
+    void aSettledPrefixClearsTheHintWithoutLoading() {
+        var row = new Candidate("tenant", "workspace", "session", 1, 2, 0, null, null);
+        when(harness.isAvailable()).thenReturn(true);
+        when(store.findPending("workspace", 8)).thenReturn(List.of(row));
+        when(store.claim(row)).thenReturn(true);
+        when(store.hasPendingInput(row)).thenReturn(false);
+        when(store.recordPending(row, false)).thenReturn(true);
+        recovery().scan();
+        verify(store).recordPending(row, false);
+        verify(harness, never()).recoverForWake(anyString(), anyString());
+        verifyNoInteractions(records);
+    }
+
+    @Test
+    void aRefusedProofStampNeverReadsTheParentOrLoadsWork() {
+        var row = new Candidate("tenant", "workspace", "child", 1, 2, 0, "parent", "run");
+        when(harness.isAvailable()).thenReturn(true);
+        when(store.findPending("workspace", 8)).thenReturn(List.of(row));
+        when(store.claim(row)).thenReturn(true);
+        when(store.hasPendingInput(row)).thenReturn(true);
+        when(store.recordPending(row, true)).thenReturn(false);
+        recovery().scan();
+        verify(store).recordPending(row, true);
+        verify(harness, never()).recoverForWake(anyString(), anyString());
+        verifyNoInteractions(records);
     }
 
     @Test

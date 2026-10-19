@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,10 +22,10 @@ import java.util.Set;
 public class WakeRecoveryStore {
     private static final Set<String> SOURCES = Set.of("monitor", "channel", "child_agent",
             "workflow", "automation", "session_message");
-    private static final int JOURNAL_PAGE = 8;
+    private static final int JOURNAL_PAGE = 1;
     private static final long RETRY_MS = 30_000;
     private static final String UNOWNED = " (h.state = 'SEALED' OR (h.state = 'ACTIVE'"
-            + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until <= ?)))";
+            + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")))";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Boolean> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
@@ -45,13 +46,20 @@ public class WakeRecoveryStore {
     }
 
     public List<Candidate> findPending(String defaultWorkspace, int limit) {
-        long now = databaseNow();
+        List<Candidate> candidates = new ArrayList<>(findPending(defaultWorkspace, limit, true));
+        if (candidates.size() < limit) {
+            candidates.addAll(findPending(defaultWorkspace, limit - candidates.size(), false));
+        }
+        return candidates;
+    }
+
+    private List<Candidate> findPending(String defaultWorkspace, int limit, boolean hinted) {
         return jdbc.query("SELECT h.tenant_id, h.workspace_id, h.session_id, h.journal_revision,"
                         + " h.committed_sequence, h.compacted_through_revision, s.parent_session_id,"
                         + " s.parent_child_run_id FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id WHERE"
                         + " h.head_kind = 'MANAGED_SESSION' AND h.wake_scan_pending = TRUE"
-                        + " AND h.wake_retry_at <= ? AND" + UNOWNED
+                        + " AND h.wake_pending = ? AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
                         + " AND s.retired_at IS NULL AND s.csi_guard = FALSE"
                         + " AND h.workspace_id = COALESCE(s.workspace_id, ?)"
@@ -60,7 +68,7 @@ public class WakeRecoveryStore {
                         row.getString("session_id"), row.getLong("journal_revision"),
                         row.getLong("committed_sequence"), row.getLong("compacted_through_revision"),
                         row.getString("parent_session_id"), row.getString("parent_child_run_id")),
-                now, now, defaultWorkspace, limit);
+                hinted, defaultWorkspace, limit);
     }
 
     /** A durable delay survives a failed load or a process dying after this claim. */
@@ -76,15 +84,14 @@ public class WakeRecoveryStore {
             if (session.isEmpty()) {
                 return false;
             }
-            long now = databaseNow();
-            return jdbc.update("UPDATE ma_session_head h SET wake_retry_at = ? WHERE"
+            return jdbc.update("UPDATE ma_session_head h SET wake_retry_at = " + ManagedSchemaTime.SQL_NOW + " + " + RETRY_MS + " WHERE"
                         + " h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
                         + " AND h.session_id = ? AND h.workspace_id = ?"
                         + " AND h.head_kind = 'MANAGED_SESSION' AND h.journal_revision = ?"
-                        + " AND h.wake_scan_pending = TRUE AND h.wake_retry_at <= ? AND" + UNOWNED,
-                now + RETRY_MS, ManagedSchemaKeys.key(candidate.tenantId()),
+                        + " AND h.wake_scan_pending = TRUE AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED,
+                ManagedSchemaKeys.key(candidate.tenantId()),
                 ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
-                candidate.workspaceId(), candidate.journalRevision(), now, now) == 1;
+                candidate.workspaceId(), candidate.journalRevision()) == 1;
         }));
     }
 
@@ -190,24 +197,9 @@ public class WakeRecoveryStore {
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
     }
 
-    static boolean hasWakeInput(byte[] bytes, int eventCount) {
-        String[] lines = new String(bytes, StandardCharsets.UTF_8).split("\n");
-        for (int index = 0; index < eventCount; index++) {
-            JsonNode record = ManagedExtensionRecordStore.parse(lines[index]);
-            if (record != null && isWakeInput(record.path("managedSession"))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isWakeInput(JsonNode event) {
+    static boolean isWakeInput(JsonNode event) {
         return "input.accepted".equals(event.path("kind").asText())
                 && SOURCES.contains(event.path("payload").path("source").asText());
-    }
-
-    private long databaseNow() {
-        return jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
     }
 
     private static IllegalStateException corrupt() {

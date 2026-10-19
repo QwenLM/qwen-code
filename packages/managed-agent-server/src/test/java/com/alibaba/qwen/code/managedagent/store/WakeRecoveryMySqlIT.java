@@ -36,15 +36,11 @@ class WakeRecoveryMySqlIT extends WakeRecoveryStoreTest {
                     }
                 }
                 var claim = worker.submit(() -> store.claim(candidate));
-                String catalog = owner.getCatalog();
                 await().atMost(Duration.ofSeconds(10)).until(() -> jdbc.queryForObject(
-                        "SELECT COUNT(*) FROM performance_schema.data_locks WHERE OBJECT_SCHEMA = ?"
-                                + " AND OBJECT_NAME = 'ma_session' AND LOCK_STATUS = 'WAITING'",
-                        Long.class, catalog) > 0);
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.data_locks"
-                                + " WHERE OBJECT_SCHEMA = ? AND OBJECT_NAME = 'ma_session_head'"
-                                + " AND LOCK_TYPE = 'RECORD' AND LOCK_STATUS = 'GRANTED'",
-                        Long.class, catalog)).isZero();
+                        "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB = DATABASE()"
+                                + " AND COMMAND = 'Query' AND TIME >= 1"
+                                + " AND INFO LIKE 'SELECT session_id FROM ma_session%'",
+                        Long.class) > 0);
                 try (var head = owner.prepareStatement("UPDATE ma_session_head SET gmt_modified = 2")) {
                     head.setQueryTimeout(5);
                     assertThat(head.executeUpdate()).isEqualTo(1);
