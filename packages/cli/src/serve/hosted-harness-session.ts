@@ -402,6 +402,38 @@ function namedStoreFailure(cause: unknown): string | undefined {
 }
 
 /**
+ * Renders a store refusal with its stable status, remote code, refusing
+ * route and any writer-vs-store-head pairing captured at the refusal
+ * (review #14522): the store's public refusal text is shared across
+ * server predicates, so the printable error has to name which operation
+ * with which grant was refused (a grant never re-acquired vs one the
+ * store already judged superseded).
+ */
+function describeManagedError(cause: unknown): string {
+  let store: ManagedSessionStoreHttpError | undefined;
+  for (
+    let current: unknown = cause;
+    current instanceof Error;
+    current = (current as Error & { cause?: unknown }).cause
+  ) {
+    if (current instanceof ManagedSessionStoreHttpError) {
+      store = current;
+      break;
+    }
+  }
+  if (store === undefined) return String(cause);
+  const details = [
+    `status=${store.status}`,
+    `code=${store.remoteCode}`,
+    ...(store.route === undefined ? [] : [`route=${store.route}`]),
+    ...(store.writerRefusalContext === undefined
+      ? []
+      : [`[writer-context: ${store.writerRefusalContext}]`]),
+  ];
+  return `${String(cause)} (${details.join(' ')})`;
+}
+
+/**
  * Lifts a Session's recovery block. The named reason belongs to the block,
  * so it is cleared with it here rather than by hand at each lift site.
  */
@@ -2945,7 +2977,7 @@ async function startHostedRecoveredTurn(
         session.recoveryReason = 'managed_session_store_unavailable';
       writeStderrLineSafe(
         'qwen serve: Hosted Harness recovery remained blocked: ' +
-          String(cause),
+          describeManagedError(cause),
       );
     })
     .finally(() => {
@@ -8928,7 +8960,7 @@ export function registerHostedHarnessSessionRoutes(
             const storeFailure = namedStoreFailure(cause);
             if (storeFailure !== undefined) failureReason = storeFailure;
             writeStderrLineSafe(
-              `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
+              `qwen serve: Hosted Harness turn ${promptId} failed: ${describeManagedError(cause)}`,
             );
           }
         }

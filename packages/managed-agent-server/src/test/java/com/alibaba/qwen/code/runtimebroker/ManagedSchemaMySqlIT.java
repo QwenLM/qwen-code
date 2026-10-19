@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,7 +21,7 @@ import java.util.HashSet;
 
 import javax.sql.DataSource;
 
-/** Requires a dedicated empty database; never cleans, upgrades or repairs an existing schema. */
+/** Destructive schema checks use their own database; system catalogs remain untouched. */
 class ManagedSchemaMySqlIT {
     @Test
     void refusesSystemCatalogsBeforeChangingAnyTables() throws Exception {
@@ -65,11 +66,12 @@ class ManagedSchemaMySqlIT {
 
     @Test
     void baselineAndConstraintsWorkOnRealMySql() throws Exception {
-        DataSource source =
-                new DriverManagerDataSource(
-                        required("mysql.url"),
-                        required("mysql.user"),
-                        System.getProperty("mysql.password", ""));
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            verifyBaselineAndConstraints(database.source());
+        }
+    }
+
+    private static void verifyBaselineAndConstraints(DataSource source) throws Exception {
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
@@ -243,7 +245,7 @@ class ManagedSchemaMySqlIT {
             }
             ManagedSchema.initialize(source);
             if (mariaDb) {
-                String url = required("mysql.url");
+                String url = connection.getMetaData().getURL();
                 DataSource disabledChecks = new DriverManagerDataSource(
                         url + (url.contains("?") ? "&" : "?")
                                 + "sessionVariables=check_constraint_checks=0",
