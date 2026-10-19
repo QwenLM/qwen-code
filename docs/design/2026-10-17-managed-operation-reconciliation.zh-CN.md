@@ -130,7 +130,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 未知门禁过去用 budget-exempt 标志调用 `transientFailure`，于是 Workspace 绑定的 Turn 在证据仍未知时，每个 backoff 都重试一次取消加载。现在它挂在 `hosted_runtime_recovery_blocked` 上：
 
 - **挂起。** Turn 保持活动状态，输入继续 unsettled，永远不会写成 `FAILED`。挂起释放 dispatch lease，并把 `retry_after` 设为 `OperationReconciler.RECHECK`（5 分钟）。用户取消把 Turn 置为 `CANCELLING` 时会清空这个 `retry_after`，所以取消会立即被驱动，而不是排在复查窗口之后。
-- **扫描。** `findDispatchable` 对非 `CANCELLING` 的 Turn 排除这个码；取消仍会扫到它，`CANCELLING` 车道保留现有的有界重试；待处理的取消永远不会被写成 `FAILED`，取消路由仍可能把它结算为 `CANCELLED`。
+- **扫描。** `findDispatchable` 对非 `CANCELLING` 的 Turn 排除这个码；取消仍会扫到它，`CANCELLING` 车道保留现有的重试路径（退避有上限；尝试次数不受预算限制）；因未知结果而待处理的取消永远不会被写成 `FAILED`，取消路由仍可能把它结算为 `CANCELLED`。
 - **复查。** 现有的一秒扫描同时读取到期的挂起 Turn。每次复查认领 Turn，先通过连接器丢弃缓存的 takeover 快照，再重新驱动取消加载——绝不驱动继续加载，因为 Turn 正是因为继续无法证明安全才挂起的。已就绪：现有取消路由把观测到的结果记入 journal，并把 Turn 标为 `managed_runtime_recovery_blocked`。终态围栏走现有的 cancel-over-abandoned 路径。仍未知：再次挂起。复查抛错时也重新挂起，不在同一行上空转。
 - **快照。** `discardManagedRecovery` 丢弃缓存的 attachment 与 pending-recovery 标记，下一次加载会重新向 Broker 询问，而不是拿挂起时的报告作答。
 
@@ -144,7 +144,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - 第二阶段：`SshWorkspaceStoreTest` 覆盖未预留的注册直接失败、已预留的注册挂起一个延迟、`completeParked` 只补完一次、`releaseParked` 记为失败并把目录让给其他注册，以及释放不会动另一次注册已完成的所有权。`SshWorkspaceServiceTest` 覆盖各个结论：marker 已落地、没有 marker、路径换成了另一个目录、另一次注册的 marker、actor 已无权限、节点读不到，以及未预留的旧记录不经探测即失败。所有用例都只做探测。`OperationReconcilerTest.aKindOutsideAnySessionScansAndSettlesThroughItsSource` 覆盖证据源自己的扫描与结算。
 - 第三阶段：`ManagedRenameReconciliationTest`（H2，以及 InnoDB 上的 `ManagedRenameReconciliationMySqlIT`）覆盖：提交时抛错的投递带着认领和已退役的回执挂起，不再被认领或投递，也不挡住关闭；因崩溃挂起的标题在扫描把它挂起之前挡住后续改名，之后被替换；遗留的 `UNKNOWN` 行被转换；没有 journal、head 为 `ACTIVE`、另一个标题的 digest 时结论为未知，之后变为已提交，回执、这一行和标题都记为完成并只产生一个事件，key 重放结果；已提交的标题在已关闭的 Session 上展示，在删除中的 Session 上不展示；head 为 `DELETING` 时证明未提交，压缩开始后证明不了任何事，失败的 key 用新 revision 重试且不会被标为已替换；未知结论重新挂起并多计一次尝试；认领自己的迟到应答能完成挂起的标题；未提交之前的失败仍然重试并保持生命周期屏障；请求里缺少标题的行永远不会被判为已提交，但完整的 journal 仍能让它失败；通过 store 的 `@Transactional` 代理注入语句故障，挂起与回执退役、已提交结算与标题、事件和回执都整体回滚。`OperationReconcilerTest.aParkedTitleSettlesThroughItsOwnSettle` 覆盖标题经由自己的结算、从不走通用结算。`ManagedSessionLifecycleTest` 现在会在标题挂起时关闭 Session，且不重发标题。`WorkspaceMigrationStoreTest` 统计挂起和遗留的标题，不再统计已完成、已替换或已失败的标题。
 - Turn 层读取：`hosted-workspace-broker.test.ts` 固定了恢复读取上的 reconcile 查询、每个未知记录恰好一次 reconcile 尝试、一次性决策（已结算才返回，仍在执行或仍未知都不轮询），以及终态围栏。`hosted-runtime-recovery.test.ts` 覆盖被动加载逐执行对账、证据读不出来时报未知，以及继续加载把已结算结果记入 journal、或报未知/abandoned 且不写 journal。
-- Turn 取消：`HarnessCoordinatorTest.workspaceRecoveryFailureUsesTheMatchingCancellationAuthority` 让待处理取消保留有界重试，且不会写成 `FAILED`。
+- Turn 取消：`HarnessCoordinatorTest.workspaceRecoveryFailureUsesTheMatchingCancellationAuthority` 让待处理取消保留现有重试路径（退避有上限、预算豁免），且不会把 unknown-outcome 情况写成 `FAILED`；`managed_runtime_recovery_incomplete` 仍走终止路径。
 - Turn 挂起：`HarnessCoordinatorTest` 覆盖用挂起替代 budget-exempt 重试、复查丢弃快照并重新询问、仍未知时再次挂起，以及取消就绪后的终止。
 
 ## 验收（来自 #14166）
@@ -154,4 +154,4 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - 对准入未知的种类，`recovery_blocked` 的下一步由一条规则决定；生命周期等待被命名为另一个概念（决定 1）。binding、Session head 和扩展 run 的词表，已在 #14166 上说明是不同的概念。
 - Turn 层接管读取原命令的 Broker 记录（决定 9）：两个加载都会对账，已结算的答案被观测，仍无法证明的结果报为未知，而不是当作瞬时故障失败或再次派发。
 - 结果仍未知的 Turn 会挂起，并按对账器周期复查，而不是继续 budget-exempt 重试或再次派发（决定 10）。
-- `CANCELLING` Turn 上的待处理取消不会被写成 `FAILED`；取消车道重试，取消路由仍可能结算为 `CANCELLED`（决定 10）。
+- `CANCELLING` Turn 上因未知 Runtime 结果而待处理的取消不会被写成 `FAILED`；取消车道重试，取消路由仍可能结算为 `CANCELLED`（决定 10）。`managed_runtime_recovery_incomplete` 仍走终止路径。

@@ -1278,7 +1278,7 @@ public class HarnessCoordinator {
                     new IllegalStateException("Cancellation remains pending"),
                     true);
         }
-        if (recoveryBlocked && !"CANCELLING".equals(turn.status())) {
+        if (recoveryBlocked && !"CANCELLING".equals(current.status())) {
             if (!store.failRecoveryBlockedTurn(turn.tenantId(), turn.sessionId(),
                     turn.turnId(), owner, message)) {
                 return false;
