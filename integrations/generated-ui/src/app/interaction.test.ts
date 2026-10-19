@@ -89,6 +89,96 @@ async function harness(
 }
 
 describe('interactions while a worker response is pending', () => {
+  it.each([
+    [
+      'dropdown options',
+      'html',
+      'rate',
+      '<option value="1">One</option><option value="2">Two</option>',
+    ],
+    [
+      'containing markup',
+      'html',
+      'controls',
+      '<select id="rate"><option value="1">One</option><option value="2">Two</option></select>',
+    ],
+    ['dropdown text', 'text', 'rate', 'Cleared'],
+  ])(
+    'preserves a newer selection when an old round replaces %s',
+    async (_name, kind, id, value) => {
+      const h = await harness(
+        `ui.on('resetButton', 'click', () => {
+        ui.${kind}('${id}', ${JSON.stringify(value)});
+        ui.text('answer', 'stale');
+      });
+      ui.on('rate', 'change', (event) => {
+        ui.text('answer', ui.input('rate').value);
+        ui.text('eventValue', event.value);
+      });`,
+        '<div id="controls"><select id="rate"><option value="1">One</option><option value="2">Two</option></select></div><button id="resetButton">Reset</button><output id="answer">Initial</output><output id="eventValue"></output>',
+      );
+      h.click('resetButton');
+      h.input.value = '2';
+      h.input.dispatchEvent(new Event('change', { bubbles: true }));
+      h.deliver();
+      expect(h.content.getElementById('rate')).toBe(h.input);
+      expect(h.input.value).toBe('2');
+      expect(h.content.getElementById('answer')!.textContent).toBe('Initial');
+      h.deliver();
+      expect(h.content.getElementById('answer')!.textContent).toBe('2');
+      expect(h.content.getElementById('eventValue')!.textContent).toBe('2');
+    },
+  );
+
+  it('allows dropdown rebuilding without a newer edit and rereads it for the next event', async () => {
+    const h = await harness(
+      `ui.on('resetButton', 'click', () => {
+        ui.html('rate', '<option value="1">One</option><option value="2">Two</option>');
+        ui.text('answer', 'Rebuilt');
+      });
+      ui.on('calculate', 'click', () => ui.text('answer', ui.input('rate').value));`,
+      '<select id="rate"><option value="1">One</option><option value="2" selected>Two</option></select><button id="resetButton">Reset</button><button id="calculate">Calculate</button><output id="answer"></output>',
+    );
+    h.click('resetButton');
+    h.click('calculate');
+    h.deliver();
+    expect(h.input.value).toBe('1');
+    expect(h.content.getElementById('answer')!.textContent).toBe('Rebuilt');
+    h.deliver();
+    expect(h.content.getElementById('answer')!.textContent).toBe('1');
+  });
+
+  it('allows HTML updates that leave a newer selection unchanged', async () => {
+    const h = await harness(
+      `ui.on('resetButton', 'click', () => ui.html('answer', '<strong>Updated</strong>'));
+      ui.on('rate', 'change', (event) => ui.text('eventValue', event.value));`,
+      '<select id="rate"><option value="1">One</option><option value="2">Two</option></select><button id="resetButton">Reset</button><output id="answer"></output><output id="eventValue"></output>',
+    );
+    h.click('resetButton');
+    h.input.value = '2';
+    h.input.dispatchEvent(new Event('change', { bubbles: true }));
+    h.deliver();
+    expect(h.input.value).toBe('2');
+    expect(h.content.querySelector('#answer strong')?.textContent).toBe(
+      'Updated',
+    );
+    h.deliver();
+    expect(h.content.getElementById('eventValue')!.textContent).toBe('2');
+  });
+
+  it('still discards stale explicit value writes even if they match the newer value', async () => {
+    const h = await harness(`ui.on('resetButton', 'click', () => {
+      ui.value('rate', '50');
+      ui.text('answer', 'stale');
+    });`);
+    h.click('resetButton');
+    h.enter('50');
+    h.deliver();
+    expect(h.input.value).toBe('50');
+    expect(h.content.getElementById('answer')!.textContent).toBe('');
+    h.deliver();
+  });
+
   it('recalculates from a preceding reset rather than the queued stale snapshot', async () => {
     const h = await harness(`
       function calculate() { ui.text('answer', String(Number(ui.input('rate').value) * 2)); }

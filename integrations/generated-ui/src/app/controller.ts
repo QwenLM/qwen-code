@@ -75,23 +75,7 @@ export class ViewController {
             this.fail(response.error);
             return;
           }
-          // A superseded value and the outputs derived from it belong to one
-          // round. Compare live control state, not queued events: a trailing
-          // `change` re-notifies an edit already delivered as `input` and must
-          // not suppress the round that edit produced.
-          let superseded = false;
-          if (response.patches.some((patch) => patch.kind === 'value')) {
-            const inputs = this.surface.inputs();
-            superseded = response.patches.some((patch) => {
-              if (patch.kind !== 'value') return false;
-              const before = this.inflightInputs?.[patch.id];
-              const now = inputs[patch.id];
-              return (
-                before?.value !== now?.value || before?.checked !== now?.checked
-              );
-            });
-          }
-          this.surface.apply(superseded ? [] : response.patches);
+          this.surface.apply(response.patches, this.inflightInputs);
           clearTimeout(this.timer);
           this.pending = false;
           this.onStatus('ready', 'Interactive view ready');

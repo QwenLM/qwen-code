@@ -162,6 +162,29 @@ describe('generated markup display', () => {
     expect(h.surface.inputs()['plan-a'].checked).toBe(true);
   });
 
+  it('keeps a newer checkbox edit and all outputs when old markup would replace it', () => {
+    const h = harness(
+      '<div id="controls"><input id="enabled" type="checkbox"></div><output id="out">Original</output>',
+    );
+    const before = h.surface.inputs();
+    const checkbox = h.content.getElementById('enabled') as HTMLInputElement;
+    checkbox.checked = true;
+    h.surface.apply(
+      [
+        { kind: 'text', id: 'out', value: 'Stale' },
+        {
+          kind: 'html',
+          id: 'controls',
+          value: '<input id="enabled" type="checkbox">',
+        },
+      ],
+      before,
+    );
+    expect(h.content.getElementById('enabled')).toBe(checkbox);
+    expect(h.surface.inputs()['enabled'].checked).toBe(true);
+    expect(h.content.getElementById('out')?.textContent).toBe('Original');
+  });
+
   it('rejects duplicate IDs, unsupported controls and excessive markup or input data', () => {
     expect(() => harness('<div id="same"></div><input id="same">')).toThrow(
       /unique/,

@@ -209,7 +209,7 @@ export class ViewSurface {
     return inputs;
   }
 
-  apply(patches: UiPatch[]): void {
+  apply(patches: UiPatch[], inflightInputs?: InputValues): void {
     if (this.stopped) return;
     if (
       !Array.isArray(patches) ||
@@ -220,6 +220,9 @@ export class ViewSurface {
     }
     const body = this.content!.body;
     const projected = body.cloneNode(true) as HTMLElement;
+    // Radio groups normalize only in a document; keep that state isolated.
+    const preview = body.ownerDocument.implementation.createHTMLDocument();
+    preview.body.replaceWith(projected);
     // Input/textarea cloning preserves live state; option selection needs copying.
     for (const select of body.querySelectorAll('select')) {
       const copy = projected.querySelector<HTMLSelectElement>(
@@ -232,6 +235,22 @@ export class ViewSurface {
     }
     // Validate the whole round before changing live nodes, preserving input focus.
     this.applyTo(projected, patches);
+    if (inflightInputs) {
+      const current = this.readInputs(body);
+      const next = this.readInputs(projected);
+      // HTML/text can change controls beyond the patch target or remove them.
+      // Discard the entire stale round, including its derived outputs.
+      const superseded = Object.entries(current).some(([id, now]) => {
+        const before = inflightInputs[id];
+        return (
+          (before?.value !== now.value || before?.checked !== now.checked) &&
+          (patches.some((patch) => patch.kind === 'value' && patch.id === id) ||
+            next[id]?.value !== now.value ||
+            next[id]?.checked !== now.checked)
+        );
+      });
+      if (superseded) return;
+    }
     this.applyTo(body, patches);
   }
 
