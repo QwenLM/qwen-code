@@ -957,6 +957,13 @@ fi
     },
   );
 
+  it('grants the PR comment writer access to pull requests', () => {
+    expect(jobs.report_pr.permissions).toEqual({
+      issues: 'write',
+      'pull-requests': 'write',
+    });
+  });
+
   it('keeps the bot PAT in a job that runs no repository code', () => {
     // The job that can write as the bot must not check out or execute anything
     // from the repository; it only consumes strings produced elsewhere.
