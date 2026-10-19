@@ -375,6 +375,18 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestedRevision, String title, List<Map<String, Object>> input,
             String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
             boolean approvalSelectionSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection,
+                requestedApprovalMode, approvalSelectionSupported, null, false);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
+            boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -388,6 +400,12 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         AgentPin pin = selectApprovalMode(resolveAgentPin(tenantId, agentId,
                 requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
+        boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
+        if (planMode && (!planModeSupported || !approvalSelectionSupported
+                || pin.hooks() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())))) {
+            throw new ApiException(HttpStatus.CONFLICT, "unsupported_feature", "Plan mode is unavailable");
+        }
         if (!input.isEmpty() && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
                 && !workspaceShellEnabled) {
             throw workspaceExecutionUnavailable();
@@ -417,7 +435,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                workspace, actorId, pin);
+                workspace, actorId, pin, null, planMode);
     }
 
     private boolean configuredStorage(String tenant, String storage) {
@@ -450,7 +468,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
                 "qwen-code", title, List.of(), null, workspace, actorId,
-                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD));
+                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD, false));
     }
 
     @Override
@@ -908,7 +926,7 @@ public class ManagedAgentStore implements AgentStateStore {
      * its digest and the approval mode and tool profile compiled from its content (D8c-1).
      */
     private record AgentPin(String revision, String digest,
-            String approvalMode, String toolProfile) {
+            String approvalMode, String toolProfile, boolean hooks) {
     }
 
     private boolean isSshWorkspace(ContextBinding binding) {
@@ -928,7 +946,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String tenantId, String agentId) {
         AgentPin pin = resolveAgentPin(tenantId, agentId, null, true);
         return new WebShellSessionOptions(
-                pin.approvalMode(), availableApprovalModes(pin));
+                pin.approvalMode(), availableApprovalModes(pin),
+                !pin.hooks() && (WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                        || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())), false);
     }
 
     private static List<String> availableApprovalModes(AgentPin pin) {
@@ -936,6 +956,14 @@ public class ManagedAgentStore implements AgentStateStore {
                 : WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
                         ? List.of("default", "auto-edit")
                         : List.of("default", "auto-edit", "yolo");
+    }
+
+    @Override
+    public boolean supportsPlanMode(SessionRecord session) {
+        return WorkspaceToolProfiles.supportsApprovalSelection(session)
+                && findChildLineage(session.tenantId(), session.sessionId()) == null
+                && (session.agentDefinitionDigest() == null
+                || !definitions.pinnedContent(session).containsKey("hook_catalog"));
     }
 
     private static AgentPin selectApprovalMode(AgentPin pin, String requested, boolean supported) {
@@ -948,7 +976,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_approval_mode",
                     "The selected approval mode is not available for this Agent.");
         }
-        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile());
+        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks());
     }
 
     // Called only for a new admission; a retry has already replayed and
@@ -965,7 +993,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
                             : WorkspaceToolProfiles.FILES)
                     : null;
-            return new AgentPin(agentRevision, null, approvalMode, toolProfile);
+            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false);
         }
         if (definitions == null) {
             throw ManagedAgentDefinitionStore.notFound();
@@ -978,7 +1006,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         definitionModels);
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
-                compiled.toolProfile());
+                compiled.toolProfile(), readMap(revision.definitionJson()).containsKey("hook_catalog"));
     }
 
     private ManagedAgentDefinitionStore.DefinitionRevision resolveDefinitionRevision(
@@ -1028,6 +1056,14 @@ public class ManagedAgentStore implements AgentStateStore {
             String actorId,
             AgentPin pin,
             WorkspaceCsiRegistration registration) {
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
+                input, payloadDigest, resolved, actorId, pin, registration, false);
+    }
+
+    private Admission insertSession(String tenantId, String operation, String idempotencyKey,
+            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved, String actorId, AgentPin pin,
+            WorkspaceCsiRegistration registration, boolean planMode) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
@@ -1051,9 +1087,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key, owner_actor_key, runtime_request_key, approval_mode) VALUES"
+                        + " creator_actor_key, owner_actor_key, runtime_request_key, approval_mode,"
+                        + " plan_enabled, selected_approval_mode, approval_revision) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, pin.revision(), pin.digest(),
                 title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
@@ -1068,7 +1105,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         ? CsiFilesRetirementProfile.PROFILE
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
-                runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo");
+                runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",
+                planMode, planMode ? pin.approvalMode() : null, planMode ? 1 : 0);
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
                         + " covered_sequence, gmt_modified) VALUES"
@@ -3416,7 +3454,8 @@ public class ManagedAgentStore implements AgentStateStore {
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
         if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                    jdbc, tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         }
         if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
@@ -4070,10 +4109,10 @@ public class ManagedAgentStore implements AgentStateStore {
         args.addAll(sessionIds);
         Map<String, WebShellApprovalSelection> result = new HashMap<>();
         jdbc.query("SELECT session_id, COALESCE(selected_approval_mode, approval_mode) AS mode,"
-                        + " approval_revision FROM ma_session WHERE tenant_id=? AND session_id IN ("
+                        + " approval_revision, plan_enabled FROM ma_session WHERE tenant_id=? AND session_id IN ("
                         + placeholders(sessionIds.size()) + ") AND session_kind='PUBLIC'",
                 row -> { result.put(row.getString("session_id"), new WebShellApprovalSelection(
-                        row.getString("mode"), row.getLong("approval_revision"))); }, args.toArray());
+                        row.getString("mode"), row.getLong("approval_revision"), row.getBoolean("plan_enabled"))); }, args.toArray());
         return result;
     }
 
@@ -4094,7 +4133,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
             String promptId) {
-        var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision,"
+        var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision, t.plan_enabled,"
                         + " s.approval_revision AS selected_revision, s.agent_id, s.agent_definition_digest,"
                         + " s.workspace_id, s.tool_profile FROM ma_turn t JOIN ma_session s"
                         + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
@@ -4111,7 +4150,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         throw new ApiException(HttpStatus.CONFLICT, "approval_snapshot_missing", "The Turn has no approval snapshot");
                     }
                     // Legacy prompt replays must preserve the original absence of a selection.
-                    return mode == null ? null : new WebShellApprovalSelection(mode, row.getLong("approval_revision"));
+                    return mode == null ? null : new WebShellApprovalSelection(mode, row.getLong("approval_revision"),
+                            row.getBoolean("plan_enabled"));
                 }, tenantId, sessionId, promptId);
         if (rows.size() != 1) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_not_found", "The Turn was not found");
@@ -4124,6 +4164,15 @@ public class ManagedAgentStore implements AgentStateStore {
     public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported) {
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, null, false);
+    }
+
+    @Override
+    @Transactional
+    public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
@@ -4156,7 +4205,7 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             Map<String, Object> result = readMap(replay.resultJson());
             return new WebShellApprovalChangeResult(sessionId, (String) result.get("mode"),
-                    ((Number) result.get("revision")).longValue(), true);
+                    ((Number) result.get("revision")).longValue(), true, Boolean.TRUE.equals(result.get("planMode")));
         }
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
@@ -4166,27 +4215,34 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!WorkspaceToolProfiles.supportsApprovalMode(mode)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "unsupported_approval_mode", "The approval mode is unavailable");
         }
+        boolean planMode = requestedPlanMode == null
+                ? Boolean.TRUE.equals(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                        Boolean.class, tenantId, sessionId)) : requestedPlanMode;
+        if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
+            throw new ApiException(HttpStatus.CONFLICT, "unsupported_feature", "Plan mode is unavailable");
+        }
         requireIdlePolicyChange(session);
         long current = jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
-        if (current != expectedRevision || current >= 9_007_199_254_740_991L) {
+        if (current != expectedRevision || current >= 9_007_199_254_740_991L
+                || planMode && current >= 9_007_199_254_740_990L) {
             throw new ApiException(HttpStatus.CONFLICT, "approval_selection_conflict", "The approval revision changed");
         }
         long revision = current + 1;
         long now = clock.millis();
-        jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, gmt_modified = ?,"
+        jdbc.update("UPDATE ma_session SET selected_approval_mode = ?, approval_revision = ?, plan_enabled = ?, gmt_modified = ?,"
                 + " version = version + 1 WHERE tenant_id = ? AND session_id = ? AND approval_revision = ?",
-                mode, revision, now, tenantId, sessionId, current);
+                mode, revision, planMode, now, tenantId, sessionId, current);
         ManagedReceipts.insert(jdbc, namespace, tenantId, scopeKind, scope, key, digest,
                 "SET_APPROVAL", actorId.getBytes(StandardCharsets.UTF_8), sessionId, null,
                 "COMPLETED", session.status(), true, now);
         jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?",
-                writeJson(Map.of("mode", mode, "revision", revision)),
+                writeJson(Map.of("mode", mode, "revision", revision, "planMode", planMode)),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.receiptKey(
                         namespace, tenantId, scopeKind, scope, key));
         appendEvent(tenantId, sessionId, null, "session.approval.changed",
-                Map.of("mode", mode, "revision", revision), false, null, now);
-        return new WebShellApprovalChangeResult(sessionId, mode, revision, false);
+                Map.of("mode", mode, "revision", revision, "planMode", planMode), false, null, now);
+        return new WebShellApprovalChangeResult(sessionId, mode, revision, false, planMode);
     }
 
     private void requireIdlePolicyChange(SessionRecord session) {
@@ -5603,7 +5659,8 @@ public class ManagedAgentStore implements AgentStateStore {
             itemId = StoreModels.inputItemId(event.turnId());
         }
         upsertItem(event, itemId, "message", "user", "completed",
-                Map.of());
+                input.stream().anyMatch(block -> "image".equals(block.get("type")) || "resource".equals(block.get("type")))
+                        ? Map.of("inputAttachments", input) : Map.of());
         for (int index = 0; index < input.size(); index++) {
             Map<String, Object> block = input.get(index);
             String text = string(block.get("text"));
@@ -6048,7 +6105,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String payloadDigest, long now) {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision) SELECT"
+                        + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, plan_enabled) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
@@ -6060,10 +6117,16 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
                         + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
-                        + " THEN approval_revision ELSE NULL END"
+                        + " THEN approval_revision ELSE NULL END,"
+                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
+                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/2')"
+                        + " THEN plan_enabled ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, writeJson(input),
                 payloadDigest, now, now, "qwen-code".getBytes(StandardCharsets.UTF_8),
+                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
                 "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
                 "qwen-code".getBytes(StandardCharsets.UTF_8), tenantId, sessionId);
     }

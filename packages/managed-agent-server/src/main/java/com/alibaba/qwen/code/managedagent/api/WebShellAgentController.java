@@ -160,7 +160,7 @@ public class WebShellAgentController {
                     "unsupported_feature",
                     "Standalone Phase 1 has no environment templates.");
         }
-        if (selection == null && request.approvalMode() != null) {
+        if (selection == null && (request.approvalMode() != null || request.planMode() != null)) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "unsupported_approval_mode",
                     "Approval mode selection requires a bound Workspace.");
@@ -176,7 +176,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode()));
+                        request.input(), selection, request.approvalMode(), request.planMode()));
         return ResponseEntity.accepted().body(admission);
     }
 
@@ -277,7 +277,7 @@ public class WebShellAgentController {
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
         return service.changeWebShellSessionApproval(tenant.tenantId(), tenant.actorId(), request.sessionId(),
-                request.idempotencyKey(), request.approvalMode(), request.expectedRevision());
+                request.idempotencyKey(), request.approvalMode(), request.expectedRevision(), request.planMode());
     }
 
     @PostMapping("/session-models/query")
