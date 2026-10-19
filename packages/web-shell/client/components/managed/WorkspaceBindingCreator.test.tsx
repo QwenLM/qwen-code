@@ -18,7 +18,7 @@ const editorMocks = vi.hoisted(() => ({
   props: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
-  clearText: vi.fn(),
+  clear: vi.fn(),
   setText: vi.fn(),
 }));
 
@@ -34,7 +34,7 @@ vi.mock('../ChatEditor', async () => {
         ref,
         () =>
           ({
-            clearText: editorMocks.clearText,
+            clear: editorMocks.clear,
             setText: editorMocks.setText,
           }) as EditorHandle,
       );
@@ -689,7 +689,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.currentModel).toBe('agent-a');
     expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-a');
     expect(editorMocks.props?.composerScopeKey).toBe(scope);
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     getSession.mockResolvedValue({
       sessionId: 'session-a',
       agentId: 'agent-a',
@@ -819,6 +819,7 @@ describe('WorkspaceBindingCreator', () => {
       },
     ]);
     expect(onCreated).toHaveBeenCalledWith('session-a');
+    expect(editorMocks.clear).toHaveBeenCalledOnce();
   });
 
   it('blocks creation until supported policy options are loaded and ignores stale Agent replies', async () => {
@@ -856,7 +857,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.availableModes).toEqual(['auto-edit']);
     expect(editorMocks.props?.modeControlsDisabled).toBe(true);
     expect(editorMocks.props?.disabled).toBe(false);
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1197,7 +1198,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-created');
     expect(editorMocks.props?.currentModel).toBe('agent-b');
     expect(editorMocks.props?.composerScopeKey).toBe(composerScope);
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(editorMocks.setText).not.toHaveBeenCalled();
     expect(provider.workspaceBinding?.createEmpty).not.toHaveBeenCalled();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -1267,7 +1268,7 @@ describe('WorkspaceBindingCreator', () => {
       container.querySelector<HTMLInputElement>('#managed-workspace-cwd')
         ?.value,
     ).toBe('project');
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     await act(async () => root.render(null));
     await render();
     expect(provider.workspaceBinding.get).toHaveBeenCalledWith(
@@ -1375,7 +1376,7 @@ describe('WorkspaceBindingCreator', () => {
       expect(createWorkspace.mock.calls[1][1].idempotencyKey).not.toBe(
         original.idempotencyKey,
       );
-      expect(editorMocks.clearText).not.toHaveBeenCalled();
+      expect(editorMocks.clear).not.toHaveBeenCalled();
     },
   );
 
@@ -1732,7 +1733,7 @@ describe('WorkspaceBindingCreator', () => {
     );
     expect(container.querySelector('details [role="alert"]')).toBeNull();
     expect(commit).not.toHaveBeenCalled();
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
   });
 
   it('recovers frozen initial input and restores it after abandoning an uncertain request', async () => {
@@ -1753,7 +1754,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.setText).toHaveBeenCalledExactlyOnceWith(
       'Keep my draft',
     );
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(createSession).toHaveBeenCalledOnce();
   });
 
@@ -1781,7 +1782,7 @@ describe('WorkspaceBindingCreator', () => {
         idempotencyKey: 'old-key',
       }),
     );
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
   });
 
