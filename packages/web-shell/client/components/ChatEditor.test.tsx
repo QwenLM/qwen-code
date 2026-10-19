@@ -3921,6 +3921,70 @@ describe('ChatEditor toolbar popovers', () => {
     },
   );
 
+  it.each([
+    ['official', ['low', 'high', 'max']],
+    ['maas-pro', ['high', 'max']],
+  ] as const)(
+    'renders only supported DeepSeek %s efforts with off and default controls',
+    async (route, efforts) => {
+      const onSelectReasoningEffort = vi.fn();
+      const props: ChatEditorRenderProps = {
+        visibleToolbarActions: ['model'],
+        currentModel: route,
+        availableModels: [{ id: route, label: 'DeepSeek' }],
+        reasoning: {
+          enabled: true,
+          effort: 'high',
+          defaultEffort: 'high',
+          efforts: [...efforts],
+        },
+        onSelectReasoningEffort,
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+          ?.click(),
+      );
+      const controls = document.querySelector(
+        '[data-web-shell-model-reasoning]',
+      );
+      expect(
+        Array.from(
+          controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
+        ).map((button) => button.getAttribute('data-web-shell-effort')),
+      ).toEqual(efforts);
+      await act(async () =>
+        controls
+          ?.querySelector<HTMLButtonElement>('[data-web-shell-effort="max"]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('max');
+      await act(async () =>
+        controls
+          ?.querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith(
+        'none',
+        'toggle',
+      );
+      rerenderChatEditor(container, {
+        ...props,
+        reasoning: { ...props.reasoning!, enabled: false, effort: 'none' },
+      });
+      await act(async () =>
+        document
+          .querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
+          ?.click(),
+      );
+      expect(onSelectReasoningEffort).toHaveBeenLastCalledWith(
+        'high',
+        'toggle',
+      );
+    },
+  );
+
   it('localizes every fixed effort tier after a runtime language change', () => {
     const props: ChatEditorRenderProps = {
       visibleToolbarActions: ['model'],

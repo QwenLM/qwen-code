@@ -1,8 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiFilesProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+
 import java.net.URI;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -19,6 +22,7 @@ public final class WorkspaceCsiRuntimeIdentity {
     public static final int VERSION = 1;
     public static final int FILES_VERSION = 2;
     public static final int FILES_AUTHORITY_VERSION = 3;
+    public static final int FILES_FINALIZATION_VERSION = 4;
     private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private static final Set<String> KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
             "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity");
@@ -26,6 +30,8 @@ public final class WorkspaceCsiRuntimeIdentity {
             "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity", "profileIdentity");
     private static final Set<String> FILES_AUTHORITY_KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
             "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity", "profileIdentity", "authority");
+    private static final Set<String> FILES_FINALIZATION_KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
+            "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity", "profileIdentity", "authority", "finalization");
     private static final Set<String> PLACEMENT_KEYS = Set.of("clusterDomain", "namespace", "namespaceUid",
             "podName", "podUid", "nodeName", "nodeUid", "containerName", "containerId", "image", "imageId",
             "podIp", "secretName", "secretUid");
@@ -50,7 +56,8 @@ public final class WorkspaceCsiRuntimeIdentity {
 
     public static Map<String, Object> fileHistoryBoot(RuntimeBindingRecord binding) {
         var boot = boot(binding);
-        require(binding.getResourceHandle().getVersion() == FILES_AUTHORITY_VERSION);
+        require(binding.getResourceHandle().getVersion() == FILES_AUTHORITY_VERSION
+                || binding.getResourceHandle().getVersion() == FILES_FINALIZATION_VERSION);
         return boot;
     }
 
@@ -61,6 +68,10 @@ public final class WorkspaceCsiRuntimeIdentity {
 
     public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
         var value = handle.getValue();
+        if (handle.getVersion() == FILES_FINALIZATION_VERSION) {
+            require(ManagedCsiFilesProtocol.FINALIZATION_FORMAT.equals(value.get("finalization")));
+            return ManagedCsiFilesProtocol.finalizationBoot(request, seed, map(value.get("storage")), map(value.get("authority")));
+        }
         return handle.getVersion() == FILES_AUTHORITY_VERSION
                 ? ManagedCsiFilesProtocol.boot(request, seed, map(value.get("storage")), map(value.get("authority")))
                 : boot(request, seed, map(value.get("storage")));
@@ -74,12 +85,13 @@ public final class WorkspaceCsiRuntimeIdentity {
     public static void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
         try {
             boolean files = ManagedCsiFilesProtocol.selects(request);
-            boolean authorityHandle = files && handle != null && handle.getVersion() == FILES_AUTHORITY_VERSION;
+            boolean finalizationHandle = files && handle != null && handle.getVersion() == FILES_FINALIZATION_VERSION;
+            boolean authorityHandle = files && handle != null && (handle.getVersion() == FILES_AUTHORITY_VERSION || finalizationHandle);
             require(request != null && seed != null && request.isManagedContext() && KIND.equals(request.getProvisionerKind())
                     && (files || "workspace".equals(request.getScope().getIsolationClass()) && request.getIsolationKey() == null)
-                    && handle != null && KIND.equals(handle.getKind()) && handle.getVersion() == (authorityHandle ? FILES_AUTHORITY_VERSION : files ? FILES_VERSION : VERSION));
+                    && handle != null && KIND.equals(handle.getKind()) && handle.getVersion() == (finalizationHandle ? FILES_FINALIZATION_VERSION : authorityHandle ? FILES_AUTHORITY_VERSION : files ? FILES_VERSION : VERSION));
             var value = handle.getValue();
-            require(value.keySet().equals(authorityHandle ? FILES_AUTHORITY_KEYS : files ? FILES_KEYS : KEYS));
+            require(value.keySet().equals(finalizationHandle ? FILES_FINALIZATION_KEYS : authorityHandle ? FILES_AUTHORITY_KEYS : files ? FILES_KEYS : KEYS));
             if (files) {
                 require(same(ManagedCsiFilesProtocol.identity(request), value.get("profileIdentity")));
             }
