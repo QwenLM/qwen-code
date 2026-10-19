@@ -14,18 +14,18 @@ export interface ManagedStdioLaunch {
 // read end here is what lets a server tree be reaped when the worker dies:
 // a SIGKILL closes the pipe, the launcher sees EOF, and the whole process
 // group goes with it. The server itself never receives the transport's
-// stdin directly; it gets a pipe this launcher forwards.
+// stdin directly; it gets a pipe this launcher forwards. POSIX only: Windows
+// keeps the SDK's cross-spawn transport so command shims still resolve.
 const LAUNCHER = String.raw`
 const { spawn } = require('node:child_process');
 const [executable, argsJson] = process.argv.slice(1);
 const args = JSON.parse(argsJson);
 const env = JSON.parse(process.env.QWEN_MANAGED_STDIO_COMMAND_ENV || '{}');
-const detached = process.platform !== 'win32';
 const child = spawn(executable, args, {
   cwd: process.cwd(),
   env,
   stdio: ['pipe', 'inherit', 'inherit'],
-  detached,
+  detached: true,
 });
 let reaping = false;
 let finished = false;
@@ -39,10 +39,7 @@ function finish() {
 function groupAlive() {
   if (child.pid === undefined) return false;
   try {
-    process.kill(
-      process.platform === 'win32' ? child.pid : -child.pid,
-      0,
-    );
+    process.kill(-child.pid, 0);
     return true;
   } catch {
     return false;
@@ -52,13 +49,7 @@ function groupAlive() {
 function killGroup(signal) {
   if (child.pid === undefined) return;
   try {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-        stdio: 'ignore',
-      });
-    } else {
-      process.kill(-child.pid, signal);
-    }
+    process.kill(-child.pid, signal);
   } catch {
     // The group may have exited between the proof and the signal.
   }
@@ -106,6 +97,13 @@ child.on('exit', () => {
 });
 process.on('SIGTERM', reap);
 process.on('SIGINT', reap);
+
+// A paused stdin pipe must not be the only liveness channel: check the
+// parent separately so a dead worker reaps even under backpressure.
+const parentPid = process.ppid;
+setInterval(() => {
+  if (process.ppid !== parentPid) reap();
+}, 100).unref();
 `;
 
 /**

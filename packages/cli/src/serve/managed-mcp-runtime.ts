@@ -645,21 +645,33 @@ export class ManagedMcpRuntime {
       const transport =
         definition.transport === 'stdio'
           ? (() => {
+              const env = {
+                ...Object.fromEntries(
+                  DEFAULT_INHERITED_ENV_VARS.map((key) => [key, '']),
+                ),
+                PATH: process.env['PATH'] ?? '',
+                HOME: directory!,
+                USERPROFILE: directory!,
+                ...(process.env['SystemRoot']
+                  ? { SYSTEMROOT: process.env['SystemRoot'] }
+                  : {}),
+                ...definition.env,
+              };
+              // Windows keeps the SDK transport: its cross-spawn launch still
+              // resolves .cmd/.bat command shims, which the native launcher
+              // does not. Containment on Windows is unchanged.
+              if (process.platform === 'win32')
+                return new StdioClientTransport({
+                  command: definition.command!,
+                  args: definition.args,
+                  cwd: directory!,
+                  stderr: 'pipe',
+                  env,
+                });
               const launch = launchManagedStdio(
                 definition.command!,
                 definition.args ?? [],
-                {
-                  ...Object.fromEntries(
-                    DEFAULT_INHERITED_ENV_VARS.map((key) => [key, '']),
-                  ),
-                  PATH: process.env['PATH'] ?? '',
-                  HOME: directory!,
-                  USERPROFILE: directory!,
-                  ...(process.env['SystemRoot']
-                    ? { SYSTEMROOT: process.env['SystemRoot'] }
-                    : {}),
-                  ...definition.env,
-                },
+                env,
               );
               return new StdioClientTransport({
                 command: launch.executable,

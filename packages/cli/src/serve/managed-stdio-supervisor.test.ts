@@ -39,6 +39,36 @@ writeFileSync(process.env.LAUNCHER_PID, String(launcher.pid));
 setInterval(() => {}, 1000);
 `;
 
+const BACKPRESSURE_SERVER = String.raw`
+const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const descendant = spawn(
+  process.execPath,
+  ['-e', 'setInterval(() => {}, 1000)'],
+  { stdio: 'inherit' },
+);
+writeFileSync(
+  process.env.PIDS,
+  JSON.stringify({ server: process.pid, descendant: descendant.pid }),
+);
+setInterval(() => {}, 1000);
+`;
+
+const BACKPRESSURE_WORKER = String.raw`
+const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const spec = JSON.parse(process.env.SPEC);
+const launcher = spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['pipe', 'ignore', 'ignore'],
+});
+launcher.stdin.on('error', () => undefined);
+writeFileSync(process.env.LAUNCHER_PID, String(launcher.pid));
+const payload = Buffer.alloc(64 * 1024, 'x');
+for (let index = 0; index < 32; index++) launcher.stdin.write(payload);
+setTimeout(() => process.kill(process.pid, 'SIGKILL'), 500);
+`;
+
 const directories: string[] = [];
 
 function directory(): string {
@@ -77,6 +107,30 @@ function readPids(path: string): { server: number; descendant: number } {
 
 afterEach(() => {
   for (const path of directories.splice(0)) {
+    try {
+      const pids = readPids(join(path, 'pids.json'));
+      for (const pid of [pids.server, pids.descendant]) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // The case already reaped it.
+        }
+      }
+    } catch {
+      // A case failed before the server recorded its pids.
+    }
+    try {
+      const launcherPid = Number(
+        readFileSync(join(path, 'launcher.pid'), 'utf8'),
+      );
+      try {
+        process.kill(launcherPid, 'SIGKILL');
+      } catch {
+        // The launcher already exited.
+      }
+    } catch {
+      // The case failed before the worker recorded the launcher pid.
+    }
     rmSync(path, { recursive: true, force: true });
   }
 });
@@ -131,6 +185,36 @@ describe.skipIf(process.platform === 'win32')(
       // is the SIGKILL a dead Runtime worker produces.
       worker.kill('SIGKILL');
 
+      await waitFor(() => !alive(pids.server) && !alive(pids.descendant));
+      expect(alive(pids.server)).toBe(false);
+      expect(alive(pids.descendant)).toBe(false);
+      await waitFor(() => existsSync(launcherPidFile));
+      const launcherPid = Number(readFileSync(launcherPidFile, 'utf8'));
+      await waitFor(() => !alive(launcherPid));
+    });
+
+    it('reaps under stdin backpressure when the stdin holder dies', async () => {
+      const root = directory();
+      const pidsFile = join(root, 'pids.json');
+      const launcherPidFile = join(root, 'launcher.pid');
+      const launch = launchManagedStdio(
+        process.execPath,
+        ['-e', BACKPRESSURE_SERVER],
+        { PATH: process.env['PATH'] ?? '', PIDS: pidsFile },
+      );
+      spawn(process.execPath, ['-e', BACKPRESSURE_WORKER], {
+        env: {
+          PATH: process.env['PATH'] ?? '',
+          SPEC: JSON.stringify(launch),
+          LAUNCHER_PID: launcherPidFile,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      await waitFor(() => existsSync(pidsFile));
+      const pids = readPids(pidsFile);
+
+      // The worker fills the launcher's stdin while the server never reads,
+      // then SIGKILLs itself. Reaping must not wait for the pipe to drain.
       await waitFor(() => !alive(pids.server) && !alive(pids.descendant));
       expect(alive(pids.server)).toBe(false);
       expect(alive(pids.descendant)).toBe(false);
