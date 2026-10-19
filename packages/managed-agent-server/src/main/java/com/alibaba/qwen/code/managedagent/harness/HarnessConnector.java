@@ -90,6 +90,14 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    /**
+     * Discards the takeover snapshot cached for a Session so the next
+     * recovery load re-reads the parked Runtime state instead of answering
+     * from a report already known to be stale.
+     */
+    default void discardManagedRecovery(String tenantId, String sessionId) {
+    }
+
     Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
 

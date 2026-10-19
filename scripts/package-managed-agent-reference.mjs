@@ -326,6 +326,22 @@ export async function createReferenceDistribution({
     'packages/managed-agent-server/distribution/config/application.example.yml',
     'config/application.example.yml',
   );
+  const systemdFiles = [
+    'qwen-hosted-harness.service',
+    'qwen-managed-agent-server.service',
+    'harness.env.example',
+    'server.env.example',
+    'README.md',
+    'README.zh-CN.md',
+  ];
+  for (const file of systemdFiles) {
+    await copy(
+      root,
+      stage,
+      `packages/managed-agent-server/distribution/systemd/${file}`,
+      `systemd/${file}`,
+    );
+  }
   const documentation = [
     ['docs/users/managed-agent-reference-deployment.md', 'docs/deployment.md'],
     [
@@ -447,6 +463,8 @@ export async function createReferenceDistribution({
     `${rootName}/bin/qwen-managed-agent-server`,
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
     `${rootName}/config/application.example.yml`,
+    `${rootName}/systemd/qwen-managed-agent-server.service`,
+    `${rootName}/systemd/README.md`,
   ]) {
     if (!entries.split('\n').includes(required)) {
       throw new Error(`Archive is missing ${required}.`);
