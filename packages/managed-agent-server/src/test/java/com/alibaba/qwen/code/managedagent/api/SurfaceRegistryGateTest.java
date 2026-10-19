@@ -73,6 +73,14 @@ class SurfaceRegistryGateTest {
     }
 
     @Test
+    void fileReadsDeclareWorkspaceGrantOwnershipRatherThanSessionOrDaemonOwnership() {
+        assertThat(SurfaceRegistry.WEBSHELL_WORKSPACE_FILES_QUERY.ruleClass())
+                .isEqualTo(SurfaceRegistry.RuleClass.WORKSPACE_FILES);
+        assertThat(SurfaceRegistry.WEBSHELL_WORKSPACE_FILES_READ.ruleClass())
+                .isEqualTo(SurfaceRegistry.RuleClass.WORKSPACE_FILES);
+    }
+
+    @Test
     void capabilityTwinsShareOneRuleClass() {
         Map<SurfaceRegistry.Capability, SurfaceRegistry.RuleClass> classes =
                 new EnumMap<>(SurfaceRegistry.Capability.class);

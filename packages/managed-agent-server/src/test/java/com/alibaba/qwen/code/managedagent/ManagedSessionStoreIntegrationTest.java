@@ -485,16 +485,16 @@ class ManagedSessionStoreIntegrationTest {
         for (JsonNode resource : oversizedResources) {
             inlineBytes += resource.get("byteLength").asInt();
         }
-        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_TRANSACTION_BYTES; index++) {
+        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES; index++) {
             byte[] bytes = new byte[Math.min(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
-                    ManagedSessionStoreModels.MAX_TRANSACTION_BYTES - inlineBytes)];
+                    ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES - inlineBytes)];
             oversizedResources.addObject().put("resourceId", "budget-part-" + index)
                     .put("kind", "managed-message-part").put("schemaVersion", 1)
                     .put("byteLength", bytes.length).put("digest", sha256(bytes))
                     .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
             inlineBytes += bytes.length;
         }
-        assertThat(inlineBytes).isEqualTo(8 * 1024 * 1024);
+        assertThat(inlineBytes).isEqualTo(40 * 1024 * 1024);
         mvc.perform(post(base + "/transactions:commit")
                 .header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
