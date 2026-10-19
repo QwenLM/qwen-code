@@ -155,7 +155,10 @@ export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
 export function stripLeadingSystemReminders(text: string): string {
   let rest = text;
   while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
-    const close = rest.indexOf(SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN.length);
+    const close = rest.indexOf(
+      SYSTEM_REMINDER_CLOSE,
+      SYSTEM_REMINDER_OPEN.length,
+    );
     // Require the closing tag to end its own line (or the string), the shape
     // every producer emits; anything else is text the user typed.
     const after = close === -1 ? -1 : close + SYSTEM_REMINDER_CLOSE.length;

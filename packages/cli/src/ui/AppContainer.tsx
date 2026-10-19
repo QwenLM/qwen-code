@@ -3145,16 +3145,15 @@ export const AppContainer = (props: AppContainerProps) => {
       // the model still reads the notice while the row shows what was typed
       // (#11553). Reminders that `useMessageQueue` prepends to a queued entry
       // have no composer-side copy and still reach the model only.
-      const submittedPrompt =
-        submittedPromptProvenanceUnavailable
-          ? undefined
-          : !provenanceEnabled
-            ? stripLeadingSystemReminders(submittedValue)
-            : restoredSubmission === null
-              ? trimmedSubmittedPrompt || undefined
-              : restoredSubmission.modelText === submittedValue
-                ? restoredSubmission.submittedPrompt
-                : undefined;
+      const submittedPrompt = submittedPromptProvenanceUnavailable
+        ? undefined
+        : !provenanceEnabled
+          ? stripLeadingSystemReminders(submittedValue)
+          : restoredSubmission === null
+            ? trimmedSubmittedPrompt || undefined
+            : restoredSubmission.modelText === submittedValue
+              ? restoredSubmission.submittedPrompt
+              : undefined;
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
       }
