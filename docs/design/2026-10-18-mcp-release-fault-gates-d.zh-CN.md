@@ -40,12 +40,12 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的两个域 `m
 
 不新增类，因此六处 fork 账目不变：类 `@Timeout` 600 s、共享 healthy 与 CI fork（当前值见 `hosted-process-ci.test.js`）及其字面钉点、本地 `hosted-mcp-gates` profile（`**/HostedMcp*IT.java`）、workflow 注释、artifact 根 `target/fg12-cases/`。
 
-JDK 21 + MySQL 8.0.46 实测（加入应答 hold 之后）：两次运行六格整类 32–37 s（最新 36.8 s），release 格 6.0–6.5 s。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，整类仍在该余量内；共享 healthy 和 CI fork 均不动。当前 `main` 上 MariaDB 10.11 无法运行该类：它在 Spring 启动前的 managed schema 校验就失败。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
+JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 32–37 s（两次）、在 MariaDB 10.11 上 40.5 s，release 格 6.0–7.0 s。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，整类仍在该余量内；共享 healthy 和 CI fork 均不动。当前 `main`（含 #14618）两种 schema 均可校验。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
 
 ## 验收
 
 - `mvn -q -DskipTests test-compile checkstyle:check` 干净。
-- `HostedMcpRestartFaultGatesIT` 在 JDK 21 + MySQL 8.0.46 上 6/6 绿（MariaDB 10.11 无法校验当前 managed schema）；新格在杀进程前先自证注入（数据库 `releasing` 与在飞的 `mcp-release`）。
+- `HostedMcpRestartFaultGatesIT` 在 JDK 21 + MySQL 8.0.46 与 MariaDB 10.11 上 6/6 绿；新格在杀进程前先自证注入（数据库 `releasing` 与在飞的 `mcp-release`）。
 - `fg12d` 证据显示一次 `mcp-release`、至少一次同 id 且 settled 的 `mcp-status`、一次 `mcp.start` 与一次 `mcp.exit`、最终 `released`，且没有第二次 configure/invoke。
 - settled 的 `mcp-status` 应答被扣住期间，记录仍为 `releasing`、`settle_resources` 尚未应答；两者只在应答交付后才推进。
 - 本切片不跑 TS 变异见证（按 FG12d 任务书）。剩余风险：绿依赖 release 在 60×1 s 重试窗口内 settle；更慢的 Runtime 会让门禁变红，而不是带着未结算记录变绿。

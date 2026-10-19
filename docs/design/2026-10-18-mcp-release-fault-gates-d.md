@@ -40,12 +40,12 @@ The whole-Spring/Broker restart cells stay out. A whole-Spring restart replaces 
 
 No new class, so the six fork accounts stay unchanged: the class `@Timeout` 600 s, the shared healthy sum and CI fork (current values in `hosted-process-ci.test.js`) and its literal pin, the local `hosted-mcp-gates` profile (`**/HostedMcp*IT.java`), the workflow comments, and the artifact root `target/fg12-cases/`.
 
-Measured on JDK 21 + MySQL 8.0.46 after the held reply was added: the six-case class 32–37 s across two runs (latest 36.8 s), the release case 6.0–6.5 s. FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the class stays inside that allowance; the shared healthy sum and the CI fork do not move. MariaDB 10.11 cannot run this class on current `main`: it fails managed-schema validation before Spring starts. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
+Measured on JDK 21 after the held reply was added: the six-case class is 32–37 s on MySQL 8.0.46 (two runs) and 40.5 s on MariaDB 10.11, with the release case at 6.0–7.0 s. FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the class stays inside that allowance; the shared healthy sum and the CI fork do not move. Both schemas validate on current `main` after #14618. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
 
 ## Acceptance
 
 - `mvn -q -DskipTests test-compile checkstyle:check` clean.
-- `HostedMcpRestartFaultGatesIT` 6/6 green on JDK 21 + MySQL 8.0.46 (MariaDB 10.11 cannot validate the current managed schema); the new case proves its injection (`releasing` in the database and a held `mcp-release`) before the kill.
+- `HostedMcpRestartFaultGatesIT` 6/6 green on JDK 21 + MySQL 8.0.46 and MariaDB 10.11; the new case proves its injection (`releasing` in the database and a held `mcp-release`) before the kill.
 - The `fg12d` evidence shows one `mcp-release`, at least one settled `mcp-status` for the same id, one `mcp.start` and one `mcp.exit`, `released`, and no second configure or invoke.
 - While the settled `mcp-status` reply is parked, the record is still `releasing` and `settle_resources` has not answered; both advance only after the reply is delivered.
 - No TS mutation witness in this slice (per the FG12d brief). Remaining risk: the green depends on the release settling within the 60×1 s retry window; a slower Runtime fails the gate rather than passing it with an unsettled record.
