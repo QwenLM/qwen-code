@@ -1,16 +1,15 @@
 package com.alibaba.qwen.code.runtimebroker.managedschema;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class ManagedSchemaProjectionTest {
     @Test

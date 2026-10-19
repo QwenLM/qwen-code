@@ -6,9 +6,9 @@
 
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.automation.AutomationScanner;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.AutomationScanner;
-import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
