@@ -758,6 +758,14 @@ class HostedMcpRestartFaultGatesIT {
                 settled = response;
                 break;
             }
+            JsonNode refusal = json.readTree(response.body());
+            String code = refusal.path("error").asText(
+                    refusal.path("code").asText());
+            if (response.statusCode() == 409
+                    && "hosted_turn_active".equals(code)) {
+                Thread.sleep(500);
+                continue;
+            }
             assertThat(response.statusCode())
                     .as("settle: %s", response.body()).isEqualTo(503);
             Thread.sleep(500);
@@ -769,6 +777,26 @@ class HostedMcpRestartFaultGatesIT {
                 releaseId.equals(call.operationId()));
         assertThat(releases.getFirst().status()).isEqualTo(503);
         assertThat(releases.getLast().status()).isEqualTo(200);
+        List<Map<String, Object>> releaseWire = wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-release".equals(request.at(
+                                    "/operation/kind").asText());
+                })
+                .toList();
+        assertThat(releaseWire).hasSize(2);
+        assertThat(releaseWire.getFirst().get("status")).isEqualTo(503);
+        assertThat(((JsonNode) releaseWire.getFirst().get("answer"))
+                .path("result").isMissingNode()).isTrue();
+        assertThat(releaseWire.getLast().get("status")).isEqualTo(200);
+        assertThat(releaseWire).allMatch(entry -> {
+            JsonNode request = (JsonNode) entry.get("request");
+            return releaseId.equals(request.at(
+                    "/operation/operationId").asText());
+        });
         assertThat(configuration(session.id()).path("releaseState").asText())
                 .isEqualTo("released");
         assertThat(controls("mcp-configure")).isEmpty();
@@ -1329,7 +1357,8 @@ class HostedMcpRestartFaultGatesIT {
                 && refuseArmed.compareAndSet(true, false)) {
             proxyCalls.set(index, call.complete(503));
             entry.put("status", 503);
-            entry.put("answer", Map.of("error", "injected_refusal"));
+            entry.put("answer", json.createObjectNode()
+                    .put("error", "injected_refusal"));
             wire.add(entry);
             byte[] refusal = json.writeValueAsString(
                     Map.of("error", "injected_refusal"))
