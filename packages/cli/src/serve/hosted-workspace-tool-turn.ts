@@ -691,6 +691,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
 const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
   'read_file',
   'glob',
+  'skill',
   'task_list',
   'send_message',
 ]);
@@ -700,7 +701,7 @@ const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
  * (decision 5): it says the run may only read and never names it.
  */
 function hostedPlanModeRefusal(): string {
-  return `This run is in plan mode until the leader approves its plan: only read_file, glob, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
+  return `This run is in plan mode until the leader approves its plan: only read_file, glob, static skill loading, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
 }
 
 export const HOSTED_MEMBER_PLAN_TOOL: FunctionDeclaration = {
