@@ -226,8 +226,16 @@ class ManagedAgentPreflightTest {
     @Test
     void warnsWhenTheToolPathUsesAnotherProvisioner() {
         ManagedAgentProperties properties = toolProperties();
-        properties.getRuntimeBroker().setProvisioner("static");
+        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
         assertEquals(ManagedAgentPreflight.Status.WARN,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsWorkspaceFilesWithTheStaticProvisioner() {
+        ManagedAgentProperties properties = toolProperties();
+        properties.getRuntimeBroker().setProvisioner("static");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
     }
 
