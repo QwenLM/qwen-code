@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -16,9 +17,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import javax.sql.DataSource;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RuntimeDispatchAdmissionTest {
     @Test
