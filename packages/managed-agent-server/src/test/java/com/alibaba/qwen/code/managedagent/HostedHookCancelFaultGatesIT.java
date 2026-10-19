@@ -257,10 +257,13 @@ class HostedHookCancelFaultGatesIT {
                 .anyMatch(event -> "SessionEnd".equals(event.path("eventName").asText()))).isTrue());
         assertThat(running(hook)).as("async command alive when SessionEnd started").isFalse();
         assertThat(running(child)).as("descendant alive when SessionEnd started").isFalse();
-        Path unit = cgroup(hook);
         // The drain's own cleanup removes the empty unit before the lifecycle
         // Hooks start; an absent unit is the drained state, not a failure.
+        // cgroup() asserts containment through AssertJ's toRealPath(), which
+        // refuses a path that no longer exists, so derive the path directly.
+        Path unit = unitPath(hook);
         if (Files.exists(unit)) {
+            assertThat(unit).startsWith(hookRoot);
             assertThat(Files.readString(unit.resolve("cgroup.events")))
                     .as("PreToolUse unit when SessionEnd started").contains("populated 0");
         }
@@ -599,8 +602,12 @@ class HostedHookCancelFaultGatesIT {
         return !"Z".equals(fields[0]) && fields[19].equals(process.path("startTicks").asText());
     }
 
+    private Path unitPath(JsonNode process) {
+        return Path.of("/sys/fs/cgroup" + process.path("cgroup").asText().substring(3));
+    }
+
     private Path cgroup(JsonNode process) {
-        Path path = Path.of("/sys/fs/cgroup" + process.path("cgroup").asText().substring(3));
+        Path path = unitPath(process);
         assertThat(path).startsWith(hookRoot);
         return path;
     }
