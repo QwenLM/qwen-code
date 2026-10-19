@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdir,
   mkdtemp,
@@ -29,6 +29,26 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await rm(directory, { recursive: true, force: true });
 });
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitFor(
+  assertion: () => boolean | Promise<boolean>,
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await assertion()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('condition did not settle');
+}
 
 describe('unit creation and attachment', () => {
   it('refuses to create or attach without a delegated Linux root', () => {
@@ -196,6 +216,25 @@ fs.appendFileSync(${JSON.stringify(marker)}, fs.readFileSync(${JSON.stringify(jo
     expect(result.status).toBe(0);
     expect(result.output[3]).toBe('joined\n');
   });
+
+  it('enables parent-death reaping only when the caller opts in', () => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const plain = unit.launch(process.execPath, ['--eval', ''], {});
+    expect(plain.env).not.toHaveProperty(
+      'QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT',
+    );
+    const supervised = unit.launch(
+      process.execPath,
+      ['--eval', ''],
+      {},
+      {
+        reapOnParentExit: true,
+      },
+    );
+    expect(supervised.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT).toBe('1');
+  });
 });
 
 describe('exit evidence', () => {
@@ -232,4 +271,84 @@ describe('exit evidence', () => {
       expect(result.signal).toBe(signal);
     },
   );
+});
+
+describe.skipIf(process.platform === 'win32')('parent death', () => {
+  it('reaps the unit when the launcher parent dies', async () => {
+    const launcherPidFile = join(directory, 'launcher.pid');
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      ['--eval', 'setTimeout(() => process.exit(0), 1000)'],
+      {},
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const spec = JSON.parse(process.env.SPEC);
+const child = spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+writeFileSync(process.env.LAUNCHER_PID, String(child.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      {
+        env: {
+          PATH: process.env['PATH'] ?? '',
+          SPEC: JSON.stringify(launch),
+          LAUNCHER_PID: launcherPidFile,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    try {
+      await waitFor(async () => {
+        try {
+          return (await readFile(launcherPidFile, 'utf8')).length > 0;
+        } catch {
+          return false;
+        }
+      });
+      const launcherPid = Number(await readFile(launcherPidFile, 'utf8'));
+
+      // The launcher captures its parent after it joins the unit. Wait for
+      // that membership write before killing the worker, or the launcher
+      // starts with ppid 1 and has no change to observe.
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.procs'), 'utf8')) ===
+            String(launcherPid)
+          );
+        } catch {
+          return false;
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // The worker dies without running any handler; the launcher is
+      // reparented and must reap its own unit.
+      worker.kill('SIGKILL');
+
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+      await waitFor(() => !alive(launcherPid));
+    } finally {
+      worker.kill('SIGKILL');
+    }
+  });
 });

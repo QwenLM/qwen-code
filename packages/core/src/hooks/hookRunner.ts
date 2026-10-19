@@ -1297,6 +1297,7 @@ export class HookRunner {
           shellConfig.executable,
           [...shellConfig.argsPrefix, command],
           env,
+          { reapOnParentExit: true },
         );
         child = spawn(
           launch?.executable ?? shellConfig.executable,

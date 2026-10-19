@@ -56,6 +56,22 @@ try {
 try {
   writeSync(3, 'joined\n');
 } catch {}
+// A Hook command belongs to the worker that launched it. If that worker
+// dies without running its handlers, this launcher is reparented and the
+// unit would otherwise stay populated forever. Hook commands opt in; a
+// background Shell does not, because H3 keeps it across worker restarts.
+if (process.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT === '1') {
+  const parentPid = process.ppid;
+  setInterval(() => {
+    if (process.ppid === parentPid) return;
+    try {
+      writeFileSync(group + '/cgroup.kill', '1');
+    } catch {
+      // The unit is gone or the kernel refused the write.
+    }
+    process.exit(0);
+  }, 100).unref();
+}
 // No deployment command or environment is evaluated before membership.
 const child = spawn(executable, JSON.parse(args), {
   env: JSON.parse(process.env.QWEN_HOOK_COMMAND_ENV),
@@ -178,7 +194,12 @@ export class HookCommandCgroup {
     return Reflect.construct(HookCommandCgroup, [directory]);
   }
 
-  launch(executable: string, args: string[], env: NodeJS.ProcessEnv) {
+  launch(
+    executable: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    options?: { reapOnParentExit?: boolean },
+  ) {
     return {
       executable: process.execPath,
       args: [
@@ -193,6 +214,9 @@ export class HookCommandCgroup {
         PATH: '/usr/bin:/bin',
         LANG: 'C.UTF-8',
         QWEN_HOOK_COMMAND_ENV: JSON.stringify(env),
+        ...(options?.reapOnParentExit
+          ? { QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT: '1' }
+          : {}),
       },
     };
   }
