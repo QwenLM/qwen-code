@@ -1,21 +1,21 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalChangeResult;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellApprovalSelection;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -441,7 +441,7 @@ class ManagedApprovalChangeTest {
                     try {
                         change("actor", "race", "yolo", 0);
                         return "unexpected-change";
-                    } catch (ApiException conflict) {
+                    } catch (ManagedAgentException conflict) {
                         return conflict.getCode();
                     }
                 });
@@ -472,7 +472,7 @@ class ManagedApprovalChangeTest {
                 start.await();
                 try {
                     return Long.toString(change("actor", UUID.randomUUID().toString(), "yolo", 0).approvalRevision());
-                } catch (ApiException conflict) {
+                } catch (ManagedAgentException conflict) {
                     return conflict.getCode();
                 }
             };
@@ -585,7 +585,7 @@ class ManagedApprovalChangeTest {
     private TransactionTemplate transaction() { return new TransactionTemplate(manager); }
 
     private void assertCode(Runnable action, String code) {
-        assertThatThrownBy(action::run).isInstanceOfSatisfying(ApiException.class,
+        assertThatThrownBy(action::run).isInstanceOfSatisfying(ManagedAgentException.class,
                 error -> assertThat(error.getCode()).isEqualTo(code));
     }
 }

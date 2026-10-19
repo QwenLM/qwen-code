@@ -2347,7 +2347,12 @@ export async function loadCliConfig(
     }
 
     if (sessionId) {
-      sessionService.assertLegacySessionExecution(sessionId);
+      // A Managed host restores its own sessions; a Legacy host must not
+      // execute a Managed transcript. The reverse direction is refused when
+      // the Managed session writer lease sees a Legacy transcript.
+      if (hostPolicy?.executionEngine !== 'managed') {
+        sessionService.assertLegacySessionExecution(sessionId);
+      }
     }
 
     if (argv.forkSession && sessionId) {

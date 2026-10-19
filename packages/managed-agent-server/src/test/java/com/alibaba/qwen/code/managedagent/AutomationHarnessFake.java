@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
-import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;

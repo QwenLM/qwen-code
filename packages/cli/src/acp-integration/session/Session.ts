@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
@@ -13258,9 +13259,12 @@ export class Session implements SessionContext {
       ? this.sessionReasoningSelection
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
-    const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const requestModel = getRequestModel(generation ?? {}, modelId);
+    const thinkingMandatory =
+      requestModel === (generation?.model ?? modelId) &&
+      generation?.thinkingMandatory === true;
+    const gptCapabilities = getGptReasoningCapabilities(requestModel);
     const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
     const gptModel = gptCapabilities !== undefined && !configuredReasoning;
     const supportsPreference = (value: ReasoningSelection | undefined) =>
@@ -13268,7 +13272,7 @@ export class Session implements SessionContext {
       value !== REASONING_EFFORT_DEFAULT &&
       ((gptModel && value !== REASONING_EFFORT_NONE) ||
         isReasoningSelectionSupported(
-          modelId,
+          requestModel,
           value,
           thinkingMandatory,
           modelReasoning,
