@@ -240,9 +240,10 @@ class HostedHookCancelFaultGatesIT {
 
         // The async Hook outlives its admission; DELETE refuses an ACTIVE
         // Session with a live turn (409 turn_active), so wait for the turn to
-        // finish and confirm the held command survived it.
+        // finish and confirm the held command survived it. The public Turn
+        // status is lowercased by publicTurn().
         waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn,
-                null, null, 200).path("status").asText()).isIn("COMPLETED", "FAILED", "CANCELLED"));
+                null, null, 200).path("status").asText()).isIn("completed", "failed", "cancelled"));
         assertThat(running(hook)).as("held command must outlive the turn").isTrue();
 
         String operation = api("DELETE", "/v1/agents/sessions/" + session, null, "delete-" + session, 202)
