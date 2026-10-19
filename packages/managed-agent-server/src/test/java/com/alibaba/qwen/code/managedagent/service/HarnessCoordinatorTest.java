@@ -1182,14 +1182,15 @@ class HarnessCoordinatorTest {
         } finally {
             coordinator.close();
         }
-        // The cancel keeps its bounded terminal path — and the mark that
-        // cannot park a CANCELLING row is never written.
+        // The cancel keeps its bounded retry path — the mark that cannot
+        // park a CANCELLING row is never written, and no terminal is forged.
         verify(store, never()).markTurnRecoveryBlocked(anyString(),
                 anyString(), anyString(), anyString(), anyString(),
                 anyString());
-        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("managed_runtime_recovery_blocked"),
-                anyString());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong(), eq(true));
     }
 
     // The same guard on the coded 409 arm: a CANCELLING workflow Turn
@@ -2856,8 +2857,12 @@ class HarnessCoordinatorTest {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                     anyString(), anyLong(), eq(true));
         } else if (cancelling) {
-            order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                    anyString(), eq("managed_runtime_recovery_blocked"), anyString());
+            // A pending cancel is never written FAILED; it keeps the cancel
+            // lane's bounded retry so the cancel route can settle it.
+            order.verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                    anyString(), anyString(), anyString());
             verify(store, never()).failRecoveryBlockedTurn(anyString(), anyString(), anyString(),
                     anyString(), anyString());
         } else {
@@ -3605,9 +3610,11 @@ class HarnessCoordinatorTest {
             coordinator.close();
         }
 
-        verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
-                anyString(), eq("managed_runtime_recovery_blocked"),
-                anyString());
+        // The pending cancel keeps its bounded retry; no terminal is forged.
+        verify(store).scheduleTurnRetry(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), anyLong(), eq(true));
+        verify(store, never()).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                anyString(), anyString(), anyString());
         verify(harness, never()).cancelManagedRuntime(anyString(), anyString(),
                 anyString(), anyString(), anyString());
         verify(harness, never()).continueManagedRuntime(anyString(),

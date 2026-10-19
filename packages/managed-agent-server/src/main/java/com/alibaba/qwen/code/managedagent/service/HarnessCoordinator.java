@@ -1271,7 +1271,14 @@ public class HarnessCoordinator {
                         new IllegalStateException("Recovery cancellation remains unsettled"), true);
             }
         }
-        if (recoveryBlocked && !"CANCELLING".equals(turn.status())) {
+        if (recoveryBlocked && "CANCELLING".equals(current.status())) {
+            // A pending user cancel keeps its own lane: the cancel route may
+            // still settle it as CANCELLED, so never write FAILED over it.
+            return transientFailure(current, true,
+                    new IllegalStateException("Cancellation remains pending"),
+                    true);
+        }
+        if (recoveryBlocked && !"CANCELLING".equals(current.status())) {
             if (!store.failRecoveryBlockedTurn(turn.tenantId(), turn.sessionId(),
                     turn.turnId(), owner, message)) {
                 return false;
