@@ -521,11 +521,11 @@ class HostedAutomationFaultGatesIT {
     }
 
     // revision-1 / revision-2: the journal refuses one revision of a manual run's fire. The
-    // Harness's store client gives up after its bounded retry, the manual run answers a
-    // retryable 503, and the Session stops writing: once the refusal drops, the same key still
-    // answers 503 until the Harness is restarted. On the reloaded Session the retry fires the
-    // same run once. Revision 1 refused leaves nothing committed; revision 2 refused leaves the
-    // claim, which the replay completes.
+    // Harness's store client gives up after its bounded retry and the manual run answers a
+    // retryable 503; the Session keeps the append unsettled instead of latching (#14570). Once
+    // the refusal drops, the same key settles against the durable head — the revision never
+    // landed — and retries, so the run fires once without a restart. Revision 1 refused leaves
+    // nothing committed; revision 2 refused leaves the claim, which the replay completes.
     private void revisionRefused(String name, String marker, int revision) throws Exception {
         String session = createSession(marker);
         String id = create(session, "FG11B_" + marker.toUpperCase(), "0 0 1 1 *", marker + "-base");
@@ -540,15 +540,10 @@ class HostedAutomationFaultGatesIT {
         String runId = refused.getFirst().substring(0, refused.getFirst().lastIndexOf(':'));
         assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
                 .as("committed while refused").hasSize(revision - 1);
-        dropRefusal(name);
-        assertUnknown(send("POST", path, null, key));
-        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
-                .as("a Session whose commit failed writes nothing more").hasSize(revision - 1);
         assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id)).isEmpty();
-        long generation = coldRestart(session);
+        dropRefusal(name);
         JsonNode run = retryUntilAccepted("POST", path, null, key);
         assertThat(run.path("id").asText()).isEqualTo(runId);
-        assertThat(writerGeneration(session)).as("the reloaded Session's writer").isGreaterThan(generation);
         waiting().atMost(Duration.ofSeconds(60)).until(() -> "completed".equals(runState(runId)));
         assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
                 .containsExactly(runId + ":1", runId + ":2");
