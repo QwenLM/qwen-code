@@ -216,6 +216,7 @@ async function installCodeReview(
     revision: 1,
     partial: false,
     reviewSummary: false,
+    delayedSettings: undefined as Promise<void> | undefined,
     delayedPage: undefined as
       | { page: number; promise: Promise<void> }
       | undefined,
@@ -235,6 +236,7 @@ async function installCodeReview(
       url: ref,
     });
     if (url.pathname === '/github/prs/settings') {
+      if (request.method() === 'GET') await state.delayedSettings;
       if (request.method() === 'POST') {
         const body = request.postDataJSON() as Record<string, unknown>;
         writes.push(body);
@@ -470,34 +472,139 @@ async function dragPane(page: Page, name: 'inbox' | 'context', delta: number) {
   await page.mouse.up();
 }
 
-test('the account entry stays visible while off and its toggle controls reads @smoke', async ({
+async function openSettingsPage(page: Page) {
+  const settings = page.getByRole('button', { name: 'Settings', exact: true });
+  if (!(await settings.isVisible())) {
+    await page.getByRole('button', { name: 'More', exact: true }).click();
+  }
+  await settings.click();
+}
+
+async function openExperimentalSettings(page: Page) {
+  await openSettingsPage(page);
+  await page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('button', { name: /^Experimental/ })
+    .click();
+  return page.getByRole('switch', { name: 'Code Review Workbench' });
+}
+
+for (const noWorkspaces of [false, true]) {
+  test(`unified experimental settings control the account entry (noWorkspaces=${noWorkspaces}) @smoke`, async ({
+    page,
+    baseURL,
+  }) => {
+    const harness = await installCodeReview(page, baseURL!, {
+      enabled: false,
+      noWorkspaces,
+    });
+    await page.goto('/?language=en-US');
+    const entry = page.getByRole('button', {
+      name: 'Code review',
+      exact: true,
+    });
+    const control = await openExperimentalSettings(page);
+    await expect(control).not.toBeChecked();
+    await expect(control).toBeEnabled();
+    await expect(entry).toHaveCount(0);
+    expect(githubReads(harness)).toEqual([]);
+    await control.click();
+    await expect(control).toBeChecked();
+    await expect(entry).toBeVisible();
+    expect(githubReads(harness)).toEqual([]);
+    await page.reload();
+    await expect(entry).toBeVisible();
+    await entry.click();
+    await expect(prRow(page, ALPHA)).toBeVisible();
+    await page.getByRole('button', { name: 'Code Review settings' }).click();
+    await page.getByRole('switch', { name: 'Enable Code Review' }).click();
+    await expect(page.getByTestId('code-review-workbench')).toHaveCount(0);
+    await expect(entry).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/code-review/);
+    const readsAfterDisable = githubReads(harness).length;
+    await page.goto(
+      `/code-review?language=en-US&pr=${encodeURIComponent(ALPHA)}`,
+    );
+    await expect(
+      page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+    ).toBeVisible();
+    await expect(page).not.toHaveURL(/\/code-review/);
+    await expect(entry).toHaveCount(0);
+    expect(githubReads(harness)).toHaveLength(readsAfterDisable);
+    const offControl = await openExperimentalSettings(page);
+    await expect(offControl).not.toBeChecked();
+    expect(harness.writes).toEqual([{ enabled: true }, { enabled: false }]);
+    expectReadOnly(harness);
+    if (noWorkspaces) {
+      expect(
+        harness.daemon.requests.filter((request) =>
+          /\/workspace\/settings|\/workspaces\/[^/]+\/settings/.test(
+            request.path,
+          ),
+        ),
+      ).toEqual([]);
+    }
+  });
+}
+
+test('disabling from unified settings hides the entry and survives reload', async ({
   page,
   baseURL,
 }) => {
-  const harness = await installCodeReview(page, baseURL!, { enabled: false });
-  await page.goto('/?language=en-US');
-  await page.getByRole('button', { name: 'Code review', exact: true }).click();
-  await expect(page.getByTestId('code-review-gate')).toBeVisible();
-  expect(githubReads(harness)).toEqual([]);
-  await page
-    .getByRole('button', { name: 'Enable Code Review', exact: true })
-    .click();
-  await expect(page.getByTestId('code-review-page')).toBeVisible();
-  await expect(prRow(page, ALPHA)).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: 'Workspace', exact: true }),
-  ).toHaveCount(0);
-  await page.getByRole('button', { name: 'Code Review settings' }).click();
-  await page.getByRole('switch', { name: 'Enable Code Review' }).click();
-  await expect(page.getByTestId('code-review-gate')).toBeVisible();
+  const harness = await installCodeReview(page, baseURL!);
+  await openWorkbench(page);
+  const control = await openExperimentalSettings(page);
+  await expect(control).toBeChecked();
+  await control.click();
+  await expect(control).not.toBeChecked();
   await expect(
     page.getByRole('button', { name: 'Code review', exact: true }),
+  ).toHaveCount(0);
+  const reads = githubReads(harness).length;
+  await page.reload();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
-  expect(harness.writes).toEqual([{ enabled: true }, { enabled: false }]);
-  expectReadOnly(harness);
+  await expect(
+    page.getByRole('button', { name: 'Code review', exact: true }),
+  ).toHaveCount(0);
+  expect(harness.writes).toEqual([{ enabled: false }]);
+  expect(githubReads(harness)).toHaveLength(reads);
 });
 
-test('a system-locked disabled setting cannot be enabled from the gate', async ({
+test('an enabled cold deep link waits for account settings before loading its PR', async ({
+  page,
+  baseURL,
+}) => {
+  const harness = await installCodeReview(page, baseURL!);
+  let release!: () => void;
+  harness.state.delayedSettings = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.goto(`/code-review?language=en-US&pr=${encodeURIComponent(BETA)}`);
+  await expect
+    .poll(() =>
+      harness.requests.some(
+        (request) => request.path === '/github/prs/settings',
+      ),
+    )
+    .toBe(true);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/\/code-review/);
+  await expect(page.getByTestId('code-review-workbench')).toHaveCount(0);
+  expect(githubReads(harness)).toEqual([]);
+  release();
+  await expect(page.getByTestId('code-review-detail')).toContainText(
+    'Details for fixture/beta.',
+  );
+  await expect(page).toHaveURL(
+    /pr=https%3A%2F%2Fgithub.com%2Ffixture%2Fbeta%2Fpull%2F42/,
+  );
+});
+
+test('a system-locked disabled setting cannot be enabled from unified settings', async ({
   page,
   baseURL,
 }) => {
@@ -506,17 +613,17 @@ test('a system-locked disabled setting cannot be enabled from the gate', async (
     locked: true,
   });
   await page.goto('/code-review?language=en-US');
-  await expect(page.getByTestId('code-review-gate')).toBeVisible();
+  await expect(page).not.toHaveURL(/\/code-review/);
   await expect(
-    page.getByRole('button', { name: 'Enable Code Review', exact: true }),
+    page.getByRole('button', { name: 'Code review', exact: true }),
   ).toHaveCount(0);
+  const control = await openExperimentalSettings(page);
+  await expect(control).toBeDisabled();
   await expect(
-    page.getByText('This setting is managed by your administrator.'),
+    page.getByText('This setting is managed by your administrator.', {
+      exact: false,
+    }),
   ).toBeVisible();
-  await page.getByRole('button', { name: 'Code Review settings' }).click();
-  await expect(
-    page.getByRole('switch', { name: 'Enable Code Review' }),
-  ).toBeDisabled();
   expect(harness.writes).toEqual([]);
   expect(githubReads(harness)).toEqual([]);
 });
@@ -531,7 +638,11 @@ test('an older daemon receives no account GitHub reads', async ({
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
   await expect(page.getByTestId('code-review-page')).toHaveCount(0);
-  expect(githubReads(harness)).toEqual([]);
+  await openSettingsPage(page);
+  await expect(
+    page.getByRole('switch', { name: 'Code Review Workbench' }),
+  ).toHaveCount(0);
+  expect(harness.requests).toEqual([]);
 });
 
 test('an account with no local workspaces can open its inbox and PR detail @smoke', async ({

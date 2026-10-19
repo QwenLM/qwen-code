@@ -32,6 +32,7 @@ import {
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
+import type { useCodeReviewSettings } from '../../hooks/useCodeReviewSettings';
 import {
   WEB_SHELL_THEMES,
   WebShellThemeId,
@@ -110,6 +111,7 @@ export interface SettingsMessageSettingsState {
     value: unknown,
   ) => Promise<DaemonSettingUpdateResult>;
   liveSetup?: UseLiveVoiceSetupResult;
+  codeReview?: ReturnType<typeof useCodeReviewSettings>;
 }
 
 const SUB_DIALOG_KEYS = new Set([
@@ -128,6 +130,7 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.compactMode',
   'mcpServers',
   'model.reasoningEffort',
+  'experimental.codeReview',
 ]);
 const LIVE_SETTING_KEYS = new Set([
   'experimental.liveVoice.enabled',
@@ -264,6 +267,7 @@ type SettingsPageItem =
   | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
   | { type: 'local-control' }
   | { type: 'live' }
+  | { type: 'code-review' }
   | { type: 'connections' }
   | { type: 'model-management' };
 
@@ -448,8 +452,16 @@ export function SettingsMessage({
   useEffect(() => {
     refreshNotificationPermission?.();
   }, [refreshNotificationPermission]);
-  const { status, settings, loading, error, reload, setValue, liveSetup } =
-    settingsState;
+  const {
+    status,
+    settings,
+    loading,
+    error,
+    reload,
+    setValue,
+    liveSetup,
+    codeReview,
+  } = settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -513,6 +525,18 @@ export function SettingsMessage({
         });
       }
     }
+    if (codeReview) {
+      const experimental = groups.find((group) => group.id === 'Experimental');
+      if (experimental) {
+        experimental.items.push({ type: 'code-review' });
+      } else {
+        groups.push({
+          id: 'Experimental',
+          label: formatSettingCategory('Experimental', t),
+          items: [{ type: 'code-review' }],
+        });
+      }
+    }
     const daemon = groups.find((group) => group.id === 'Daemon');
     if (daemon) {
       daemon.items.unshift({ type: 'local-control' });
@@ -547,6 +571,9 @@ export function SettingsMessage({
           if (item.type === 'setting') {
             return isSettingVisible(item.setting.key, presentation);
           }
+          if (item.type === 'code-review') {
+            return isSettingVisible('experimental.codeReview', presentation);
+          }
           const id =
             item.type === 'local'
               ? item.localKey === 'chatWidth'
@@ -565,6 +592,7 @@ export function SettingsMessage({
       .filter((group) => group.items.length > 0);
   }, [
     liveSetup,
+    codeReview,
     settings,
     t,
     hasNotifications,
@@ -1015,6 +1043,67 @@ export function SettingsMessage({
                                 <LocalControlSettingsCard />
                               </div>
                             );
+                          }
+                          if (item.type === 'code-review') {
+                            return codeReview ? (
+                              <div key="code-review">
+                                {separator}
+                                <SettingsRow
+                                  title={t(
+                                    'settings.label.experimental.codeReview',
+                                  )}
+                                  description={[
+                                    t(
+                                      'settings.description.experimental.codeReview',
+                                    ),
+                                    codeReview.locked
+                                      ? t('prWorkbench.settingLocked')
+                                      : undefined,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' ')}
+                                  metadata={
+                                    <Badge variant="secondary">
+                                      {t('settings.scope.user')}
+                                    </Badge>
+                                  }
+                                  control={
+                                    <Switch
+                                      aria-label={t(
+                                        'settings.label.experimental.codeReview',
+                                      )}
+                                      checked={codeReview.enabled}
+                                      disabled={
+                                        !codeReview.loaded ||
+                                        codeReview.busy ||
+                                        codeReview.locked ||
+                                        Boolean(codeReview.error)
+                                      }
+                                      onCheckedChange={(enabled) =>
+                                        void codeReview.setEnabled(enabled)
+                                      }
+                                    />
+                                  }
+                                />
+                                {codeReview.error && (
+                                  <Alert
+                                    variant="destructive"
+                                    className="mx-5 mb-4 w-auto max-md:mx-4"
+                                  >
+                                    <AlertDescription>
+                                      {codeReview.error}
+                                    </AlertDescription>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => void codeReview.reload()}
+                                    >
+                                      {t('prWorkbench.retry')}
+                                    </Button>
+                                  </Alert>
+                                )}
+                              </div>
+                            ) : null;
                           }
 
                           const setting = item.setting;

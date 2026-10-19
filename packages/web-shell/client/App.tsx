@@ -9017,6 +9017,7 @@ export function App({
     codeReviewSupported,
     workspaceEventSignals?.settingsVersion,
   );
+  const settingsAvailable = projectFeaturesAvailable || codeReviewSupported;
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
   const skillsCatalogActive =
@@ -9478,7 +9479,7 @@ export function App({
       !navigation &&
       mainView === 'codeReview' &&
       workspaceCapabilitiesReady &&
-      !codeReviewSupported
+      !codeReviewSettings.enabled
     ) {
       showChat();
     }
@@ -9486,7 +9487,7 @@ export function App({
     navigation,
     mainView,
     workspaceCapabilitiesReady,
-    codeReviewSupported,
+    codeReviewSettings.enabled,
     showChat,
   ]);
   const useFloatingArtifactPanel =
@@ -9918,7 +9919,10 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+      !(
+        activePanel === 'settings' &&
+        (settingsAvailable || initialConnectionsSettingsCategory)
+      )
     ) {
       setActivePanel(null);
     }
@@ -9953,6 +9957,7 @@ export function App({
     mainView,
     modelDialogMode,
     projectFeaturesAvailable,
+    settingsAvailable,
     initialConnectionsSettingsCategory,
     workspaceContextActive,
   ]);
@@ -10030,12 +10035,13 @@ export function App({
     navigationRef.current?.openPage('goals');
   }, [showChat]);
   const openCodeReview = useCallback(() => {
+    if (!codeReviewSettings.enabled) return;
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
     if (!navigationRef.current) showChat();
     setMainView('codeReview');
     navigationRef.current?.openCodeReview(codeReviewLocalRef);
-  }, [codeReviewLocalRef, showChat]);
+  }, [codeReviewSettings.enabled, codeReviewLocalRef, showChat]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -10050,7 +10056,7 @@ export function App({
       sidebarOptions.primaryNav?.items?.some((item) => {
         if (item === 'newTask') return false;
         if (item === 'managed') return externalManagedAgentAvailable;
-        if (item === 'codeReview') return codeReviewSupported;
+        if (item === 'codeReview') return codeReviewSettings.enabled;
         if (!projectFeaturesAvailable) return false;
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
@@ -10059,7 +10065,8 @@ export function App({
         (sidebarOptions.footer !== false &&
           sidebarOptions.footer?.items?.some((item) => {
             if (item === 'collapse') return false;
-            if (item === 'settings' || item === 'sessionsOverview') {
+            if (item === 'settings') return settingsAvailable;
+            if (item === 'sessionsOverview') {
               return projectFeaturesAvailable;
             }
             if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
@@ -10253,6 +10260,12 @@ export function App({
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
+    if (
+      page === 'code-review' &&
+      codeReviewSupported &&
+      !codeReviewSettings.loaded
+    )
+      return;
     if (page === 'chat' && navigation.revision === 0) {
       navigationAppliedRef.current = navigation.revision;
       navigationSettledRef.current = true;
@@ -10267,8 +10280,10 @@ export function App({
     const allowed =
       page === 'chat' ||
       ((page === 'code-review'
-        ? codeReviewSupported
-        : projectFeaturesAvailable) &&
+        ? codeReviewSettings.enabled
+        : page === 'settings'
+          ? settingsAvailable
+          : projectFeaturesAvailable) &&
         (page !== 'live' || liveSidebarEnabled) &&
         (page === 'settings'
           ? hostSidebar?.footer !== false &&
@@ -10309,6 +10324,9 @@ export function App({
     liveSidebarEnabled,
     workspaceCapabilitiesReady,
     codeReviewSupported,
+    codeReviewSettings.loaded,
+    codeReviewSettings.enabled,
+    settingsAvailable,
   ]);
   useEffect(() => {
     if (
@@ -13377,6 +13395,7 @@ export function App({
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
     liveSetup: liveSidebarEnabled ? undefined : liveSetup,
+    codeReview: codeReviewSupported ? codeReviewSettings : undefined,
   };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
@@ -21580,7 +21599,7 @@ export function App({
                     openGoals();
                   }}
                   onOpenCodeReview={
-                    codeReviewSupported
+                    codeReviewSettings.enabled
                       ? () => {
                           closeMobileDrawer();
                           openCodeReview();
@@ -21673,6 +21692,7 @@ export function App({
                     pushToast('info', message)
                   }
                   projectFeaturesEnabled={projectFeaturesAvailable}
+                  settingsEnabled={settingsAvailable}
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
@@ -22046,7 +22066,7 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable || activePanel === 'status') && (
+                (projectFeaturesAvailable || activePanel === 'status' || (activePanel === 'settings' && settingsAvailable)) && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -22205,7 +22225,7 @@ export function App({
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
                         }
-                        modelManagementSectionProps={{
+                        modelManagementSectionProps={projectFeaturesAvailable ? {
                           ...modelManagementPolicy,
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
@@ -22233,7 +22253,7 @@ export function App({
                               'builtin:model-management';
                             setShowAuthDialog(true);
                           },
-                        }}
+                        } : undefined}
                         onSubDialog={(key, scope) => {
                           if (!isSettingVisible(key, settingsPresentation)) return;
                           settingsDialogKeyRef.current = key;
@@ -22389,7 +22409,7 @@ export function App({
                   </div>
                 </section>
               )}
-              {codeReviewSupported && mainView === 'codeReview' && (
+              {codeReviewSettings.enabled && mainView === 'codeReview' && (
                 <div
                   className={styles.fullPage}
                   data-testid="code-review-workbench"

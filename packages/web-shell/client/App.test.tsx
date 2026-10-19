@@ -1745,15 +1745,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         },
         props.sessionHeader,
         props.sessionContent,
-        React.createElement(
-          'button',
-          {
-            'data-testid': 'open-code-review',
-            type: 'button',
-            onClick: props.onOpenCodeReview,
-          },
-          'code review',
-        ),
+        props.onOpenCodeReview &&
+          React.createElement(
+            'button',
+            {
+              'data-testid': 'open-code-review',
+              type: 'button',
+              onClick: props.onOpenCodeReview,
+            },
+            'code review',
+          ),
         React.createElement(
           'button',
           {
@@ -12351,58 +12352,86 @@ afterEach(() => {
 });
 
 describe('App code review capability boundary', () => {
-  it('restores chat when an embedded host loses code review support', async () => {
-    Object.assign(mockWorkspace.client, {
-      githubPullRequestSettings: vi.fn().mockResolvedValue({
-        v: 1,
-        enabled: false,
-        userEnabled: false,
-        locked: false,
-      }),
-    });
-    mockWorkspace.capabilities = {
-      ...mockWorkspace.capabilities,
-      features: ['github_code_review'],
-    };
-    const { container, rerender } = renderApp({
-      sidebar: {
-        enabled: true,
-        primaryNav: { items: ['newTask', 'codeReview'] },
-      },
-    });
-    await flush();
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="open-code-review"]')!
-        .click();
-    });
-    await flush();
-    const sidebarPage = () =>
-      container
-        .querySelector('[data-testid="sidebar"]')
-        ?.getAttribute('data-active-page');
-    const chat = () => container.querySelector('[data-testid="submit"]')!;
-    expect(
-      container.querySelector('[data-testid="code-review-gate"]'),
-    ).not.toBeNull();
-    expect(sidebarPage()).toBe('codeReview');
-    expect(chat().closest('[aria-hidden="true"]')).not.toBeNull();
+  it.each(['capability', 'setting'])(
+    'restores chat when an embedded host loses its %s',
+    async (change) => {
+      Object.assign(mockWorkspace.client, {
+        githubPullRequestSettings: vi.fn().mockResolvedValue({
+          v: 1,
+          enabled: true,
+          userEnabled: true,
+          locked: false,
+        }),
+        githubPullRequestInbox: vi.fn().mockResolvedValue({
+          v: 1,
+          scope: 'account',
+          account: { host: 'github.com', login: 'fixture' },
+          authored: [],
+          needsMyReview: [],
+          page: 1,
+          limit: 50,
+          hasMore: { authored: false, needsMyReview: false },
+          search: {},
+        }),
+      });
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        features: ['github_code_review'],
+      };
+      const { container, rerender } = renderApp({
+        sidebar: {
+          enabled: true,
+          primaryNav: { items: ['newTask', 'codeReview'] },
+        },
+      });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-code-review"]')!
+          .click();
+      });
+      await flush();
+      const sidebarPage = () =>
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-active-page');
+      const chat = () => container.querySelector('[data-testid="submit"]')!;
+      expect(
+        container.querySelector('[data-testid="code-review-page"]'),
+      ).not.toBeNull();
+      expect(sidebarPage()).toBe('codeReview');
+      expect(chat().closest('[aria-hidden="true"]')).not.toBeNull();
 
-    const capabilities = mockWorkspace.capabilities;
-    mockWorkspace.capabilities = undefined;
-    rerender();
-    await flush();
-    expect(sidebarPage()).toBe('codeReview');
-
-    mockWorkspace.capabilities = { ...capabilities, features: [] };
-    rerender();
-    await flush();
-    expect(
-      container.querySelector('[data-testid="code-review-workbench"]'),
-    ).toBeNull();
-    expect(sidebarPage()).toBe('home');
-    expect(chat().closest('[aria-hidden="true"]')).toBeNull();
-  });
+      const capabilities = mockWorkspace.capabilities;
+      if (change === 'capability') {
+        mockWorkspace.capabilities = undefined;
+        rerender();
+        await flush();
+        expect(sidebarPage()).toBe('codeReview');
+        mockWorkspace.capabilities = { ...capabilities, features: [] };
+        rerender();
+      } else {
+        vi.mocked(
+          mockWorkspace.client.githubPullRequestSettings,
+        ).mockResolvedValue({
+          v: 1,
+          enabled: false,
+          userEnabled: false,
+          locked: false,
+        });
+        await act(async () => window.dispatchEvent(new Event('focus')));
+      }
+      await flush();
+      expect(
+        container.querySelector('[data-testid="code-review-workbench"]'),
+      ).toBeNull();
+      expect(sidebarPage()).toBe('home');
+      expect(
+        container.querySelector('[data-testid="open-code-review"]'),
+      ).toBeNull();
+      expect(chat().closest('[aria-hidden="true"]')).toBeNull();
+    },
+  );
 });
 
 describe('App live transcript boundary', () => {

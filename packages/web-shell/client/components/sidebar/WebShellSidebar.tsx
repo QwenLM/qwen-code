@@ -555,6 +555,7 @@ interface WebShellSidebarProps {
     workspaceCwd?: string,
   ) => Promise<boolean> | boolean | void;
   projectFeaturesEnabled?: boolean;
+  settingsEnabled?: boolean;
   onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
   onStandaloneNotice?: (message: string) => void;
 }
@@ -1089,6 +1090,7 @@ export function WebShellSidebar({
   onOpenWorkspaceManagement,
   onNewWorktreeSession,
   projectFeaturesEnabled = true,
+  settingsEnabled = projectFeaturesEnabled,
   onLoadStandaloneSession,
   onStandaloneNotice,
 }: WebShellSidebarProps) {
@@ -5869,7 +5871,7 @@ export function WebShellSidebar({
           footer &&
           typeof footer === 'object' &&
           footer.render?.()}
-        {projectFeaturesEnabled && footerItems.has('settings') && (
+        {settingsEnabled && footerItems.has('settings') && (
           <button
             className={styles.footerButton}
             type="button"

@@ -1122,3 +1122,127 @@ describe('SettingsMessage user-scope editing', () => {
     ).not.toBeNull();
   });
 });
+
+describe('SettingsMessage account code review setting', () => {
+  function codeReviewState(
+    overrides: Partial<
+      NonNullable<SettingsMessageSettingsState['codeReview']>
+    > = {},
+  ) {
+    return {
+      enabled: false,
+      userEnabled: null,
+      loaded: true,
+      busy: false,
+      locked: false,
+      error: undefined,
+      reload: vi.fn(async () => {}),
+      setEnabled: vi.fn(async () => {}),
+      ...overrides,
+    };
+  }
+
+  it.each(['workspace', 'user'])(
+    'uses the account API from the %s tab',
+    async (scope) => {
+      const setValue = vi.fn();
+      const codeReview = codeReviewState();
+      const container = renderPanel(
+        { ...makeState([], setValue), codeReview },
+        { initialCategory: 'Experimental' },
+      );
+      if (scope === 'user') clickUserTab(container);
+      const control = switchButton(container);
+      expect(control.getAttribute('aria-label')).toBe('Code Review Workbench');
+      expect(control.getAttribute('aria-checked')).toBe('false');
+      expect(control.closest('[data-slot="field"]')?.textContent).toContain(
+        'User',
+      );
+      await act(async () => control.click());
+      expect(codeReview.setEnabled).toHaveBeenCalledExactlyOnceWith(true);
+      expect(setValue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { loaded: false },
+    { busy: true },
+    { locked: true },
+    { error: 'Account settings unavailable' },
+  ])('disables mutations for %j', async (override) => {
+    const codeReview = codeReviewState(override);
+    const container = renderPanel(
+      { ...makeState([], vi.fn()), codeReview },
+      { initialCategory: 'Experimental' },
+    );
+    const control = switchButton(container);
+    expect(control.disabled).toBe(true);
+    await act(async () => control.click());
+    expect(codeReview.setEnabled).not.toHaveBeenCalled();
+    if (codeReview.locked)
+      expect(container.textContent).toContain(
+        'This setting is managed by your administrator.',
+      );
+    if (codeReview.error) {
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        codeReview.error,
+      );
+      const retry = Array.from(
+        container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent === 'Try again')!;
+      await act(async () => retry.click());
+      expect(codeReview.reload).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('uses the effective value and disables an enabled account', async () => {
+    const codeReview = codeReviewState({ enabled: true, userEnabled: false });
+    const container = renderPanel(
+      { ...makeState([], vi.fn()), codeReview },
+      { initialCategory: 'Experimental' },
+    );
+    const control = switchButton(container);
+    expect(control.getAttribute('aria-checked')).toBe('true');
+    await act(async () => control.click());
+    expect(codeReview.setEnabled).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it.each([
+    { includeItems: [] },
+    { excludeItems: ['setting:code-review'] },
+    {
+      includeItems: ['setting:code-review'],
+      excludeItems: ['setting:code-review'],
+    },
+  ] satisfies WebShellSettingsOptions[])(
+    'honors host filtering %j',
+    (presentation) => {
+      const container = renderPanel(
+        { ...makeState([], vi.fn()), codeReview: codeReviewState() },
+        { initialCategory: 'Experimental', presentation },
+      );
+      expect(
+        container.querySelector('[aria-label="Code Review Workbench"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('includes the account row without exposing a generic workspace write', () => {
+    const descriptor = {
+      ...boolSetting(),
+      key: 'experimental.codeReview',
+      category: 'Experimental',
+    };
+    const container = renderPanel(
+      { ...makeState([descriptor], vi.fn()), codeReview: codeReviewState() },
+      {
+        initialCategory: 'Experimental',
+        presentation: { includeItems: ['setting:code-review'] },
+      },
+    );
+    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(1);
+    expect(switchButton(container).getAttribute('aria-label')).toBe(
+      'Code Review Workbench',
+    );
+  });
+});
