@@ -77,6 +77,19 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
   });
 
+  it('sizes the daemon-e2e budget for the stretched setup on the fast tier', () => {
+    // The fast tier runs this leg on every touched PR push instead of nightly
+    // only, so it meets the ~44 min stretched-setup tail far more often than a
+    // 45 ceiling leaves room for. This budget was originally sized for the
+    // post-job Maven cache save, which #14396 has since suppressed on
+    // self-hosted runners; a killed job concludes cancelled and reddens the
+    // gate of a green suite either way. The full tier keeps the budget the
+    // stretched-setup sizing below justifies.
+    expect(parse(workflow).jobs['daemon-e2e']['timeout-minutes']).toBe(
+      "${{ inputs.tier == 'fast' && 90 || 45 }}",
+    );
+  });
+
   it('serializes latency-sensitive tests on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
@@ -85,9 +98,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 2400 9');
+    expect(block).toContain('flock --wait 3600 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 40 minutes',
+      '::error::sdk-java host lock not acquired within 60 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -98,12 +111,18 @@ describe('SDK Java self-hosted workflow guards', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
+    expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
       'mvn --batch-mode --no-transfer-progress clean test\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
         '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
         '            cd ../../managed-agent-server\n' +
-        `            mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        '            # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
+        '            if [ "${TIER}" = "fast" ]; then\n' +
+        '              mvn --batch-mode --no-transfer-progress clean test\n' +
+        '            else\n' +
+        `              mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        '            fi\n' +
         '          fi',
     );
   });
@@ -122,6 +141,39 @@ describe('SDK Java self-hosted workflow guards', () => {
       block.indexOf('clean test'),
     );
     expect(block).toContain(`'-Dtest=${brokerTestPattern}'`);
+    expect(block).toContain("TIER: '${{ inputs.tier }}'");
+    expect(hosted.run).toContain(
+      'if [ "${TIER}" = "fast" ]; then\n' +
+        '  mvn --batch-mode --no-transfer-progress clean test\n' +
+        'else\n' +
+        `  mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        'fi',
+    );
+  });
+
+  it('builds the JavaScript the full module suite loads before the fast tier runs it', () => {
+    const steps = parse(workflow).jobs.test.steps;
+    const names = steps.map((candidate) => candidate.name);
+    const build = steps.find(
+      (candidate) =>
+        candidate.name ===
+        'Build Managed Agent JavaScript prerequisites (fast tier)',
+    );
+    expect(build.if).toBe("${{ inputs.tier == 'fast' }}");
+    expect(build.run).toBe(
+      parse(workflow).jobs['mysql-integration'].steps.find(
+        (candidate) => candidate.name === 'Build native producer prerequisites',
+      ).run,
+    );
+    for (const later of [
+      'Run Java SDK tests (self-hosted)',
+      'Run Runtime Broker state tests',
+    ]) {
+      expect(names.indexOf(build.name)).toBeLessThan(names.indexOf(later));
+    }
+    expect(names.indexOf('Set up Node.js 22 (hosted)')).toBeLessThan(
+      names.indexOf(build.name),
+    );
   });
 
   it.skipIf(process.platform === 'win32').each([0, 23])(
@@ -199,48 +251,87 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it.each(['test', 'mysql-integration', 'daemon-e2e'])(
-    'keeps setup-java Maven files job-local in the %s job',
-    (name) => {
-      const block = job(name);
+  it.each([
+    'test',
+    'mysql-integration',
+    'daemon-e2e',
+    'event-transport-broker',
+    'event-transport-multi-node',
+  ])('keeps setup-java Maven files job-local in the %s job', (name) => {
+    const block = job(name);
+    expect(block).toContain(
+      "settings-path: '${{ runner.temp }}/setup-java-m2'",
+    );
+    // Two tail-anchored forms, no prefix match: mysql-integration appends
+    // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
+    // (pinned by the 'installs and verifies against one job-local Maven
+    // repository' test), the EventTransport lanes to both of theirs; the
+    // other jobs must carry no suffix at all — an appended -DskipTests
+    // would be word-split live by the mvn launcher.
+    const exact = block.match(
+      /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+    );
+    const jobLocal = block.match(
+      /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
+    );
+    expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
+      {
+        test: 6,
+        'mysql-integration': 2,
+        'daemon-e2e': 1,
+        'event-transport-broker': 2,
+        'event-transport-multi-node': 2,
+      }[name],
+    );
+    if (name.startsWith('event-transport-')) {
+      expect(exact).toBeNull();
       expect(block).toContain(
-        "settings-path: '${{ runner.temp }}/setup-java-m2'",
+        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
       );
-      // Two tail-anchored forms, no prefix match: mysql-integration appends
-      // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
-      // (pinned by the 'installs and verifies against one job-local Maven
-      // repository' test); the other jobs must carry no suffix at all — an
-      // appended -DskipTests would be word-split live by the mvn launcher.
-      const exact = block.match(
-        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
-      );
-      const jobLocal = block.match(
-        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
-      );
-      expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
-        { test: 6, 'mysql-integration': 2, 'daemon-e2e': 1 }[name],
-      );
-      if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
-      expect(block).not.toContain('Drop shared Maven toolchains.xml');
-      expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
-    },
-  );
+    } else if (name !== 'mysql-integration') {
+      expect(jobLocal).toBeNull();
+    }
+    expect(block).not.toContain('Drop shared Maven toolchains.xml');
+    expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
+  });
 
   it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
     // A step copied between jobs and later fixed in only one is the #13506
     // drift class; the checksum gate in this body is the security-relevant
     // part, so pin the whole body equal — not just the step name.
     const parsed = parse(workflow);
-    const bodies = ['test', 'mysql-integration', 'daemon-e2e'].map((name) => {
-      const s = parsed.jobs[name].steps.find(
+    const reference = parse(
+      readFileSync(
+        '.github/workflows/release-managed-agent-reference.yml',
+        'utf8',
+      ),
+    );
+    const bodies = [
+      ...[
+        'test',
+        'mysql-integration',
+        'daemon-e2e',
+        'event-transport-broker',
+        'event-transport-multi-node',
+      ].map((name) => parsed.jobs[name]),
+      reference.jobs.build,
+    ].map((pooledJob, index) => {
+      const s = pooledJob.steps.find(
         (candidate) => candidate.name === 'Set up Maven (self-hosted)',
       );
-      expect(s, name).toBeDefined();
-      expect(s.if, name).toBe("${{ runner.environment == 'self-hosted' }}");
+      expect(s, String(index)).toBeDefined();
+      expect(s.if, String(index)).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
       return s.run;
     });
-    expect(bodies[1]).toBe(bodies[0]);
-    expect(bodies[2]).toBe(bodies[0]);
+    for (const body of bodies.slice(1)) expect(body).toBe(bodies[0]);
+    expect(reference.jobs.build.env).toEqual({
+      MAVEN_VERSION: parsed.env.MAVEN_VERSION,
+      MAVEN_SHA512: parsed.env.MAVEN_SHA512,
+      MYSQL_CONTAINER:
+        'qwen-code-reference-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
+    });
     expect(bodies[0]).toContain('sha512sum --check');
     expect(bodies[0]).toContain('>> "${GITHUB_PATH}"');
   });
@@ -612,30 +703,30 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       'Install Managed Agent dependencies',
       'Run Managed Agent tests, Checkstyle, and MySQL integration',
     ]);
-    for (const s of mavenSteps) {
+    const lockWaits = mavenSteps.map((s) => {
       expect(s.run, s.name).toContain(
         'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
       );
-      expect(s.run, s.name).toContain('flock --wait 2400 9');
-    }
+      const seconds = Number(s.run.match(/flock --wait (\d+) 9/)?.[1]);
+      expect(seconds, s.name).toBeGreaterThanOrEqual(50 * 60);
+      return seconds;
+    });
     // The ceiling must absorb one full lock wait per acquisition — this job
-    // takes the lock once per Maven step — plus the ~14 minutes of measured
-    // Maven work. The 1200 s budget was sized on pool run 37743332082's
-    // 1193 s of waits against 818 s of holds, and main run 38258395829
-    // exhausted it: the verify step starved a full 1200 s behind cross-run
-    // pool traffic and failed before Maven started (#13989), so the budget
-    // now covers two full sibling holds. Derived from the step count so a
-    // fourth locked step turns this red instead of silently over-drawing
-    // the budget.
+    // takes the lock once per Maven step — plus the ~50 minutes of measured
+    // Maven work. Run 39097018288 held it for 47m26s, longer than the old
+    // 40-minute acquisition budget. Derive the ceiling from the step count
+    // so another locked step cannot silently overdraw it.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(mavenSteps.length * 2400 + 14 * 60);
+    ).toBeGreaterThanOrEqual(
+      lockWaits.reduce((total, seconds) => total + seconds, 0) + 50 * 60,
+    );
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured locked work (~5 minutes on
     // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
     // now consume part of that wait budget.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      2400 + 10 * 60,
+      3600 + 10 * 60,
     );
   });
 
@@ -660,8 +751,8 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(install.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
     );
-    // The write-back closes the cache: 'maven' loop — the seed above only
-    // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
+    // The write-back closes the host-shared ~/.m2 loop — the seed above only
+    // reads that repository, so without it a pom key rotation leaves a
     // thin entry that never recaptures the managed-agent-server tree. The
     // excludes name the two in-house fixed release coordinates, not the
     // whole com/alibaba group, so third-party artifacts under it (druid)
@@ -670,6 +761,7 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     // has already passed, and pipefail keeps a failing left-hand tar from
     // being masked by the extractor's exit 0.
     expect(verify.run).toContain('set -o pipefail');
+    expect(verify.run).toContain('mkdir -p "${HOME}/.m2/repository"');
     expect(verify.run).toContain(
       'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
     );
@@ -772,6 +864,15 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     'sdk-java-contract-open-prs.yml': parse(
       readFileSync('.github/workflows/sdk-java-contract-open-prs.yml', 'utf8'),
     ),
+    'release-managed-agent-reference.yml': parse(
+      readFileSync(
+        '.github/workflows/release-managed-agent-reference.yml',
+        'utf8',
+      ),
+    ),
+    'managed-agent-gate.yml': parse(
+      readFileSync('.github/workflows/managed-agent-gate.yml', 'utf8'),
+    ),
   };
   const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
   const ciSteps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
@@ -785,9 +886,13 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
     ['sdk-java.yml', 'test'],
     ['sdk-java.yml', 'flyway-migrations'],
     ['sdk-java.yml', 'mysql-integration'],
+    ['sdk-java.yml', 'event-transport-broker'],
+    ['sdk-java.yml', 'event-transport-multi-node'],
     ['sdk-java.yml', 'daemon-e2e'],
     ['sdk-java-flyway-open-prs.yml', 'recheck'],
     ['sdk-java-contract-open-prs.yml', 'recheck'],
+    ['release-managed-agent-reference.yml', 'build'],
+    ['managed-agent-gate.yml', 'scope'],
   ];
 
   it.each(poolJobs)(
@@ -852,12 +957,18 @@ describe('Java SDK release validation gate', () => {
       required: true,
       type: 'string',
     });
+    // The only lane condition is the fast-tier skip, and the release caller
+    // passes no tier, so the default 'full' runs every lane.
+    expect(checks.on.workflow_call.inputs.tier).toMatchObject({
+      required: false,
+      default: 'full',
+    });
     for (const lane of Object.values(checks.jobs)) {
       const checkout = lane.steps.find((entry) =>
         entry.uses?.startsWith('actions/checkout@'),
       );
       expect(checkout.with.ref).toBe('${{ inputs.ref || github.sha }}');
-      expect(lane.if).toBeUndefined();
+      expect([undefined, "${{ inputs.tier != 'fast' }}"]).toContain(lane.if);
       expect(lane['continue-on-error']).toBeUndefined();
     }
     expect(release.jobs.java_checks).toMatchObject({
@@ -865,6 +976,7 @@ describe('Java SDK release validation gate', () => {
       uses: './.github/workflows/sdk-java.yml',
       with: { ref: '${{ needs.prepare.outputs.release_sha }}' },
     });
+    expect(release.jobs.java_checks.with.tier).toBeUndefined();
     expect(release.jobs.java_checks['continue-on-error']).toBeUndefined();
     expect(release.jobs.release.needs).toEqual(['prepare', 'java_checks']);
     expect(release.jobs.release.if).toBeUndefined();
@@ -898,5 +1010,36 @@ describe('Java SDK release validation gate', () => {
     expect(guard).toBeLessThan(
       steps.findIndex((entry) => entry.name === 'Create and push release tag'),
     );
+  });
+});
+
+// An ECS host keeps ~/.m2 between jobs, and setup-java's post-job save tars
+// that whole shared repository before reserving the key: 14 to 37 minutes per
+// job on 2026-10-16, discarded when a parallel job wins the reservation.
+//
+// The corpus is derived, not listed: a lane joins the pool with a one-line
+// runs-on ternary (3bddf6e0bb moved three), and a closed file list stays
+// green through exactly that move. Only pool-capable lanes are pinned — a
+// hosted-literal runs-on never lands there, so release-sdk-java.yml keeps
+// cache: 'maven' and mobile-shell.yml declares no cache at all.
+describe('setup-java Maven cache stays on hosted runners', () => {
+  const hostedOnly =
+    "${{ runner.environment == 'github-hosted' && 'maven' || '' }}";
+  const sites = globSync('.github/workflows/*.{yml,yaml}').flatMap((file) =>
+    Object.entries(parse(readFileSync(file, 'utf8')).jobs).flatMap(
+      ([name, job]) =>
+        (job.steps ?? [])
+          .filter((s) => String(s.uses ?? '').startsWith('actions/setup-java'))
+          .map((s) => [`${file} ${name}`, s, job['runs-on']]),
+    ),
+  );
+  const poolCapable = sites.filter(([, , runsOn]) =>
+    String(runsOn ?? '').includes('self-hosted'),
+  );
+  it('finds every pool-capable setup-java step', () => {
+    expect(poolCapable.length).toBe(6);
+  });
+  it.each(poolCapable)('%s caches Maven only on hosted runners', (_, step) => {
+    expect(step.with?.cache).toBe(hostedOnly);
   });
 });

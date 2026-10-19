@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -184,6 +185,11 @@ const proxy = createServer(async (req, res) => {
         return;
       }
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (url.pathname.endsWith(':release-mount')) {
+      assert(
+        isLegitimateMountRelease(upstream.status, json?.code),
+        `${upstream.status} ${url}: ${bytes}`,
+      );
     } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     if (restoring && store && url.pathname.endsWith('/transactions'))
       report.restoreTransactions.push(...json.transactions);
@@ -344,7 +350,13 @@ try {
     assert.equal(
       records.filter((event) => event.data.record?.type === 'tool_result')
         .length,
-      ['result-checkpoint', 'turn-reply'].includes(current.fault) ? 1 : 0,
+      ['result-checkpoint', 'result-reply', 'turn-reply'].includes(
+        current.fault,
+      )
+        ? 1
+        : 0,
+      // The lost result reply landed durably: the settle (#14570) applies
+      // the committed tool_result exactly once instead of latching.
     );
     const started =
       current.fault.startsWith('result-') || current.fault === 'turn-reply';

@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -69,6 +69,11 @@ public class ManagedArtifactConfiguration {
     @Bean
     public ThreadPoolTaskScheduler messageRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("message-relay-").build();
+    }
+
+    @Bean
+    public ThreadPoolTaskScheduler wakeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("wake-recovery-").build();
     }
 
     /**

@@ -12,6 +12,7 @@ import { parse } from 'yaml';
 
 import externalContextConfig from '../../integrations/external-context/vitest.config.js';
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
+import generatedUiConfig from '../../integrations/generated-ui/vitest.config.js';
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
 import browserUseConfig from '../../packages/browser-use/vitest.config.js';
@@ -55,6 +56,7 @@ type ExemptionConfig = {
 const configs: Record<string, ExemptionConfig> = {
   'integrations/external-context': externalContextConfig,
   'integrations/external-context-mem0': externalContextMem0Config,
+  'integrations/generated-ui': generatedUiConfig,
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
   'packages/browser-use': browserUseConfig,
@@ -112,6 +114,8 @@ const configModules: Record<
     import('../../integrations/external-context-mem0/vitest.config.js'),
   'integrations/test-failure-explorer': () =>
     import('../../integrations/test-failure-explorer/vitest.config.js'),
+  'integrations/generated-ui': () =>
+    import('../../integrations/generated-ui/vitest.config.js'),
   'packages/acp-bridge': () =>
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
@@ -206,6 +210,7 @@ describe('shared-pool test timeout', () => {
     'integrations/external-context',
     'integrations/external-context-mem0',
     'integrations/test-failure-explorer',
+    'integrations/generated-ui',
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',

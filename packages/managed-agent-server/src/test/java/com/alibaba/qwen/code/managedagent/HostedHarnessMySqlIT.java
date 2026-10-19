@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.daemon.ManagedSessionStoreConnection;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -104,7 +105,7 @@ class HostedHarnessMySqlIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         dataSource.setConnectionProperties(timeouts);
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(dataSource);
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource);
         jdbc.setQueryTimeout(10);
         Map<String, Object> database = jdbc.queryForMap(
                 "SELECT VERSION() AS version, @@version_comment AS engine");
@@ -219,7 +220,7 @@ class HostedHarnessMySqlIT {
     void lifecycleOperationsCloseThePackagedHarnessSession() throws Exception {
         Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the packaged CLI first").isRegularFile();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(required("mysql.url"),
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(required("mysql.url"),
                 required("mysql.user"), System.getProperty("mysql.password", "")));
         startModel();
         startHarness(cli);
@@ -243,6 +244,7 @@ class HostedHarnessMySqlIT {
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
                 "--qwen.managed-agent.runtime-broker.enabled=false",
                 "--qwen.managed-agent.dispatch.scan-delay=100ms");
         try {
@@ -272,11 +274,63 @@ class HostedHarnessMySqlIT {
             api("GET", "/v1/agents/sessions/" + id, null, null, 404);
             assertThat(writerState(id)).isEqualTo("DELETED");
             assertThat(modelRequests).hasSize(1);
+            cancelAutomationOccurrence();
             assertThat(modelFailure.get()).isNull();
         } catch (Exception | AssertionError failure) {
             System.err.println("HOSTED_MYSQL_HARNESS_LOG\n" + logs());
             throw failure;
         }
+    }
+
+    private void cancelAutomationOccurrence() throws Exception {
+        String id = api("POST", "/v1/agents/sessions", "automation-session", """
+                {"agent_id":"qwen-code",
+                 "input":[{"type":"input_text","text":"AUTOMATION_INIT"}]}
+                """, 202).path("id").asText();
+        String sessionPath = "/v1/agents/sessions/" + id;
+        await(() -> api("GET", sessionPath + "/events", null, null, 200)
+                .path("data").toString().contains("\"turn.completed\""),
+                SETTLEMENT_POLL_SECONDS, "Automation Session ready");
+        // Public Automation creation requires a bound Workspace; prepare
+        // this text-only fixture through the real Harness instead.
+        HarnessConnector harness = spring.getBean(HarnessConnector.class);
+        String schedule = "asch_" + UUID.randomUUID().toString().replace("-", "");
+        Map<String, Object> definition = Map.of(
+                "operationId", UUID.randomUUID().toString(),
+                "kind", "define_schedule", "scheduleId", schedule,
+                "definition", Map.of("goal", "Cancel one occurrence", "cron", "0 0 1 1 *",
+                        "timezone", "UTC", "prompt", "MYSQL_CANCEL"));
+        harness.runAutomationOperation(tenant, id, definition);
+        harness.runAutomationOperation(tenant, id, Map.of(
+                "operationId", UUID.randomUUID().toString(),
+                "kind", "fire_run", "scheduleId", schedule,
+                "definitionRevision", 1, "occurrenceKey", "manual:cancel",
+                "trigger", "manual", "firedAt", System.currentTimeMillis()));
+        assertThat(cancellationRequested.await(15, TimeUnit.SECONDS))
+                .as("The automation wake reaches the actual model request").isTrue();
+        JsonNode tasks = api("GET", sessionPath + "/tasks", null, null, 200).path("data");
+        JsonNode task = java.util.stream.StreamSupport.stream(tasks.spliterator(), false)
+                .filter(value -> "automation_run".equals(value.path("kind").asText()))
+                .findFirst().orElseThrow();
+        assertThat(task.path("action_capabilities").toString()).contains("cancel");
+        String taskPath = sessionPath + "/tasks/" + task.path("id").asText();
+        JsonNode admitted = api("POST", taskPath + "/cancel", "automation-cancel", null, 202);
+        assertThat(admitted.path("type").asText()).isEqualTo("task_cancel");
+        JsonNode completed = awaitOperation(id, admitted.path("id").asText());
+        assertThat(completed.path("admission_stage").asText()).isEqualTo("harness_confirmed");
+        assertThat(api("GET", taskPath, null, null, 200).path("state").asText())
+                .isEqualTo("cancelled");
+        assertThat(api("POST", taskPath + "/cancel", "automation-cancel", null, 202)
+                .path("id").asText()).isEqualTo(admitted.path("id").asText());
+        JsonNode preserved = json.valueToTree(harness.runAutomationOperation(tenant, id,
+                Map.of("operationId", UUID.randomUUID().toString(),
+                        "kind", "define_schedule", "scheduleId", schedule,
+                        "definition", Map.of())).get("schedule"));
+        assertThat(preserved.path("enabled").asBoolean()).isTrue();
+        assertThat(preserved.path("revision").asLong()).isEqualTo(1);
+        releaseCancellation.countDown();
+        JsonNode closing = api("POST", sessionPath + "/close", "automation-close", null, 202);
+        awaitOperation(id, closing.path("id").asText());
     }
 
     private JsonNode awaitOperation(String session, String operationId)
@@ -297,6 +351,7 @@ class HostedHarnessMySqlIT {
                     URI.create("http://127.0.0.1:" + springPort + path))
                     .timeout(Duration.ofSeconds(10))
                     .header("X-Qwen-Tenant-Id", tenant)
+                    .header("X-Qwen-Actor-Id", "actor")
                     .header("Accept", "application/json")
                     .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                             : HttpRequest.BodyPublishers.ofString(body));

@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { promises as fsp } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ExtensionManager,
   hashDaemonWorkspace,
@@ -1981,6 +1982,122 @@ describe('extension management v2 REST', () => {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
+
+  it.each([false, true])(
+    'rejects bare array refresh bodies before submission (qualified=%s)',
+    async (qualified) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      try {
+        const route = qualified
+          ? '/workspaces/' +
+            encodeURIComponent(h.secondary.workspaceId) +
+            '/extensions/refresh'
+          : '/workspace/extensions/refresh';
+        for (const body of ['[]', '["selected-session"]']) {
+          const response = await auth(
+            request(h.app)
+              .post(route)
+              .set('Content-Type', 'application/json')
+              .send(body),
+          );
+          expect(response.status).toBe(400);
+          expect(response.body.code).toBe('invalid_request_body');
+          expect(response.body.operationId).toBeUndefined();
+        }
+        expect(
+          h.secondary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+        expect(
+          h.primary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { sessionIds: [] },
+    { sessionIds: ['selected-session', 'selected-session'] },
+  ])(
+    'refreshes selection $sessionIds without advancing workspace applied generation',
+    async ({ sessionIds }) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      vi.mocked(h.secondary.bridge.getSessionSummary).mockReturnValue(
+        {} as ReturnType<AcpSessionBridge['getSessionSummary']>,
+      );
+      try {
+        const response = await auth(
+          request(h.app)
+            .post(
+              `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/refresh`,
+            )
+            .send({ sessionIds }),
+        );
+        expect(response.status).toBe(202);
+        await expect(
+          pollOperation(h.app, response.body.operationId),
+        ).resolves.toMatchObject({ status: 'succeeded' });
+        expect(
+          h.secondary.bridge.refreshExtensionsForAllSessions,
+        ).toHaveBeenCalledWith(expect.any(Object), {
+          sessionIds: [...new Set(sessionIds)],
+        });
+        expect(
+          h.primary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+        const projection = await auth(
+          request(h.app).get(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+          ),
+        );
+        expect(projection.body).toMatchObject({
+          desiredGeneration: 7,
+          appliedGeneration: 0,
+        });
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([null, 'session', [1], [' '], ['foreign-session']])(
+    'rejects an invalid or foreign refresh selection %j before submission',
+    async (sessionIds) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      vi.mocked(h.secondary.bridge.getSessionSummary).mockImplementation(
+        (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      );
+      try {
+        const response = await auth(
+          request(h.app)
+            .post(
+              `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/refresh`,
+            )
+            .send({ sessionIds }),
+        );
+        expect(response.status).toBe(
+          Array.isArray(sessionIds) && sessionIds[0] === 'foreign-session'
+            ? 404
+            : 400,
+        );
+        expect(response.body.operationId).toBeUndefined();
+        expect(
+          h.secondary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+        expect(
+          h.primary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('advances applied generation only after an explicit workspace refresh', async () => {
     const h = await makeHarness();

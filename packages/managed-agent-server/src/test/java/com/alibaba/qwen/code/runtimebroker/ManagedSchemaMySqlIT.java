@@ -1,26 +1,25 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
+import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-
-import org.junit.jupiter.api.Test;
-
-import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
-import java.util.HashSet;
-
-import javax.sql.DataSource;
-
-/** Requires a dedicated empty database; never cleans, upgrades or repairs an existing schema. */
+/** Destructive schema checks use their own database; system catalogs remain untouched. */
 class ManagedSchemaMySqlIT {
     @Test
     void refusesSystemCatalogsBeforeChangingAnyTables() throws Exception {
@@ -65,11 +64,12 @@ class ManagedSchemaMySqlIT {
 
     @Test
     void baselineAndConstraintsWorkOnRealMySql() throws Exception {
-        DataSource source =
-                new DriverManagerDataSource(
-                        required("mysql.url"),
-                        required("mysql.user"),
-                        System.getProperty("mysql.password", ""));
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            verifyBaselineAndConstraints(database.source());
+        }
+    }
+
+    private static void verifyBaselineAndConstraints(DataSource source) throws Exception {
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
@@ -243,7 +243,7 @@ class ManagedSchemaMySqlIT {
             }
             ManagedSchema.initialize(source);
             if (mariaDb) {
-                String url = required("mysql.url");
+                String url = connection.getMetaData().getURL();
                 DataSource disabledChecks = new DriverManagerDataSource(
                         url + (url.contains("?") ? "&" : "?")
                                 + "sessionVariables=check_constraint_checks=0",
@@ -469,6 +469,17 @@ class ManagedSchemaMySqlIT {
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
                     org.junit.jupiter.api.Assertions.assertArrayEquals(binding, row.getBytes(1));
+                    assertFalse(row.next());
+                }
+            }
+            try (var read =
+                    connection.prepareStatement(
+                            "SELECT runtime_session_id FROM ma_runtime_session FORCE"
+                                    + " INDEX(ix_ma_runtime_session_harness) WHERE"
+                                    + " harness_session_id=? AND tenant_id=?")) {
+                read.setBytes(1, session);
+                read.setBytes(2, tenant);
+                try (var row = read.executeQuery()) {
                     assertFalse(row.next());
                 }
             }

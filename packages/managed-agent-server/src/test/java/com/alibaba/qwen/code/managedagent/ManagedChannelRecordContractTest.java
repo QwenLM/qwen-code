@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -12,7 +12,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ManagedChannelRecordContractTest {
@@ -25,7 +24,11 @@ class ManagedChannelRecordContractTest {
             String domain = fixture.get("domain").textValue();
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            assertNull(body.taskKindOf().apply(null));
+            // A delivery projects as a task of its route Session (#13746
+            // F3); a route projects none.
+            assertEquals("channel_delivery".equals(domain)
+                    ? "channel_delivery" : null,
+                    body.taskKindOf().apply(null), id);
             JsonNode record = merge(fixtures.get("templates").get(domain), fixture.get("patch"));
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);

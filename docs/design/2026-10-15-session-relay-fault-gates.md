@@ -67,16 +67,25 @@ The semantics under gate, with their load-bearing lines at `main` =
   (`notReachedText`, `:859-881`), the heading counts reached-of-N
   (`:895-902`), and the receipt is committed refused when nothing was
   reached.
-- Cancellation of the minted-but-unrelayed window:
-  `answerCommandByJournal`
-  (`hosted-workspace-tool-turn.ts:5843-5903`) settles a `planned` entry
-  `cancelled` (`settle` only from `planned`,
-  `hosted-session-command-session.ts:392-412`); the recovery side answers
-  identically (`sessionCommandJournalAnswer`,
+- Cancellation of the minted-but-unrelayed window (re-verified for slice
+  2 at `main` = `5af87595f3`): the parked wait's abort arm
+  (`hosted-workspace-tool-turn.ts:5976-5984`) answers through
+  `answerCommandByJournal` (`:6047-6117`), which settles a `planned`
+  entry `cancelled` and an `accepting` one `unknown`, re-reading the
+  journal when its settle loses a race (`settle`'s from-table,
+  `hosted-session-command-session.ts:403-422`: `cancelled` only from
+  `planned`); the relay discovers only `planned`, `accepting` and
+  `unknown` entries (`HANDOVER_SQL`,
+  `SessionMessageRelayStore.java:73-90`), and an entry it already
+  claimed whose sender settled it terminal is classified without an
+  execute (decision 2, `SessionMessageRelay.java:539-549`). The recovery
+  side answers identically (`sessionCommandJournalAnswer`,
   `packages/cli/src/serve/hosted-runtime-recovery.ts:1180-1225`).
 - SSE: the public stream resumes by `Last-Event-ID` / `after`
-  (`PublicAgentController.java:195-218`), the WebShell stream by
-  `afterSequence` (`WebShellAgentController.java:125-134`).
+  (`PublicAgentController.java:198-218`, `parseSequence` `:291`), the
+  WebShell stream by `afterSequence` (`WebShellAgentController.java:131-140`);
+  both replay through the one `streamEvents` read
+  (`ManagedAgentService.java:1621-1624`) and then tail the live hub.
 - Ground-truth tables: `ma_session_record` (journal: `domain`,
   `record_id` = `cmd_`/`msgc_`, `revision`, `delivery_state`,
   `record_resource_id`) and `ma_delivery` (relay ledger:
@@ -129,11 +138,11 @@ The semantics under gate, with their load-bearing lines at `main` =
    deliberately-disabled record bodies all stay out (tracked on #14054).
    The slices land in this order, each its own PR in the FG8 shape:
 
-   | Slice | Letters        | Waits for                                                                                                 | Why                                                                                                                                                                                                          |
-   | ----- | -------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-   | 1     | **FG9a, FG9f** | nothing                                                                                                   | The round's owed semantics — probe-before-send and answer honesty under lost replies — with no in-flight PR touching them.                                                                                   |
-   | 2     | **FG9d, FG9e** | nothing; ordered second only to bound slice size                                                          | Cancellation and SSE-gap letters reuse the slice-1 fixture and the FG8e observer unchanged.                                                                                                                  |
-   | 3     | **FG9b, FG9c** | **#13918** (InnoDB lock guard convoy) and **#13986** (restart-proof held-Runtime drain) — both OPEN today | FG9b's markers assert the store-failure error taxonomy #13918 rewrites; FG9c's member/lead restart arms pin cold-load recovery the held-Runtime backfill (#13986) is reshaping. Same waiters as FG8 slice 3. |
+   | Slice | Letters        | Waits for                                                                                                                                | Why                                                                                                                                                                                                          |
+   | ----- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+   | 1     | **FG9a, FG9f** | nothing                                                                                                                                  | The round's owed semantics — probe-before-send and answer honesty under lost replies — with no in-flight PR touching them.                                                                                   |
+   | 2     | **FG9d, FG9e** | nothing; ordered second only to bound slice size                                                                                         | Cancellation and SSE-gap letters reuse the slice-1 fixture, adding the H4e-b3 relay hold, a second proxy in front of the public API and an in-JVM port of the FG8e observer (see _Fixture design_).          |
+   | 3     | **FG9b, FG9c** | **#13918** (InnoDB lock guard convoy) and **#13986** (restart-proof held-Runtime drain) — both merged since (`53a24a5ddf`, `c24e99e9cb`) | FG9b's markers assert the store-failure error taxonomy #13918 rewrites; FG9c's member/lead restart arms pin cold-load recovery the held-Runtime backfill (#13986) is reshaping. Same waiters as FG8 slice 3. |
 
    The gate ledger below specifies all six letters so the round is
    reviewable as one design; each slice's PR implements its letters and
@@ -168,12 +177,16 @@ The semantics under gate, with their load-bearing lines at `main` =
    the _same_ command id (same prompt key, same call id, across faults
    and restarts); the fresh-command-id duplicate shape is never scripted,
    and no assertion contradicts the current behavior there. Neither bug
-   is fixed here; neither is papered over.
+   is fixed here; neither is papered over. #14063 has since closed with
+   #14296 (`9280ef9845`), which corrected the member-message timeout
+   guidance; FG9d asserts the corrected answer texts verbatim, and the
+   fresh-command-id shape stays unscripted. #14062 is still open.
 
 5. **#13339 discipline.** The lane has no quarantine or retry mechanism.
    FG9 therefore: (a) adds only the new `Hosted*IT` class and never
    modifies `HostedWorkspaceToolTurnIT`; (b) gives every case a
-   fault-fired witness (drop counters, `FG9B_*` markers, kill markers,
+   fault-fired witness (drop counters, `fg9b_fire` counts, held kill
+   points,
    the aborted stream's unread proof, JDBC rows committed beyond the
    resume cursor) so a gate can never go silently green; (c) scopes all
    JDBC mutations (seeds, triggers) to the case tenant; (d) keeps the
@@ -193,8 +206,8 @@ Ground truth is JDBC over the `ma_session_record` journal rows
 relay ledger, the public-event ledger for FG9e, and the captured Spring
 and Harness logs. Every case asserts its fault actually fired:
 `FG9_DROPPED <what>` / `FG9_HELD <what>` proxy counters and the commit
-log (FG9a, FG9d, FG9f), `FG9B_<case>` SQLException markers (FG9b), kill
-markers read from the producer's own progress (FG9c), or the
+log (FG9a, FG9d, FG9f), the trigger's own fire count in `fg9b_fire`
+(FG9b), the held commit the kill lands on (FG9c), or the
 resume-cursor JDBC witness (FG9e). `one row` always means the journal
 holds exactly one record with that id at its expected revision; the
 sender's view is compared against the committed receipts byte for byte
@@ -261,55 +274,167 @@ _answer text_ under stale roster and a stopping head — the two places a
 bug reports `reached` when it did not, or silently drops a position
 from the report.
 
-### FG9d — cancellation (slice 2)
+### FG9d — cancellation (slice 2, delivered)
 
-| Case                     | Injection                                                                                                                                    | Expect                                                                                                                                                                                                                                                                                                                                     |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cancel-after-mint`      | Cancel alice's Turn (public `agent.session.cancel`) after her outbound `session_command` committed `planned` but before the relay's handover | The cancelled send produces no delivery: zero `msgc_` rows, zero recipient journal rows; the sender entry settles `cancelled` (`answerCommandByJournal`, `settle` only from `planned`); the relay classifies the ledger row `done` without an execute; the sender's turn ends cancelled with no fabricated reply                           |
-| `cancel-reply-lost`      | Drop the reply to the cancel POST after the cancel committed; the client re-issues the same cancel                                           | The re-issued cancel answers the same committed state — one cancel journal entry, one settled terminal state; no duplicate cancellation event; the entry stays undelivered                                                                                                                                                                 |
-| `cancel-during-handover` | Cancel while the relay's handover attempt is outstanding (the handover verb's reply held at the proxy until the cancel lands, then released) | Only a physically settled relay produces a terminal state: either the handover raced the cancel and the committed receipt answers honestly, or the cancelled entry blocks the relay from executing — never both, never a delivered message on a cancelled send; the outcome the journal holds is one of the two, and the gate proves which |
+The cancel is the public `agent.session.cancel` on alice's own Session:
+admitted durably as `CANCELLING` with one `turn.cancel.requested`, then
+carried to the Harness by the coordinator, which aborts her parked wait;
+the wait's journal answer (`answerCommandByJournal`) decides what the
+call is told and what the entry becomes. The cases pin the two windows
+in which that answer can be wrong: before the relay's first claim, held
+with the H4e-b3 relay hold, and while the handover commit is in flight.
 
-### FG9e — SSE gap (slice 2)
+| Case                     | Injection                                                                                                                                                                                                                        | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cancel-after-mint`      | Hold the relay before alice sends; cancel her Turn once her command committed `planned`                                                                                                                                          | The send never left: the entry settles `cancelled` at revision 2 with no reply; alice's call is answered once, with the not-sent text; no receipt on the lead, no `msgc_`, nothing on bob's journal; the Turn ends `CANCELLED` with one `turn.cancel.requested` and one `turn.cancelled`; and the relay never claims the command — zero ledger rows for it once every other delivery settled, because its discovery reads only `planned`, `accepting` and `unknown` entries                                                                                                                                                                                                                                                                                                                                                          |
+| `cancel-reply-lost`      | The same window, with the cancel POST sent through a second lose-once proxy in front of the public API, which drops its reply after it committed; the client re-issues the same cancel under the same `Idempotency-Key` directly | The re-issue answers `202` `replayed: true` for the same Turn; one request receipt for the key; one `turn.cancel.requested` and one `turn.cancelled` — no duplicate cancellation; and every `cancel-after-mint` expectation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `cancel-during-handover` | Hold the reply of the relay's handover commit (`commitSessionCommand`, revision 2 on alice's journal) at the store proxy; cancel her Turn; release it 2 s after the durable `CANCELLING`                                         | The Harness answers the cancel only after the held commit (its cancel route's duration covers the hold), so the abort reads the handed-over entry and can no longer withdraw it — never both "not sent" and a delivery: the entry never reads `cancelled`; it walks planned → accepting → unknown (the cancel's settle) → accepted (the receipt copied back), revision 4; alice's call is answered once, with the reached-the-leader text; one receipt at revision 1, whose reply alice holds byte for byte. The relay's execute races alice's run settling after the cancel, and the receipt says which arm it took: answered `Message sent to bob.` with one `msgc_` delivered and consumed once, or refused `Your run has ended or is being stopped; …` with none — both honest, and the gate asserts whichever the receipt names |
 
-The public and WebShell streams are served by the in-JVM Spring; the
-client aborts and resumes are the injection, so this letter needs no
-proxy. A `*` broadcast in flight supplies the relay traffic. Each case
-aborts the stream mid-relay, lets the relay progress while disconnected
-— the JDBC witness proves committed rows beyond the cursor before the
-resume — and reconnects only then, so the replay is never vacuous.
+Mechanics notes recorded at landing:
 
-| Case                        | Injection                                                                   | Expect                                                                                                                                                                                                 |
-| --------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `public-sender-resume`      | Abort the sender's public stream mid-fan-out; resume with `Last-Event-ID`   | The replayed sequence is duplicate-free and gap-free from the cursor; the receipt and minted messages commit beyond the cursor while disconnected (JDBC); the terminal turn event appears exactly once |
-| `webshell-sender-resume`    | Abort the sender's WebShell stream mid-fan-out; resume with `afterSequence` | Same continuity assertions over the WebShell envelope                                                                                                                                                  |
-| `public-recipient-resume`   | Abort a recipient's public stream between the mint and the delivery; resume | The minted message's projection replays in order without loss or duplication; the recipient's consumption event appears exactly once                                                                   |
-| `webshell-recipient-resume` | Same over the recipient's WebShell stream                                   | Same assertions                                                                                                                                                                                        |
+- A command withdrawn before the relay's first claim never enters the
+  ledger at all: the slice-1 draft's "the relay classifies the ledger row
+  `done`" holds only for a command the relay already claimed (decision
+  2), which no reply manipulation in this window produces. The gate
+  asserts the zero-row shape, read after every other delivery of the
+  case settled.
+- The Harness orders a cancel behind the Session's in-flight store
+  commit: its cancel route answered only once the held handover reply
+  was released (2.3–3.3 s across the landing runs, each covering the
+  beat the case holds the reply past the cancel). So with the handover
+  commit in flight the abort always reads the handed-over entry, and its
+  journal answer settles `unknown`; the gate witnesses the overlap from
+  the Harness's own request log (the cancel route's `durationMs` ≥
+  1.5 s). The reverse window — the cancel's settle in flight when the
+  relay arrives — is not reachable at the store boundary: the settle's
+  commit lands before its reply is held, and the relay decides by
+  committed state (it discovers only `planned`, `accepting` and
+  `unknown` entries and re-reads the record right after its claim), so
+  an in-flight settle is `cancel-after-mint`'s zero-claim shape.
 
-### FG9b — store failures (slice 3, after #13918)
+### FG9e — SSE gap (slice 2, delivered)
 
-Test-only SQL triggers, tenant- and scope-scoped, installed and dropped
-per case like FG7b/FG6f, `SIGNAL SQLSTATE` text `FG9B_<case>` asserted
-in the captured Spring output. The error codes these cases assert are
-the post-#13918 taxonomy, re-pinned at slice landing.
+Two cases instead of the draft's four: each observes one `*` broadcast on
+one surface from both of its ends — the sender (alice) and a recipient
+(bob) — because both ends ride the same relay and the same team boot,
+and the fork budget (#14148) pays for every team boot. The public and
+WebShell streams are served by the in-JVM Spring; the injection is the
+client's own abort (its HttpClient's `shutdownNow`) and resume, so the
+letter needs no proxy. Each stream is cut only once its client holds
+every committed event, resumes only after JDBC proves events committed
+beyond its cursor, and the client's whole view (the cut frames, then the
+resumed ones) must be one sequence from 1 with no gap and no duplicate,
+frame for frame the committed row as that surface serves it.
 
-| Case                      | Injection                                                                     | Expect                                                                                                                                                                                                                                                                          |
-| ------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `outbound-commit-refused` | One-shot trigger fails the member's outbound `session_command` commit         | Zero downstream effects: no `ma_delivery` row, no execute, no `msgc_` rows; the sender's parked wait keeps its recoverable state; no duplicate journal rows after the harness reloads (the mint is re-driven only through the original call's own replay, never minted afresh)  |
-| `receipt-commit-refused`  | One-shot trigger fails the lead's inbound-receipt commit                      | The execute fails without a receipt; the relay re-drives once the trigger drops, and the re-run answers through the probe (positions already committed are `sent.`), never re-sending; the recipient's view is not advanced by the failed receipt — one delivery, no duplicates |
-| `answered-commit-refused` | One-shot trigger fails the `answered` write-back commit on the member journal | The relay retries the `answered` verb; exactly one `accepted` revision carries the reply; the member's parked wait consumes exactly once; no duplicate reply bytes on the journal                                                                                               |
+| Case              | Injection                                                                                                                                                                                                                                                                                                | Expect                                                                                                                                                                                                                                                                                                                                 |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `public-resume`   | Hold the relay; open alice's and bob's public streams; cut alice's once her command is `planned`, then release the relay, so the whole relay runs while she is disconnected; cut bob's once both `msgc_` are minted and before his delivery; let every delivery settle; resume both with `Last-Event-ID` | Nothing relayed before alice's cut (no `msgc_`) and nothing on bob's journal at his; both Sessions committed events beyond their cursors while cut; both resumed views continuous and exactly the ledger (snake_case, second `created_at`); alice's Turn terminal once and her post-relay answer once; bob's launch Turn terminal once |
+| `webshell-resume` | Same over the WebShell stream, resumed with `afterSequence`                                                                                                                                                                                                                                              | Same over the WebShell envelope (camelCase, millisecond `createdAt`)                                                                                                                                                                                                                                                                   |
 
-### FG9c — process crashes (slice 3, after #13986)
+Mechanics notes recorded at landing:
 
-POSIX-only. The driver owns the Harness child process and signals it;
-cold-load assertions are written against the #13361 branch-tagged 409
-arm names, re-pinned against the merged #13986 surface at slice landing.
-A Harness kill here kills every team session it hosts — the two cases
-differ only in which relay window the kill lands in.
+- The Turn that reads a relayed message is the Harness's own wake Turn
+  and is not projected to the public ledger, so a recipient's stream
+  carries no projection of the message itself: bob's tail is his launch
+  Turn ending after his latch releases, while his delivery and
+  consumption land (JDBC) during the cut. The draft's "the recipient's
+  consumption event appears exactly once" has no event to count; the
+  recipient end pins instead that a stream cut across its delivery
+  resumes with no gap and no duplicate, frame for frame its ledger. The
+  sender's end is the relay-dependent one: her Turn's tail commits only
+  after the relay answered.
+- The expired-cursor `resync_required` arm (open question 3) is not
+  armed: the resync answer belongs to the Session stream's replay floor,
+  whichever capability produced the events, and the FG8 tracker
+  (#14163) owns that one case (`cursor-expired-resync`), which its
+  design deferred and its slice 2 (#14334) has not yet delivered.
 
-| Case                     | Injection                                                                                                     | Expect                                                                                                                                                                                                                                                                                    |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lead-kill-mid-fanout`   | SIGKILL the Harness after the first `msgc_` mint commit (witnessed at the store proxy) and before the receipt | Restart: the unsettled command is never re-minted (one `session_command` row); the re-execution probes position 1 committed — reported `sent.`, never re-sent — and sends position 2 exactly once; the receipt commits honestly; both recipients deliver once                             |
-| `member-kill-after-mint` | SIGKILL the Harness after alice's outbound `session_command` commit and before her wait's first checkpoint    | Reopen: the minted-but-unwaited entry does not become an invisible duplicate — one `session_command` row, the wait resumes from the journal (`sessionCommandJournalAnswer` arms, `hosted-runtime-recovery.ts:1180-1225`); the relay completes the command; the sender's turn answers once |
+### FG9b — store failures (slice 3, delivered)
+
+The fault is a test-only trigger on `ma_session_record`, scoped to the
+case tenant, one Session and one record shape, refusing every matching
+write until the case drops it — the FG8b shape, with each fire also
+counted in a MyISAM side table, since Spring flattens the `SIGNAL` into a
+500 `internal_error` and the `FG9B_<CASE>` text never leaves its own log.
+The draft's one-shot arm never reaches the Session: the store client's
+bounded uncertain-error retry (three attempts, 250 ms apart) heals it
+inside the commit call. Past the third refusal the Session's authority
+latches its writes (`writesStopped` — the refused transaction's sequences
+may already be on disk), and a latched writer admits no retry at all:
+dropping the trigger heals nothing. Each case therefore drops the trigger
+and restarts the Harness cold, and what it pins is the cold load's
+healing — through the original command, never a second entry, mint or
+receipt. The lead's own Turn has settled before every arm, and bob and
+carol stay parked on their model latches across it (see _Fixture
+design_).
+
+| Case                      | Injection                                                                       | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `outbound-commit-refused` | Refuse the insert of alice's outbound `session_command` (`planned`)             | While latched: the trigger fired exactly three times; the Harness logs her Turn `recovery blocked: ManagedSessionWritesStoppedError`; no entry, no ledger row, no answer, and the Turn stays `RUNNING` rather than settling over its call. After the drop and a cold restart (a new writer generation holds her Session): her parked call is answered once, from the journal, with the not-sent text; her journal still holds no `session_command` and the store accepted no `sendSessionCommand` commit for her at all — answered, never minted afresh; no receipt, no `msgc_`, nothing on bob's journal |
+| `receipt-commit-refused`  | Refuse the insert of the lead's inbound receipt                                 | The execute probed bob's position and minted it before its receipt, so the Harness logs the execute `failed in its store` (503 `session_command_failed`) with one `msgc_` and no receipt; alice's entry stays `accepting`, unanswered. After the lead's cold load the relay's retry re-executes: the probe finds the minted position — one `sendSessionMessage` commit on the lead across the whole case — and the one receipt answers `Message sent to bob.\n- bob: sent.`, which alice holds; one delivery to bob                                                                                       |
+| `answered-commit-refused` | Refuse the `accepted` write on alice's entry — the relay's `answered` copy-back | The lead's half is durable (its receipt and bob's `msgc_`) while alice's entry stays `accepting`, unanswered. After her cold load the relay's retry re-executes into the stored receipt — no second receipt commit, no second mint — and copies it back once: her entry walks planned → accepting → accepted → consumed (revision 4), holding the receipt's reply byte for byte, and her call is answered once                                                                                                                                                                                            |
+
+Mechanics notes recorded at landing:
+
+- A refused journal commit latches the whole Session's authority, not
+  just the call ("a stopped writer admits no retry at all; a blocked
+  Session never recovers alone"). Nothing in the relay heals it; the
+  draft's "after the harness reloads" is the only healing, and the
+  receipt case's "the relay re-drives once the trigger drops" happens
+  only after it. Meanwhile the relay keeps retrying with backoff: the
+  message relay spends an attempt on each `writes_stopped` refusal
+  (1 s doubling to the 300 s cap), so a latch left alone for a minute
+  pushes the next retry out by minutes. Each case restarts within
+  seconds of the third fire.
+- The `answered` verb mislabels a store failure. `runCommandOperation`'s
+  `answered` arm answers `ManagedSessionRecordError` as an invalid
+  request, and both the store's `ManagedSessionStoreHttpError` and the
+  latch's `ManagedSessionWritesStoppedError` extend it — so the relay
+  reads 400 `invalid_command_operation`, with no stderr line, where
+  `execute` answers 503 `session_command_failed`. The relay defers
+  either the same way and delivery is unaffected; the gate pins the
+  outcome, not the code, and the mislabel is tracked separately (#14419).
+- A Turn still open on the lead when its Session latched or its Harness
+  died kept the workspace its dead owner held: in the probes the cold
+  lead churned on `workspace_unavailable` and
+  `hosted_session_already_attached` (writer generation 2 → 12 within two
+  minutes), executed nothing, and alice's wait ran out into `unknown`.
+  The fixture's lead used to answer its closing round with empty text,
+  which the model client retries for ~20 s, so its Turn was still open
+  when the arm fired; see _Fixture design_ for the fix and the settle
+  wait.
+
+### FG9c — process crashes (slice 3, delivered)
+
+POSIX-only. The case SIGKILLs the packaged Harness and its descendants —
+every team Session it hosts dies with it — and starts a cold one (new
+`HOME`/`QWEN_HOME`) on the same port; a new writer generation on the
+Session under test is the takeover's witness. Each kill lands on a commit
+the store accepted whose reply the store proxy holds, so the dead process
+never learned it landed: the sharpest window of each step. bob and carol
+stay parked on their model latches across the kill, and their re-driven
+rounds are the ones that count.
+
+| Case                     | Injection                                                                                                                                                                                   | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lead-kill-mid-fanout`   | A `*` broadcast to bob and carol; hold the reply of the lead's first `sendSessionMessage` commit; SIGKILL the Harness while it is held; restart cold                                        | At the kill one `msgc_` committed and no receipt. After the lead's cold load the relay's retry re-executes: the probe reports the first position `sent.` from the journal and mints only the second — two `sendSessionMessage` commits across the case, one per position — and the one receipt answers `Message sent to every other member of team "review".\n- bob: sent.\n- carol: sent.`, which alice holds; each recipient delivers and consumes once |
+| `member-kill-after-mint` | Hold the relay; hold the reply of alice's `sendSessionCommand` commit; SIGKILL the Harness while it is held; restart cold; release the relay once a new writer generation holds her Session | The entry the dead process never acknowledged is the one command: the same id, one `sendSessionCommand` commit across the case, revision 4 (planned → accepting → accepted → consumed). The takeover resumed her parked wait from the journal, and her call is answered once, `Message sent to bob.\n- bob: sent.`; one `msgc_`, one delivery                                                                                                             |
+
+Mechanics notes recorded at landing:
+
+- The H4e-b3 restart case (`memberHarnessRestartDuringCommandWait`)
+  kills after the planned entry was acknowledged and the wait parked;
+  `member-kill-after-mint` moves the kill into the commit's own reply,
+  the window in which only the journal knows the entry exists. The park
+  is committed before the outbound, so the takeover resumes it through
+  `resumeCommandWaitRuns`, which reads the journal and never calls
+  `runCommand` again; a park whose outbound never committed takes that
+  function's never-committed arm instead, which is the arm FG9b's
+  `outbound-commit-refused` reaches.
+- Members killed mid-model-round are not lost: the coordinator re-drives
+  their round on the new generation, and the killed round's exchange
+  returns into a dead connection once its latch opens, which the model
+  fixture ignores by Harness generation.
 
 ## Fixture design
 
@@ -380,7 +505,41 @@ dropped|holding|release|released <rule>`); those lines are the
 fault-fired witnesses the letters assert with `countOps`. Production
 timeouts stay at their defaults except FG9f's `partial-timeout`, where
 `qwen.managed-agent.harness.request-timeout` is lowered to 3 s for the
-letter so the held mint forces a relay-side timeout-and-retry quickly.
+letter so the held mint forces a relay-side timeout-and-retry quickly,
+and FG9e's stream heartbeat (below).
+
+**Slice 2 additions.** Five pieces, all inside the gate JVM:
+
+- the **relay hold** is the H4e-b3 one: `SchedulerHold` parks a task on
+  the one-thread `messageRelayScheduler`, so no scan — and with it no
+  claim or handover — runs until the case releases it; FG9d's
+  `cancel-after-mint` / `cancel-reply-lost` and both FG9e cases take it
+  before alice sends;
+- a **second proxy instance** fronts the public API for the client's own
+  cancel POST in `cancel-reply-lost` only (everything else talks to
+  Spring directly), with the same drop-after-commit disposition;
+- the **observer** is an in-JVM port of FG8e's: one HttpClient per
+  stream (HTTP/1.1), so a cut is that client's `shutdownNow`; it checks
+  each frame's SSE `id`/`event` against its payload's
+  `sequence`/`type`, and the comparison maps each ledger row the way
+  the surface serves it (snake_case and seconds publicly, camelCase and
+  milliseconds on the WebShell, nulls omitted). The authentication
+  filter now covers `/api/agent/web-shell/v1/*` and async dispatch, as
+  FG8's does;
+- FG9e runs the stream heartbeat at 2 s. A stream the client cut stays
+  open server-side until its next write fails, and an open stream holds
+  Spring's graceful shutdown for its whole 30 s window; FG8e's 60 s
+  events poll/heartbeat is not reused, since the resumed views here are
+  almost entirely replay and a long heartbeat only keeps cut streams
+  alive;
+- Spring and the embedded broker bind ephemeral ports that are read back
+  after boot, and both proxies take their upstream only then: the first
+  full-class run found Spring's pre-picked port taken by the time Spring
+  bound it (`PortInUseException`) — any ephemeral bind or connection
+  between the pick and Spring's own bind can take it, and the second
+  proxy adds one more. The Harness port is still picked
+  ahead, as in the sibling H4e ITs, because Spring's connector is
+  configured with it before the Harness starts.
 
 **Witness-then-release choreography.** The slice's hardest ordering
 productions — recorded alongside the landing, since each cost its own
@@ -397,23 +556,54 @@ holds at the lead's plan until the target's first model contact (the
 `stophit` latch), because cancelling a not-started run is honest data
 but no contact, and the case's roster gate waits for the contact
 forever otherwise; the member-session lookup reads `childSessionId` at
-the child-run record body's _top_ level, the widened contract's shape;
+the child-run record body's _top_ level, the widened contract's shape,
+and slice 2, which reads a member Session before any relay work, waits
+for that attach to land, since it can trail the member's first model
+call;
 and `settleAndCheckDelivered` scopes its terminal-set poll to
 `delivery_kind = 'SESSION_MESSAGE'`, because the three child-launch
 `<childRunId>` deliveries stay `delivered` by construction once the
 scripted lead completes before the latched members — orchestration
 bookkeeping, not relay work the case owes.
 
-**Store-failure triggers** (slice 3, FG9b) copy the FG7b DDL shape with
-`SIGNAL SQLSTATE` text `FG9B_<case>`, scoped to the case tenant and
-record-id prefix, asserted in the captured Spring output, dropped in
-teardown.
+**Store-failure triggers** (slice 3, FG9b) follow FG8b rather than
+FG7b: a `BEFORE INSERT` or `BEFORE UPDATE` trigger on `ma_session_record`
+whose condition names the case tenant, the Session, the `session_command`
+domain and, for the copy-back, `NEW.delivery_state = 'accepted'`; it
+inserts the case name into the MyISAM `fg9b_fire` table and then
+`SIGNAL SQLSTATE '45000'` with the text `FG9B_<CASE>`. Spring answers the
+store client a 500 (`internal_error`), so the fire count is the
+attribution. The case drops its trigger before the restart; teardown
+drops any left over and the side table.
 
-**Kill arms** (slice 3, FG9c) are the H4e-b3 restart mechanics verbatim:
-`harness.destroyForcibly()`, a fresh `startHarness()` (new
-`HOME`/`QWEN_HOME` = genuinely cold), the writer-generation takeover
-witness, and the relay hold before and after so the kill always lands
-mid-flight. POSIX only; both slices keep `@Timeout(600)` per letter.
+**Kill arms** (slice 3, FG9c, and FG9b's cold restart) are the H4e-b3
+restart mechanics: the Harness's descendants and then the Harness itself
+`destroyForcibly()`, a fresh `startHarness()` on the same port (new
+`HOME`/`QWEN_HOME` — genuinely cold), and the writer-generation
+takeover witness on the Session under test. `member-kill-after-mint`
+keeps the relay held across the kill and releases it only after the
+takeover, as H4e-b3 does. POSIX only; every letter keeps
+`@Timeout(600)`.
+
+**Slice 3 additions.** Four pieces, all inside the gate JVM:
+
+- the lead's **closing round answers with text** (`LEAD_REPORT done`)
+  instead of an empty response, which the model client retries four
+  times (2.5–8.2 s apart, ~20 s in all) before it settles the Turn, so
+  the lead's Turn — and every wake Turn that reads a member's result —
+  used to stay open for that long. Slices 1 and 2 never depended on it;
+  the full class is re-measured green with it;
+- FG9b and FG9c **wait for the lead's Turn to settle**
+  (`awaitLeadSettled`) before arming, and keep bob and carol on WAIT
+  across the arm, so no lead Turn is open in the fault window;
+- the store proxy now logs each commit's `op=<operation>` and the
+  upstream `status=`, and `journalCommits(session, operation)` counts
+  the commits the store accepted. It is the "never minted twice"
+  witness: `ma_session_record` keeps one row per record id, and a
+  re-mint under the same id would leave no second row behind;
+- the Harness log is appended across restarts, and each restart bumps a
+  generation the model fixture uses to ignore the dead exchanges of the
+  rounds the kill interrupted.
 
 **CI.** The class name places it in the `hosted-harness-mysql` lane
 (`Hosted*IT` include; `check-failsafe-reports.js hosted` enforces it
@@ -430,12 +620,31 @@ ran). The update set, in one diff per slice:
   `hosted-session-relay-gates` focused profile copies
   `hosted-monitor-run-gates` for local runs.
 
+Slice 2 moves only the healthy allowance, re-measured with the four-letter
+class green (308–314 s healthy locally across three runs, ~534 s budgeted
+at the same 1.7×, up from slice 1's ~300 s): 2400→2640 s. The hosted fork,
+which #14334 raised to 3600 s for the five FG8 letters, already covers one
+600 s ceiling plus that runtime (3240 s), so the fork, the Verify step and
+the job ceiling stay where #14334 left them.
+
+Slice 3 re-measures the six-letter class at 528–557 s healthy locally
+across three runs (FG9b 129–137 s, FG9c 100–109 s; the four earlier
+letters unchanged at ~310 s, as on lane run 38957583765, whose class ran
+310 s), ~950 s budgeted at the same 1.7×, ~416 s over slice 2's ~534 s.
+The allowance composes with the letters that moved it while this slice
+was open — FG8c's crash letter (#14407, 2640→2930 s) and FG10a's workflow
+digest letter (#14390, 2930→2963 s): 2963 − 534 + 950 ≈ 3380 s. One 600 s
+ceiling plus that no longer fits the 3600 s fork, so the fork moves
+3600→3990 s; the Verify step, which must wrap the fork plus its 600 s,
+moves 75→80 minutes (210 s of margin), and the job ceiling 320→325 to stay
+above the summed step ceilings (310) plus the uncapped setup steps.
+
 ## Mutation checks
 
 Each mutation is applied, shown to turn exactly its gate red, then
 reverted, following the FG6/FG7/FG8 documented manual procedure. The
 slice-1 mutations below are committed with this design; slices 2 and 3
-refine theirs when those letters land.
+follow them.
 
 1. FG9a — the store client's uncertain-error retry mints a fresh
    transaction identity instead of re-driving the original:
@@ -452,14 +661,66 @@ refine theirs when those letters land.
    steps): `receipt-commit-reply` red — the receipt re-commits (a
    second revision) or the answer bytes diverge byte for byte.
 
-Planned, refined at slice landing: FG9d — the cancel settle accepting a
-settle from a non-`planned` state (`cancel-after-mint` red on the second
-settle's conflict); FG9e — the per-letter replay-boundary off-by-one
-pair from the FG8e mutations re-applied to the relay ledger projection;
-FG9b — the refused outbound commit proceeding to mint a delivery row
-(`outbound-commit-refused` red at the zero-delivery assertion); FG9c —
-the cold load treating a parked command wait as clean
-(`member-kill-after-mint` red at the resume-from-journal assertion).
+Slice 2, each run against its case alone (`-Dqwen.fg9d.case` /
+`-Dqwen.fg9e.case`); the two Harness-side mutations patch the packaged
+bundle's chunk in place and restore it byte for byte:
+
+5. FG9d — the cancel's journal answer still says "not sent" but leaves
+   the entry `planned` (the `planned` arm's `settle(…, 'cancelled')`
+   dropped): `cancel-after-mint` red — the entry stays `planned` and
+   never settles `cancelled`, so a released relay would hand it over.
+6. FG9d — the cancel's request digest not stable across a retry (a
+   per-call nonce): `cancel-reply-lost` red — the re-issued cancel
+   answers `409 idempotency_conflict` instead of the committed admission.
+7. FG9d — the cancel tells a handed-over sender its message was not
+   sent (the journal answer's `accepting` arm answers with the `planned`
+   text while the entry still settles `unknown`):
+   `cancel-during-handover` red at the answer assertion — a sender told
+   to send again duplicates a message the relay delivers. The stronger
+   regression, the cancel withdrawing the handed-over entry itself, is
+   refused three deep: the journal answer settles `unknown`, `settle`
+   admits `cancelled` only from `planned`, and the record contract's
+   delivery transitions (`managed-extension-record.ts:183-187`) never
+   leave `accepting` for `cancelled`; with the first two mutated, the
+   third refuses every settle, the Turn ends recovery-blocked and never
+   leaves `CANCELLING`, and this case is red at that wait.
+8. FG9e — the public `Last-Event-ID` cursor read one short:
+   `public-resume` red (a duplicate at the resume boundary).
+9. FG9e — the WebShell `afterSequence` cursor read one long on a resume:
+   `webshell-resume` red (a gap at the resume boundary).
+
+Slice 3, each run against its case alone (`-Dqwen.fg9b.case` /
+`-Dqwen.fg9c.case`); the Harness-side ones patch the bundle's chunk in
+place and restore it byte for byte, the relay one patches the Java
+source:
+
+10. FG9b — the cold load tells a never-committed outbound it reached the
+    leader (`resumeCommandWaitRuns`' never-committed arm answers with the
+    `accepting` text): `outbound-commit-refused` red at the answer
+    assertion — a sender told her message may have landed never sends
+    the one that did not.
+11. FG9b — the execute answers without its durable receipt (the receipt
+    commit's failure swallowed): `receipt-commit-refused` red — the
+    execute answers 202, so the store failure the case waits for never
+    happens, and the reply alice would hold has no receipt behind it.
+12. FG9b — the relay classifies the command done when its `answered`
+    copy-back failed: `answered-commit-refused` red — her entry is never
+    answered, and her wait runs out into `unknown`.
+13. FG9c — each execution derives fresh `msgc_` ids (the command id
+    salted per run, so the ids are not replay-stable):
+    `lead-kill-mid-fanout` red — the re-execution sends position 1 again
+    under a new id (three `msgc_` for two positions). Neutralizing only
+    the send loop's committed-position probe (slice 1's mutation 2) is
+    an equivalent mutant at this kill point: `sendToRunningMember`
+    answers a re-driven send of the same id and content `sent` without
+    a commit, and each guard alone keeps position 1 from a second send.
+    Both rest on the replay-stable id, which is what this mutation
+    breaks.
+14. FG9c — the cold load reads a parked entry as never committed
+    (`resumeCommandWaitRuns` takes its never-committed arm with the
+    record present): `member-kill-after-mint` red — alice is told "not
+    sent" while her entry stays live, the relay delivers it anyway, and
+    the copied-back reply is never consumed.
 
 ## Validation and acceptance
 
@@ -468,11 +729,12 @@ the cold load treating a parked command wait as clean
 - The module's surefire suite, Checkstyle, and SpotBugs green.
 - The new class green on a local MySQL/MariaDB (the CI lane is MySQL
   8.4): every case firing its declared fault — each drop counter, hold
-  counter, `FG9B_*` marker and kill marker observed — per-letter
+  counter, `fg9b_fire` count and held kill point observed — per-letter
   selectors working, and the happy path (a broadcast with no injection)
   green with exactly one `msgc_` row per position.
-- Every slice-1 mutation above individually red; source restored; the
-  gate green again. Slices 2/3 repeat the procedure for their mutations.
+- Every slice-1 and slice-2 mutation above individually red; source
+  restored; the gate green again. Slice 3 repeats the procedure for its
+  mutations.
 - `hosted-process-ci.test.js` green with any moved budgets, and
   `check-failsafe-reports.js hosted` satisfied after a full lane run.
 - Two consecutive clean open-ended and reverse audit rounds per
@@ -491,6 +753,7 @@ the cold load treating a parked command wait as clean
 2. Whether the broadcast roster should grow to four members (three
    recipients) to sharpen the partial arms' decisiveness — cost is one
    more scripted member per case; decided at implementation.
-3. Whether FG9e needs the expired-cursor `resync_required` arm the FG8e
-   slice deferred — left to slice 2's landing, same replay-floor
-   mechanics question.
+3. Resolved at slice 2: FG9e does not arm the expired-cursor
+   `resync_required` case. The resync answer belongs to the Session
+   stream's replay floor whichever capability produced the events, and
+   the FG8 tracker (#14163) still owes that one case.

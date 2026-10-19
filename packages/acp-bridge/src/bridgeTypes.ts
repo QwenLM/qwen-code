@@ -1308,6 +1308,14 @@ export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
   cancelReason?: 'user';
+  /**
+   * Attempt to close without interrupting known active work. A negotiated
+   * child confirms atomically; refusal, uncertainty, or unsafe local state
+   * leaves the session live.
+   */
+  closeIfUnheld?: boolean;
+  /** Refuse the close unless the owning runtime confirms the session is idle. */
+  requireIdle?: boolean;
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
   /**
@@ -2259,8 +2267,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): SessionReplaySnapshot | undefined;
 
   /**
-   * Explicitly close a live session. Force-closes even when other clients
-   * are attached. Throws `SessionNotFoundError` for unknown ids.
+   * Explicitly close a live session. Force-closes even when other clients are
+   * attached unless `closeIfUnheld` requests a conditional close. Throws
+   * `SessionNotFoundError` for unknown ids.
    */
   closeSession(
     sessionId: string,
@@ -2684,12 +2693,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
-   * Broadcast extension refresh to all active sessions and emit an
-   * `extensions_changed` workspace event when complete.
+   * Refresh selected active sessions, or all when sessionIds is omitted,
+   * and emit an `extensions_changed` workspace event when complete.
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
-    options?: { skillsOnly?: boolean },
+    options?: { skillsOnly?: boolean; sessionIds?: readonly string[] },
   ): Promise<{
     refreshed: number;
     failed: number;
@@ -3057,6 +3066,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     name: string,
     originatorClientId?: string,
   ): Promise<RuntimeMcpServerRemoveResult>;
+
+  /**
+   * Whether this workspace runtime holds any MCP server that was added at
+   * runtime and is still registered. A paired Bridge reads it while it
+   * evaluates whether the Managed engine can reproduce the runtime's
+   * configuration: a Managed child starts without those servers, so a session
+   * must not select Managed while one is registered.
+   */
+  hasRuntimeMcpServers(): boolean;
 
   /**
    * Add a runtime MCP server to one live session only. This does not mutate
