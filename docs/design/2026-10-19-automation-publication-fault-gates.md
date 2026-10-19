@@ -110,14 +110,15 @@ are recorded here instead of being rediscovered:
   The case stores it with `default` and answers the wake turn's Shell
   permission action over
   `/api/agent/web-shell/v1/actions/{query,respond}`.
-- A public Shell wake turn needs workspace-execution authority, and the
-  automation dispatch does not supply it. The non-durable broker answers the
-  Harness with `409 workspace_unavailable`; the durable broker on an
-  owner-private state directory still leaves the turn in
+- A public Shell wake turn fails before any fault arm runs: the non-durable
+  broker answers the Harness with `409 workspace_unavailable`, and the durable
+  broker on an owner-private state directory still ends the turn in
   `WorkspaceExecutionStore.unavailable()`. Answering the Shell permission
   action — the `actions/respond` flow `HostedPublicWorkspaceIT` drives — does
-  not mint it either. Slice 1 must first give the automation wake-turn
-  dispatch that authority; only then can a fault arm run.
+  not change that. The session-level `authorize` passes for both a plain and a
+  definition-backed Session, and the runtime session carries the workspace
+  capability digest, so the refusing branch sits inside the acquire/claim path
+  and is not yet pinned; slice 1 must locate it before a fault arm can run.
 
 ## Limits
 
