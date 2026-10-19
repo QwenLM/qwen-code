@@ -18,11 +18,10 @@ import type {
   ChangeEvent as ReactChangeEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import {
-  DAEMON_APPROVAL_MODES,
-  useOptionalWorkspace,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
+import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
+import { EXECUTION_APPROVAL_MODES } from '../utils/planMode';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
@@ -89,8 +88,6 @@ import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
-  ArrowDownIcon,
-  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderClosedIcon,
@@ -222,11 +219,13 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  availableModes?: readonly string[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   sessionWorkflowEnabled?: boolean;
   currentModel?: string;
+  modelControlsDisabled?: boolean;
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
@@ -273,6 +272,8 @@ interface ChatEditorProps {
   contextWindow?: number;
   /** Keep Context Usage available before a restored session reports usage. */
   contextUsageAlwaysVisible?: boolean;
+  /** Explicit observation state permits zero; omission keeps legacy inference. */
+  contextUsageKnown?: boolean;
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
@@ -308,6 +309,8 @@ interface ChatEditorProps {
   disableLegacyHistoryFallback?: boolean;
   shellModeEnabled?: boolean;
   workspaceFeaturesEnabled?: boolean;
+  fileReferenceActions?: AtMentionWorkspaceActions;
+  persistFileReferences?: boolean;
   attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
@@ -754,6 +757,7 @@ function ToolbarPopover({
   header,
   submenu,
   compact = false,
+  modePopover = false,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -773,6 +777,7 @@ function ToolbarPopover({
     sectionLabel: string;
   };
   compact?: boolean;
+  modePopover?: boolean;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -923,6 +928,7 @@ function ToolbarPopover({
         data-web-shell-toolbar-popover
         data-web-shell-compact-overlay={compact ? '' : undefined}
         data-web-shell-reasoning-popover={submenu ? '' : undefined}
+        data-web-shell-mode-popover={modePopover ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
         onOpenAutoFocus={(event) => {
           if (!submenu) return;
@@ -1415,10 +1421,12 @@ export const ChatEditor = memo(
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
+      availableModes = EXECUTION_APPROVAL_MODES,
       planMode = false,
       modeControlsDisabled = false,
       onTogglePlan,
       currentModel = '',
+      modelControlsDisabled = false,
       gitBranch,
       gitWorktree,
       gitCwd,
@@ -1441,6 +1449,7 @@ export const ChatEditor = memo(
       tokenCount = 0,
       contextWindow = 0,
       contextUsageAlwaysVisible = false,
+      contextUsageKnown,
       onShowContextUsage,
       onOpenContextUsage,
       contextUsageControls,
@@ -1468,6 +1477,8 @@ export const ChatEditor = memo(
       disableLegacyHistoryFallback,
       shellModeEnabled = true,
       workspaceFeaturesEnabled = true,
+      fileReferenceActions,
+      persistFileReferences,
       attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
       onFocusFooter,
@@ -1655,6 +1666,8 @@ export const ChatEditor = memo(
       shellModeEnabled,
       attachmentsEnabled,
       workspaceFeaturesEnabled,
+      fileReferenceActions,
+      persistFileReferences,
       composerTagIcons,
       parseUserMessageContent,
       renderComposerTag,
@@ -1875,7 +1888,16 @@ export const ChatEditor = memo(
       ],
     );
     const handleAddMenuInsertReference = useCallback(
-      (tag: WebShellComposerTag) => {
+      async (tag: WebShellComposerTag) => {
+        const actions = core.workspaceActionsRef.current;
+        try {
+          if (tag.kind === 'file' && actions?.prepareFileReference) {
+            tag = await actions.prepareFileReference(tag);
+            if (core.workspaceActionsRef.current !== actions) return;
+          }
+        } catch {
+          return;
+        }
         addComposerTags([tag], { placement: 'inline', position: 'end' });
         const view = core.viewRef.current;
         if (view) {
@@ -1886,7 +1908,7 @@ export const ChatEditor = memo(
         }
         focusComposer();
       },
-      [addComposerTags, core.viewRef, focusComposer],
+      [addComposerTags, core.viewRef, core.workspaceActionsRef, focusComposer],
     );
     const handleAddMenuPrependSkill = useCallback(
       (invocation: string) => {
@@ -1989,11 +2011,103 @@ export const ChatEditor = memo(
     }, [core.hasAttachments, onAttachmentsChange]);
 
     const planDescriptionId = useId();
+    const modeItems = useMemo<DropdownItem[]>(
+      () =>
+        EXECUTION_APPROVAL_MODES.filter((id) =>
+          availableModes.includes(id),
+        ).map((id) => ({
+          id,
+          label: getModeListLabel(id, t),
+          description: t(`mode.desc.${id}`),
+          icon: <ModeIcon mode={id} />,
+        })),
+      [availableModes, t],
+    );
+    const modeItemIds = modeItems.map((item) => item.id).join(',');
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+    // Focus held by the mode control is recorded rather than read back: the
+    // trigger is natively disabled the moment the list empties or the
+    // controls lock, and a focused element blurs to the body there and then,
+    // as does a popover row whose row unmounts. Any focus inside the control
+    // sets this; a blur that lands on another element ends the ownership, one
+    // that lands nowhere (the body) does not.
+    const modeControlHadFocusRef = useRef(false);
+    // The control's last focused element — the trigger or a popover row. A
+    // changed row set is not itself a loss: a widening, or a narrowing that
+    // kept this element, takes nothing the user had, and handing off there
+    // would steal focus back to the composer from wherever it landed.
+    const modeControlFocusedElementRef = useRef<HTMLElement | null>(null);
+    const previousModeItemIdsRef = useRef(modeItemIds);
     useEffect(() => {
-      if (modeControlsDisabled) setModeDropdownOpen(false);
-    }, [modeControlsDisabled]);
+      const rowsChanged = previousModeItemIdsRef.current !== modeItemIds;
+      previousModeItemIdsRef.current = modeItemIds;
+      const gone = modeControlsDisabled || availableModes.length === 0;
+      const focusedElement = modeControlFocusedElementRef.current;
+      const focusedElementLost =
+        focusedElement !== null && !focusedElement.isConnected;
+      if (!gone && (!rowsChanged || !focusedElementLost)) return;
+      // A narrowing keeps the picker open; only an empty or locked control
+      // closes it.
+      if (gone) setModeDropdownOpen(false);
+      const hadFocus = modeControlHadFocusRef.current;
+      const toolbar = toolbarLeadingRef.current;
+      const doc = toolbar?.ownerDocument;
+      const active = getShadowAwareActiveElement(toolbar);
+      if (active !== null && active !== doc?.body && active.isConnected) {
+        // Focus that is anywhere but lost is somewhere the user put it. The
+        // handoff takes it only from this instance's own mode control — the
+        // picker's rows are portaled, so toolbar containment can never vouch
+        // for them, but the recorded element can: only focus inside this
+        // control sets it, and another instance's row can never match it —
+        // and only once the control is gone: a row that survived a narrowing
+        // and an enabled trigger both keep their focus.
+        if (!(active instanceof HTMLElement)) return;
+        const inModeControl = active.closest(
+          '[data-web-shell-mode-popover], [data-web-shell-mode-button]',
+        );
+        if (
+          !gone ||
+          !inModeControl ||
+          (active !== modeControlFocusedElementRef.current &&
+            toolbar?.contains(active) !== true)
+        )
+          return;
+      } else if (!hadFocus) {
+        // Nothing ties a body-level focus to this control without the record.
+        return;
+      }
+      if (!disabled && !isCoarsePointerDevice()) {
+        modeControlHadFocusRef.current = false;
+        modeControlFocusedElementRef.current = null;
+        focusComposer();
+        return;
+      }
+      // The mode control itself is disabled, so it cannot be the target — and
+      // nor can a disabled control beside it. With none focusable, the
+      // enabled composer is still a better resting place than the body.
+      const target = toolbar?.querySelector<HTMLElement>(
+        '[data-web-shell-toolbar-popover-trigger]:not(:disabled), [data-web-shell-plan-button]:not(:disabled):not([aria-disabled])',
+      );
+      if (target) {
+        modeControlHadFocusRef.current = false;
+        modeControlFocusedElementRef.current = null;
+        target.focus();
+      } else if (!disabled) {
+        modeControlHadFocusRef.current = false;
+        modeControlFocusedElementRef.current = null;
+        focusComposer();
+      }
+    }, [
+      modeItemIds,
+      availableModes.length,
+      modeControlsDisabled,
+      disabled,
+      focusComposer,
+    ]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+    useEffect(() => {
+      if (modelControlsDisabled) setModelDropdownOpen(false);
+    }, [modelControlsDisabled]);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const isMobile = Boolean(core.mobileComposer);
     const [mobileFocused, setMobileFocused] = useState(false);
@@ -2098,16 +2212,6 @@ export const ChatEditor = memo(
       return () => resizeObserver.disconnect();
     }, [chatWidthToggleMin]);
 
-    const modeItems = useMemo<DropdownItem[]>(
-      () =>
-        DAEMON_APPROVAL_MODES.filter((id) => id !== 'plan').map((id) => ({
-          id,
-          label: getModeListLabel(id, t),
-          description: t(`mode.desc.${id}`),
-          icon: <ModeIcon mode={id} />,
-        })),
-      [t],
-    );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
       const activeActions = visibleToolbarActions.filter((action) =>
@@ -2124,6 +2228,8 @@ export const ChatEditor = memo(
     // its only way to read the breakdown, and only that case advertises it.
     const contextRingAction = onOpenContextUsage ?? onShowContextUsage;
     const contextRingHint = Boolean(onShowContextUsage) && !onOpenContextUsage;
+    const knownContextUsage =
+      contextUsageKnown ?? (contextWindow > 0 && tokenCount > 0);
     const showModeAction = showToolbarAction('approvalMode');
     const showPlanAction = Boolean(
       onTogglePlan && visibleActionSet?.has('plan'),
@@ -2182,12 +2288,12 @@ export const ChatEditor = memo(
 
     const handleModeSelect = useCallback(
       (modeId: string) => {
-        if (modeControlsDisabled) return;
+        if (modeControlsDisabled || !availableModes.includes(modeId)) return;
         onSelectMode?.(modeId);
         setModeDropdownOpen(false);
         core.focus();
       },
-      [onSelectMode, core, modeControlsDisabled],
+      [availableModes, onSelectMode, core, modeControlsDisabled],
     );
 
     // The add menu closes before this runs and leaves focus to the caller. The
@@ -2200,11 +2306,12 @@ export const ChatEditor = memo(
 
     const handleModelSelect = useCallback(
       (modelId: string) => {
+        if (modelControlsDisabled) return;
         onSelectModel?.(modelId);
         setModelDropdownOpen(false);
         core.focus();
       },
-      [onSelectModel, core],
+      [onSelectModel, core, modelControlsDisabled],
     );
     const showCancelButton = isRunning && !core.hasContent;
     const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
@@ -3200,28 +3307,6 @@ export const ChatEditor = memo(
                 className={styles.mobileEditingActions}
                 data-web-shell-mobile-editing-actions
               >
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.previousInput')}
-                  title={t('composerMobile.previousInput')}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={core.navigatePrevHistory}
-                >
-                  <ArrowUpIcon />
-                </button>
-                <button
-                  type="button"
-                  className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.nextInput')}
-                  title={t('composerMobile.nextInput')}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={core.navigateNextHistory}
-                >
-                  <ArrowDownIcon />
-                </button>
                 {!showAddMenuAction && (
                   <button
                     type="button"
@@ -3367,6 +3452,7 @@ export const ChatEditor = memo(
                           : undefined
                       }
                       availabilityKey={JSON.stringify([
+                        core.workspaceActionsRef.current?.scopeKey,
                         fileUploadEnabled === false,
                         attachmentsEnabled,
                         uploadEnabled,
@@ -3428,9 +3514,25 @@ export const ChatEditor = memo(
                       className={`${styles.dropdownWrapper} ${
                         showModeLabel ? '' : styles.dropdownWrapperCompact
                       }`}
+                      onFocus={(event) => {
+                        modeControlHadFocusRef.current = true;
+                        if (event.target instanceof HTMLElement) {
+                          modeControlFocusedElementRef.current = event.target;
+                        }
+                      }}
+                      onBlur={(event) => {
+                        // A blur that lands nowhere is the browser dropping a
+                        // disabled or unmounted control's focus to the body —
+                        // the loss the handoff above exists to catch.
+                        if (event.relatedTarget instanceof HTMLElement) {
+                          modeControlHadFocusRef.current = false;
+                          modeControlFocusedElementRef.current = null;
+                        }
+                      }}
                     >
                       <ToolbarPopover
                         compact={compactOverlays}
+                        modePopover
                         open={modeDropdownOpen}
                         items={modeItems}
                         activeId={currentMode}
@@ -3446,7 +3548,10 @@ export const ChatEditor = memo(
                               showModeLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-mode-button
-                            disabled={modeControlsDisabled}
+                            disabled={
+                              modeControlsDisabled ||
+                              availableModes.length === 0
+                            }
                             data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();
@@ -3635,6 +3740,7 @@ export const ChatEditor = memo(
                               showModelLabel ? '' : styles.toolBtnCompact
                             }`}
                             data-web-shell-model-button
+                            disabled={modelControlsDisabled}
                             data-web-shell-toolbar-popover-trigger
                             onClick={(e) => {
                               e.stopPropagation();
@@ -3725,12 +3831,12 @@ export const ChatEditor = memo(
                     </button>
                   )}
                 {showToolbarAction('contextUsage') &&
-                  (contextUsageAlwaysVisible ||
-                    (contextWindow > 0 && tokenCount > 0)) && (
+                  (contextUsageAlwaysVisible || knownContextUsage) && (
                     <ContextUsagePopover
                       key={sessionId}
                       tokenCount={tokenCount}
                       contextWindow={contextWindow}
+                      known={contextUsageKnown}
                       controls={contextUsageControls}
                       onOpenDetails={onOpenContextUsage}
                       showSnapshotHint={contextRingHint}
@@ -3743,9 +3849,11 @@ export const ChatEditor = memo(
                           e.stopPropagation();
                           contextRingAction?.();
                         }}
-                        disabled={!contextRingAction}
+                        disabled={
+                          !contextRingAction && contextUsageKnown === undefined
+                        }
                         aria-label={
-                          contextWindow > 0 && tokenCount > 0
+                          knownContextUsage
                             ? t('status.contextUsed', {
                                 pct: (
                                   (tokenCount / contextWindow) *
@@ -3758,13 +3866,13 @@ export const ChatEditor = memo(
                         <span className={styles.toolBtnIcon}>
                           <ContextUsageRing
                             pct={
-                              contextWindow > 0
+                              knownContextUsage
                                 ? (tokenCount / contextWindow) * 100
                                 : 0
                             }
                           />
                         </span>
-                        {contextWindow > 0 && tokenCount > 0 && (
+                        {knownContextUsage && (
                           <span
                             className={styles.contextUsagePercentage}
                             data-level={getContextUsageLevel(

@@ -78,6 +78,7 @@ import {
 import { getModelProvidersOwnerScope } from './modelProvidersScope.js';
 import { needsMigration } from './migration/index.js';
 import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -2448,9 +2449,7 @@ describe('Settings Loading and Merging', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it
-      .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
-      .each([0o400, 0o444])(
+    it.skipIf(!arePermissionBitsEnforced()).each([0o400, 0o444])(
       'recovers repeatedly from a read-only Workspace file (%o)',
       async (mode) => {
         const actualFs = await vi.importActual<typeof fs>('node:fs');
@@ -2870,6 +2869,36 @@ describe('Settings Loading and Merging', () => {
         );
       });
     });
+
+    it.each([{ workspaceModes: ['default'] }, { workspaceModes: [] }])(
+      'ignores the workspace approval mode list $workspaceModes in favor of the user list',
+      ({ workspaceModes }) => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) =>
+            p === USER_SETTINGS_PATH ||
+            p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            JSON.stringify({
+              ui: {
+                allowedApprovalModes:
+                  p === USER_SETTINGS_PATH ? ['auto', 'yolo'] : workspaceModes,
+              },
+            }),
+        );
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.ui?.allowedApprovalModes).toEqual([
+          'auto',
+          'yolo',
+        ]);
+        expect(
+          getSettingsWarnings(settings).some((warning) =>
+            warning.includes('ui.allowedApprovalModes'),
+          ),
+        ).toBe(true);
+      },
+    );
 
     it('should resolve environment variables in user settings', () => {
       process.env['TEST_API_KEY'] = 'user_api_key_from_env';

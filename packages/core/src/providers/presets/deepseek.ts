@@ -20,6 +20,7 @@ export const deepseekProvider: ProviderConfig = {
       contextWindowSize: 1000000,
       capabilities: {
         reasoning: {
+          profile: 'deepseek-openai',
           thinking: true,
           efforts: ['low', 'high', 'max'],
           defaultEffort: 'high',
@@ -31,6 +32,7 @@ export const deepseekProvider: ProviderConfig = {
       id: 'deepseek-v4-flash',
       capabilities: {
         reasoning: {
+          profile: 'deepseek-openai',
           thinking: true,
           efforts: ['low', 'high', 'max'],
           defaultEffort: 'high',

@@ -138,11 +138,14 @@ async function render(
   loadPage: TrajectoryPageLoader | undefined,
   liveStore: TrajectoryLiveStore | null = null,
   historyGapRevision = 0,
+  shadow = false,
 ): Promise<HTMLElement> {
   const container = document.createElement('div');
-  document.body.appendChild(container);
+  const host = shadow ? document.createElement('div') : container;
+  document.body.appendChild(host);
+  if (shadow) host.attachShadow({ mode: 'open' }).append(container);
   const root = createRoot(container);
-  mounted.push({ root, container });
+  mounted.push({ root, container: host });
   await act(async () => {
     root.render(
       <I18nProvider language="en">
@@ -231,6 +234,88 @@ const metricsOf = (container: HTMLElement) =>
   ).map((node) => node.textContent ?? '');
 
 describe('TrajectoryPanel', () => {
+  it.each([false, true])(
+    'does not recover old execution focus into a different loader (shadow=%s)',
+    async (shadow) => {
+      const store = createTrajectoryLiveStore();
+      const seed = (sessionId: string) =>
+        store.begin(
+          {},
+          {
+            sessionId,
+            scope: 'scope',
+            incomplete: false,
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'agent_message_chunk',
+                  _meta: {
+                    executionLifecycle: {
+                      v: 1,
+                      kind: 'request',
+                      phase: 'started',
+                      executionId: 'selected',
+                      sessionId,
+                      promptId: 'p',
+                      model: 'model',
+                      startedAt: 10,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        );
+      const client = {
+        getSessionTranscriptPage: async () => page(REAL_EVENTS),
+      };
+      seed('old');
+      const container = await render(
+        createTrajectoryPageLoader(client, 'old', 'scope'),
+        store,
+        0,
+        shadow,
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const close = container.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      close.focus();
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(close);
+      const focus = vi.fn();
+      container.addEventListener('focusin', focus);
+      await act(async () => {
+        seed('new');
+        mounted.at(-1)!.root.render(
+          <I18nProvider language="en">
+            <TrajectoryLiveContext.Provider value={store}>
+              <TrajectoryPanel
+                loadPage={createTrajectoryPageLoader(client, 'new', 'scope')}
+              />
+            </TrajectoryLiveContext.Provider>
+          </I18nProvider>,
+        );
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="trajectory-execution-row"]'),
+      ).not.toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
   it('discloses incomplete lifecycle details separately from page truncation', async () => {
     const store = createTrajectoryLiveStore();
     store.begin(
@@ -249,6 +334,336 @@ describe('TrajectoryPanel', () => {
     ).toContain(
       'Lifecycle details may be incomplete or outside the retained limit.',
     );
+  });
+
+  it('updates one execution through terminal state without refreshing or moving history', async () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, {
+      sessionId: 's',
+      scope: 'scope',
+      epoch: 'epoch',
+      events: [],
+      incomplete: false,
+    });
+    store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+    const getSessionTranscriptPage = vi.fn(async () => page(REAL_EVENTS));
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    const history = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    history.scrollTop = 240;
+    act(() => history.dispatchEvent(new Event('scroll', { bubbles: true })));
+    const totals = container.querySelector(
+      '[data-testid="trajectory-totals"]',
+    )!.textContent;
+    const lifecycle = {
+      v: 1,
+      kind: 'request',
+      phase: 'started',
+      executionId: 'new',
+      sessionId: 's',
+      promptId: 'p',
+      model: 'new-model',
+      startedAt: Date.now(),
+    };
+    const event = (value: object, id: number): DaemonEvent => ({
+      v: 1,
+      id,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: { executionLifecycle: value },
+      },
+    });
+    await act(async () => store.ingest(owner, event(lifecycle, 1)));
+    let rows = container.querySelectorAll<HTMLElement>(
+      '[data-testid="trajectory-execution-row"]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.dataset.status).toBe('running');
+    const key = rows[0]!.dataset.executionKey;
+    const historyRow = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+    await act(async () => historyRow.click());
+    expect(historyRow.getAttribute('aria-selected')).toBe('true');
+    await act(async () => rows[0]!.click());
+    expect(historyRow.getAttribute('aria-selected')).toBe('false');
+    expect(rows[0]!.getAttribute('aria-selected')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]')!
+        .textContent,
+    ).toContain('new-model');
+    await act(async () =>
+      store.ingest(
+        owner,
+        event(
+          {
+            ...lifecycle,
+            phase: 'ended',
+            endedAt: lifecycle.startedAt + 50,
+            durationMs: 50,
+            outcome: 'success',
+          },
+          2,
+        ),
+      ),
+    );
+    rows = container.querySelectorAll<HTMLElement>(
+      '[data-testid="trajectory-execution-row"]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.dataset.executionKey).toBe(key);
+    expect(rows[0]!.dataset.status).toBe('success');
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]')!
+        .textContent,
+    ).toContain('Succeeded');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Close details"]')!
+        .click(),
+    );
+    expect(document.activeElement).toBe(
+      container.querySelector(
+        '[data-testid="trajectory-executions"] [role="grid"]',
+      ),
+    );
+    expect(getSessionTranscriptPage).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="trajectory-totals"]')!.textContent,
+    ).toBe(totals);
+    expect(history.scrollTop).toBe(240);
+  });
+
+  it('does not reopen details when a vanished execution returns to history', async () => {
+    let present = true;
+    const lifecycleEvent: DaemonEvent = {
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          executionLifecycle: {
+            v: 1,
+            kind: 'request',
+            phase: 'ended',
+            executionId: 'history-only',
+            sessionId: 's',
+            promptId: 'p',
+            model: 'history-model',
+            startedAt: 10,
+            endedAt: 20,
+            durationMs: 10,
+            outcome: 'success',
+          },
+        },
+      },
+    };
+    const loader = createTrajectoryPageLoader(
+      {
+        getSessionTranscriptPage: async () =>
+          page(present ? [lifecycleEvent] : []),
+      },
+      's',
+      'scope',
+    );
+    const container = await render(loader);
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-execution-row"]')!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).not.toBeNull();
+    const refresh = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Refresh"]',
+    )!;
+    present = false;
+    await act(async () => refresh.click());
+    expect(
+      container.querySelector('[data-testid="trajectory-execution-row"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    refresh.focus();
+    present = true;
+    await act(async () => refresh.click());
+    expect(
+      container.querySelector('[data-testid="trajectory-execution-row"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(refresh);
+  });
+
+  it.each(
+    [false, true].flatMap((shadow) =>
+      (['grid', 'collapsed', 'outside'] as const).map((target) => ({
+        shadow,
+        target,
+      })),
+    ),
+  )(
+    'recovers focused details on execution eviction ($target, shadow=$shadow)',
+    async ({ shadow, target }) => {
+      const store = createTrajectoryLiveStore();
+      const owner = {};
+      store.begin(owner, {
+        sessionId: 's',
+        scope: 'scope',
+        epoch: 'epoch',
+        events: [],
+        incomplete: false,
+      });
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+      const event = (id: number): DaemonEvent => ({
+        v: 1,
+        id: id + 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            executionLifecycle: {
+              v: 1,
+              kind: 'request',
+              phase: 'ended',
+              executionId: `execution-${id}`,
+              sessionId: 's',
+              promptId: 'p',
+              model: 'model',
+              startedAt: id,
+              endedAt: id + 1,
+              durationMs: 1,
+              outcome: 'success',
+            },
+          },
+        },
+      });
+      store.ingest(owner, event(0));
+      const loader = createTrajectoryPageLoader(
+        { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+        's',
+        'scope',
+      );
+      const container = await render(loader, store, 0, shadow);
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-executions"] > button',
+      )!;
+      if (target === 'collapsed') await act(async () => toggle.click());
+      const details = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-inspector"]',
+      )!;
+      const refresh = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Refresh"]',
+      )!;
+      const close = details.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      (target === 'outside' ? refresh : close).focus();
+      await act(async () => {
+        for (let id = 1; id <= 256; id++) store.ingest(owner, event(id));
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(
+        target === 'outside'
+          ? refresh
+          : target === 'collapsed'
+            ? toggle
+            : container.querySelector(
+                '[data-testid="trajectory-executions"] [role="grid"]',
+              ),
+      );
+    },
+  );
+
+  it('returns focus to the recent toggle when closing details with its grid collapsed', async () => {
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      {
+        sessionId: 's',
+        scope: 'scope',
+        incomplete: false,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                executionLifecycle: {
+                  v: 1,
+                  kind: 'request',
+                  phase: 'started',
+                  executionId: 'selected',
+                  sessionId: 's',
+                  promptId: 'p',
+                  model: 'model',
+                  startedAt: 10,
+                },
+              },
+            },
+          },
+        ],
+      },
+    );
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-execution-row"]')!
+        .click(),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-executions"] > button',
+    )!;
+    await act(async () => toggle.click());
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-executions"] [role="grid"]',
+      ),
+    ).toBeNull();
+    const close = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Close details"]',
+    )!;
+    close.focus();
+    await act(async () =>
+      close.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+        }),
+      ),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(toggle);
   });
 
   it('shows the matched live request lifecycle in recorded details', async () => {

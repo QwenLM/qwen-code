@@ -33,9 +33,11 @@ export function projectJavaAgentItem(
     return [
       projectedItemEvent(item, item.firstSequence, 'accepted', {
         itemId: item.itemId,
-        prompt: item.content
-          .filter((part) => part.type === 'input_text')
-          .map((part) => ({ type: 'text', text: part.text })),
+        prompt: Array.isArray(item.attributes?.['inputAttachments'])
+          ? item.attributes['inputAttachments']
+          : item.content
+              .filter((part) => part.type === 'input_text')
+              .map((part) => ({ type: 'text', text: part.text })),
       }),
     ];
   }
@@ -136,6 +138,7 @@ function eventType(
     case 'action.updated':
       return 'action_updated';
     case 'session.context.changed':
+    case 'session.approval.changed':
       return 'context_changed';
     default:
       return undefined;

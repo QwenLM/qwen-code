@@ -30,16 +30,21 @@ const sessionKey = {
 const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 
 const temporaryDirectories = new Set<string>();
+const activeRigs = new Set<Rig>();
 
-afterEach(async () => {
+async function cleanupFixtures(): Promise<void> {
+  for (const rig of activeRigs) await closeLoop(rig);
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
   temporaryDirectories.clear();
-});
+}
+
+afterEach(cleanupFixtures);
 
 class ManualClock implements MonitorLoopClock {
   time = 0;
+  readonly executions: Array<Promise<unknown>> = [];
   private seq = 0;
   private readonly pending = new Map<
     number,
@@ -60,8 +65,18 @@ class ManualClock implements MonitorLoopClock {
     this.pending.delete(handle as unknown as number);
   }
 
+  advance(ms: number): Promise<void> {
+    return this.track(this.advanceOnce(ms));
+  }
+
+  track<T>(execution: Promise<T>): Promise<T> {
+    this.executions.push(execution);
+    void execution.catch(() => undefined);
+    return execution;
+  }
+
   /** Runs every handler due by then, in due order, awaiting each. */
-  async advance(ms: number): Promise<void> {
+  private async advanceOnce(ms: number): Promise<void> {
     const until = this.time + ms;
     for (;;) {
       const next = [...this.pending.entries()]
@@ -82,7 +97,7 @@ class ManualClock implements MonitorLoopClock {
       .filter(([, entry]) => entry.at <= this.time)
       .sort((a, b) => a[1].at - b[1].at);
     for (const [handle] of due) this.pending.delete(handle);
-    return Promise.all(due.map(([, entry]) => entry.handler()));
+    return this.track(Promise.all(due.map(([, entry]) => entry.handler())));
   }
 }
 
@@ -127,6 +142,11 @@ class FakeExecutor {
 
   answerStop(proven: boolean): void {
     this.heldStops.shift()?.(proven);
+  }
+
+  releaseStops(): void {
+    this.holdStop = false;
+    while (this.heldStops.length > 0) this.answerStop(false);
   }
 
   exitNaturally(): Promise<void> {
@@ -215,11 +235,25 @@ async function openLoop(harness: Harness): Promise<Rig> {
   const executor = new FakeExecutor();
   const clock = new ManualClock();
   const loop = new HostedMonitorLoop(session, 'monitor-1', executor, clock);
-  return { authority, session, executor, clock, loop, lease };
+  const stop = loop.stop.bind(loop);
+  vi.spyOn(loop, 'stop').mockImplementation((...args) =>
+    clock.track(stop(...args)),
+  );
+  const rig = { authority, session, executor, clock, loop, lease };
+  activeRigs.add(rig);
+  return rig;
 }
 
 async function closeLoop(rig: Rig): Promise<void> {
+  rig.loop.prepareLifecycle();
+  rig.executor.releaseStops();
+  await Promise.allSettled(rig.clock.executions);
+  await rig.loop.done.catch(() => undefined);
+  if (rig.session.record('monitor-1')?.stopReason === null) {
+    await rig.loop.stop();
+  }
   await rig.lease.release().catch(() => undefined);
+  activeRigs.delete(rig);
 }
 
 function params(overrides: Record<string, unknown> = {}) {
@@ -244,6 +278,23 @@ function committed(
 }
 
 describe('HostedMonitorLoop', () => {
+  it('drains an abandoned quota stop before removing its transcript', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.holdStop = true;
+    await rig.loop.start(params({ maxEvents: 1 }));
+    rig.executor.onLine?.('one');
+    const fired = rig.clock.advance(1_000);
+    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+
+    await cleanupFixtures();
+    rig.executor.answerStop(false);
+    await expect(fired).resolves.toBeUndefined();
+    await expect(fs.stat(harness.transcriptPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('keeps observations but suppresses wakes and premature stop during lifecycle drain', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
