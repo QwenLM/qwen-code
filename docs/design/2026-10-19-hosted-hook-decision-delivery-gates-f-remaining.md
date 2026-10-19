@@ -2,9 +2,9 @@
 
 [English](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.md) | [简体中文](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.zh-CN.md)
 
-> Builds on #14701, now in main. The deny arm shipped there; the cells below
-> are planned for this layer and are not claimed implemented until each test
-> lands.
+> Builds on #14701, now in main. The deny arm shipped there; `failclosed-reply-lost`
+> lands in this layer, and the remaining cells are planned and are not claimed
+> implemented until each test lands.
 
 ## Problem and scope
 
@@ -14,7 +14,11 @@ failure reply, oversized single and aggregate outputs, the 4096 receipt cap
 and the 16-running quota on a PermissionRequest, and a suppressed
 MessageDisplay reload.
 
-## Cases (planned)
+## Cases
+
+`failclosed-reply-lost` is implemented in
+`fg13fFailClosedReplyLossReplaysTheBlockedFailureOnMySql`; the other rows are
+planned.
 
 | Case                     | Inject                                                                                                                                                                                                                                                     | Expect                                                                                                                    |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -26,10 +30,9 @@ MessageDisplay reload.
 
 ## Prerequisites
 
-`failclosed-reply-lost` needs a failure mode in `hosted-hook-fault-process.mjs`.
-The fixture currently answers allow/deny and exits 0, so the first commit of
-this layer adds the failure mode; the cell is not planned against a fixture
-that does not exist.
+Resolved. `hosted-hook-fault-process.mjs` now answers `hook-fail` by recording
+`hook.fail` and exiting 1 without a decision, so the settled receipt is a
+failure rather than a deny.
 
 ## Coverage
 
@@ -38,16 +41,21 @@ oversized worker bound (`managed-hook-runtime.test.ts`: a 70 KiB handler return
 against the 60 KiB `MAX_BYTES`, receipt under 1 KiB), and the receipt cap and
 the running quota (the 4096-operation worker test). The Hosted cells add what
 the in-process tests cannot see: the harness aggregate/settle bound, the
-transport leg, owner restart and lifecycle. For `receipt-cap` that marginal
+transport leg, owner restart and lifecycle. `failclosed-reply-lost` adds the
+Hosted path for the wrap: the settled failure reply is dropped, the record
+shows `recovery_blocked` / `outcome_unknown`, and a later status read persists
+the wrapped block before the tool. For `receipt-cap` that marginal
 value is delivery — a cap refusal crosses the broker as a deny — not the cap
 arithmetic; its 4096 `hook-execute` requests are why the cell is budgeted
 separately.
 
 ## Mutation witnesses
 
-- `failclosed-reply-lost`: apply the decision after the reply arrives, or
-  rerun the command. The tool runs or a second call appears. The fixture must
-  first grow a failure mode (see Prerequisites).
+- `failclosed-reply-lost`: stop dropping the settled failure reply; the record
+  settles immediately and never reads `recovery_blocked`. Remove the
+  `failClosed` wrap and the result carries `success:false` with no
+  `decision:'block'`, so the tool runs. Rerun the command on a lost reply and
+  `hook.call` counts two.
 - `oversized-output`: mutate the layer the witness names. The worker bound is
   already pinned by `managed-hook-runtime.test.ts`; reverting it turns that
   test red, not this cell. This cell's witnesses are the harness
