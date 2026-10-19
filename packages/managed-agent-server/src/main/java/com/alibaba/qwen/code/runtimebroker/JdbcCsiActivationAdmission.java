@@ -178,8 +178,9 @@ public final class JdbcCsiActivationAdmission {
                     && original.firstActivationJournalRevision() == null);
             JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
             noEarlierAuthorization(connection, original);
-        } else {
-            require(!"installActivation".equals(metadata.path("operation").textValue()));
+        } else if ("installActivation".equals(metadata.path("operation").textValue())) {
+            qualifyColdTail(connection, original, history);
+            require(history.activation().expiresAt() <= now);
         }
         var activation = CsiNativeActivationProof.activation(parsed, metadata, original.request(), writerId,
                 history.genesis().definitionDigest(), history.activation(),
@@ -317,6 +318,38 @@ public final class JdbcCsiActivationAdmission {
     static CsiNativeActivationProof.Prefix requireLive(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
             throws SQLException {
         return lockNativeHead(connection, original).prefix();
+    }
+
+    public static void qualifyColdWriter(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcRuntimeBindingRepository bindings, long revision, long sequence, String digest, String writerId,
+            long writerGeneration, long activationEpoch, long writerExpiresAt, String successorId) throws SQLException {
+        original.requireAdmission();
+        var history = history(connection, original, revision, sequence, digest, writerId);
+        requireHistoryIdentity(connection, original, history.prefix(), bindings);
+        require(history.activation() != null && activationEpoch == history.activation().epoch()
+                && writerGeneration >= history.activation().writerGeneration()
+                && !successorId.equals(history.activation().workerId())
+                && (writerGeneration > history.activation().writerGeneration()
+                        || writerId.equals(history.activation().workerId())));
+        qualifyColdTail(connection, original, history);
+        long now = JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli();
+        require(writerExpiresAt <= now && history.activation().expiresAt() <= now);
+    }
+
+    private static void qualifyColdTail(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            History history) throws SQLException {
+        original.requireAdmission();
+        var prefix = history.prefix();
+        require(history.activation() != null && prefix.input() != null && prefix.pendingBatch() != null
+                && prefix.input().noDeadline() && prefix.batches().size() == 1
+                && prefix.checkpoint() != null && prefix.attempt() != null
+                && "output_committed".equals(prefix.attempt().stage())
+                && !prefix.assistantCommitted() && prefix.stream() == null
+                && java.util.Set.of("await_runtime", "results_ready").contains(
+                        prefix.checkpoint().state().path("continuation").path("phase").textValue()));
+        JdbcCsiExecutionAdmission.verifyColdReceipts(connection, original,
+                new NativeHead(history.revision(), history.sequence(), history.digest(), prefix,
+                        0, history.activation().expiresAt(), history.activation()));
     }
 
     public record NativeHead(long revision, long sequence, String digest, CsiNativeActivationProof.Prefix prefix,
