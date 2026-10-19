@@ -2,9 +2,9 @@
 
 [English](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.md) | [简体中文](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.zh-CN.md)
 
-> Stack layer 2/2 on #14701's branch. The deny arm is in the base; the cells
-> below are planned for this layer and are not claimed implemented until each
-> test lands.
+> Builds on #14701, now in main. The deny arm shipped there; the cells below
+> are planned for this layer and are not claimed implemented until each test
+> lands.
 
 ## Problem and scope
 
@@ -26,7 +26,7 @@ MessageDisplay reload.
 
 ## Coverage
 
-The base unit tests already cover the failClosed wrap (`hosted-hook-session.test.ts`), the receipt cap and the running quota (the 4096-operation worker test). The Hosted cells add transport, owner-restart and lifecycle coverage. The receipt-cap E2E needs 4096 `hook-execute` requests before the cap fires, so it is budgeted separately.
+The unit tests already on main cover the failClosed wrap (`hosted-hook-session.test.ts`), the receipt cap and the running quota (the 4096-operation worker test). The Hosted cells add transport, owner-restart and lifecycle coverage. The receipt-cap E2E needs 4096 `hook-execute` requests before the cap fires, so it is budgeted separately.
 
 ## Mutation witnesses
 

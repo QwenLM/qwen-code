@@ -2,7 +2,7 @@
 
 [English](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.md) | [简体中文](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.zh-CN.md)
 
-> 堆叠层 2/2，基于 #14701 的分支。deny 臂已在该 base 中；下列用例是本层的计划，
+> 承接已合入 main 的 #14701。deny 臂已在其中落地；下列用例是本层的计划，
 > 在各自测试落地前不宣称已实现。
 
 ## 问题与范围
@@ -23,7 +23,7 @@ FG13f 覆盖决策与输出投递。#14701 钉住“已结算 deny 回复丢失�
 
 ## 覆盖
 
-base 的单测已经覆盖 `failClosed` 包装（`hosted-hook-session.test.ts`）、回执上限与运行名额（4096 次操作的 worker 单测）。Hosted 各格补的是传输、owner 重启与生命周期覆盖。回执上限的 E2E 需要先发出 4096 次 `hook-execute` 请求才能触发，因此单独预算。
+main 上已有的单测已经覆盖 `failClosed` 包装（`hosted-hook-session.test.ts`）、回执上限与运行名额（4096 次操作的 worker 单测）。Hosted 各格补的是传输、owner 重启与生命周期覆盖。回执上限的 E2E 需要先发出 4096 次 `hook-execute` 请求才能触发，因此单独预算。
 
 ## 变异见证
 
