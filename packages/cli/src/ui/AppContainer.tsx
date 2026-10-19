@@ -3144,11 +3144,16 @@ export const AppContainer = (props: AppContainerProps) => {
       // draft). Hand the same value `stripLeadingSystemReminders` derives so
       // the model still reads the notice while the row shows what was typed
       // (#11553). Reminders that `useMessageQueue` prepends to a queued entry
-      // have no composer-side copy and still reach the model only.
+      // have no composer-side copy and still reach the model only. When
+      // nothing was stripped the queued text is already the user's own text,
+      // so the row keeps its composer-provenance-free fallback.
+      const strippedSubmittedValue = stripLeadingSystemReminders(submittedValue);
       const submittedPrompt = submittedPromptProvenanceUnavailable
         ? undefined
         : !provenanceEnabled
-          ? stripLeadingSystemReminders(submittedValue)
+          ? strippedSubmittedValue === submittedValue
+            ? undefined
+            : strippedSubmittedValue
           : restoredSubmission === null
             ? trimmedSubmittedPrompt || undefined
             : restoredSubmission.modelText === submittedValue
