@@ -29,7 +29,9 @@ install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
 
 控制面以 `qwen-managed-agent` 身份读取 `application.yml`，因此该文件由服务账号拥有、权限 `0600`。预检会拒绝 group 或 others 可读的含 secret 文件；而 `root` 拥有的 `0600` 文件服务同样读不到。`systemd` 以 root 读取两个环境文件，因此它们保持 `0640 root:qwen-managed-agent` 即可。
 
-`harness.env` 与 `server.env` 中的 Harness token 和 capability digest 必须一致。若 `qwen serve` 因 4170 被占用而报告了其他端口，请在启动控制面前把 `server.env` 中的 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 改为实际端口。
+`harness.env` 与 `server.env` 中的 Harness token 和 capability digest 必须一致。若 `qwen serve` 因 4170 被占用而报告了其他端口，请在启动控制面前把 `server.env` 中的 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 改为实际端口。`QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` 是另一个值：它指向本 Java 控制面自己的监听端口（模板中为 `http://127.0.0.1:8080`），不随 Harness 端口变化。
+
+也可以运行 `../bin/qwen-managed-agent-bootstrap --directory /etc/qwen-managed-agent` 生成这三个文件，随后调整属主与权限。
 
 4. 安装并启动：
 
@@ -59,6 +61,8 @@ curl --fail http://127.0.0.1:8080/actuator/health
 ## 两处 kill mode 的差异
 
 控制面使用 `KillMode=process`，使 Broker 重启时 Runtime worker 继续存活；默认的 `control-group` 会把它们随服务一起终止。Harness 使用 `KillMode=mixed`，其工具进程随它终止。除非改用等价监管方式，否则保留这两项设置。
+
+同一项 `KillMode=process` 也意味着 `systemctl stop qwen-managed-agent-server` 只向主进程发送信号：unit 报告 inactive 时 Runtime worker 仍在运行并持有状态目录与 Workspace，随后启动会与它们竞争。重启前先回收：`systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`。
 
 ## 路径
 
