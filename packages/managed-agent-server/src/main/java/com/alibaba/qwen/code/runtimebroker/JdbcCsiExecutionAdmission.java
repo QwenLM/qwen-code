@@ -51,6 +51,24 @@ public final class JdbcCsiExecutionAdmission {
         head.requireCurrentTime(connection);
     }
 
+    static void verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
+        var members = receiptMembers(connection, original, head, head.prefix(), 0, 0);
+        require(!members.isEmpty() && head.prefix().receipts().keySet().equals(members.stream()
+                .map(ToolExecutionRecord::getExecutionCallId).collect(java.util.stream.Collectors.toSet())));
+        var batch = head.prefix().pendingBatch();
+        require(batch != null && members.stream().map(member -> member.getReference().get("functionCallId"))
+                .collect(java.util.stream.Collectors.toSet()).equals(batch.calls().stream()
+                        .map(CsiNativeActivationProof.FunctionCall::id)
+                        .filter(id -> !batch.refusedFunctionIds().contains(id))
+                        .collect(java.util.stream.Collectors.toSet())));
+        for (var member : members) {
+            require(member.getState() == ToolExecutionRecord.State.SETTLED && !member.isCancelRequested()
+                    && member.getResult() != null && member.getAuthorizedDispatchGeneration() != null
+                    && java.util.Set.of("success", "error").contains(member.getExecutionStatus()));
+        }
+    }
+
     private static List<ToolExecutionRecord> receiptMembers(Connection connection,
             JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
             CsiNativeActivationProof.Prefix prefix,

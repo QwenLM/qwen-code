@@ -7930,10 +7930,14 @@ it('probes every inconclusive background binding within one timeout window', asy
       .finally(() => {
         completed = true;
       });
+    // A deadlock guard, not a latency assertion: the probes are mock calls
+    // that only need to be in flight together, and a shared runner under load
+    // can spend more than a second scheduling them (release run 39192115354
+    // failed this guard on all three attempts while every other test passed).
     const guardedStart = new Promise<never>((_resolve, reject) => {
       guard = realSetTimeout(
         () => reject(new Error('both probes did not start concurrently')),
-        1_000,
+        10_000,
       );
     });
 
@@ -8020,7 +8024,7 @@ it('settles grant-proven bindings before waiting for process probes', async () =
     const guardedStart = new Promise<never>((_resolve, reject) => {
       guard = realSetTimeout(
         () => reject(new Error('process probe did not start')),
-        1_000,
+        10_000,
       );
     });
 
