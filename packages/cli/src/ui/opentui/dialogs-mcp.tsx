@@ -561,6 +561,9 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   // ink's BaseSelectionList keeps the highlighted item by key and falls back
   // to the first row when it is gone; deriving the row from the action's key
   // gives the same rule without a one-frame stale index after a rebuild.
+  // (ink also skips disabled rows when it falls back. No action emitted today
+  // is disabled, so the first row is the complete fallback here; if one gains
+  // a disabled state, mirror computeInitialIndex before landing on it.)
   const actionIndexFor = (key: string | null): number =>
     Math.max(
       0,
