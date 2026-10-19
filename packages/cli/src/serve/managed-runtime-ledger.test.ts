@@ -835,6 +835,7 @@ describe('Managed Runtime ledger', () => {
         const table = queryProcessTable();
         const row = table.get(process.pid);
         expect(row).toBeDefined();
+        expect(row!.state).toBeDefined();
         expect(row!.args.length).toBeGreaterThan(0);
         expect(row!.runningMs).toBeGreaterThanOrEqual(0);
       },

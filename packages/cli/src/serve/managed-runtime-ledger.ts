@@ -164,7 +164,8 @@ export interface ProcessTableRow {
    * procps's negative wraparound): the row still COUNTS as a member — a
    * group whose only row is undatable is not gone — but no age judgement
    * may ever be made from it, so the group can only judge 'unknown' (held
-   * unproven), never 'gone' and never 'recycled'.
+   * unproven), never 'gone' and never 'recycled'. A zombie row is the one
+   * exception: it runs nothing, so the identity judges drop it first.
    */
   readonly runningMs: number | undefined;
   /** ps's STAT column; a leading `Z` is a zombie awaiting reap, not live. */
@@ -360,8 +361,9 @@ function isZombieRow(row: ProcessTableRow): boolean {
 type GroupIdentity = 'gone' | 'ours' | 'recycled' | 'unknown';
 
 /**
- * Judges the group `record` holds against a live table. `gone`: no member
- * left. `ours`: some member old enough to have been there at the record's
+ * Judges the group `record` holds against a live table. `gone`: no live
+ * member left (zombies are not live members). `ours`: some member old enough
+ * to have been there at the record's
  * write still runs — judged first, so a SIGTERM-ignoring survivor keeps
  * the group accountable even where its dead leader's pid has been recycled
  * to a younger leader. `recycled`: with no old-enough member, a live young
@@ -947,7 +949,10 @@ export async function sweepWorkerLedger(
   const prove = async (pgid: number): Promise<boolean> => {
     // Only ESRCH (or the caller's idea of 'gone') proves an exit; a transient
     // EPERM during teardown must not end the wait, and a permanent one ends
-    // it unproven at the deadline.
+    // it unproven at the deadline. This stays on the bare liveness probe: a
+    // group killed by this very sweep can turn zombie-only after the judge,
+    // so one proof may time out; the ledger reaper retries on backoff and the
+    // next pass judges the zombie-only group 'gone'.
     const deadline = performance.now() + proofTimeoutMs;
     for (;;) {
       if (liveness(pgid) === 'gone') return true;
