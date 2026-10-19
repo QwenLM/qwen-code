@@ -6964,6 +6964,7 @@ function createActionsHarness(
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
     getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
+    getClient?: () => DaemonClient | undefined;
     getEventDetailMode?: () => 'full' | 'summary';
   } = {},
 ) {
@@ -7036,6 +7037,7 @@ function createActionsHarness(
       )) as () => Promise<DaemonSessionClient>,
     getDefaultSessionContext:
       opts.getDefaultSessionContext ?? (() => undefined),
+    getClient: opts.getClient,
     getConnection: () => connection,
     getEventDetailMode: opts.getEventDetailMode ?? (() => 'full'),
     hasSessionActivePrompt: opts.hasSessionActivePrompt ?? (() => false),
@@ -7110,6 +7112,12 @@ function createMockSession(
     workspaceCwd: '/workspace',
     clientId,
     client: {
+      workspaceByCwd: vi.fn(() => ({
+        reloadModelProviders: vi.fn(async () => ({
+          status: 'applied' as string,
+        })),
+        workspaceProviders: vi.fn(async () => workspaceProvidersStatus('low')),
+      })),
       createOrAttachSession: vi.fn(),
       branchSession: vi.fn(),
       detachSession: vi.fn(async () => undefined),
@@ -7529,3 +7537,219 @@ function createTimedCreateClient({
     signals,
   };
 }
+
+describe('model catalog refresh', () => {
+  function setup() {
+    const session = createMockSession('session-a');
+    const workspace = session.client.workspaceByCwd();
+    session.client.workspaceByCwd.mockReturnValue(workspace);
+    const context = contextStatus('session-a');
+    context.state.models = {
+      currentModelId: 'new-default',
+      availableModels: [
+        { modelId: 'old-model', name: 'Old' },
+        { modelId: 'new-model', name: 'New' },
+      ],
+    };
+    session.context.mockResolvedValue(context);
+    const h = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace',
+        currentModel: 'old-model',
+        models: [{ id: 'old-model' }],
+      },
+    });
+    return { ...h, session, workspace, context };
+  }
+
+  it.each([false, true])(
+    'refreshes with an absent or void callback (callback=%s)',
+    async (withCallback) => {
+      const h = setup();
+      const callback = vi.fn(async () => undefined);
+      await h.actions.refreshModels(withCallback ? callback : undefined);
+      if (withCallback) {
+        expect(callback).toHaveBeenCalledWith({
+          workspaceCwd: '/workspace',
+          sessionId: 'session-a',
+        });
+        expect(callback.mock.invocationCallOrder[0]).toBeLessThan(
+          h.workspace.reloadModelProviders.mock.invocationCallOrder[0]!,
+        );
+      }
+      expect(h.session.client.workspaceByCwd).toHaveBeenCalledWith(
+        '/workspace',
+      );
+      expect(h.workspace.reloadModelProviders).toHaveBeenCalledWith({
+        clientId: 'client-session-a',
+      });
+      expect(
+        h.workspace.reloadModelProviders.mock.invocationCallOrder[0],
+      ).toBeLessThan(h.session.context.mock.invocationCallOrder[0]!);
+      expect(h.getConnection().models?.map((model) => model.id)).toEqual([
+        'old-model',
+        'new-model',
+      ]);
+      expect(h.getConnection().currentModel).toBe('old-model');
+      expect(h.session.setModel).not.toHaveBeenCalled();
+    },
+  );
+
+  it('awaits the host and stops on host failure without losing models', async () => {
+    const h = setup();
+    const host = createDeferred<void>();
+    const refresh = h.actions.refreshModels(() => host.promise);
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    host.reject(new Error('catalog unavailable'));
+    await expect(refresh).rejects.toThrow('catalog unavailable');
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    expect(h.getConnection().models).toEqual([{ id: 'old-model' }]);
+  });
+
+  it.each(['failed', 'deferred'])(
+    'preserves old models after a %s live reload',
+    async (status) => {
+      const h = setup();
+      h.workspace.reloadModelProviders.mockResolvedValue({ status });
+      await expect(h.actions.refreshModels()).rejects.toThrow(
+        'Unable to reload',
+      );
+      expect(h.session.context).not.toHaveBeenCalled();
+      expect(h.getConnection().models).toEqual([{ id: 'old-model' }]);
+    },
+  );
+
+  it.each(['host', 'reload', 'read'])(
+    'discards refresh after navigation during %s',
+    async (stage) => {
+      const h = setup();
+      const gate = createDeferred<void>();
+      if (stage === 'reload')
+        h.workspace.reloadModelProviders.mockImplementation(async () => {
+          await gate.promise;
+          return { status: 'applied' };
+        });
+      if (stage === 'read')
+        h.session.context.mockImplementation(async () => {
+          await gate.promise;
+          return contextStatus('session-a');
+        });
+      const refresh = h.actions.refreshModels(
+        stage === 'host' ? () => gate.promise : undefined,
+      );
+      if (stage !== 'host')
+        await vi.waitFor(() =>
+          expect(h.workspace.reloadModelProviders).toHaveBeenCalled(),
+        );
+      if (stage === 'read')
+        await vi.waitFor(() => expect(h.session.context).toHaveBeenCalled());
+      h.sessionRef.current = createMockSession(
+        'session-b',
+      ) as unknown as DaemonSessionClient;
+      h.replaceConnection({
+        status: 'connected',
+        sessionId: 'session-b',
+        workspaceCwd: '/other',
+        models: [{ id: 'other-model' }],
+      });
+      gate.resolve();
+      await refresh;
+      expect(h.getConnection().models).toEqual([{ id: 'other-model' }]);
+      if (stage === 'host')
+        expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+
+  it('discards readback when connection ownership changes before session refs', async () => {
+    const h = setup();
+    const read = createDeferred<DaemonSessionContextStatus>();
+    h.session.context.mockReturnValue(read.promise);
+    const refresh = h.actions.refreshModels();
+    await vi.waitFor(() => expect(h.session.context).toHaveBeenCalled());
+    h.replaceConnection({
+      ...h.getConnection(),
+      sessionId: 'session-b',
+      models: [{ id: 'other-model' }],
+    });
+    read.resolve(h.context);
+    await refresh;
+    expect(h.getConnection().models).toEqual([{ id: 'other-model' }]);
+  });
+
+  it('retains a model selected while the read is in flight', async () => {
+    const h = setup();
+    const read = createDeferred<DaemonSessionContextStatus>();
+    h.session.context.mockReturnValue(read.promise);
+    const refresh = h.actions.refreshModels();
+    await vi.waitFor(() => expect(h.session.context).toHaveBeenCalled());
+    h.replaceConnection({
+      ...h.getConnection(),
+      currentModel: 'concurrent-model',
+    });
+    read.resolve(h.context);
+    await refresh;
+    expect(h.getConnection().currentModel).toBe('concurrent-model');
+  });
+
+  it('retains the old list if readback fails', async () => {
+    const h = setup();
+    h.session.context.mockRejectedValue(new Error('read failed'));
+    await expect(h.actions.refreshModels()).rejects.toThrow('read failed');
+    expect(h.getConnection().models).toEqual([{ id: 'old-model' }]);
+  });
+
+  it('reloads the admission workspace even when context reports a worktree subdirectory', async () => {
+    const h = setup();
+    const context = h.context;
+    context.workspaceCwd = '/workspace/.qwen/worktrees/branch/subdir';
+    h.session.context.mockResolvedValue(context);
+    await h.actions.refreshModels();
+    expect(h.session.client.workspaceByCwd).toHaveBeenLastCalledWith(
+      '/workspace',
+    );
+  });
+
+  it('refreshes a deferred welcome workspace without creating a session', async () => {
+    const session = createMockSession('unused');
+    const workspace = session.client.workspaceByCwd();
+    workspace.reloadModelProviders.mockResolvedValue({ status: 'deferred' });
+    session.client.workspaceByCwd.mockReturnValue(workspace);
+    const client = session.client as unknown as DaemonClient;
+    const h = createActionsHarness({
+      getClient: () => client,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/secondary',
+        currentModel: 'keep-selected',
+        sessionContext: { kind: 'workspace', cwd: '/secondary' },
+      },
+    });
+    await h.actions.refreshModels();
+    expect(session.client.workspaceByCwd).toHaveBeenLastCalledWith(
+      '/secondary',
+    );
+    expect(workspace.workspaceProviders).toHaveBeenCalledOnce();
+    expect(h.getConnection().models?.length).toBeGreaterThan(0);
+    expect(h.getConnection().providers).toBeDefined();
+    expect(h.getConnection().currentModel).toBe('keep-selected');
+    expect(session.client.createOrAttachSession).not.toHaveBeenCalled();
+  });
+
+  it.each(['standalone', 'live'] as const)(
+    'does not reload %s through a workspace fallback',
+    async (kind) => {
+      const h = setup();
+      h.replaceConnection({
+        ...h.getConnection(),
+        sessionContext: { kind } as DaemonProductSessionContext,
+      });
+      await expect(h.actions.refreshModels()).rejects.toThrow(
+        'connected workspace',
+      );
+      expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+});

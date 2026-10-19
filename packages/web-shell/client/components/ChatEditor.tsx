@@ -1,4 +1,8 @@
 import {
+  ModelRefreshControl,
+  type ModelRefreshState,
+} from './ModelRefreshControl';
+import {
   forwardRef,
   memo,
   useImperativeHandle,
@@ -278,6 +282,7 @@ interface ChatEditorProps {
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
   contextUsageControls?: ContextUsageControls;
+  modelRefresh?: ModelRefreshState;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -754,6 +759,7 @@ function ToolbarPopover({
   searchable = false,
   searchLabel,
   noResultsLabel,
+  footer,
   header,
   submenu,
   compact = false,
@@ -770,6 +776,7 @@ function ToolbarPopover({
   searchable?: boolean;
   searchLabel?: string;
   noResultsLabel?: (query: string) => string;
+  footer?: ReactNode;
   header?: ReactNode;
   submenu?: {
     triggerLabel: string;
@@ -886,6 +893,7 @@ function ToolbarPopover({
         />
       )}
       {dropdownItems}
+      {footer}
     </>
   );
 
@@ -1453,6 +1461,7 @@ export const ChatEditor = memo(
       onShowContextUsage,
       onOpenContextUsage,
       contextUsageControls,
+      modelRefresh,
       availableModels = [],
       onSelectMode,
       onSelectModel,
@@ -3704,6 +3713,7 @@ export const ChatEditor = memo(
                         compact={compactOverlays}
                         open={modelDropdownOpen}
                         items={modelItems}
+                        footer={<ModelRefreshControl state={modelRefresh} />}
                         activeId={currentModel}
                         onOpenChange={(open) => {
                           setModelDropdownOpen(open);

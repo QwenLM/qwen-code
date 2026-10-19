@@ -132,6 +132,7 @@ import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
 import { useModelConfigurations } from './hooks/useModelConfigurations';
+import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -519,6 +520,7 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellCustomization,
   type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
@@ -1345,6 +1347,8 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Refresh and persist the host catalog before Qwen reloads models. No return data is required. */
+  onRefreshModels?: WebShellCustomization['onRefreshModels'];
   /** Native settings-page presentation. Does not restrict commands or daemon access. */
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
@@ -3375,6 +3379,7 @@ function readScopedModelSetting(
 }
 
 export function App({
+  onRefreshModels,
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
@@ -3745,6 +3750,7 @@ export function App({
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const customization = useMemo(
     () => ({
+      onRefreshModels,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -3780,6 +3786,7 @@ export function App({
       fileDropAction,
     }),
     [
+      onRefreshModels,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -3827,6 +3834,7 @@ export function App({
     structuralOnly: true,
   });
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
@@ -21017,6 +21025,9 @@ export function App({
             >
               <ModelDialog
                 mode={modelDialogMode}
+                modelRefresh={
+                  modelDialogMode === 'main' ? modelRefresh : undefined
+                }
                 models={modelDialogModels[modelDialogMode]}
                 loading={
                   (modelDialogMode === 'advisor' && providersState.loading) ||
@@ -23648,6 +23659,7 @@ export function App({
                           onOpenContextUsage={
                             contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
+                          modelRefresh={modelRefresh}
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}

@@ -4883,6 +4883,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const actions = useMemo<DaemonSessionActions>(
     () =>
       createDaemonSessionActions({
+        getClient: () => workspaceClientRef.current,
         store,
         sessionRef,
         activePromptsRef,

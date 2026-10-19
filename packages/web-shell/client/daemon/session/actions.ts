@@ -7,6 +7,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type {
   DaemonApprovalMode,
+  DaemonClient,
   DaemonSessionContextStatus,
   DaemonSessionClient,
   DaemonSessionBtwResult,
@@ -53,6 +54,7 @@ import {
 import {
   getPlanExecutionMode,
   mapProviderStatus,
+  mapSessionContextModels,
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
@@ -263,6 +265,7 @@ export interface CreateDaemonSessionActionsArgs {
     overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
+  getClient?: () => DaemonClient | undefined;
   getConnection: () => DaemonConnectionState;
   getEventDetailMode: () => 'full' | 'summary';
   hasSessionActivePrompt: () => boolean;
@@ -460,6 +463,7 @@ export function createDaemonSessionActions({
   createDetachedSession,
   createDetachedStandaloneSession,
   getDefaultSessionContext,
+  getClient,
   getConnection,
   getEventDetailMode,
   hasSessionActivePrompt,
@@ -1821,6 +1825,62 @@ export function createDaemonSessionActions({
         ) {
           setPromptStatus('idle');
         }
+      }
+    },
+
+    async refreshModels(beforeRefresh) {
+      const session = sessionRef.current;
+      const before = getConnection();
+      const context = before.sessionContext;
+      const client = session?.client ?? getClient?.();
+      const workspaceCwd =
+        session?.workspaceCwd ??
+        (context?.kind === 'workspace' ? context.cwd : before.workspaceCwd);
+      if (
+        !client ||
+        !workspaceCwd ||
+        before.status !== 'connected' ||
+        (context && context.kind !== 'workspace')
+      ) {
+        throw new Error('Model refresh requires a connected workspace.');
+      }
+      const isCurrent = (current = getConnection()) =>
+        sessionRef.current === session &&
+        current.sessionId === before.sessionId &&
+        current.sessionContext === context &&
+        current.workspaceCwd === before.workspaceCwd &&
+        current.status === 'connected' &&
+        (session ? session.client === client : getClient?.() === client);
+      await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
+      if (!isCurrent()) return;
+      const workspace = client.workspaceByCwd(workspaceCwd);
+      const result = await workspace.reloadModelProviders({
+        clientId: session?.clientId,
+      });
+      if (!isCurrent()) return;
+      if (
+        result.status !== 'applied' &&
+        !(result.status === 'deferred' && !session)
+      ) {
+        throw new Error('Unable to reload model providers.');
+      }
+      if (session) {
+        const status = await session.context();
+        if (!isCurrent()) return;
+        const models = mapSessionContextModels(status);
+        if (status.sessionId !== session.sessionId || !models) {
+          throw new Error('Unable to read the refreshed session model list.');
+        }
+        setConnection((current) =>
+          isCurrent(current) ? { ...current, models: models.models } : current,
+        );
+      } else {
+        const providers = await workspace.workspaceProviders();
+        if (!isCurrent()) return;
+        const { models } = mapProviderStatus(providers);
+        setConnection((current) =>
+          isCurrent(current) ? { ...current, providers, models } : current,
+        );
       }
     },
 

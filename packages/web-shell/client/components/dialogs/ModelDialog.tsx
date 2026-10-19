@@ -1,3 +1,7 @@
+import {
+  ModelRefreshControl,
+  type ModelRefreshState,
+} from '../ModelRefreshControl';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -14,6 +18,7 @@ export type ModelDialogMode =
   | 'image';
 
 interface ModelDialogProps {
+  modelRefresh?: ModelRefreshState;
   mode?: ModelDialogMode;
   loading?: boolean;
   error?: Error;
@@ -93,6 +98,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 export function ModelDialog({
+  modelRefresh,
   mode = 'main',
   loading = false,
   error,
@@ -168,6 +174,7 @@ export function ModelDialog({
 
   return (
     <div className={styles.layout}>
+      <ModelRefreshControl state={modelRefresh} />
       <div
         className={`${styles.list} ${keyboardMode ? styles.keyboardOnly : ''}`}
         ref={listRef}
