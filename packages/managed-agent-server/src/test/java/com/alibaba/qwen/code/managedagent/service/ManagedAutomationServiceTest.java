@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -12,15 +14,19 @@ import static org.mockito.Mockito.when;
 class ManagedAutomationServiceTest {
     // A dead writer's lease lapses on its own. A 409 would tell the caller
     // the conflict is final, so the public route crosses it as the
-    // retryable 503 the channel routes already answer.
-    @Test
-    void crossesASelfHealingHarnessConflictAsRetryable() {
+    // retryable 503 the channel routes already answer. The inputs are a
+    // fixed list rather than the production set, so dropping a member from
+    // that set fails this test.
+    @ParameterizedTest
+    @ValueSource(strings = {"managed_session_writer_conflict",
+            "workspace_busy", "workspace_unavailable",
+            "hosted_session_closing"})
+    void crossesASelfHealingHarnessConflictAsRetryable(String code) {
         ApiException conflict = ManagedAutomationService
-                .translate(refusal(409, "managed_session_writer_conflict"));
+                .translate(refusal(409, code));
         assertThat(conflict.getStatus())
                 .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-        assertThat(conflict.getCode())
-                .isEqualTo("managed_session_writer_conflict");
+        assertThat(conflict.getCode()).isEqualTo(code);
     }
 
     // A refusal a retry cannot change keeps its class.
