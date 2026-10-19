@@ -24,9 +24,9 @@ distribution needs no additional component.
 The command binds the same inputs Spring would load:
 
 - the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables;
-- the external YAML named by `--spring.config.additional-location` (which the
-  launcher adds when `config/application.yml` exists) or by
-  `SPRING_CONFIG_ADDITIONAL_LOCATION`;
+- the external YAML named by `--spring.config.additional-location` (which an
+  operator can pass) or by `SPRING_CONFIG_ADDITIONAL_LOCATION` (which the
+  launcher sets when `config/application.yml` exists);
 - the process environment, which keeps precedence over both files.
 
 ## Checks
