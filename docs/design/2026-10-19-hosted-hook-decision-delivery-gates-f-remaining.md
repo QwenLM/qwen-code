@@ -16,19 +16,27 @@ MessageDisplay reload.
 
 ## Cases (planned)
 
-| Case                     | Inject                                                                                                      | Expect                                                                                                                    |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `failclosed-reply-lost`  | A failClosed Hook fails; the broker proxy drops the first settled `hook-status` reply carrying the failure. | One physical call; the decision is persisted before the tool; the tool never runs; a later read settles the same failure. |
-| `oversized-output`       | A Hook returns an oversized single output and an oversized aggregate output.                                | The output is a bounded failure under the saved policy; the record does not grow past the bound.                          |
-| `receipt-cap`            | Exhaust the worker's 4096 receipt cap on a PermissionRequest.                                               | The request is denied whatever the fail policy; no second call.                                                           |
-| `running-quota`          | Exhaust the 16-running quota on a PermissionRequest.                                                        | The refusal is `non_blocking_error`, so it denies only under failClosed.                                                  |
-| `message-display-reload` | A MessageDisplay Hook suppresses output; reload the Session.                                                | The suppressed output never appears in the replay.                                                                        |
+| Case                     | Inject                                                                                                                                                                                                 | Expect                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `failclosed-reply-lost`  | A failClosed Hook fails; the broker proxy drops the first settled `hook-status` reply carrying the failure. The fixture needs a failure mode; the current fixture only answers allow/deny and exits 0. | One physical call; the decision is persisted before the tool; the tool never runs; a later read settles the same failure. |
+| `oversized-output`       | A Hook returns an oversized single output and an oversized aggregate output. Both the worker `MAX_BYTES` and the harness aggregate/settle bound are 60 KiB.                                            | The output is a bounded failure under the saved policy; the record does not grow past 60 KiB.                             |
+| `receipt-cap`            | Exhaust the worker's 4096 receipt cap on a PermissionRequest.                                                                                                                                          | The request is denied whatever the fail policy; no second call.                                                           |
+| `running-quota`          | Exhaust the 16-running quota on a PermissionRequest.                                                                                                                                                   | The refusal is `non_blocking_error`, so it denies only under failClosed.                                                  |
+| `message-display-reload` | A MessageDisplay Hook suppresses output; reload the Session.                                                                                                                                           | The suppressed output never appears in the replay.                                                                        |
+
+## Coverage
+
+The base unit tests already cover the failClosed wrap (`hosted-hook-session.test.ts`), the receipt cap and the running quota (the 4096-operation worker test). The Hosted cells add transport, owner-restart and lifecycle coverage. The receipt-cap E2E needs 4096 `hook-execute` requests before the cap fires, so it is budgeted separately.
 
 ## Mutation witnesses
 
 - `failclosed-reply-lost`: apply the decision after the reply arrives, or
-  rerun the command. The tool runs or a second call appears.
-- `oversized-output`: accept the oversized output. The bound assertion fails.
+  rerun the command. The tool runs or a second call appears. The fixture must
+  first grow a failure mode; the current fixture only answers allow/deny.
+- `oversized-output`: accept the oversized output at the layer the witness
+  names. Reverting only the worker bound leaves the existing tests green
+  because the harness bound re-checks the same 60 KiB; the worker bound needs
+  its own test.
 - `receipt-cap`: let one more receipt in, or serve the request. The deny
   assertion fails.
 - `running-quota`: classify the refusal as blocking. It denies under the allow
@@ -40,3 +48,8 @@ MessageDisplay reload.
 
 The other FG13 rounds (FG13a store acks, FG13b, FG13e) and local non-managed
 Hooks stay on #14449.
+
+## Validation
+
+The `hosted-harness-mysql` lane on Linux with MySQL 8.4 and a delegated cgroup
+v2 root is the evidence. A skipped cell is not a passing gate.

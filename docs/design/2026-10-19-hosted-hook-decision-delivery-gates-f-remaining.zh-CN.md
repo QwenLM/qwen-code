@@ -13,18 +13,22 @@ FG13f 覆盖决策与输出投递。#14701 钉住“已结算 deny 回复丢失�
 
 ## 用例（计划）
 
-| 用例                     | 注入                                                                                   | 期望                                                                   |
-| ------------------------ | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `failclosed-reply-lost`  | `failClosed` Hook 失败；broker 代理丢弃第一条已结算、携带该失败的 `hook-status` 回复。 | 一次物理调用；决策先于工具持久化；工具绝不运行；后续读取结算同一失败。 |
-| `oversized-output`       | Hook 返回超大的单条输出与超大的聚合输出。                                              | 在已保存策略下记为有界失败；记录不越界增长。                           |
-| `receipt-cap`            | 在 `PermissionRequest` 上耗尽 worker 的 4096 回执上限。                                | 不论失败策略如何都拒绝；无第二次调用。                                 |
-| `running-quota`          | 在 `PermissionRequest` 上耗尽 16 个运行名额。                                          | 拒绝为 `non_blocking_error`，因此只在 `failClosed` 下阻断。            |
-| `message-display-reload` | `MessageDisplay` Hook 抑制输出；重载 Session。                                         | 被抑制的文本绝不出现在重放里。                                         |
+| 用例                     | 注入                                                                                                                                              | 期望                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `failclosed-reply-lost`  | `failClosed` Hook 失败；broker 代理丢弃第一条已结算、携带该失败的 `hook-status` 回复。夹具需要失败模式；当前夹具只会回答 allow/deny 并以 0 退出。 | 一次物理调用；决策先于工具持久化；工具绝不运行；后续读取结算同一失败。 |
+| `oversized-output`       | Hook 返回超大的单条输出与超大的聚合输出。worker 的 `MAX_BYTES` 与 harness 的聚合/结算上限都是 60 KiB。                                            | 在已保存策略下记为有界失败；记录不越界增长到 60 KiB 以上。             |
+| `receipt-cap`            | 在 `PermissionRequest` 上耗尽 worker 的 4096 回执上限。                                                                                           | 不论失败策略如何都拒绝；无第二次调用。                                 |
+| `running-quota`          | 在 `PermissionRequest` 上耗尽 16 个运行名额。                                                                                                     | 拒绝为 `non_blocking_error`，因此只在 `failClosed` 下阻断。            |
+| `message-display-reload` | `MessageDisplay` Hook 抑制输出；重载 Session。                                                                                                    | 被抑制的文本绝不出现在重放里。                                         |
+
+## 覆盖
+
+base 的单测已经覆盖 `failClosed` 包装（`hosted-hook-session.test.ts`）、回执上限与运行名额（4096 次操作的 worker 单测）。Hosted 各格补的是传输、owner 重启与生命周期覆盖。回执上限的 E2E 需要先发出 4096 次 `hook-execute` 请求才能触发，因此单独预算。
 
 ## 变异见证
 
-- `failclosed-reply-lost`：在回复到达后才应用决策，或重跑命令。工具会运行，或出现第二次调用。
-- `oversized-output`：接受超大输出。有界失败断言失败。
+- `failclosed-reply-lost`：在回复到达后才应用决策，或重跑命令。工具会运行，或出现第二次调用。夹具必须先补失败模式；当前夹具只会回答 allow/deny。
+- `oversized-output`：在接受超大输出的那一层做变异。只撤 worker 侧上限会存活，因为 harness 侧会对同一 60 KiB 再检查一次；worker 侧上限需要自己的测试。
 - `receipt-cap`：再放一条回执进来，或直接服务该请求。拒绝断言失败。
 - `running-quota`：把拒绝归类为 blocking。它在 allow 策略下也会阻断。
 - `message-display-reload`：保留被抑制文本。重载重放会包含它。
@@ -32,3 +36,7 @@ FG13f 覆盖决策与输出投递。#14701 钉住“已结算 deny 回复丢失�
 ## 非目标
 
 FG13 其余轮次（FG13a store ack、FG13b、FG13e）与本地非托管 Hook 仍留在 #14449。
+
+## 验证
+
+在 Linux、MySQL 8.4 与委派 cgroup v2 根上跑完整的 `hosted-harness-mysql` 车道即证据。被跳过的用例不算通过。
