@@ -477,6 +477,15 @@ export class LocalManagedSessionAuthority {
   private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly eventIds = new Set<string>();
+  /**
+   * The first committed `tool.receipt` per execution call. Shell capture
+   * resolves a call's receipt on every accept; scanning the whole log for it
+   * made each call O(history).
+   */
+  private readonly receiptsByExecutionCall = new Map<
+    string,
+    ManagedSessionEvent
+  >();
   private readonly checkpointSequences = new Map<string, number>();
   private checkpoint: ManagedSessionCheckpoint | undefined;
   private hasContinuation = false;
@@ -738,6 +747,7 @@ export class LocalManagedSessionAuthority {
         authority.recordDomainEvent(event);
       }
       authority.recordRecoveryFacts(event, branches.has(event.eventId));
+      authority.indexReceipt(event);
     }
     await authority.rebuildExtensionRecords();
     if (options.retainVerifiedResources !== true)
@@ -830,6 +840,26 @@ export class LocalManagedSessionAuthority {
       if (this.events[index].kind === kind) return this.events[index];
     }
     return undefined;
+  }
+
+  /**
+   * The first committed `tool.receipt` for an execution call, in the same
+   * order a scan from sequence 1 would return.
+   */
+  committedReceipt(executionCallId: string): ManagedSessionEvent | undefined {
+    return this.receiptsByExecutionCall.get(executionCallId);
+  }
+
+  private indexReceipt(event: ManagedSessionEvent): void {
+    if (event.kind !== 'tool.receipt') return;
+    const executionCallId = event.payload['executionCallId'];
+    if (
+      typeof executionCallId !== 'string' ||
+      this.receiptsByExecutionCall.has(executionCallId)
+    ) {
+      return;
+    }
+    this.receiptsByExecutionCall.set(executionCallId, event);
   }
 
   /**
@@ -3303,6 +3333,7 @@ export class LocalManagedSessionAuthority {
     for (const event of events) {
       this.events.push(event);
       this.eventIds.add(event.eventId);
+      this.indexReceipt(event);
       if (event.kind === 'activation.changed') {
         this.activation = managedSessionActivationStateFrom(event);
       }
