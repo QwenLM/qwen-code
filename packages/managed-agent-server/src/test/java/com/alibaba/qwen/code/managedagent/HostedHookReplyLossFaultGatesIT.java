@@ -425,13 +425,13 @@ class HostedHookReplyLossFaultGatesIT {
     void fg13fDenyReplyLossReplaysTheBlockedDecisionOnMySql() throws Exception {
         boot("60000", "1000", "hook-deny");
         // The reply is lost once the worker has already settled the deny:
-        // only a settled/blocking status reply may consume the drop, so the
-        // running receipt cannot stand in for the decision.
+        // only a settled reply carrying the deny decision may consume the
+        // drop, so the running receipt cannot stand in for the decision.
         proxy.arm(HostedSessionRelayForwardingProxy.Rule.dropResponse(
                 (method, path, body) -> path.contains("/control")
                         && body.contains("\"kind\":\"hook-status\""),
                 reply -> reply.contains("\"state\":\"settled\"")
-                        && reply.contains("\"outcome\":\"blocking\""),
+                        && reply.contains("\"permissionDecision\":\"deny\""),
                 "hook-deny-settled-reply"));
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
@@ -456,7 +456,11 @@ class HostedHookReplyLossFaultGatesIT {
         });
         waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         assertThat(events("hook.call")).hasSize(1);
-        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("blocking");
+        JsonNode denied = hookResult(session);
+        assertThat(denied.path("outcome").asText()).isEqualTo("success");
+        assertThat(denied.at("/output/hookSpecificOutput/permissionDecision").asText()).isEqualTo("deny");
+        assertThat(denied.at("/output/hookSpecificOutput/permissionDecisionReason").asText())
+                .isEqualTo("FG13_DENIED");
         assertThat(modelRequests.toString()).doesNotContain(PROOF);
         assertThat(Files.readString(temporary.resolve("proxy.log")))
                 .contains("PROXY dropped hook-deny-settled-reply");

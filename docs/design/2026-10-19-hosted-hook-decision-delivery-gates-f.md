@@ -25,9 +25,9 @@ instead of running the tool.
 
 ## Case
 
-| Case              | Inject                                                                                                                              | Expect                                                                                                                                                                                                                          |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deny-reply-lost` | A `PreToolUse` command Hook returns deny; the broker proxy drops the first settled `hook-status` reply after the worker settled it. | Exactly one physical call; the dropped reply leaves `recovery_blocked` / `outcome_unknown`; a later read of the same operation settles it with `outcome=blocking`; the tool never reads the file; the drop is in the proxy log. |
+| Case              | Inject                                                                                                                              | Expect                                                                                                                                                                                                                                                       |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `deny-reply-lost` | A `PreToolUse` command Hook returns deny; the broker proxy drops the first settled `hook-status` reply after the worker settled it. | Exactly one physical call; the dropped reply leaves `recovery_blocked` / `outcome_unknown`; a later read of the same operation settles it with `outcome=success` and `permissionDecision=deny`; the tool never reads the file; the drop is in the proxy log. |
 
 ## Mutation witness
 
