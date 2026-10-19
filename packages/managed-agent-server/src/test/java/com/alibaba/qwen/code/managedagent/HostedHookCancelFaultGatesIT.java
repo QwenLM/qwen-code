@@ -228,7 +228,7 @@ class HostedHookCancelFaultGatesIT {
         boot("60000", "-1", "hook-ignore-term", true);
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        submit(session, "FG13_DELETE_DRAIN");
+        String turn = submit(session, "FG13_DELETE_DRAIN");
         waitFor(() -> {
             assertThat(events("hook.call")).hasSize(1);
             assertThat(events("hook.child")).hasSize(1);
@@ -237,6 +237,13 @@ class HostedHookCancelFaultGatesIT {
         JsonNode child = events("hook.child").getFirst();
         assertThat(running(hook)).isTrue();
         assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+
+        // The async Hook outlives its admission; DELETE refuses an ACTIVE
+        // Session with a live turn (409 turn_active), so wait for the turn to
+        // finish and confirm the held command survived it.
+        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn,
+                null, null, 200).path("status").asText()).isIn("COMPLETED", "FAILED", "CANCELLED"));
+        assertThat(running(hook)).as("held command must outlive the turn").isTrue();
 
         String operation = api("DELETE", "/v1/agents/sessions/" + session, null, "delete-" + session, 202)
                 .path("id").asText();
@@ -249,8 +256,13 @@ class HostedHookCancelFaultGatesIT {
                 .anyMatch(event -> "SessionEnd".equals(event.path("eventName").asText()))).isTrue());
         assertThat(running(hook)).as("async command alive when SessionEnd started").isFalse();
         assertThat(running(child)).as("descendant alive when SessionEnd started").isFalse();
-        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events")))
-                .as("PreToolUse unit when SessionEnd started").contains("populated 0");
+        Path unit = cgroup(hook);
+        // The drain's own cleanup removes the empty unit before the lifecycle
+        // Hooks start; an absent unit is the drained state, not a failure.
+        if (Files.exists(unit)) {
+            assertThat(Files.readString(unit.resolve("cgroup.events")))
+                    .as("PreToolUse unit when SessionEnd started").contains("populated 0");
+        }
         waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
                 null, null, 200).path("status").asText()).isEqualTo("completed"));
 
