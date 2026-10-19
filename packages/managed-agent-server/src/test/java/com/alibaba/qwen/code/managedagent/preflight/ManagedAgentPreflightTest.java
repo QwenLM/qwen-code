@@ -206,7 +206,34 @@ class ManagedAgentPreflightTest {
         properties.getHarness().setApprovalMode("yolo");
         properties.getSessionStore().setEnabled(true);
         properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker()
+                .setWorkspaceCreationRoot("/tmp/workspace-root");
         assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void rejectsWorkspaceFilesWithoutAMountOrCreationRoot() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setApprovalMode("yolo");
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.toolPathCheck(properties).status());
+    }
+
+    @Test
+    void warnsWhenTheToolPathUsesAnotherProvisioner() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setApprovalMode("yolo");
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setProvisioner("static");
+        assertEquals(ManagedAgentPreflight.Status.WARN,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
     }
 

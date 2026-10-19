@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.context.properties.bind.Bindable;
@@ -366,6 +367,28 @@ public final class ManagedAgentPreflight {
             return new Check("tool-path", Status.FAIL,
                     "Workspace files require the Runtime Broker",
                     "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true");
+        }
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
+        if (!"local-process".equals(broker.getProvisioner())) {
+            return new Check("tool-path", Status.WARN,
+                    "not evaluated for provisioner " + broker.getProvisioner(),
+                    null);
+        }
+        if (!WorkspaceExecutionProfile.admitsIsolationClass(
+                broker.getIsolationClass())) {
+            return new Check("tool-path", Status.FAIL,
+                    "unsupported isolation class "
+                            + broker.getIsolationClass(),
+                    "use session isolation");
+        }
+        if (broker.getWorkspaceMounts().isEmpty()
+                && isBlank(broker.getWorkspaceCreationRoot())
+                && broker.getSsh().getNodes().isEmpty()) {
+            return new Check("tool-path", Status.FAIL,
+                    "no Workspace mount, creation root or SSH node",
+                    "add runtime-broker.workspace-mounts to "
+                            + "config/application.yml");
         }
         return new Check("tool-path", Status.PASS,
                 "Workspace files enabled in mode " + mode, null);
