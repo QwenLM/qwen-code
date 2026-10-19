@@ -274,6 +274,7 @@ test('ships systemd units with the documented kill modes', async () => {
   assert.match(harness, /^StateDirectory=qwen-managed-agent$/m);
   assert.match(harness, /--profile hosted-harness/);
   assert.match(harness, /--no-web/);
+  assert.match(harness, /QWEN_HOSTED_HARNESS_BROKER_ARGS/);
   assert.ok(server.endsWith('\n'));
   assert.ok(harness.endsWith('\n'));
   assert.doesNotMatch(server, /\t/);
