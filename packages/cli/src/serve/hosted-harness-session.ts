@@ -10,7 +10,11 @@ import {
   hostedTurnApproval,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
-import { parseHostedInput, readHostedInput } from './hosted-input.js';
+import {
+  HOSTED_ATTACHMENT_INPUT_BYTES,
+  parseHostedInput,
+  readHostedInput,
+} from './hosted-input.js';
 import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
@@ -6420,8 +6424,9 @@ export function registerHostedHarnessSessionRoutes(
       : promptInput!.text;
     const attachments = (promptInput?.attachments.length ?? 0) > 0;
     const maxBytes = attachments
-      ? 8 * 1024 * 1024
+      ? HOSTED_ATTACHMENT_INPUT_BYTES
       : HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const maxUserRecordBytes = attachments ? maxBytes + 1024 * 1024 : maxBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
       daemonPromptId: promptId,
@@ -6429,8 +6434,7 @@ export function registerHostedHarnessSessionRoutes(
     });
     if (
       Buffer.byteLength(JSON.stringify(prompt)) > maxBytes ||
-      Buffer.byteLength(JSON.stringify(userRecord)) >
-        (attachments ? 9 * 1024 * 1024 : maxBytes)
+      Buffer.byteLength(JSON.stringify(userRecord)) > maxUserRecordBytes
     )
       return error(res, 413, 'hosted_prompt_too_large');
     const existing = session.admissions.get(promptId);

@@ -60,7 +60,6 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
   tenantHeader: 'X-Qwen-Tenant-Id',
   writerTokenHeader: 'X-Qwen-Managed-Writer-Token',
   maxInlineResourceBytes: 64 * 1024,
-  maxAttachmentInputBytes: 8 * 1024 * 1024,
   maxResourcesPerTransaction: 1024,
   minimumWriterTokenLength: 32,
   maximumWriterTokenLength: 512,
@@ -68,9 +67,10 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
   maximumLeaseDurationMs: 300_000,
 } as const;
 
+const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
+
 export function managedSessionInlineResourceBytes(kind: string): number {
-  if (kind === 'managed-input')
-    return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxAttachmentInputBytes;
+  if (kind === 'managed-input') return MAX_ATTACHMENT_INPUT_BYTES;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
   return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
 }
