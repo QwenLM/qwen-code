@@ -373,8 +373,21 @@ public final class ManagedAgentPreflight {
 
     static Check toolPathCheck(ManagedAgentProperties properties) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
+        if (broker.getSsh().isEnabled()
+                && (!files || broker.getSsh().getNodes().isEmpty())) {
+            return new Check("tool-path", Status.FAIL,
+                    "SSH Runtime requires Workspace files and configured nodes",
+                    "enable Workspace files and add runtime-broker.ssh.nodes");
+        }
+        if (!StringUtils.isBlank(broker.getWorkspaceCreationRoot()) && !files) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace creation requires Workspace files",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true");
+        }
         if (shell && !files) {
             return new Check("tool-path", Status.FAIL,
                     "Workspace Shell requires Workspace files",
@@ -411,8 +424,6 @@ public final class ManagedAgentPreflight {
                     "Workspace files require the Runtime Broker",
                     "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true");
         }
-        ManagedAgentProperties.RuntimeBroker broker =
-                properties.getRuntimeBroker();
         if ("static".equals(broker.getProvisioner())) {
             return new Check("tool-path", Status.FAIL,
                     "Workspace files cannot use the static provisioner",

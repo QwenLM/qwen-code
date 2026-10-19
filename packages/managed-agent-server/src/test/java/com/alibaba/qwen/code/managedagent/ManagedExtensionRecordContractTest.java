@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords.InvalidRecordException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;

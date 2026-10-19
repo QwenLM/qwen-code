@@ -1,16 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
-
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
@@ -19,6 +12,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Uses its own disposable empty application catalog. */
 class WorkspaceCreationSchemaMySqlIT {
@@ -54,7 +53,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(11, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
@@ -92,7 +91,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(11, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
                     .usingRecursiveComparison().isEqualTo(existing);
             operation(jdbc, "created", "WORKSPACE_CREATE");
@@ -126,7 +125,7 @@ class WorkspaceCreationSchemaMySqlIT {
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
-            assertEquals(11, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement();
                     var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
@@ -177,7 +176,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(11, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(

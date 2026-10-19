@@ -1,13 +1,14 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.ArtifactResponse;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.ToolResultResponse;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellArtifactQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellArtifactRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellToolResultRequest;
-import com.alibaba.qwen.code.managedagent.service.ManagedArtifactService;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactService;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.ArtifactResponse;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.ToolResultResponse;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellArtifactQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellArtifactRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellToolResultRequest;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
