@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -370,6 +371,40 @@ class ManagedAgentPreflightTest {
         properties.getAuth().setSigningKey("x".repeat(31));
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 ManagedAgentPreflight.authCheck(environment, properties)
+                        .status());
+    }
+
+    @Test
+    void acceptsTheDefaultStartupProperties() {
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.startupValidationCheck(
+                        new ManagedAgentProperties()).status());
+    }
+
+    @Test
+    void rejectsAnOutOfRangeApprovalTimeout() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setApprovalTimeout(Duration.ofMillis(500));
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.startupValidationCheck(properties)
+                        .status());
+    }
+
+    @Test
+    void rejectsAnInvalidBoundSessionIsolation() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("tenant");
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.startupValidationCheck(properties)
+                        .status());
+    }
+
+    @Test
+    void rejectsSshWithoutWorkspaceFiles() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().getSsh().setEnabled(true);
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.startupValidationCheck(properties)
                         .status());
     }
 
